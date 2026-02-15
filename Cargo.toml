@@ -172,6 +172,11 @@ bb8 = "0.8"
 # Template engine (MiniJinja for DBT-like SQL templating)
 minijinja = { version = "2", features = ["json"] }
 
+# macOS specific - force compatible core-graphics version to resolve conflicts
+core-graphics = "0.25"
+core-text = "21.1"
+core-foundation = "0.10"
+
 # Text diffing (for version control)
 similar = "2"
 imara-diff = "0.1"
