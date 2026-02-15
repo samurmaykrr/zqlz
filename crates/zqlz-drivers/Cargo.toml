@@ -1,0 +1,45 @@
+[package]
+name = "zqlz-drivers"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = ["postgres", "mysql", "sqlite", "redis"]
+postgres = ["dep:zqlz-driver-postgres"]
+mysql = ["dep:zqlz-driver-mysql"]
+sqlite = ["dep:zqlz-driver-sqlite"]
+redis = ["dep:zqlz-driver-redis"]
+mssql = ["dep:zqlz-driver-mssql"]
+duckdb = ["dep:zqlz-driver-duckdb"]
+mongodb = ["dep:zqlz-driver-mongodb"]
+clickhouse = ["dep:zqlz-driver-clickhouse"]
+all-drivers = ["postgres", "mysql", "sqlite", "redis", "mssql", "duckdb", "mongodb", "clickhouse"]
+
+[dependencies]
+# Core
+zqlz-core.workspace = true
+
+# Driver crates (optional based on features)
+zqlz-driver-postgres = { workspace = true, optional = true }
+zqlz-driver-mysql = { workspace = true, optional = true }
+zqlz-driver-sqlite = { workspace = true, optional = true }
+zqlz-driver-mssql = { workspace = true, optional = true }
+zqlz-driver-duckdb = { workspace = true, optional = true }
+zqlz-driver-redis = { workspace = true, optional = true }
+zqlz-driver-mongodb = { workspace = true, optional = true }
+zqlz-driver-clickhouse = { workspace = true, optional = true }
+
+# Async
+async-trait.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }
+uuid = { workspace = true, features = ["v4"] }
+tempfile.workspace = true

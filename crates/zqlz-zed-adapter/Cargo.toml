@@ -1,0 +1,51 @@
+[package]
+name = "zqlz-zed-adapter"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+path = "src/zqlz_zed_adapter.rs"
+
+[features]
+default = []
+vim-mode = ["vim"]
+
+[dependencies]
+# Zed editor dependencies
+editor = { workspace = true }
+text = { workspace = true }
+rope = { workspace = true }
+language = { workspace = true }
+multi_buffer = { workspace = true }
+settings = { workspace = true }
+lsp = { workspace = true }
+theme = { workspace = true }
+vim_mode_setting = { workspace = true }
+
+# Vim mode (optional)
+vim = { workspace = true, optional = true }
+
+# GPUI
+gpui = { workspace = true }
+
+# ZQLZ dependencies
+zqlz-settings = { path = "../zqlz-settings" }
+zqlz-ui = { path = "../zqlz-ui" }
+zqlz-lsp = { path = "../zqlz-lsp" }
+zqlz-services = { path = "../zqlz-services" }
+
+# Standard dependencies
+anyhow = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+parking_lot = { workspace = true }
+lsp-types = { workspace = true }
+rust-embed = { workspace = true, features = ["interpolate-folder-path"] }
+
+# Tree-sitter for SQL syntax
+tree-sitter = { workspace = true }
+tree-sitter-sequel = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]

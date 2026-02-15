@@ -1,0 +1,95 @@
+[package]
+name = "zqlz-app"
+description = "A high-performance, modern database client and SQL editor."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors = ["ZQLZ Team"]
+default-run = "zqlz"
+
+[lib]
+name = "zqlz_app"
+path = "src/lib.rs"
+test = true
+
+[[bin]]
+name = "zqlz"
+path = "src/main.rs"
+
+[dependencies]
+# GUI Framework
+gpui.workspace = true
+
+# Internal crates
+zqlz-ui.workspace = true
+zqlz-core.workspace = true
+zqlz-connection.workspace = true
+zqlz-services.workspace = true
+zqlz-query.workspace = true
+zqlz-lsp.workspace = true
+zqlz-table-designer.workspace = true
+zqlz-trigger-designer.workspace = true
+zqlz-schema.workspace = true
+zqlz-interchange.workspace = true
+zqlz-versioning.workspace = true
+zqlz-templates.workspace = true
+zqlz-drivers.workspace = true
+
+# Zed Editor Integration
+editor.workspace = true
+zqlz-zed-adapter.workspace = true
+
+# LSP
+lsp-types.workspace = true
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+
+# Utilities
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-appender.workspace = true
+chrono.workspace = true
+dirs.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rust-embed.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+rusqlite.workspace = true
+sqlformat = "0.5.0"
+regex.workspace = true
+sqlparser.workspace = true
+smol.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa.workspace = true
+objc.workspace = true
+
+# Settings
+zqlz-settings.workspace = true
+
+[target.'cfg(target_os = "windows")'.build-dependencies]
+winresource = "0.1"
+
+# macOS bundle metadata (used by cargo-bundle)
+[package.metadata.bundle-dev]
+icon = ["resources/app-icon-dev@2x.png", "resources/app-icon-dev.png"]
+identifier = "dev.zqlz.ZQLZ-Dev"
+name = "ZQLZ Dev"
+osx_minimum_system_version = "10.15.7"
+osx_info_plist_exts = ["resources/info/*"]
+
+[package.metadata.bundle-nightly]
+icon = ["resources/app-icon-nightly@2x.png", "resources/app-icon-nightly.png"]
+identifier = "dev.zqlz.ZQLZ-Nightly"
+name = "ZQLZ Nightly"
+osx_minimum_system_version = "10.15.7"
+osx_info_plist_exts = ["resources/info/*"]
+
+[package.metadata.bundle-stable]
+icon = ["resources/app-icon@2x.png", "resources/app-icon.png"]
+identifier = "dev.zqlz.ZQLZ"
+name = "ZQLZ"
+osx_minimum_system_version = "10.15.7"
+osx_info_plist_exts = ["resources/info/*"]

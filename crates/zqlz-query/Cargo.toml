@@ -1,0 +1,53 @@
+[package]
+name = "zqlz-query"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query execution, results display, and query editor for ZQLZ"
+
+[lib]
+path = "src/zqlz_query.rs"
+
+[dependencies]
+# Core ZQLZ crates
+zqlz-core.workspace = true
+zqlz-ui.workspace = true
+zqlz-settings.workspace = true
+zqlz-services.workspace = true
+zqlz-lsp.workspace = true
+zqlz-templates.workspace = true
+zqlz-analyzer.workspace = true
+zqlz-zed-adapter.workspace = true
+
+# GPUI
+gpui.workspace = true
+
+# LSP types
+lsp-types.workspace = true
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+
+# SQL parsing
+sqlparser.workspace = true
+sqlformat.workspace = true
+regex.workspace = true
+
+# Template engine
+minijinja.workspace = true
+serde_json.workspace = true
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+
+# HTTP client for AI providers
+reqwest.workspace = true
+
+[dev-dependencies]

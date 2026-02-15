@@ -1,0 +1,209 @@
+#!/usr/bin/env bash
+#
+# ZQLZ Linux Bundle Script
+# Creates a distributable Linux package (tarball with .desktop file)
+#
+# Usage: ./script/bundle-linux [target-triple]
+#   target-triple: x86_64-unknown-linux-gnu (default) or aarch64-unknown-linux-gnu
+#
+# Environment variables:
+#   RELEASE_CHANNEL - stable, nightly, or dev (default: dev)
+
+set -euo pipefail
+
+# Configuration
+APP_NAME="ZQLZ"
+VERSION="${ZQLZ_VERSION:-0.1.0}"
+
+# Determine release channel
+RELEASE_CHANNEL="${RELEASE_CHANNEL:-dev}"
+case "$RELEASE_CHANNEL" in
+    stable)
+        APP_DISPLAY_NAME="ZQLZ"
+        APP_SUFFIX=""
+        ICON_SUFFIX=""
+        ;;
+    nightly)
+        APP_DISPLAY_NAME="ZQLZ Nightly"
+        APP_SUFFIX="-nightly"
+        ICON_SUFFIX="-nightly"
+        ;;
+    *)
+        APP_DISPLAY_NAME="ZQLZ Dev"
+        APP_SUFFIX="-dev"
+        ICON_SUFFIX="-dev"
+        ;;
+esac
+
+# Get the script directory and project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RESOURCES_DIR="$PROJECT_ROOT/crates/zqlz-app/resources"
+
+cd "$PROJECT_ROOT"
+
+# Parse arguments
+target_triple="${1:-x86_64-unknown-linux-gnu}"
+arch="${target_triple%%-*}"
+
+echo "==> Building ZQLZ for $target_triple (channel: $RELEASE_CHANNEL)"
+
+# Determine build flags
+if [[ "$RELEASE_CHANNEL" == "dev" ]]; then
+    build_flag=""
+    profile="debug"
+else
+    build_flag="--release"
+    profile="release"
+fi
+
+# Build the application
+echo "==> Building application..."
+cargo build $build_flag --package zqlz-app --target "$target_triple"
+
+# Create bundle structure
+bundle_name="zqlz${APP_SUFFIX}"
+bundle_dir="target/$target_triple/$profile/${bundle_name}.app"
+bin_dir="$bundle_dir/bin"
+share_dir="$bundle_dir/share"
+icons_512="$share_dir/icons/hicolor/512x512/apps"
+icons_1024="$share_dir/icons/hicolor/1024x1024/apps"
+applications_dir="$share_dir/applications"
+
+echo "==> Creating bundle at $bundle_dir"
+rm -rf "$bundle_dir"
+mkdir -p "$bin_dir" "$icons_512" "$icons_1024" "$applications_dir"
+
+# Copy binary
+cp "target/$target_triple/$profile/zqlz" "$bin_dir/zqlz"
+
+# Strip debug symbols for release builds
+if [[ "$profile" == "release" ]]; then
+    echo "==> Stripping debug symbols..."
+    # Save debug symbols separately
+    if command -v objcopy &> /dev/null; then
+        objcopy --only-keep-debug "$bin_dir/zqlz" "$bundle_dir/zqlz.debug" 2>/dev/null || true
+        objcopy --strip-debug "$bin_dir/zqlz" 2>/dev/null || true
+    elif command -v strip &> /dev/null; then
+        strip "$bin_dir/zqlz" 2>/dev/null || true
+    fi
+fi
+
+# Copy icons
+icon_source="$RESOURCES_DIR/app-icon${ICON_SUFFIX}.png"
+icon_source_2x="$RESOURCES_DIR/app-icon${ICON_SUFFIX}@2x.png"
+
+if [[ ! -f "$icon_source" ]]; then
+    icon_source="$RESOURCES_DIR/app-icon.png"
+fi
+if [[ ! -f "$icon_source_2x" ]]; then
+    icon_source_2x="$RESOURCES_DIR/app-icon@2x.png"
+fi
+
+if [[ -f "$icon_source" ]]; then
+    cp "$icon_source" "$icons_512/zqlz${APP_SUFFIX}.png"
+fi
+if [[ -f "$icon_source_2x" ]]; then
+    cp "$icon_source_2x" "$icons_1024/zqlz${APP_SUFFIX}.png"
+fi
+
+# Generate .desktop file from template
+desktop_template="$RESOURCES_DIR/zqlz.desktop.in"
+desktop_file="$applications_dir/zqlz${APP_SUFFIX}.desktop"
+
+export APP_NAME="$APP_DISPLAY_NAME"
+export APP_CLI="zqlz"
+export APP_ICON="zqlz${APP_SUFFIX}"
+export DO_STARTUP_NOTIFY="true"
+export APP_ARGS="%F"
+
+if [[ -f "$desktop_template" ]]; then
+    envsubst < "$desktop_template" > "$desktop_file"
+else
+    # Create desktop file inline
+    cat > "$desktop_file" << EOF
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=${APP_DISPLAY_NAME}
+GenericName=Database Client
+Comment=A high-performance, modern database client and SQL editor.
+TryExec=zqlz
+StartupNotify=true
+Exec=zqlz %F
+Icon=zqlz${APP_SUFFIX}
+Categories=Development;Database;Utility;
+Keywords=zqlz;sql;database;postgresql;mysql;sqlite;duckdb;
+MimeType=application/x-sqlite3;application/sql;text/x-sql;text/csv;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Exec=zqlz --new %F
+Name=Open a new window
+EOF
+fi
+
+# Create tarball
+tarball_name="zqlz-linux-${arch}.tar.gz"
+tarball_path="target/$target_triple/$profile/$tarball_name"
+
+echo "==> Creating tarball at $tarball_path"
+tar -czvf "$tarball_path" -C "target/$target_triple/$profile" "${bundle_name}.app"
+
+# Create installation script
+install_script="$bundle_dir/install.sh"
+cat > "$install_script" << 'INSTALL_EOF'
+#!/usr/bin/env bash
+# ZQLZ Installation Script
+set -euo pipefail
+
+PREFIX="${PREFIX:-/usr/local}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+echo "Installing ZQLZ to $PREFIX..."
+
+# Install binary
+sudo install -Dm755 "$SCRIPT_DIR/bin/zqlz" "$PREFIX/bin/zqlz"
+
+# Install icons
+for size_dir in "$SCRIPT_DIR/share/icons/hicolor"/*; do
+    if [[ -d "$size_dir" ]]; then
+        size=$(basename "$size_dir")
+        for icon in "$size_dir/apps"/*.png; do
+            if [[ -f "$icon" ]]; then
+                sudo install -Dm644 "$icon" "$PREFIX/share/icons/hicolor/$size/apps/$(basename "$icon")"
+            fi
+        done
+    fi
+done
+
+# Install .desktop file
+for desktop in "$SCRIPT_DIR/share/applications"/*.desktop; do
+    if [[ -f "$desktop" ]]; then
+        sudo install -Dm644 "$desktop" "$PREFIX/share/applications/$(basename "$desktop")"
+    fi
+done
+
+# Update icon cache
+if command -v gtk-update-icon-cache &> /dev/null; then
+    sudo gtk-update-icon-cache -f -t "$PREFIX/share/icons/hicolor" 2>/dev/null || true
+fi
+
+# Update desktop database
+if command -v update-desktop-database &> /dev/null; then
+    sudo update-desktop-database "$PREFIX/share/applications" 2>/dev/null || true
+fi
+
+echo "Installation complete! Run 'zqlz' to start."
+INSTALL_EOF
+chmod +x "$install_script"
+
+echo ""
+echo "==> Build complete!"
+echo "    Bundle: $bundle_dir"
+echo "    Tarball: $tarball_path"
+echo ""
+echo "To install locally, run:"
+echo "    tar -xzf $tarball_path"
+echo "    cd ${bundle_name}.app && ./install.sh"
+echo ""

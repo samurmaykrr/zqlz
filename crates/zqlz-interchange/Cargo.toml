@@ -1,0 +1,44 @@
+[package]
+name = "zqlz-interchange"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/zqlz_interchange.rs"
+
+[dependencies]
+# Core
+zqlz-core.workspace = true
+zqlz-ui.workspace = true
+
+# GPUI
+gpui.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+
+# Utilities
+uuid.workspace = true
+chrono.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+anyhow.workspace = true
+
+# Compression (for large exports)
+flate2 = "1.0"
+
+# Base64 for binary data in JSON
+base64 = "0.22"
+
+# Directory utilities
+dirs = "5"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

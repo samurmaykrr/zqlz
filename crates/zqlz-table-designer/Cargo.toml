@@ -1,0 +1,35 @@
+[package]
+name = "zqlz-table-designer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Table designer panel for ZQLZ database IDE"
+
+[lib]
+path = "src/table_designer.rs"
+
+[dependencies]
+# Core ZQLZ crates
+zqlz-core = { workspace = true }
+zqlz-drivers = { workspace = true }
+zqlz-ui = { workspace = true }
+
+# GPUI
+gpui = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+
+[dev-dependencies]
+# Testing with in-memory SQLite
+zqlz-drivers = { workspace = true }
+rusqlite = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+tempfile = { workspace = true }
+indoc = { workspace = true }

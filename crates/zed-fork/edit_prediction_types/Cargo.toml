@@ -1,0 +1,11 @@
+[package]
+name = "edit_prediction_types"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/edit_prediction_types.rs"
+
+[dependencies]
+gpui.workspace = true

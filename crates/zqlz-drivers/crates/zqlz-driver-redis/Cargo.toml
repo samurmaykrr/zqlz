@@ -1,0 +1,26 @@
+[package]
+name = "zqlz-driver-redis"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Redis driver for ZQLZ Database IDE"
+
+[lib]
+path = "src/zqlz_driver_redis.rs"
+
+[dependencies]
+zqlz-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+toml.workspace = true
+redis = { version = "0.27", features = ["tokio-comp", "cluster-async"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

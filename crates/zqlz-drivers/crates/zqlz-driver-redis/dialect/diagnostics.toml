@@ -1,0 +1,430 @@
+# Redis Custom Validation Rules
+# These rules check argument counts, types, and invalid combinations
+
+# ============================================================================
+# String Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-set-args"
+command = "SET"
+type = "argument_count"
+severity = "error"
+message = "SET requires at least 2 arguments: key and value"
+min_args = 2
+max_args = 7  # SET key value [EX seconds|PX milliseconds|EXAT timestamp|PXAT ms-timestamp] [NX|XX] [GET]
+help = "Usage: SET key value [EX seconds] [PX milliseconds] [NX|XX] [GET]"
+
+[[rule]]
+id = "redis-get-args"
+command = "GET"
+type = "argument_count"
+severity = "error"
+message = "GET requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: GET key"
+
+[[rule]]
+id = "redis-mget-args"
+command = "MGET"
+type = "argument_count"
+severity = "error"
+message = "MGET requires at least 1 key"
+min_args = 1
+help = "Usage: MGET key [key ...]"
+
+[[rule]]
+id = "redis-mset-args"
+command = "MSET"
+type = "argument_count"
+severity = "error"
+message = "MSET requires pairs of keys and values (even number of arguments)"
+min_args = 2
+help = "Usage: MSET key value [key value ...]"
+
+[[rule]]
+id = "redis-append-args"
+command = "APPEND"
+type = "argument_count"
+severity = "error"
+message = "APPEND requires exactly 2 arguments: key and value"
+min_args = 2
+max_args = 2
+help = "Usage: APPEND key value"
+
+[[rule]]
+id = "redis-strlen-args"
+command = "STRLEN"
+type = "argument_count"
+severity = "error"
+message = "STRLEN requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: STRLEN key"
+
+# ============================================================================
+# Key Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-del-args"
+command = "DEL"
+type = "argument_count"
+severity = "error"
+message = "DEL requires at least 1 key"
+min_args = 1
+help = "Usage: DEL key [key ...]"
+
+[[rule]]
+id = "redis-exists-args"
+command = "EXISTS"
+type = "argument_count"
+severity = "error"
+message = "EXISTS requires at least 1 key"
+min_args = 1
+help = "Usage: EXISTS key [key ...]"
+
+[[rule]]
+id = "redis-expire-args"
+command = "EXPIRE"
+type = "argument_count"
+severity = "error"
+message = "EXPIRE requires exactly 2 arguments: key and seconds"
+min_args = 2
+max_args = 3  # EXPIRE key seconds [NX|XX|GT|LT]
+help = "Usage: EXPIRE key seconds [NX|XX|GT|LT]"
+
+[[rule]]
+id = "redis-ttl-args"
+command = "TTL"
+type = "argument_count"
+severity = "error"
+message = "TTL requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: TTL key"
+
+[[rule]]
+id = "redis-rename-args"
+command = "RENAME"
+type = "argument_count"
+severity = "error"
+message = "RENAME requires exactly 2 arguments: old key and new key"
+min_args = 2
+max_args = 2
+help = "Usage: RENAME key newkey"
+
+[[rule]]
+id = "redis-type-args"
+command = "TYPE"
+type = "argument_count"
+severity = "error"
+message = "TYPE requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: TYPE key"
+
+# ============================================================================
+# Hash Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-hset-args"
+command = "HSET"
+type = "argument_count"
+severity = "error"
+message = "HSET requires at least 3 arguments: key, field, and value"
+min_args = 3
+help = "Usage: HSET key field value [field value ...]"
+
+[[rule]]
+id = "redis-hget-args"
+command = "HGET"
+type = "argument_count"
+severity = "error"
+message = "HGET requires exactly 2 arguments: key and field"
+min_args = 2
+max_args = 2
+help = "Usage: HGET key field"
+
+[[rule]]
+id = "redis-hmget-args"
+command = "HMGET"
+type = "argument_count"
+severity = "error"
+message = "HMGET requires at least 2 arguments: key and at least one field"
+min_args = 2
+help = "Usage: HMGET key field [field ...]"
+
+[[rule]]
+id = "redis-hgetall-args"
+command = "HGETALL"
+type = "argument_count"
+severity = "error"
+message = "HGETALL requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: HGETALL key"
+
+[[rule]]
+id = "redis-hdel-args"
+command = "HDEL"
+type = "argument_count"
+severity = "error"
+message = "HDEL requires at least 2 arguments: key and at least one field"
+min_args = 2
+help = "Usage: HDEL key field [field ...]"
+
+[[rule]]
+id = "redis-hexists-args"
+command = "HEXISTS"
+type = "argument_count"
+severity = "error"
+message = "HEXISTS requires exactly 2 arguments: key and field"
+min_args = 2
+max_args = 2
+help = "Usage: HEXISTS key field"
+
+# ============================================================================
+# List Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-lpush-args"
+command = "LPUSH"
+type = "argument_count"
+severity = "error"
+message = "LPUSH requires at least 2 arguments: key and at least one value"
+min_args = 2
+help = "Usage: LPUSH key element [element ...]"
+
+[[rule]]
+id = "redis-rpush-args"
+command = "RPUSH"
+type = "argument_count"
+severity = "error"
+message = "RPUSH requires at least 2 arguments: key and at least one value"
+min_args = 2
+help = "Usage: RPUSH key element [element ...]"
+
+[[rule]]
+id = "redis-lpop-args"
+command = "LPOP"
+type = "argument_count"
+severity = "error"
+message = "LPOP requires 1 or 2 arguments: key [count]"
+min_args = 1
+max_args = 2
+help = "Usage: LPOP key [count]"
+
+[[rule]]
+id = "redis-rpop-args"
+command = "RPOP"
+type = "argument_count"
+severity = "error"
+message = "RPOP requires 1 or 2 arguments: key [count]"
+min_args = 1
+max_args = 2
+help = "Usage: RPOP key [count]"
+
+[[rule]]
+id = "redis-lrange-args"
+command = "LRANGE"
+type = "argument_count"
+severity = "error"
+message = "LRANGE requires exactly 3 arguments: key, start, and stop"
+min_args = 3
+max_args = 3
+help = "Usage: LRANGE key start stop"
+
+[[rule]]
+id = "redis-llen-args"
+command = "LLEN"
+type = "argument_count"
+severity = "error"
+message = "LLEN requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: LLEN key"
+
+# ============================================================================
+# Set Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-sadd-args"
+command = "SADD"
+type = "argument_count"
+severity = "error"
+message = "SADD requires at least 2 arguments: key and at least one member"
+min_args = 2
+help = "Usage: SADD key member [member ...]"
+
+[[rule]]
+id = "redis-smembers-args"
+command = "SMEMBERS"
+type = "argument_count"
+severity = "error"
+message = "SMEMBERS requires exactly 1 argument: the key"
+min_args = 1
+max_args = 1
+help = "Usage: SMEMBERS key"
+
+[[rule]]
+id = "redis-sismember-args"
+command = "SISMEMBER"
+type = "argument_count"
+severity = "error"
+message = "SISMEMBER requires exactly 2 arguments: key and member"
+min_args = 2
+max_args = 2
+help = "Usage: SISMEMBER key member"
+
+[[rule]]
+id = "redis-srem-args"
+command = "SREM"
+type = "argument_count"
+severity = "error"
+message = "SREM requires at least 2 arguments: key and at least one member"
+min_args = 2
+help = "Usage: SREM key member [member ...]"
+
+# ============================================================================
+# Sorted Set Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-zadd-args"
+command = "ZADD"
+type = "argument_count"
+severity = "error"
+message = "ZADD requires at least 3 arguments: key, score, and member"
+min_args = 3
+help = "Usage: ZADD key [NX|XX] [GT|LT] [CH] [INCR] score member [score member ...]"
+
+[[rule]]
+id = "redis-zrange-args"
+command = "ZRANGE"
+type = "argument_count"
+severity = "error"
+message = "ZRANGE requires at least 3 arguments: key, start, and stop"
+min_args = 3
+help = "Usage: ZRANGE key start stop [BYSCORE|BYLEX] [REV] [LIMIT offset count] [WITHSCORES]"
+
+[[rule]]
+id = "redis-zscore-args"
+command = "ZSCORE"
+type = "argument_count"
+severity = "error"
+message = "ZSCORE requires exactly 2 arguments: key and member"
+min_args = 2
+max_args = 2
+help = "Usage: ZSCORE key member"
+
+[[rule]]
+id = "redis-zrem-args"
+command = "ZREM"
+type = "argument_count"
+severity = "error"
+message = "ZREM requires at least 2 arguments: key and at least one member"
+min_args = 2
+help = "Usage: ZREM key member [member ...]"
+
+# ============================================================================
+# Transaction Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-multi-args"
+command = "MULTI"
+type = "argument_count"
+severity = "error"
+message = "MULTI takes no arguments"
+min_args = 0
+max_args = 0
+help = "Usage: MULTI"
+
+[[rule]]
+id = "redis-exec-args"
+command = "EXEC"
+type = "argument_count"
+severity = "error"
+message = "EXEC takes no arguments"
+min_args = 0
+max_args = 0
+help = "Usage: EXEC"
+
+[[rule]]
+id = "redis-discard-args"
+command = "DISCARD"
+type = "argument_count"
+severity = "error"
+message = "DISCARD takes no arguments"
+min_args = 0
+max_args = 0
+help = "Usage: DISCARD"
+
+# ============================================================================
+# Server Commands
+# ============================================================================
+
+[[rule]]
+id = "redis-ping-args"
+command = "PING"
+type = "argument_count"
+severity = "error"
+message = "PING takes 0 or 1 argument"
+min_args = 0
+max_args = 1
+help = "Usage: PING [message]"
+
+[[rule]]
+id = "redis-select-args"
+command = "SELECT"
+type = "argument_count"
+severity = "error"
+message = "SELECT requires exactly 1 argument: database index"
+min_args = 1
+max_args = 1
+help = "Usage: SELECT index"
+
+[[rule]]
+id = "redis-flushdb-args"
+command = "FLUSHDB"
+type = "argument_count"
+severity = "warning"
+message = "FLUSHDB takes 0 or 1 argument [ASYNC|SYNC]"
+min_args = 0
+max_args = 1
+help = "Usage: FLUSHDB [ASYNC|SYNC]"
+
+[[rule]]
+id = "redis-flushall-args"
+command = "FLUSHALL"
+type = "argument_count"
+severity = "warning"
+message = "FLUSHALL takes 0 or 1 argument [ASYNC|SYNC]"
+min_args = 0
+max_args = 1
+help = "Usage: FLUSHALL [ASYNC|SYNC]"
+
+[[rule]]
+id = "redis-info-args"
+command = "INFO"
+type = "argument_count"
+severity = "error"
+message = "INFO takes 0 or 1 argument [section]"
+min_args = 0
+max_args = 1
+help = "Usage: INFO [section]"
+
+[[rule]]
+id = "redis-dbsize-args"
+command = "DBSIZE"
+type = "argument_count"
+severity = "error"
+message = "DBSIZE takes no arguments"
+min_args = 0
+max_args = 0
+help = "Usage: DBSIZE"

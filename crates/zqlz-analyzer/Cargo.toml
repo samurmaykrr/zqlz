@@ -1,0 +1,20 @@
+[package]
+name = "zqlz-analyzer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Query analysis and EXPLAIN plan parsing for ZQLZ"
+
+[lib]
+path = "src/zqlz_analyzer.rs"
+
+[dependencies]
+zqlz-core = { path = "../zqlz-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+pretty_assertions.workspace = true

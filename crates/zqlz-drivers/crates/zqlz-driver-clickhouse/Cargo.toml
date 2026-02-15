@@ -1,0 +1,26 @@
+[package]
+name = "zqlz-driver-clickhouse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "ClickHouse driver for ZQLZ Database IDE"
+
+[lib]
+path = "src/zqlz_driver_clickhouse.rs"
+
+[dependencies]
+zqlz-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+chrono.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+serde = { workspace = true, features = ["derive"] }
+clickhouse.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

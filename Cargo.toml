@@ -1,0 +1,398 @@
+[workspace]
+resolver = "2"
+members = [
+    # ZQLZ crates
+    "crates/zqlz-core",
+    "crates/zqlz-drivers",
+    "crates/zqlz-drivers/crates/zqlz-driver-postgres",
+    "crates/zqlz-drivers/crates/zqlz-driver-mysql",
+    "crates/zqlz-drivers/crates/zqlz-driver-sqlite",
+    "crates/zqlz-drivers/crates/zqlz-driver-mssql",
+    "crates/zqlz-drivers/crates/zqlz-driver-duckdb",
+    "crates/zqlz-drivers/crates/zqlz-driver-redis",
+    "crates/zqlz-drivers/crates/zqlz-driver-mongodb",
+    "crates/zqlz-drivers/crates/zqlz-driver-clickhouse",
+    "crates/zqlz-connection",
+    "crates/zqlz-query",
+    "crates/zqlz-objects",
+    "crates/zqlz-editor",
+    "crates/zqlz-analyzer",
+    "crates/zqlz-lsp",
+    "crates/zqlz-templates",
+    "crates/zqlz-schema",
+    "crates/zqlz-versioning",
+    "crates/zqlz-settings",
+    "crates/zqlz-services",
+    "crates/zqlz-table-designer",
+    "crates/zqlz-trigger-designer",
+    "crates/zqlz-interchange",
+    "crates/zqlz-ui",
+    "crates/zqlz-admin",
+    "crates/zqlz-schema-tools",
+    "crates/zqlz-monitor",
+    "crates/zqlz-app",
+    # Testing
+    "crates/zqlz-driver-tests",
+    # Zed Editor Adapter
+    "crates/zqlz-zed-adapter",
+    # Zed fork - stub crates (minimal implementations to avoid heavy deps)
+    # Note: editor, workspace, rpc, client, project now use git dependencies
+    "crates/zed-fork/dap",
+    "crates/zed-fork/db",
+    "crates/zed-fork/telemetry",
+    "crates/zed-fork/task",
+    "crates/zed-fork/edit_prediction_types",
+    "crates/zed-fork/feature_flags",
+    "crates/zed-fork/zed_actions",
+    "crates/zed-fork/vim_mode_setting",
+    "crates/zed-fork/emojis",
+]
+default-members = ["crates/zqlz-app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/yourorg/zqlz"
+publish = false
+
+[workspace.lints]
+rust.missing_debug_implementations = "allow"
+rust.missing_docs = "allow"
+clippy.all = "warn"
+
+[workspace.dependencies]
+# Zed crates - using git dependencies from upstream
+# (Real implementations - pulled directly from Zed repo)
+# IMPORTANT: All Zed crates must use the same git revision for compatibility
+# Pinned to commit 571ea7cf22 (2026-02-12) for stability - update deliberately
+
+assets = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+buffer_diff = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+clock = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+collections = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+component = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+display_map = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }  # Required for Zed editor integration
+editor = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }  # Use Zed's editor directly from git
+file_icons = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+fs = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+fuzzy = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+git = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+http_client = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+icons = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+keymap = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }  # Required for Zed keybindings
+language = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+languages = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+lsp = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+markdown = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+menu = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+multi_buffer = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+paths = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+refineable = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+release_channel = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+rope = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+settings = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+snippet = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+text = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+theme = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+ui = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+ui_input = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+util = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+vim = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }  # Vim mode support (optionality handled at crate level)
+zlog = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+ztracing = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+ztracing_macro = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+
+# Zed crates - using git dependencies from upstream (formerly local stubs)
+client = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+project = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+rpc = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+workspace = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+
+# Zed crates - stub implementations (local)
+# (Minimal stubs to avoid pulling in heavy Zed infrastructure like collab, DB, etc.)
+dap = { path = "crates/zed-fork/dap" }
+db = { path = "crates/zed-fork/db" }
+edit_prediction_types = { path = "crates/zed-fork/edit_prediction_types" }
+emojis = { path = "crates/zed-fork/emojis" }
+feature_flags = { path = "crates/zed-fork/feature_flags" }
+task = { path = "crates/zed-fork/task" }
+telemetry = { path = "crates/zed-fork/telemetry" }
+vim_mode_setting = { path = "crates/zed-fork/vim_mode_setting" }
+zed_actions = { path = "crates/zed-fork/zed_actions" }
+
+# Core
+async-trait = "0.1"
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+smol = "1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_repr = "0.1"
+bincode = "1"
+
+# Database drivers
+# Using rusqlite 0.32.1 which is compatible with libsqlite3-sys 0.30.1 (required by Zed editor)
+rusqlite = { version = "=0.32.1", features = ["bundled", "column_decltype"] }
+libsqlite3-sys = { version = "=0.30.1", features = ["bundled"] }
+tokio-postgres = { version = "0.7", features = ["with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+postgres-types = { version = "0.2", features = ["derive", "with-chrono-0_4", "with-uuid-1", "with-serde_json-1"] }
+mysql_async = { version = "0.35", features = ["default"] }
+tiberius = { version = "0.12", default-features = false, features = ["rustls", "chrono", "tds73"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+duckdb = { version = "1.0", features = ["bundled"] }
+clickhouse = { version = "0.14", features = ["native-tls"] }
+
+# SSH/Security
+ssh2 = "0.9"
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+
+# TLS/SSL
+native-tls = "0.2"
+postgres-native-tls = "0.5"
+
+
+# Query building & parsing
+sea-query = "0.32"
+sqlparser = "0.52"
+sqlformat = "0.5.0"
+
+# Connection pooling
+deadpool = "0.12"
+bb8 = "0.8"
+
+# Template engine (MiniJinja for DBT-like SQL templating)
+minijinja = { version = "2", features = ["json"] }
+
+# Text diffing (for version control)
+similar = "2"
+imara-diff = "0.1"
+
+# Encryption (for credentials)
+ring = "0.17"
+
+# Text processing
+aho-corasick = "1.1"
+regex = "1"
+fancy-regex = "0.14"
+unicode-segmentation = "1.12"
+unicode-width = "0.2"
+
+# Tree-sitter for syntax highlighting
+tree-sitter = { version = "0.26", features = ["wasm"] }
+tree-sitter-json = "0.24"
+tree-sitter-html = "0.23"
+tree-sitter-javascript = "0.23"
+tree-sitter-python = "0.25"
+tree-sitter-rust = "0.24"
+tree-sitter-sequel = "0.3.11"
+tree-sitter-typescript = { git = "https://github.com/zed-industries/tree-sitter-typescript", rev = "e2c53597d6a5d9cf7bbe8dccde576fe1e46c5899" }
+tree-sitter-yaml = { git = "https://github.com/zed-industries/tree-sitter-yaml", rev = "baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a" }
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.23"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.23"
+tree-sitter-go = "0.23"
+tree-sitter-java = "0.23"
+tree-sitter-jsdoc = "0.23"
+tree-sitter-toml = "0.20"
+tree-sitter-zig = "0.20"
+tree-sitter-md = { git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown", rev = "9a23c1a96c0513d8fc6520972beedd419a973539" }
+
+# LSP support
+lsp-types = { version = "0.97.0", features = ["proposed"] }
+
+# GUI - GPUI - Use git version to match gpui-component's expected API
+# IMPORTANT: Must enable default features for text rendering to work!
+# Must use same revision as Zed crates for compatibility
+gpui = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+sum_tree = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+
+# Linkify URLs
+linkify = "0.10"
+
+# HTML parsing
+html5ever = "0.27"
+markup5ever_rcdom = "0.3"
+
+# Git
+git2 = { version = "0.20", default-features = false }
+ignore = "0.4"
+
+# Logging & Tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "ansi"] }
+tracing-appender = "0.2"
+log = { version = "0.4", features = ["kv_unstable_serde", "serde"] }
+env_logger = "0.11"
+
+# Filesystem
+notify = "7"
+globset = "0.4"
+
+# HTTP client
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+http = "1.1"
+http-body = "1.0"
+
+# Async utilities
+async-lock = "2.1"
+async-recursion = "1.0"
+parking_lot = "0.12"
+postage = "0.5"
+
+# Collections & data structures
+smallvec = "1"
+indexmap = { version = "2.7", features = ["serde"] }
+hashbrown = "0.15"
+dashmap = "6.0"
+itertools = "0.14"
+
+# Misc utilities
+once_cell = "1"
+paste = "1"
+derive_more = "0.99"
+convert_case = "0.8"
+ordered-float = "4"
+num-traits = "0.2"
+base64 = "0.22"
+hex = "0.4"
+nanoid = "0.4"
+
+# Schema & validation
+schemars = "1"
+jsonschema = "0.30"
+
+# Time
+time = "0.3"
+
+# Pretty printing
+pretty_assertions = "1"
+indoc = "2"
+
+# Macros
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }
+
+# Random
+rand = "0.8"
+
+# URLs
+url = "2"
+
+# String interning & text
+ropey = { version = "=2.0.0-beta.1", features = ["metric_lines_lf", "metric_utf16"] }
+rust-i18n = "3"
+
+# CI/Testing utilities
+criterion = { version = "0.5", features = ["html_reports"] }
+ctor = "0.4"
+tempfile = "3"
+profiling = "1"
+
+# Platform-specific (macOS) - added to workspace deps unconditionally
+cocoa = "=0.26.0"
+cocoa-foundation = "=0.2.0"
+core-foundation = "=0.10.0"
+core-foundation-sys = "0.8.6"
+metal = "0.29"
+objc = "0.2"
+core-video = { version = "0.4.3", features = ["metal"] }
+mach2 = "0.5"
+nix = "0.29"
+libc = "0.2"
+
+# Windows support
+windows = "0.61"
+windows-core = "0.61"
+
+# Additional common dependencies
+image = "0.25"
+palette = { version = "0.7", default-features = false, features = ["std"] }
+pulldown-cmark = { version = "0.12", default-features = false }
+toml = "0.8"
+toml_edit = { version = "0.22", default-features = false, features = ["display", "parse", "serde"] }
+semver = "1.0"
+strum = { version = "0.27", features = ["derive"] }
+slotmap = "1.0"
+inventory = "0.3"
+ref-cast = "1.0"
+rustc-hash = "2.1"
+bitflags = "2.6"
+bytes = "1.0"
+dirs = "4.0"
+which = "6.0"
+open = "5.0"
+walkdir = "2.5"
+pathdiff = "0.2"
+shellexpand = "2.1"
+shlex = "1.3"
+unicase = "2.6"
+unicode-script = "0.5"
+unindent = "0.2"
+rayon = "1.8"
+wasmparser = "0.221"
+wasm-encoder = "0.221"
+prost = "0.9"
+prost-build = "0.9"
+prost-types = "0.9"
+async-compression = { version = "0.4", features = ["gzip", "futures-io"] }
+async-pipe = { git = "https://github.com/zed-industries/async-pipe-rs", rev = "82d00a04211cf4e1236029aa03e6b6ce2a74c553" }
+async-tar = { git = "https://github.com/zed-industries/async-tar", rev = "a307f6bf3e4219c3a457bea0cab198b6d7c36e25", package = "zed-async-tar", version = "0.5.0-zed" }
+async_zip = { version = "0.0.17", features = ["deflate", "deflate64"] }
+# emojis = "0.6"  # Using Zed's emojis crate instead
+serde_json_lenient = { version = "0.2", features = ["preserve_order", "raw_value"] }
+rust-embed = { version = "8.4", features = ["include-exclude"] }
+portable-pty = "0.9"
+alacritty_terminal = "0.25.1-rc1"
+take-until = "0.2"
+
+# Internal ZQLZ crates
+zqlz-core = { path = "crates/zqlz-core" }
+zqlz-drivers = { path = "crates/zqlz-drivers" }
+zqlz-driver-postgres = { path = "crates/zqlz-drivers/crates/zqlz-driver-postgres" }
+zqlz-driver-mysql = { path = "crates/zqlz-drivers/crates/zqlz-driver-mysql" }
+zqlz-driver-sqlite = { path = "crates/zqlz-drivers/crates/zqlz-driver-sqlite" }
+zqlz-driver-mssql = { path = "crates/zqlz-drivers/crates/zqlz-driver-mssql" }
+zqlz-driver-duckdb = { path = "crates/zqlz-drivers/crates/zqlz-driver-duckdb" }
+zqlz-driver-redis = { path = "crates/zqlz-drivers/crates/zqlz-driver-redis" }
+zqlz-driver-mongodb = { path = "crates/zqlz-drivers/crates/zqlz-driver-mongodb" }
+zqlz-driver-clickhouse = { path = "crates/zqlz-drivers/crates/zqlz-driver-clickhouse" }
+zqlz-connection = { path = "crates/zqlz-connection" }
+zqlz-query = { path = "crates/zqlz-query" }
+zqlz-objects = { path = "crates/zqlz-objects" }
+zqlz-editor = { path = "crates/zqlz-editor" }
+zqlz-analyzer = { path = "crates/zqlz-analyzer" }
+zqlz-lsp = { path = "crates/zqlz-lsp" }
+zqlz-templates = { path = "crates/zqlz-templates" }
+zqlz-schema = { path = "crates/zqlz-schema" }
+zqlz-versioning = { path = "crates/zqlz-versioning" }
+zqlz-settings = { path = "crates/zqlz-settings" }
+zqlz-services = { path = "crates/zqlz-services" }
+zqlz-table-designer = { path = "crates/zqlz-table-designer" }
+zqlz-trigger-designer = { path = "crates/zqlz-trigger-designer" }
+zqlz-ui = { path = "crates/zqlz-ui" }
+zqlz-zed-adapter = { path = "crates/zqlz-zed-adapter" }
+zqlz-interchange = { path = "crates/zqlz-interchange" }
+zqlz-admin = { path = "crates/zqlz-admin" }
+zqlz-monitor = { path = "crates/zqlz-monitor" }
+
+[profile.dev]
+opt-level = 0
+debug = true
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

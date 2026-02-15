@@ -1,0 +1,60 @@
+[package]
+name = "zqlz-driver-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+
+[lib]
+path = "zqlz_driver_tests.rs"
+
+[dependencies]
+# Internal ZQLZ dependencies
+zqlz-core.workspace = true
+zqlz-drivers.workspace = true
+zqlz-driver-postgres.workspace = true
+zqlz-driver-mysql.workspace = true
+zqlz-driver-sqlite.workspace = true
+zqlz-driver-redis.workspace = true
+zqlz-connection.workspace = true
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+futures.workspace = true
+async-trait.workspace = true
+
+# Testing framework
+rstest = "0.24"
+
+# Error handling
+anyhow.workspace = true
+thiserror.workspace = true
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+
+# Logging
+tracing.workspace = true
+tracing-subscriber = { workspace = true, features = ["env-filter", "fmt"] }
+
+# Docker test containers
+testcontainers = "0.23"
+testcontainers-modules = { version = "0.11", features = [
+    "postgres",
+    "mysql",
+    "redis",
+] }
+
+# Utilities
+chrono = { workspace = true, features = ["serde"] }
+uuid = { workspace = true, features = ["v4", "serde"] }
+once_cell.workspace = true
+tempfile.workspace = true
+pretty_assertions.workspace = true
+indoc.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true, features = ["html_reports"] }
+ctor.workspace = true

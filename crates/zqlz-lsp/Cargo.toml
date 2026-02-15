@@ -1,0 +1,46 @@
+[package]
+name = "zqlz-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL Language Server Protocol integration for ZQLZ - completions, diagnostics, hover, and signature help"
+
+[lib]
+path = "src/zqlz_lsp.rs"
+
+[dependencies]
+# Core ZQLZ crates
+zqlz-core.workspace = true
+zqlz-drivers.workspace = true
+zqlz-services.workspace = true
+zqlz-ui.workspace = true
+
+# GPUI
+gpui.workspace = true
+
+# LSP types
+lsp-types.workspace = true
+
+# URL parsing (required by lsp-types)
+url.workspace = true
+
+# SQL parsing
+sqlparser.workspace = true
+
+# Tree-sitter for SQL parsing
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+
+# Async
+async-trait.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+
+# Utilities
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true

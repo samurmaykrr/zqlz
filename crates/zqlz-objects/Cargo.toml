@@ -1,0 +1,20 @@
+[package]
+name = "zqlz-objects"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Database object management for ZQLZ (procedures, views, triggers)"
+
+[lib]
+path = "src/zqlz_objects.rs"
+
+[dependencies]
+zqlz-core = { path = "../zqlz-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true
+uuid.workspace = true

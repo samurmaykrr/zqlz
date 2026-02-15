@@ -1,0 +1,3390 @@
+//! Connection sidebar panel
+//!
+//! Displays a tree view of all database connections and their objects.
+
+mod rendering;
+
+use gpui::prelude::FluentBuilder;
+use gpui::*;
+use uuid::Uuid;
+use zqlz_ui::widgets::{
+    button::{Button, ButtonVariants},
+    dock::{Panel, PanelEvent, TitleStyle},
+    h_flex,
+    input::{Input, InputEvent, InputState},
+    menu::PopupMenu,
+    typography::{body_small, caption},
+    v_flex, ActiveTheme, ConnectionStatus, DatabaseLogo, Icon, IconName, Sizable, StatusDot,
+    ZqlzIcon,
+};
+
+/// Information about a saved query for display in the sidebar
+#[derive(Clone, Debug)]
+pub struct SavedQueryInfo {
+    pub id: Uuid,
+    pub name: String,
+}
+
+/// Information about a Redis database for display in the sidebar
+#[derive(Clone, Debug)]
+pub struct RedisDatabaseInfo {
+    /// Database index (0, 1, 2, ...)
+    pub index: u16,
+    /// Number of keys in this database (if known)
+    pub key_count: Option<i64>,
+    /// Keys in this database (loaded on expand)
+    pub keys: Vec<String>,
+    /// Whether this database is expanded in the tree
+    pub is_expanded: bool,
+    /// Whether keys are currently loading
+    pub is_loading: bool,
+}
+
+impl RedisDatabaseInfo {
+    pub fn new(index: u16, key_count: Option<i64>) -> Self {
+        Self {
+            index,
+            key_count,
+            keys: Vec::new(),
+            is_expanded: false,
+            is_loading: false,
+        }
+    }
+}
+
+/// Information about a database on the server for display in the sidebar
+#[derive(Clone, Debug)]
+pub struct SidebarDatabaseInfo {
+    pub name: String,
+    pub size_bytes: Option<i64>,
+    /// Whether this is the currently connected/active database
+    pub is_active: bool,
+    /// Whether this database node is expanded in the tree
+    pub is_expanded: bool,
+    /// Whether schema is currently being loaded for this database
+    pub is_loading: bool,
+    /// Schema data loaded for this database (populated on demand)
+    pub schema: Option<DatabaseSchemaData>,
+}
+
+/// Schema objects for a single database, used in the sidebar tree
+#[derive(Clone, Debug, Default)]
+pub struct DatabaseSchemaData {
+    pub schema_name: Option<String>,
+    pub schema_expanded: bool,
+    pub tables: Vec<String>,
+    pub views: Vec<String>,
+    pub materialized_views: Vec<String>,
+    pub triggers: Vec<String>,
+    pub functions: Vec<String>,
+    pub procedures: Vec<String>,
+    pub tables_expanded: bool,
+    pub views_expanded: bool,
+    pub materialized_views_expanded: bool,
+    pub triggers_expanded: bool,
+    pub functions_expanded: bool,
+    pub procedures_expanded: bool,
+}
+
+/// A database connection entry
+#[derive(Clone, Debug)]
+pub struct ConnectionEntry {
+    pub id: Uuid,
+    pub name: String,
+    pub db_type: String,
+    pub is_connected: bool,
+    pub is_connecting: bool,
+    pub is_expanded: bool,
+    pub tables: Vec<String>,
+    pub views: Vec<String>,
+    pub materialized_views: Vec<String>,
+    pub triggers: Vec<String>,
+    pub functions: Vec<String>,
+    pub procedures: Vec<String>,
+    pub queries: Vec<SavedQueryInfo>,
+    pub tables_expanded: bool,
+    pub views_expanded: bool,
+    pub materialized_views_expanded: bool,
+    pub triggers_expanded: bool,
+    pub functions_expanded: bool,
+    pub procedures_expanded: bool,
+    pub queries_expanded: bool,
+    /// Redis databases (only used for Redis connections)
+    pub redis_databases: Vec<RedisDatabaseInfo>,
+    /// Whether Redis databases section is expanded
+    pub redis_databases_expanded: bool,
+    /// All databases on the server (for drivers that support listing them)
+    pub databases: Vec<SidebarDatabaseInfo>,
+    /// The schema name for hierarchy display (e.g. "public")
+    pub schema_name: Option<String>,
+    /// Whether the schema-level node is expanded
+    pub schema_expanded: bool,
+}
+
+impl ConnectionEntry {
+    pub fn new(id: Uuid, name: String, db_type: String) -> Self {
+        Self {
+            id,
+            name,
+            db_type,
+            is_connected: false,
+            is_connecting: false,
+            is_expanded: false,
+            tables: Vec::new(),
+            views: Vec::new(),
+            materialized_views: Vec::new(),
+            triggers: Vec::new(),
+            functions: Vec::new(),
+            procedures: Vec::new(),
+            queries: Vec::new(),
+            tables_expanded: true,
+            views_expanded: false,
+            materialized_views_expanded: false,
+            triggers_expanded: false,
+            functions_expanded: false,
+            procedures_expanded: false,
+            queries_expanded: false,
+            redis_databases: Vec::new(),
+            redis_databases_expanded: true,
+            databases: Vec::new(),
+            schema_name: None,
+            schema_expanded: true,
+        }
+    }
+
+    /// Check if this is a Redis connection
+    pub fn is_redis(&self) -> bool {
+        self.db_type == "redis"
+    }
+}
+
+/// Events emitted by the connection sidebar
+#[derive(Clone, Debug)]
+pub enum ConnectionSidebarEvent {
+    /// User wants to connect to a database
+    Connect(Uuid),
+    /// User wants to disconnect from a database
+    Disconnect(Uuid),
+    /// User selected a connection
+    Selected(Uuid),
+    /// User wants to add a new connection
+    AddConnection,
+    /// User wants to close/disconnect all active connections
+    CloseAllConnections,
+    /// User wants to create a new connection group
+    NewGroup,
+    /// User wants to open a table
+    OpenTable {
+        connection_id: Uuid,
+        table_name: String,
+        database_name: Option<String>,
+    },
+    /// User wants to open a view
+    OpenView {
+        connection_id: Uuid,
+        view_name: String,
+        database_name: Option<String>,
+    },
+    /// User wants to design/edit a view SQL definition
+    DesignView {
+        connection_id: Uuid,
+        view_name: String,
+    },
+    /// User wants to create a new view
+    NewView { connection_id: Uuid },
+    /// User wants to delete a view
+    DeleteView {
+        connection_id: Uuid,
+        view_name: String,
+    },
+    /// User wants to duplicate a view
+    DuplicateView {
+        connection_id: Uuid,
+        view_name: String,
+    },
+    /// User wants to rename a view
+    RenameView {
+        connection_id: Uuid,
+        view_name: String,
+    },
+    /// User wants to copy view name to clipboard
+    CopyViewName { view_name: String },
+    /// User wants to open a new query for this connection
+    NewQuery(Uuid),
+    /// User wants to refresh connections list
+    RefreshConnections,
+    /// User wants to delete a connection
+    DeleteConnection(Uuid),
+    /// User wants to duplicate a connection
+    DuplicateConnection(Uuid),
+    /// User wants to open settings for a connection
+    OpenConnectionSettings(Uuid),
+
+    // Table-specific events
+    /// User wants to design/edit a table structure
+    DesignTable {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to create a new table
+    NewTable { connection_id: Uuid },
+    /// User wants to delete a table
+    DeleteTable {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to empty/truncate a table
+    EmptyTable {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to duplicate a table
+    DuplicateTable {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to rename a table
+    RenameTable {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to import data into a table
+    ImportData {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to export data from a table
+    ExportData {
+        connection_id: Uuid,
+        table_name: String,
+    },
+    /// User wants to dump table SQL (structure and data)
+    DumpTableSql {
+        connection_id: Uuid,
+        table_name: String,
+        include_data: bool,
+    },
+    /// User wants to copy table name to clipboard
+    CopyTableName { table_name: String },
+    /// User wants to refresh a specific connection's schema
+    RefreshSchema { connection_id: Uuid },
+
+    // Saved queries events
+    /// User wants to open a saved query
+    OpenSavedQuery {
+        connection_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+    },
+    /// User wants to delete a saved query
+    DeleteSavedQuery {
+        connection_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+    },
+    /// User wants to rename a saved query
+    RenameSavedQuery {
+        connection_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+    },
+
+    // Version history events
+    /// User wants to view version history for a database object
+    ViewHistory {
+        connection_id: Uuid,
+        object_name: String,
+        object_type: String, // "view", "function", "procedure", "trigger"
+    },
+
+    // Function events
+    /// User wants to open/view a function definition
+    OpenFunction {
+        connection_id: Uuid,
+        function_name: String,
+    },
+
+    // Procedure events
+    /// User wants to open/view a procedure definition
+    OpenProcedure {
+        connection_id: Uuid,
+        procedure_name: String,
+    },
+
+    // Trigger events
+    /// User wants to design/edit a trigger definition
+    DesignTrigger {
+        connection_id: Uuid,
+        trigger_name: String,
+    },
+    /// User wants to create a new trigger
+    NewTrigger { connection_id: Uuid },
+    /// User wants to delete a trigger
+    DeleteTrigger {
+        connection_id: Uuid,
+        trigger_name: String,
+    },
+    /// User wants to open the visual trigger designer
+    OpenTriggerDesigner {
+        connection_id: Uuid,
+        trigger_name: Option<String>,
+    },
+
+    // Redis-specific events
+    /// User expanded a Redis database and needs keys loaded
+    LoadRedisKeys {
+        connection_id: Uuid,
+        database_index: u16,
+    },
+    /// User wants to open/view a Redis key
+    OpenRedisKey {
+        connection_id: Uuid,
+        database_index: u16,
+        key_name: String,
+    },
+    /// User wants to open a Redis database to view all keys in table viewer
+    OpenRedisDatabase {
+        connection_id: Uuid,
+        database_index: u16,
+    },
+
+    // Multi-database events
+    /// User wants to connect to a different database on the same server
+    ConnectToDatabase {
+        connection_id: Uuid,
+        database_name: String,
+    },
+}
+
+/// Connection sidebar showing all connections and their schema objects
+pub struct ConnectionSidebar {
+    /// Focus handle for keyboard interactions
+    focus_handle: FocusHandle,
+
+    /// List of connections
+    connections: Vec<ConnectionEntry>,
+
+    /// Currently selected connection
+    selected_connection: Option<Uuid>,
+
+    /// Search query for filtering schema objects
+    search_query: String,
+
+    /// Input state for search field (lazily initialized)
+    search_input_state: Option<Entity<InputState>>,
+
+    /// Context menu for the sidebar background (New Connection, Close All, New Group, Refresh)
+    sidebar_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for connections
+    connection_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for tables
+    table_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for views
+    view_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for saved queries
+    query_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for functions
+    function_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for procedures
+    procedure_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu entity for triggers
+    trigger_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Subscriptions to keep alive
+    _subscriptions: Vec<Subscription>,
+}
+
+/// State for context menus
+struct ContextMenuState {
+    menu: Entity<PopupMenu>,
+    open: bool,
+    position: Point<Pixels>,
+    _subscriptions: Vec<Subscription>,
+    menu_subscription: Option<Subscription>,
+}
+
+impl ContextMenuState {
+    fn new(window: &mut Window, cx: &mut App) -> Entity<Self> {
+        cx.new(|cx| {
+            let menu = PopupMenu::build(window, cx, |menu, _, _| menu);
+            Self {
+                menu,
+                open: false,
+                position: Point::default(),
+                _subscriptions: vec![],
+                menu_subscription: None,
+            }
+        })
+    }
+}
+
+impl Render for ContextMenuState {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.open {
+            return div().into_any_element();
+        }
+
+        deferred(
+            anchored()
+                .snap_to_window_with_margin(px(8.))
+                .anchor(Corner::TopLeft)
+                .position(self.position)
+                .child(
+                    div()
+                        .occlude()
+                        .font_family(cx.theme().font_family.clone())
+                        .cursor_default()
+                        .child(self.menu.clone()),
+                ),
+        )
+        .with_priority(1)
+        .into_any_element()
+    }
+}
+
+impl ConnectionSidebar {
+    pub fn new(cx: &mut Context<Self>) -> Self {
+        Self {
+            focus_handle: cx.focus_handle(),
+            connections: Vec::new(),
+            selected_connection: None,
+            search_query: String::new(),
+            search_input_state: None,
+            sidebar_context_menu: None,
+            connection_context_menu: None,
+            table_context_menu: None,
+            view_context_menu: None,
+            query_context_menu: None,
+            function_context_menu: None,
+            procedure_context_menu: None,
+            trigger_context_menu: None,
+            _subscriptions: Vec::new(),
+        }
+    }
+
+    /// Ensure the search input state is initialized
+    fn ensure_search_input(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_input_state.is_none() {
+            let search_input_state = cx.new(|cx| {
+                InputState::new(window, cx)
+                    .placeholder("Search objects...")
+                    .clean_on_escape()
+            });
+
+            self._subscriptions.push(cx.subscribe(
+                &search_input_state,
+                |this, _, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        if let Some(input) = &this.search_input_state {
+                            this.search_query = input.read(cx).value().to_string();
+                        }
+                        cx.notify();
+                    }
+                },
+            ));
+
+            self.search_input_state = Some(search_input_state);
+        }
+    }
+
+    /// Get current connections (for reading state)
+    pub fn connections(&self) -> &[ConnectionEntry] {
+        &self.connections
+    }
+
+    /// Set connections from external source (e.g., AppState)
+    /// This decouples the sidebar from the app's global state.
+    pub fn set_connections(&mut self, connections: Vec<ConnectionEntry>, cx: &mut Context<Self>) {
+        self.connections = connections;
+        tracing::info!("Set {} connections", self.connections.len());
+        cx.notify();
+    }
+
+    /// Add a new connection to the sidebar
+    pub fn add_connection(&mut self, entry: ConnectionEntry, cx: &mut Context<Self>) {
+        self.connections.push(entry);
+        cx.notify();
+    }
+
+    /// Remove a connection from the sidebar
+    pub fn remove_connection(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.connections.retain(|c| c.id != id);
+        if self.selected_connection == Some(id) {
+            self.selected_connection = None;
+        }
+        cx.notify();
+    }
+
+    /// Emit a refresh event to reload connections and/or schema
+    ///
+    /// This is called by MainView when the user presses Cmd+R while the sidebar is focused.
+    /// If a connection is selected, it refreshes that connection's schema.
+    /// Otherwise, it refreshes the connections list.
+    pub fn refresh(&self, cx: &mut Context<Self>) {
+        if let Some(connection_id) = self.selected_connection {
+            tracing::info!(
+                "ConnectionSidebar: Refreshing schema for connection {:?}",
+                connection_id
+            );
+            cx.emit(ConnectionSidebarEvent::RefreshSchema { connection_id });
+        } else {
+            tracing::info!("ConnectionSidebar: Refreshing connections list");
+            cx.emit(ConnectionSidebarEvent::RefreshConnections);
+        }
+    }
+
+    /// Update a connection's connected state
+    pub fn set_connected(&mut self, id: Uuid, connected: bool, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.is_connected = connected;
+            conn.is_connecting = false; // Clear connecting state when connection status changes
+            if !connected {
+                conn.is_expanded = false;
+                conn.tables.clear();
+                conn.views.clear();
+                conn.materialized_views.clear();
+                conn.triggers.clear();
+                conn.functions.clear();
+                conn.procedures.clear();
+                conn.redis_databases.clear();
+                conn.databases.clear();
+                conn.schema_name = None;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Set whether a connection is currently connecting
+    pub fn set_connecting(&mut self, id: Uuid, connecting: bool, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.is_connecting = connecting;
+        }
+        cx.notify();
+    }
+
+    /// Update tables only (progressive loading - step 1)
+    pub fn set_tables_only(&mut self, id: Uuid, tables: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.tables = tables;
+            conn.is_expanded = true;
+            conn.schema_expanded = true;
+            conn.tables_expanded = true;
+        }
+        cx.notify();
+    }
+
+    /// Update views only (progressive loading - step 2)
+    pub fn set_views_only(&mut self, id: Uuid, views: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.views = views;
+            conn.views_expanded = !conn.views.is_empty();
+        }
+        cx.notify();
+    }
+
+    /// Update materialized views only (progressive loading - step 3)
+    pub fn set_materialized_views_only(
+        &mut self,
+        id: Uuid,
+        materialized_views: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.materialized_views = materialized_views;
+            conn.materialized_views_expanded = !conn.materialized_views.is_empty();
+        }
+        cx.notify();
+    }
+
+    /// Update functions only (progressive loading - step 4)
+    pub fn set_functions_only(&mut self, id: Uuid, functions: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.functions = functions;
+            conn.functions_expanded = !conn.functions.is_empty();
+        }
+        cx.notify();
+    }
+
+    /// Update procedures only (progressive loading - step 5)
+    pub fn set_procedures_only(
+        &mut self,
+        id: Uuid,
+        procedures: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.procedures = procedures;
+            conn.procedures_expanded = !conn.procedures.is_empty();
+        }
+        cx.notify();
+    }
+
+    /// Update triggers only (progressive loading - step 6)
+    pub fn set_triggers_only(&mut self, id: Uuid, triggers: Vec<String>, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.triggers = triggers;
+            conn.triggers_expanded = !conn.triggers.is_empty();
+        }
+        cx.notify();
+    }
+
+    /// Update a connection's schema info
+    pub fn set_schema(
+        &mut self,
+        id: Uuid,
+        tables: Vec<String>,
+        views: Vec<String>,
+        materialized_views: Vec<String>,
+        triggers: Vec<String>,
+        functions: Vec<String>,
+        procedures: Vec<String>,
+        schema_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.tables = tables;
+            conn.views = views;
+            conn.materialized_views = materialized_views;
+            conn.triggers = triggers;
+            conn.functions = functions;
+            conn.procedures = procedures;
+            conn.schema_name = schema_name;
+            conn.is_expanded = true;
+            conn.schema_expanded = true;
+            conn.tables_expanded = true;
+        }
+        cx.notify();
+    }
+
+    /// Set the list of all databases on the server for a connection.
+    /// Migrates existing connection-level schema data into the active database node.
+    pub fn set_databases(
+        &mut self,
+        id: Uuid,
+        databases: Vec<(String, Option<i64>)>,
+        active_database: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            // Build per-database schema data for the active database from
+            // connection-level fields that were populated by set_schema
+            let active_schema = DatabaseSchemaData {
+                schema_name: conn.schema_name.clone(),
+                schema_expanded: conn.schema_expanded,
+                tables: conn.tables.clone(),
+                views: conn.views.clone(),
+                materialized_views: conn.materialized_views.clone(),
+                triggers: conn.triggers.clone(),
+                functions: conn.functions.clone(),
+                procedures: conn.procedures.clone(),
+                tables_expanded: conn.tables_expanded,
+                views_expanded: conn.views_expanded,
+                materialized_views_expanded: conn.materialized_views_expanded,
+                triggers_expanded: conn.triggers_expanded,
+                functions_expanded: conn.functions_expanded,
+                procedures_expanded: conn.procedures_expanded,
+            };
+
+            conn.databases = databases
+                .into_iter()
+                .map(|(name, size_bytes)| {
+                    let is_active = active_database.map_or(false, |active| active == name);
+                    SidebarDatabaseInfo {
+                        name,
+                        size_bytes,
+                        is_active,
+                        is_expanded: is_active,
+                        is_loading: false,
+                        schema: if is_active {
+                            Some(active_schema.clone())
+                        } else {
+                            None
+                        },
+                    }
+                })
+                .collect();
+        }
+        cx.notify();
+    }
+
+    /// Set schema data for a specific database within a connection.
+    /// Used when loading schema on demand (e.g. user expands an inactive database).
+    pub fn set_database_schema(
+        &mut self,
+        conn_id: Uuid,
+        database_name: &str,
+        tables: Vec<String>,
+        views: Vec<String>,
+        materialized_views: Vec<String>,
+        triggers: Vec<String>,
+        functions: Vec<String>,
+        procedures: Vec<String>,
+        schema_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name) {
+                db.is_loading = false;
+                db.schema = Some(DatabaseSchemaData {
+                    schema_name,
+                    schema_expanded: true,
+                    tables,
+                    views,
+                    materialized_views,
+                    triggers,
+                    functions,
+                    procedures,
+                    tables_expanded: true,
+                    views_expanded: false,
+                    materialized_views_expanded: false,
+                    triggers_expanded: false,
+                    functions_expanded: false,
+                    procedures_expanded: false,
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Mark a database as loading schema
+    pub fn set_database_loading(
+        &mut self,
+        conn_id: Uuid,
+        database_name: &str,
+        loading: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name) {
+                db.is_loading = loading;
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a table from a connection's schema
+    pub fn remove_table(&mut self, conn_id: Uuid, table_name: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.tables.retain(|t| t != table_name);
+        }
+        cx.notify();
+    }
+
+    /// Add a table to a connection's schema
+    pub fn add_table(&mut self, conn_id: Uuid, table_name: String, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if !conn.tables.contains(&table_name) {
+                conn.tables.push(table_name);
+                conn.tables.sort();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a view from a connection's schema
+    pub fn remove_view(&mut self, conn_id: Uuid, view_name: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.views.retain(|v| v != view_name);
+        }
+        cx.notify();
+    }
+
+    /// Add a view to a connection's schema
+    pub fn add_view(&mut self, conn_id: Uuid, view_name: String, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if !conn.views.contains(&view_name) {
+                conn.views.push(view_name);
+                conn.views.sort();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a trigger from a connection's schema
+    pub fn remove_trigger(&mut self, conn_id: Uuid, trigger_name: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.triggers.retain(|t| t != trigger_name);
+        }
+        cx.notify();
+    }
+
+    /// Add a trigger to a connection's schema
+    pub fn add_trigger(&mut self, conn_id: Uuid, trigger_name: String, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if !conn.triggers.contains(&trigger_name) {
+                conn.triggers.push(trigger_name);
+                conn.triggers.sort();
+            }
+        }
+        cx.notify();
+    }
+
+    /// Set saved queries for a connection
+    pub fn set_saved_queries(
+        &mut self,
+        conn_id: Uuid,
+        queries: Vec<SavedQueryInfo>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.queries = queries;
+        }
+        cx.notify();
+    }
+
+    /// Add a saved query to a connection
+    pub fn add_saved_query(
+        &mut self,
+        conn_id: Uuid,
+        query: SavedQueryInfo,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if !conn.queries.iter().any(|q| q.id == query.id) {
+                conn.queries.push(query);
+                conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
+            }
+        }
+        cx.notify();
+    }
+
+    /// Remove a saved query from a connection
+    pub fn remove_saved_query(&mut self, conn_id: Uuid, query_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.queries.retain(|q| q.id != query_id);
+        }
+        cx.notify();
+    }
+
+    /// Rename a saved query in a connection
+    pub fn rename_saved_query(
+        &mut self,
+        conn_id: Uuid,
+        query_id: Uuid,
+        new_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(query) = conn.queries.iter_mut().find(|q| q.id == query_id) {
+                query.name = new_name;
+            }
+            conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        cx.notify();
+    }
+
+    // =========================================================================
+    // Redis-specific methods
+    // =========================================================================
+
+    /// Set Redis databases for a connection
+    pub fn set_redis_databases(
+        &mut self,
+        conn_id: Uuid,
+        databases: Vec<(u16, Option<i64>)>, // (index, key_count)
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.redis_databases = databases
+                .into_iter()
+                .map(|(index, key_count)| RedisDatabaseInfo::new(index, key_count))
+                .collect();
+            conn.is_expanded = true;
+            conn.redis_databases_expanded = true;
+        }
+        cx.notify();
+    }
+
+    /// Set keys for a specific Redis database
+    pub fn set_redis_keys(
+        &mut self,
+        conn_id: Uuid,
+        database_index: u16,
+        keys: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(db) = conn
+                .redis_databases
+                .iter_mut()
+                .find(|d| d.index == database_index)
+            {
+                db.keys = keys;
+                db.is_loading = false;
+                db.key_count = Some(db.keys.len() as i64);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle Redis database expand/collapse and trigger key loading if needed
+    fn toggle_redis_database_expand(
+        &mut self,
+        conn_id: Uuid,
+        db_index: u16,
+        cx: &mut Context<Self>,
+    ) {
+        let mut should_load = false;
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(db) = conn
+                .redis_databases
+                .iter_mut()
+                .find(|d| d.index == db_index)
+            {
+                db.is_expanded = !db.is_expanded;
+                // If expanding and keys haven't been loaded yet, trigger load
+                if db.is_expanded && db.keys.is_empty() && !db.is_loading {
+                    db.is_loading = true;
+                    should_load = true;
+                }
+            }
+        }
+        cx.notify();
+
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadRedisKeys {
+                connection_id: conn_id,
+                database_index: db_index,
+            });
+        }
+    }
+
+    /// Toggle Redis databases section expand/collapse
+    fn toggle_redis_databases_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.redis_databases_expanded = !conn.redis_databases_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Select a connection
+    fn select_connection(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        self.selected_connection = Some(id);
+        cx.emit(ConnectionSidebarEvent::Selected(id));
+        cx.notify();
+    }
+
+    /// Toggle connection expand/collapse
+    fn toggle_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.is_expanded = !conn.is_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle tables section expand/collapse
+    fn toggle_tables_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.tables_expanded = !conn.tables_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle views section expand/collapse
+    fn toggle_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.views_expanded = !conn.views_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle materialized views section expand/collapse
+    fn toggle_materialized_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.materialized_views_expanded = !conn.materialized_views_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle triggers section expand/collapse
+    fn toggle_triggers_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.triggers_expanded = !conn.triggers_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle functions section expand/collapse
+    fn toggle_functions_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.functions_expanded = !conn.functions_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle procedures section expand/collapse
+    fn toggle_procedures_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.procedures_expanded = !conn.procedures_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle a schema section within a specific database node.
+    /// `section` identifies which section to toggle (e.g. "tables", "views", "schema").
+    fn toggle_db_section(
+        &mut self,
+        conn_id: Uuid,
+        db_name: &str,
+        section: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) {
+                if let Some(schema) = &mut db.schema {
+                    match section {
+                        "schema" => schema.schema_expanded = !schema.schema_expanded,
+                        "tables" => schema.tables_expanded = !schema.tables_expanded,
+                        "views" => schema.views_expanded = !schema.views_expanded,
+                        "materialized_views" => {
+                            schema.materialized_views_expanded = !schema.materialized_views_expanded
+                        }
+                        "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
+                        "functions" => schema.functions_expanded = !schema.functions_expanded,
+                        "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
+                        _ => {}
+                    }
+                }
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle queries section expand/collapse
+    fn toggle_queries_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.queries_expanded = !conn.queries_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Toggle a specific database node expand/collapse.
+    /// When expanding a database that has no schema loaded yet, automatically
+    /// triggers schema loading so the user doesn't need a second click.
+    fn toggle_database_expand(&mut self, id: Uuid, db_name: &str, cx: &mut Context<Self>) {
+        let mut should_load_schema = false;
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) {
+                db.is_expanded = !db.is_expanded;
+                if db.is_expanded && db.schema.is_none() && !db.is_active && !db.is_loading {
+                    should_load_schema = true;
+                }
+            }
+        }
+        if should_load_schema {
+            cx.emit(ConnectionSidebarEvent::ConnectToDatabase {
+                connection_id: id,
+                database_name: db_name.to_string(),
+            });
+        }
+        cx.notify();
+    }
+
+    /// Toggle schema-level node expand/collapse
+    fn toggle_schema_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.schema_expanded = !conn.schema_expanded;
+        }
+        cx.notify();
+    }
+
+    /// Get selected connection ID
+    pub fn selected(&self) -> Option<Uuid> {
+        self.selected_connection
+    }
+
+    /// Set the selected connection from external source (e.g., WorkspaceState sync)
+    ///
+    /// Unlike `select_connection`, this does NOT emit a Selected event,
+    /// as it's meant to sync UI state with an external source of truth.
+    pub fn set_selected(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
+        if self.selected_connection != id {
+            self.selected_connection = id;
+            cx.notify();
+        }
+    }
+
+    /// Check if an object name matches the search query (case-insensitive)
+    fn matches_search(&self, name: &str) -> bool {
+        if self.search_query.is_empty() {
+            return true;
+        }
+        name.to_lowercase()
+            .contains(&self.search_query.to_lowercase())
+    }
+
+    /// Filter a list of names by the search query
+    fn filter_by_search<'a>(&self, items: &'a [String]) -> Vec<&'a String> {
+        items
+            .iter()
+            .filter(|name| self.matches_search(name))
+            .collect()
+    }
+
+    /// Show context menu for the sidebar background area
+    fn show_sidebar_context_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.sidebar_context_menu.is_none() {
+            self.sidebar_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let has_connected = self.connections.iter().any(|c| c.is_connected);
+
+        if let Some(menu_state) = &self.sidebar_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
+                    use zqlz_ui::widgets::menu::PopupMenuItem;
+
+                    menu.item(PopupMenuItem::new("New Connection").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::AddConnection);
+                            });
+                        }
+                    }))
+                    .item(
+                        PopupMenuItem::new("Close All Connections")
+                            .disabled(!has_connected)
+                            .on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::CloseAllConnections);
+                                    });
+                                }
+                            }),
+                    )
+                    .separator()
+                    .item(PopupMenuItem::new("New Group").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::NewGroup);
+                            });
+                        }
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("Refresh").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::RefreshConnections);
+                            });
+                        }
+                    }))
+                });
+
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show connection context menu
+    fn show_connection_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let is_connected = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| c.is_connected)
+            .unwrap_or(false);
+
+        if self.connection_context_menu.is_none() {
+            self.connection_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+
+        if let Some(menu_state) = &self.connection_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
+                    let menu = if !is_connected {
+                        menu.item(
+                            zqlz_ui::widgets::menu::PopupMenuItem::new("Connect").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::Connect(conn_id));
+                                    });
+                                }
+                            }),
+                        )
+                        .separator()
+                    } else {
+                        menu.item(
+                            zqlz_ui::widgets::menu::PopupMenuItem::new("New Query").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::NewQuery(conn_id));
+                                    });
+                                }
+                            }),
+                        )
+                        .item(
+                            zqlz_ui::widgets::menu::PopupMenuItem::new("Disconnect").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::Disconnect(conn_id));
+                                    });
+                                }
+                            }),
+                        )
+                        .separator()
+                    };
+
+                    menu.item(
+                        zqlz_ui::widgets::menu::PopupMenuItem::new("Open Settings").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenConnectionSettings(
+                                        conn_id,
+                                    ));
+                                });
+                            }
+                        }),
+                    )
+                    .item(
+                        zqlz_ui::widgets::menu::PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshConnections);
+                                });
+                            }
+                        }),
+                    )
+                    .separator()
+                    .item(
+                        zqlz_ui::widgets::menu::PopupMenuItem::new("Duplicate Connection")
+                            .on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::DuplicateConnection(
+                                            conn_id,
+                                        ));
+                                    });
+                                }
+                            }),
+                    )
+                    .item(
+                        zqlz_ui::widgets::menu::PopupMenuItem::new("Delete Connection").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DeleteConnection(conn_id));
+                                });
+                            }
+                        }),
+                    )
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        // Defer the update to avoid reentrancy panic
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                // Focus the menu so it can handle dismissal properly
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show table context menu
+    fn show_table_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        table_name: String,
+        database_name: Option<String>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.table_context_menu.is_none() {
+            self.table_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let table_for_menu = table_name.clone();
+
+        if let Some(menu_state) = &self.table_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu.max_h(px(400.0)) // Make menu scrollable if it exceeds this height
+                        // Open Table
+                        .item(PopupMenuItem::new("Open Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            let db_name = database_name.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                        database_name: db_name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Design Table
+                        .item(PopupMenuItem::new("Design Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DesignTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // New Table
+                        .item(PopupMenuItem::new("New Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::NewTable {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                        // Delete Table
+                        .item(PopupMenuItem::new("Delete Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DeleteTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Empty Table
+                        .item(PopupMenuItem::new("Empty Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::EmptyTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Duplicate Table
+                        .item(PopupMenuItem::new("Duplicate Table").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DuplicateTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Import Wizard
+                        .item(PopupMenuItem::new("Import Wizard...").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ImportData {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Export Wizard
+                        .item(PopupMenuItem::new("Export Wizard...").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ExportData {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Dump SQL File - Structure and Data
+                        .item(PopupMenuItem::new("Dump SQL (Structure + Data)").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DumpTableSql {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                        include_data: true,
+                                    });
+                                });
+                            }
+                        }))
+                        // Dump SQL File - Structure Only
+                        .item(PopupMenuItem::new("Dump SQL (Structure Only)").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DumpTableSql {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                        include_data: false,
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Copy table name
+                        .item(PopupMenuItem::new("Copy Table Name").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::CopyTableName {
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Rename
+                        .item(PopupMenuItem::new("Rename").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RenameTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Refresh
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        // Defer the update to avoid reentrancy panic
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                // Focus the menu so it can handle dismissal properly
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show view context menu
+    fn show_view_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        view_name: String,
+        database_name: Option<String>,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.view_context_menu.is_none() {
+            self.view_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let view_for_menu = view_name.clone();
+
+        if let Some(menu_state) = &self.view_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu.max_h(px(400.0))
+                        // Open View (show data like a table)
+                        .item(PopupMenuItem::new("Open View").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            let db_name = database_name.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                        database_name: db_name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Design View (edit SQL definition)
+                        .item(PopupMenuItem::new("Design View").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DesignView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // New View
+                        .item(PopupMenuItem::new("New View").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::NewView {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Delete View
+                        .item(PopupMenuItem::new("Delete View").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DeleteView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Duplicate View
+                        .item(PopupMenuItem::new("Duplicate View").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DuplicateView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Export Wizard
+                        .item(PopupMenuItem::new("Export Wizard...").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    // Views can be exported like tables
+                                    cx.emit(ConnectionSidebarEvent::ExportData {
+                                        connection_id: conn_id,
+                                        table_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Copy View Name
+                        .item(PopupMenuItem::new("Copy").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::CopyViewName {
+                                        view_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Rename View
+                        .item(PopupMenuItem::new("Rename").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RenameView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // View History
+                        .item(PopupMenuItem::new("View History").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let view = view_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                        connection_id: conn_id,
+                                        object_name: view.clone(),
+                                        object_type: "view".to_string(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Refresh
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show function context menu
+    fn show_function_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        function_name: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.function_context_menu.is_none() {
+            self.function_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let function_for_menu = function_name.clone();
+
+        if let Some(menu_state) = &self.function_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu.max_h(px(400.0))
+                        // View Definition
+                        .item(PopupMenuItem::new("View Definition").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = function_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenFunction {
+                                        connection_id: conn_id,
+                                        function_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // View History
+                        .item(PopupMenuItem::new("View History").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = function_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                        connection_id: conn_id,
+                                        object_name: name.clone(),
+                                        object_type: "function".to_string(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Refresh
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show procedure context menu
+    fn show_procedure_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        procedure_name: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.procedure_context_menu.is_none() {
+            self.procedure_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let procedure_for_menu = procedure_name.clone();
+
+        if let Some(menu_state) = &self.procedure_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu.max_h(px(400.0))
+                        // View Definition
+                        .item(PopupMenuItem::new("View Definition").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = procedure_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenProcedure {
+                                        connection_id: conn_id,
+                                        procedure_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // View History
+                        .item(PopupMenuItem::new("View History").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = procedure_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                        connection_id: conn_id,
+                                        object_name: name.clone(),
+                                        object_type: "procedure".to_string(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Refresh
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show trigger context menu
+    fn show_trigger_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        trigger_name: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.trigger_context_menu.is_none() {
+            self.trigger_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let trigger_for_menu = trigger_name.clone();
+
+        if let Some(menu_state) = &self.trigger_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu.max_h(px(400.0))
+                        // Edit Raw SQL (opens trigger definition in query editor)
+                        .item(PopupMenuItem::new("Edit Raw SQL").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = trigger_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DesignTrigger {
+                                        connection_id: conn_id,
+                                        trigger_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Open Designer (visual trigger editor)
+                        .item(PopupMenuItem::new("Open Designer").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = trigger_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenTriggerDesigner {
+                                        connection_id: conn_id,
+                                        trigger_name: Some(name.clone()),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // New Trigger
+                        .item(PopupMenuItem::new("New Trigger").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::NewTrigger {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Delete Trigger
+                        .item(PopupMenuItem::new("Delete Trigger").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = trigger_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DeleteTrigger {
+                                        connection_id: conn_id,
+                                        trigger_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // View History
+                        .item(PopupMenuItem::new("View History").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = trigger_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                        connection_id: conn_id,
+                                        object_name: name.clone(),
+                                        object_type: "trigger".to_string(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Refresh
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+
+    /// Show saved query context menu
+    fn show_query_context_menu(
+        &mut self,
+        conn_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use zqlz_ui::widgets::menu::PopupMenuItem;
+
+        if self.query_context_menu.is_none() {
+            self.query_context_menu = Some(ContextMenuState::new(window, cx));
+        }
+
+        let sidebar_weak = cx.entity().downgrade();
+        let query_name_for_menu = query_name.clone();
+
+        if let Some(menu_state) = &self.query_context_menu {
+            menu_state.update(cx, |state, cx| {
+                state.position = position;
+                let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    menu
+                        // Open Query
+                        .item(PopupMenuItem::new("Open").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = query_name_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
+                                        connection_id: conn_id,
+                                        query_id,
+                                        query_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        // Rename Query
+                        .item(PopupMenuItem::new("Rename").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = query_name_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RenameSavedQuery {
+                                        connection_id: conn_id,
+                                        query_id,
+                                        query_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        // Delete Query
+                        .item(PopupMenuItem::new("Delete").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let name = query_name_for_menu.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::DeleteSavedQuery {
+                                        connection_id: conn_id,
+                                        query_id,
+                                        query_name: name.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                });
+
+                // Subscribe to dismiss event on the new menu
+                let menu_entity = new_menu.clone();
+                let menu_state_entity = cx.entity().clone();
+                state.menu_subscription = Some(cx.subscribe(
+                    &menu_entity,
+                    move |_state, _, _event: &DismissEvent, cx| {
+                        let menu_state = menu_state_entity.clone();
+                        cx.defer(move |cx| {
+                            _ = menu_state.update(cx, |state, cx| {
+                                state.open = false;
+                                cx.notify();
+                            });
+                        });
+                    },
+                ));
+
+                state.menu = new_menu.clone();
+                state.open = true;
+
+                if !new_menu.focus_handle(cx).contains_focused(window, cx) {
+                    new_menu.focus_handle(cx).focus(window, cx);
+                }
+
+                cx.notify();
+            });
+        }
+    }
+}
+
+impl Render for ConnectionSidebar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        element_id: SharedString,
+        icon: impl Into<AnyElement>,
+        label: String,
+        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        on_right_click: Option<
+            impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        >,
+        list_hover: Hsla,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let indent = px(8.0 + depth as f32 * 12.0);
+
+        let row = h_flex()
+            .id(element_id)
+            .w_full()
+            .pl(indent)
+            .pr_2()
+            .h(px(26.0))
+            .gap_1p5()
+            .items_center()
+            .cursor_pointer()
+            .text_sm()
+            .hover(|el| el.bg(list_hover))
+            .on_click(cx.listener(on_click))
+            .child(icon.into())
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(label),
+            );
+
+        if let Some(handler) = on_right_click {
+            row.on_mouse_down(MouseButton::Right, cx.listener(handler))
+        } else {
+            row
+        }
+    }
+
+    /// Build the schema objects tree (Tables, Views, Triggers, Functions, Procedures, Saved Queries).
+    ///
+    /// The `toggle_section` callback is invoked with a section key ("tables", "views", etc.)
+    /// so callers can route to either connection-level or per-database toggles.
+    /// `depth` controls indentation: section headers render at `depth`, leaf items at `depth + 1`.
+    fn render_objects_tree(
+        &self,
+        conn_id: Uuid,
+        id_suffix: &str,
+        database_name: Option<String>,
+        tables: &[String],
+        views: &[String],
+        materialized_views: &[String],
+        triggers: &[String],
+        functions: &[String],
+        procedures: &[String],
+        queries: &[SavedQueryInfo],
+        tables_expanded: bool,
+        views_expanded: bool,
+        materialized_views_expanded: bool,
+        triggers_expanded: bool,
+        functions_expanded: bool,
+        procedures_expanded: bool,
+        queries_expanded: bool,
+        toggle_section: impl Fn(&mut Self, &str, &mut Context<Self>) + Clone + 'static,
+        depth: usize,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let muted_foreground = cx.theme().muted_foreground;
+        let list_hover = cx.theme().list_hover;
+        let font_family = cx.theme().font_family.clone();
+        let has_search = !self.search_query.is_empty();
+
+        let filtered_tables = self.filter_by_search(tables);
+        let filtered_views = self.filter_by_search(views);
+        let filtered_mat_views = self.filter_by_search(materialized_views);
+        let filtered_triggers = self.filter_by_search(triggers);
+        let filtered_functions = self.filter_by_search(functions);
+        let filtered_procedures = self.filter_by_search(procedures);
+        let filtered_queries: Vec<_> = queries
+            .iter()
+            .filter(|q| self.matches_search(&q.name))
+            .collect();
+
+        // Auto-expand sections when user is actively searching
+        let tables_expanded = tables_expanded || (has_search && !filtered_tables.is_empty());
+        let views_expanded = views_expanded || (has_search && !filtered_views.is_empty());
+        let mat_views_expanded =
+            materialized_views_expanded || (has_search && !filtered_mat_views.is_empty());
+        let triggers_expanded = triggers_expanded || (has_search && !filtered_triggers.is_empty());
+        let functions_expanded =
+            functions_expanded || (has_search && !filtered_functions.is_empty());
+        let procedures_expanded =
+            procedures_expanded || (has_search && !filtered_procedures.is_empty());
+        let queries_expanded = queries_expanded || (has_search && !filtered_queries.is_empty());
+
+        let mut tree = v_flex().w_full().gap_px().font_family(font_family);
+
+        let leaf_depth = depth + 1;
+
+        // ── Tables ──────────────────────────────────────────────────────
+        if !has_search || !filtered_tables.is_empty() {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("tables-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::Table).size_3().into_any_element(),
+                "Tables",
+                tables.len(),
+                filtered_tables.len(),
+                tables_expanded,
+                move |this, _, _, cx| toggle(this, "tables", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if tables_expanded {
+                for table_name in &filtered_tables {
+                    let table = (*table_name).clone();
+                    let name_for_menu = (*table_name).clone();
+                    let db_name_for_click = database_name.clone();
+                    let db_name_for_menu = database_name.clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("table-{}-{}", id_suffix, table_name)),
+                        Icon::new(ZqlzIcon::Table)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*table_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenTable {
+                                connection_id: conn_id,
+                                table_name: table.clone(),
+                                database_name: db_name_for_click.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_table_context_menu(
+                                    conn_id,
+                                    name_for_menu.clone(),
+                                    db_name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Views ───────────────────────────────────────────────────────
+        if !views.is_empty() && (!has_search || !filtered_views.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("views-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::Eye).size_3().into_any_element(),
+                "Views",
+                views.len(),
+                filtered_views.len(),
+                views_expanded,
+                move |this, _, _, cx| toggle(this, "views", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if views_expanded {
+                for view_name in &filtered_views {
+                    let view = (*view_name).clone();
+                    let name_for_menu = (*view_name).clone();
+                    let db_name_for_click = database_name.clone();
+                    let db_name_for_menu = database_name.clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("view-{}-{}", id_suffix, view_name)),
+                        Icon::new(ZqlzIcon::Eye)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*view_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenView {
+                                connection_id: conn_id,
+                                view_name: view.clone(),
+                                database_name: db_name_for_click.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_view_context_menu(
+                                    conn_id,
+                                    name_for_menu.clone(),
+                                    db_name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Materialized Views ──────────────────────────────────────────
+        if !materialized_views.is_empty() && (!has_search || !filtered_mat_views.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("matviews-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::TreeStructure)
+                    .size_3()
+                    .into_any_element(),
+                "Materialized Views",
+                materialized_views.len(),
+                filtered_mat_views.len(),
+                mat_views_expanded,
+                move |this, _, _, cx| toggle(this, "materialized_views", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if mat_views_expanded {
+                for view_name in &filtered_mat_views {
+                    let view = (*view_name).clone();
+                    let db_name_for_click = database_name.clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("matview-{}-{}", id_suffix, view_name)),
+                        Icon::new(ZqlzIcon::TreeStructure)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*view_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenView {
+                                connection_id: conn_id,
+                                view_name: view.clone(),
+                                database_name: db_name_for_click.clone(),
+                            });
+                        },
+                        None::<fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>)>,
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Triggers ────────────────────────────────────────────────────
+        if !triggers.is_empty() && (!has_search || !filtered_triggers.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("triggers-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::LightningBolt)
+                    .size_3()
+                    .into_any_element(),
+                "Triggers",
+                triggers.len(),
+                filtered_triggers.len(),
+                triggers_expanded,
+                move |this, _, _, cx| toggle(this, "triggers", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if triggers_expanded {
+                for trigger_name in &filtered_triggers {
+                    let trig = (*trigger_name).clone();
+                    let name_for_menu = (*trigger_name).clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("trigger-{}-{}", id_suffix, trigger_name)),
+                        Icon::new(ZqlzIcon::LightningBolt)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*trigger_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::DesignTrigger {
+                                connection_id: conn_id,
+                                trigger_name: trig.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_trigger_context_menu(
+                                    conn_id,
+                                    name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Functions ───────────────────────────────────────────────────
+        if !functions.is_empty() && (!has_search || !filtered_functions.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("functions-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::Function).size_3().into_any_element(),
+                "Functions",
+                functions.len(),
+                filtered_functions.len(),
+                functions_expanded,
+                move |this, _, _, cx| toggle(this, "functions", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if functions_expanded {
+                for function_name in &filtered_functions {
+                    let func = (*function_name).clone();
+                    let name_for_menu = (*function_name).clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("function-{}-{}", id_suffix, function_name)),
+                        Icon::new(ZqlzIcon::Function)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*function_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenFunction {
+                                connection_id: conn_id,
+                                function_name: func.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_function_context_menu(
+                                    conn_id,
+                                    name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Procedures ──────────────────────────────────────────────────
+        if !procedures.is_empty() && (!has_search || !filtered_procedures.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("procedures-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::Gear).size_3().into_any_element(),
+                "Procedures",
+                procedures.len(),
+                filtered_procedures.len(),
+                procedures_expanded,
+                move |this, _, _, cx| toggle(this, "procedures", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if procedures_expanded {
+                for procedure_name in &filtered_procedures {
+                    let proc = (*procedure_name).clone();
+                    let name_for_menu = (*procedure_name).clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("procedure-{}-{}", id_suffix, procedure_name)),
+                        Icon::new(ZqlzIcon::Gear)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        (*procedure_name).clone(),
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenProcedure {
+                                connection_id: conn_id,
+                                procedure_name: proc.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_procedure_context_menu(
+                                    conn_id,
+                                    name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Saved Queries ───────────────────────────────────────────────
+        if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
+            let toggle = toggle_section.clone();
+            let header = self.render_section_header(
+                SharedString::from(format!("queries-header-{}", id_suffix)),
+                Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
+                "Queries",
+                queries.len(),
+                filtered_queries.len(),
+                queries_expanded,
+                move |this, _, _, cx| toggle(this, "queries", cx),
+                muted_foreground,
+                list_hover,
+                depth,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if queries_expanded {
+                for query in &filtered_queries {
+                    let query_id = query.id;
+                    let query_name = query.name.clone();
+                    let name_for_click = query.name.clone();
+                    let name_for_menu = query.name.clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("query-{}-{}", id_suffix, query_id)),
+                        Icon::new(ZqlzIcon::FileSql)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        query_name,
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
+                                connection_id: conn_id,
+                                query_id,
+                                query_name: name_for_click.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_query_context_menu(
+                                    conn_id,
+                                    query_id,
+                                    name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        leaf_depth,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        tree
+    }
+
+    /// Render the schema tree for a connection.
+    ///
+    /// Handles both the simple case (single database like SQLite) and the
+    /// multi-database case (PostgreSQL, MySQL, etc.) where databases are
+    /// listed as intermediate tree nodes.
+    fn render_schema_tree(
+        &self,
+        conn_id: Uuid,
+        tables: &[String],
+        views: &[String],
+        materialized_views: &[String],
+        triggers: &[String],
+        functions: &[String],
+        procedures: &[String],
+        queries: &[SavedQueryInfo],
+        tables_expanded: bool,
+        views_expanded: bool,
+        materialized_views_expanded: bool,
+        triggers_expanded: bool,
+        functions_expanded: bool,
+        procedures_expanded: bool,
+        queries_expanded: bool,
+        databases: &[SidebarDatabaseInfo],
+        schema_name: Option<&str>,
+        schema_expanded: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // Simple case: no multi-database — render objects tree directly
+        if databases.is_empty() {
+            let objects_tree = self.render_objects_tree(
+                conn_id,
+                &conn_id.to_string(),
+                None,
+                tables,
+                views,
+                materialized_views,
+                triggers,
+                functions,
+                procedures,
+                queries,
+                tables_expanded,
+                views_expanded,
+                materialized_views_expanded,
+                triggers_expanded,
+                functions_expanded,
+                procedures_expanded,
+                queries_expanded,
+                move |this, section, cx| match section {
+                    "tables" => this.toggle_tables_expand(conn_id, cx),
+                    "views" => this.toggle_views_expand(conn_id, cx),
+                    "materialized_views" => this.toggle_materialized_views_expand(conn_id, cx),
+                    "triggers" => this.toggle_triggers_expand(conn_id, cx),
+                    "functions" => this.toggle_functions_expand(conn_id, cx),
+                    "procedures" => this.toggle_procedures_expand(conn_id, cx),
+                    "queries" => this.toggle_queries_expand(conn_id, cx),
+                    _ => {}
+                },
+                1,
+                cx,
+            );
+            return objects_tree.into_any_element();
+        }
+
+        // Multi-database: build per-database tree nodes
+        let muted_fg = cx.theme().muted_foreground;
+        let muted_fg_half = muted_fg.opacity(0.5);
+        let muted_fg_dim = muted_fg.opacity(0.4);
+        let list_hover = cx.theme().list_hover;
+
+        let mut db_nodes: Vec<AnyElement> = Vec::with_capacity(databases.len());
+
+        // The connection-level objects_tree serves as fallback for the active database
+        // when per-database schema hasn't been loaded yet.
+        // Determine depth based on whether the schema node will be shown: if the
+        // schema name matches the active database name (e.g. MySQL), the redundant
+        // schema folder is skipped, so objects render one level shallower.
+        let active_db_name = databases
+            .iter()
+            .find(|d| d.is_active)
+            .map(|d| d.name.as_str());
+        let fallback_shows_schema =
+            schema_name.is_some_and(|s| active_db_name.map_or(true, |db| s != db));
+        let fallback_depth: usize = if fallback_shows_schema { 3 } else { 2 };
+
+        let mut fallback_tree: Option<AnyElement> = Some(
+            self.render_objects_tree(
+                conn_id,
+                &conn_id.to_string(),
+                active_db_name.map(|s| s.to_string()),
+                tables,
+                views,
+                materialized_views,
+                triggers,
+                functions,
+                procedures,
+                queries,
+                tables_expanded,
+                views_expanded,
+                materialized_views_expanded,
+                triggers_expanded,
+                functions_expanded,
+                procedures_expanded,
+                queries_expanded,
+                move |this, section, cx| match section {
+                    "tables" => this.toggle_tables_expand(conn_id, cx),
+                    "views" => this.toggle_views_expand(conn_id, cx),
+                    "materialized_views" => this.toggle_materialized_views_expand(conn_id, cx),
+                    "triggers" => this.toggle_triggers_expand(conn_id, cx),
+                    "functions" => this.toggle_functions_expand(conn_id, cx),
+                    "procedures" => this.toggle_procedures_expand(conn_id, cx),
+                    "queries" => this.toggle_queries_expand(conn_id, cx),
+                    _ => {}
+                },
+                fallback_depth,
+                cx,
+            )
+            .into_any_element(),
+        );
+
+        for db in databases {
+            let db_name = db.name.clone();
+            let db_name_click = db.name.clone();
+            let is_expanded = db.is_expanded;
+            let has_schema = db.schema.is_some();
+            let is_loading = db.is_loading;
+            let size_label = db.size_bytes.map(Self::format_database_size);
+
+            let mut node = v_flex().w_full();
+
+            // Database row
+            let db_row = h_flex()
+                .id(SharedString::from(format!(
+                    "db-node-{}-{}",
+                    conn_id, &db_name
+                )))
+                .w_full()
+                .pl(px(20.0))
+                .pr_2()
+                .h(px(24.0))
+                .gap_1p5()
+                .items_center()
+                .text_xs()
+                .text_color(if has_schema { muted_fg } else { muted_fg_half })
+                .cursor_pointer()
+                .hover(|el| el.bg(list_hover))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.toggle_database_expand(conn_id, &db_name_click, cx);
+                }))
+                .child(
+                    Icon::new(if is_expanded {
+                        IconName::ChevronDown
+                    } else {
+                        IconName::ChevronRight
+                    })
+                    .size_3(),
+                )
+                .child(
+                    Icon::new(ZqlzIcon::Database)
+                        .size_3()
+                        .when(!has_schema, |el| el.text_color(muted_fg_half)),
+                )
+                .child(db_name.clone())
+                .when_some(size_label, |el, size| {
+                    el.child(caption(size).color(muted_fg_dim))
+                });
+
+            node = node.child(db_row);
+
+            if is_expanded {
+                if has_schema || db.is_active {
+                    let db_schema = db.schema.as_ref();
+                    let sch_name = db_schema
+                        .and_then(|s| s.schema_name.clone())
+                        .or_else(|| schema_name.map(|s| s.to_string()));
+                    let sch_expanded = db_schema.map_or(schema_expanded, |s| s.schema_expanded);
+                    let db_name_for_toggle = db.name.clone();
+
+                    // Skip the schema folder when the schema name matches the database name
+                    // (e.g. MySQL where schema == database), rendering objects one level shallower.
+                    let show_schema_node = sch_name.as_ref().map_or(false, |s| s != &db_name);
+                    let objects_depth: usize = if show_schema_node { 3 } else { 2 };
+
+                    let tree: Option<AnyElement> = if let Some(schema) = db_schema {
+                        let db_name_for_closure = db.name.clone();
+                        Some(
+                            self.render_objects_tree(
+                                conn_id,
+                                &format!("{}-{}", conn_id, db.name),
+                                Some(db_name.clone()),
+                                &schema.tables,
+                                &schema.views,
+                                &schema.materialized_views,
+                                &schema.triggers,
+                                &schema.functions,
+                                &schema.procedures,
+                                queries,
+                                schema.tables_expanded,
+                                schema.views_expanded,
+                                schema.materialized_views_expanded,
+                                schema.triggers_expanded,
+                                schema.functions_expanded,
+                                schema.procedures_expanded,
+                                queries_expanded,
+                                move |this, section, cx| {
+                                    this.toggle_db_section(
+                                        conn_id,
+                                        &db_name_for_closure,
+                                        section,
+                                        cx,
+                                    );
+                                },
+                                objects_depth,
+                                cx,
+                            )
+                            .into_any_element(),
+                        )
+                    } else {
+                        fallback_tree.take()
+                    };
+
+                    if show_schema_node {
+                        node = node.child(
+                            v_flex()
+                                .w_full()
+                                .when_some(sch_name, |el, sch| {
+                                    el.child(
+                                        h_flex()
+                                            .id(SharedString::from(format!(
+                                                "schema-node-{}-{}",
+                                                conn_id, &db_name
+                                            )))
+                                            .w_full()
+                                            .pl(px(32.0))
+                                            .pr_2()
+                                            .h(px(24.0))
+                                            .gap_1p5()
+                                            .items_center()
+                                            .text_xs()
+                                            .text_color(muted_fg)
+                                            .cursor_pointer()
+                                            .hover(|el| el.bg(list_hover))
+                                            .on_click(cx.listener(move |this, _, _, cx| {
+                                                this.toggle_db_section(
+                                                    conn_id,
+                                                    &db_name_for_toggle,
+                                                    "schema",
+                                                    cx,
+                                                );
+                                            }))
+                                            .child(
+                                                Icon::new(if sch_expanded {
+                                                    IconName::ChevronDown
+                                                } else {
+                                                    IconName::ChevronRight
+                                                })
+                                                .size_3(),
+                                            )
+                                            .child(Icon::new(IconName::Folder).size_3())
+                                            .child(sch),
+                                    )
+                                })
+                                .when_some(tree, |el, objects| {
+                                    el.when(sch_expanded, |el| el.child(objects))
+                                }),
+                        );
+                    } else {
+                        // No schema folder — render objects directly under the database
+                        node = node.when_some(tree, |el, objects| el.child(objects));
+                    }
+                } else {
+                    // Schema is loading or pending
+                    node = node.child(
+                        h_flex()
+                            .w_full()
+                            .pl(px(32.0))
+                            .pr_2()
+                            .h(px(24.0))
+                            .gap_1p5()
+                            .items_center()
+                            .text_xs()
+                            .text_color(muted_fg_dim)
+                            .child(caption("Loading schema...").color(muted_fg_dim)),
+                    );
+                }
+            }
+
+            db_nodes.push(node.into_any_element());
+        }
+
+        v_flex()
+            .w_full()
+            .gap_px()
+            .children(db_nodes)
+            .into_any_element()
+    }
+
+    /// Format byte count as a human-readable database size string
+    fn format_database_size(bytes: i64) -> String {
+        if bytes < 1024 {
+            format!("{} B", bytes)
+        } else if bytes < 1024 * 1024 {
+            format!("{:.1} KB", bytes as f64 / 1024.0)
+        } else if bytes < 1024 * 1024 * 1024 {
+            format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
+        } else {
+            format!("{:.1} GB", bytes as f64 / (1024.0 * 1024.0 * 1024.0))
+        }
+    }
+
+    /// Render the Redis schema tree for a connection.
+    /// Shows databases with their keys instead of tables/views.
+    fn render_redis_schema_tree(
+        &self,
+        conn_id: Uuid,
+        databases: &[RedisDatabaseInfo],
+        databases_expanded: bool,
+        queries: &[SavedQueryInfo],
+        queries_expanded: bool,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let muted_foreground = cx.theme().muted_foreground;
+        let list_hover = cx.theme().list_hover;
+        let font_family = cx.theme().font_family.clone();
+
+        let has_search = !self.search_query.is_empty();
+        let search_lower = self.search_query.to_lowercase();
+
+        let filtered_databases: Vec<_> = databases
+            .iter()
+            .filter(|db| {
+                if !has_search {
+                    return true;
+                }
+                let db_name = format!("db{}", db.index);
+                if db_name.contains(&search_lower) {
+                    return true;
+                }
+                db.keys
+                    .iter()
+                    .any(|k| k.to_lowercase().contains(&search_lower))
+            })
+            .collect();
+
+        let filtered_queries: Vec<_> = queries
+            .iter()
+            .filter(|q| self.matches_search(&q.name))
+            .collect();
+
+        let databases_expanded =
+            databases_expanded || (has_search && !filtered_databases.is_empty());
+        let queries_expanded = queries_expanded || (has_search && !filtered_queries.is_empty());
+
+        let mut tree = v_flex().w_full().gap_px().font_family(font_family);
+
+        // ── Databases section ─────────────────────────────────────────
+        if !has_search || !filtered_databases.is_empty() {
+            let header = self.render_section_header(
+                SharedString::from(format!("databases-header-{}", conn_id)),
+                Icon::new(ZqlzIcon::Database).size_3().into_any_element(),
+                "Databases",
+                databases.len(),
+                filtered_databases.len(),
+                databases_expanded,
+                move |this, _, _, cx| {
+                    this.toggle_redis_databases_expand(conn_id, cx);
+                },
+                muted_foreground,
+                list_hover,
+                1,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().child(header);
+            if databases_expanded {
+                for db in &filtered_databases {
+                    let db_index = db.index;
+                    let db_loading = db.is_loading;
+                    let key_count = db.key_count;
+
+                    let label = format!(
+                        "db{}{}",
+                        db_index,
+                        key_count.map(|c| format!(" ({})", c)).unwrap_or_default()
+                    );
+
+                    let mut row = Self::render_leaf_item(
+                        SharedString::from(format!("redis-db-{}-{}", conn_id, db_index)),
+                        Icon::new(ZqlzIcon::Database)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        label,
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
+                                connection_id: conn_id,
+                                database_index: db_index,
+                            });
+                        },
+                        None::<fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>)>,
+                        list_hover,
+                        2,
+                        cx,
+                    );
+
+                    if db_loading {
+                        row = row.child(caption("...").color(muted_foreground));
+                    }
+
+                    section = section.child(row);
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        // ── Saved Queries section ─────────────────────────────────────
+        if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
+            let header = self.render_section_header(
+                SharedString::from(format!("queries-header-{}", conn_id)),
+                Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
+                "Saved Queries",
+                queries.len(),
+                filtered_queries.len(),
+                queries_expanded,
+                move |this, _, _, cx| {
+                    this.toggle_queries_expand(conn_id, cx);
+                },
+                muted_foreground,
+                list_hover,
+                1,
+                cx,
+            );
+
+            let mut section = v_flex().w_full().mt_1().child(header);
+            if queries_expanded {
+                for query in &filtered_queries {
+                    let query_id = query.id;
+                    let query_name = query.name.clone();
+                    let name_for_click = query.name.clone();
+                    let name_for_menu = query.name.clone();
+                    section = section.child(Self::render_leaf_item(
+                        SharedString::from(format!("query-{}-{}", conn_id, query_id)),
+                        Icon::new(ZqlzIcon::FileSql)
+                            .size_3()
+                            .text_color(muted_foreground)
+                            .into_any_element(),
+                        query_name,
+                        move |_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
+                                connection_id: conn_id,
+                                query_id,
+                                query_name: name_for_click.clone(),
+                            });
+                        },
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_query_context_menu(
+                                    conn_id,
+                                    query_id,
+                                    name_for_menu.clone(),
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
+                        list_hover,
+                        2,
+                        cx,
+                    ));
+                }
+            }
+            tree = tree.child(section);
+        }
+
+        tree
+    }
+}
+
+impl Render for ConnectionSidebar {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let connections: Vec<_> = self.connections.clone();
+        let has_connections = !connections.is_empty();
+        let has_search_query = !self.search_query.is_empty();
+        let search_query = self.search_query.clone();
+
+        // Ensure search input is initialized when we have connections
+        if has_connections {
+            self.ensure_search_input(window, cx);
+        }
+
+        // Clone the search input state for use in closures
+        let search_input_state = self.search_input_state.clone();
+
+        // Pre-render connection elements to avoid borrow issues in closure
+        let connection_elements: Vec<_> = if !connections.is_empty() {
+            let total = connections.len();
+            connections
+                .iter()
+                .enumerate()
+                .map(|(i, conn)| self.render_connection(conn, i == total - 1, window, cx))
+                .collect()
+        } else {
+            vec![]
+        };
+
+        // Pre-calculate if any matches exist (for "no results" message)
+        let any_matches = if has_search_query && has_connections {
+            connections.iter().any(|conn| {
+                conn.is_expanded
+                    && conn.is_connected
+                    && (conn.tables.iter().any(|t| self.matches_search(t))
+                        || conn.views.iter().any(|v| self.matches_search(v))
+                        || conn.triggers.iter().any(|t| self.matches_search(t))
+                        || conn.functions.iter().any(|f| self.matches_search(f))
+                        || conn.procedures.iter().any(|p| self.matches_search(p))
+                        || conn.queries.iter().any(|q| self.matches_search(&q.name)))
+            })
+        } else {
+            true // No search query, so "matches" is irrelevant
+        };
+
+        // Now get theme after all &mut self operations are done
+        let theme = cx.theme();
+
+        v_flex()
+            .id("connection-sidebar")
+            .key_context("ConnectionSidebar")
+            .track_focus(&self.focus_handle)
+            .size_full()
+            .bg(theme.sidebar)
+            .font_family(cx.theme().font_family.clone())
+            // Search input - only show when there are connections
+            .when_some(search_input_state, |this, input_state| {
+                this.child(
+                    div()
+                        .w_full()
+                        .px_2()
+                        .py_1()
+                        .border_b_1()
+                        .border_color(theme.border)
+                        .child(
+                            Input::new(&input_state)
+                                .small()
+                                .w_full()
+                                .appearance(false)
+                                .cleanable(true)
+                                .prefix(
+                                    Icon::new(IconName::Search)
+                                        .size_3()
+                                        .text_color(theme.muted_foreground),
+                                ),
+                        ),
+                )
+            })
+            .child(
+                div()
+                    .id("connection-list")
+                    .flex_1()
+                    .w_full()
+                    .overflow_y_scroll()
+                    .py_1()
+                    .on_mouse_down(
+                        gpui::MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.show_sidebar_context_menu(event.position, window, cx);
+                        }),
+                    )
+                    .when(connections.is_empty(), |this| {
+                        this.child(
+                            v_flex()
+                                .size_full()
+                                .items_center()
+                                .justify_center()
+                                .gap_4()
+                                .p_4()
+                                .child(
+                                    body_small("No connections yet")
+                                        .color(theme.muted_foreground)
+                                        .text_center(),
+                                )
+                                .child(
+                                    Button::new("add-first-connection")
+                                        .primary()
+                                        .small()
+                                        .label("Add Connection")
+                                        .on_click(cx.listener(|_this, _, _, cx| {
+                                            cx.emit(ConnectionSidebarEvent::AddConnection);
+                                        })),
+                                ),
+                        )
+                    })
+                    .when(!connections.is_empty(), |this| {
+                        this.children(connection_elements)
+                    })
+                    // Show "no results" message when searching with no matches
+                    .when(
+                        has_search_query && has_connections && !any_matches,
+                        |this| {
+                            this.child(
+                                div()
+                                    .w_full()
+                                    .p_4()
+                                    .text_sm()
+                                    .text_color(theme.muted_foreground)
+                                    .text_center()
+                                    .child(format!("No objects match \"{}\"", search_query)),
+                            )
+                        },
+                    ),
+            )
+            .children(self.sidebar_context_menu.clone())
+            .children(self.connection_context_menu.clone())
+            .children(self.table_context_menu.clone())
+            .children(self.view_context_menu.clone())
+            .children(self.query_context_menu.clone())
+            .children(self.function_context_menu.clone())
+            .children(self.procedure_context_menu.clone())
+            .children(self.trigger_context_menu.clone())
+    }
+}
+
+impl Focusable for ConnectionSidebar {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
+}
+
+impl EventEmitter<PanelEvent> for ConnectionSidebar {}
+impl EventEmitter<ConnectionSidebarEvent> for ConnectionSidebar {}
+
+impl Panel for ConnectionSidebar {
+    fn panel_name(&self) -> &'static str {
+        "ConnectionSidebar"
+    }
+
+    fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        "Connections"
+    }
+
+    fn title_suffix(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement> {
+        Some(
+            h_flex()
+                .gap_1()
+                .child(
+                    Button::new("add-connection")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Plus)
+                        .tooltip("Add Connection")
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::AddConnection);
+                        })),
+                )
+                .child(
+                    Button::new("refresh-connections")
+                        .ghost()
+                        .xsmall()
+                        .icon(ZqlzIcon::ArrowsClockwise)
+                        .tooltip("Refresh Connections")
+                        .on_click(cx.listener(|_this, _, _, cx| {
+                            cx.emit(ConnectionSidebarEvent::RefreshConnections);
+                        })),
+                ),
+        )
+    }
+
+    fn title_style(&self, _cx: &App) -> Option<TitleStyle> {
+        None
+    }
+
+    fn closable(&self, _cx: &App) -> bool {
+        false
+    }
+}

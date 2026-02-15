@@ -1,0 +1,71 @@
+{
+  "center": {
+    "panel_name": "StackPanel",
+    "children": [
+      {
+        "panel_name": "TabPanel",
+        "children": [],
+        "info": { "tabs": { "active_index": 0 } }
+      },
+      {
+        "panel_name": "TabPanel",
+        "children": [
+          {
+            "panel_name": "StoryContainer",
+            "children": [],
+            "info": { "panel": {} }
+          }
+        ],
+        "info": { "tabs": { "active_index": 0 } }
+      }
+    ],
+    "info": { "stack": { "sizes": [300, 400], "axis": 1 } }
+  },
+  "left_dock": {
+    "size": 350,
+    "open": true,
+    "placement": "Left",
+    "panel": {
+      "panel_name": "TabPanel",
+      "children": [
+        {
+          "panel_name": "StoryContainer",
+          "children": [],
+          "info": { "panel": {} }
+        }
+      ],
+      "info": { "tabs": { "active_index": 0 } }
+    }
+  },
+  "bottom_dock": {
+    "size": 200,
+    "open": true,
+    "placement": "Bottom",
+    "panel": {
+      "panel_name": "TabPanel",
+      "children": [
+        {
+          "panel_name": "StoryContainer",
+          "children": [],
+          "info": { "panel": {} }
+        },
+        {
+          "panel_name": "AnotherPanel",
+          "children": [],
+          "info": { "panel": {} }
+        }
+      ],
+      "info": { "tabs": { "active_index": 0 } }
+    }
+  },
+  "right_dock": {
+    "size": 300,
+    "open": false,
+    "placement": "Right",
+    "panel": {
+      "panel_name": "TabPanel",
+      "children": [],
+      "info": { "tabs": { "active_index": 0 } }
+    }
+  }
+}

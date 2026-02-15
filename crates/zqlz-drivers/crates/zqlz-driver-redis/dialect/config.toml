@@ -1,0 +1,27 @@
+# Redis Dialect Configuration
+# This file defines how ZQLZ handles Redis commands in the editor
+
+id = "redis"
+display_name = "Redis Commands"
+language_type = "command"
+
+[grammar]
+type = "none"
+# Redis has no tree-sitter grammar - we use keyword-based highlighting
+
+[parser]
+skip_sql_validation = true
+skip_tree_sitter_errors = true
+custom_validator = true
+
+[syntax]
+identifier_quote = '"'
+string_quote = '"'
+case_sensitive = true
+statement_terminator = """
+
+"""
+supports_comments = false
+
+[comments]
+# Redis commands don't support comments

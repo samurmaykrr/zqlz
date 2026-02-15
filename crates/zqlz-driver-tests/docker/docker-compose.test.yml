@@ -1,0 +1,70 @@
+version: '3.9'
+
+services:
+  # PostgreSQL with Pagila database
+  postgres-test:
+    image: postgres:16-alpine
+    container_name: zqlz-test-postgres
+    environment:
+      POSTGRES_USER: test_user
+      POSTGRES_PASSWORD: test_password
+      POSTGRES_DB: pagila
+    ports:
+      - "5433:5432"
+    volumes:
+      - ./postgres/init-pagila.sh:/docker-entrypoint-initdb.d/init-pagila.sh
+      - ./postgres/pagila-schema.sql:/tmp/pagila-schema.sql
+      - ./postgres/pagila-data.sql:/tmp/pagila-data.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U test_user -d pagila"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zqlz-test-network
+
+  # MySQL with Sakila database
+  mysql-test:
+    image: mysql:8.0
+    container_name: zqlz-test-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: root_password
+      MYSQL_DATABASE: sakila
+      MYSQL_USER: test_user
+      MYSQL_PASSWORD: test_password
+    ports:
+      - "3307:3306"
+    volumes:
+      - ./mysql/init-sakila.sh:/docker-entrypoint-initdb.d/init-sakila.sh
+      - ./mysql/sakila-schema.sql:/tmp/sakila-schema.sql
+      - ./mysql/sakila-data.sql:/tmp/sakila-data.sql
+    command: --default-authentication-plugin=mysql_native_password --log-bin-trust-function-creators=1
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-u", "test_user", "-ptest_password"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zqlz-test-network
+
+  # Redis for connection/pooling tests
+  redis-test:
+    image: redis:7-alpine
+    container_name: zqlz-test-redis
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - zqlz-test-network
+
+networks:
+  zqlz-test-network:
+    driver: bridge
+
+volumes:
+  postgres-test-data:
+  mysql-test-data:

@@ -1,0 +1,1700 @@
+# Redis Completions Configuration
+# Keywords (commands), functions (Lua scripting), and data types
+
+# =============================================================================
+# STRING COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "GET"
+category = "query"
+description = "Get the value of a key"
+documentation = """
+Returns the value associated with key. If the key does not exist, nil is returned.
+
+**Time complexity:** O(1)
+
+**Example:**
+```
+GET mykey
+```
+"""
+
+[[keyword]]
+name = "SET"
+category = "mutation"
+description = "Set string value of a key"
+snippet = "SET ${1:key} ${2:value}"
+documentation = """
+Set key to hold the string value. If key already holds a value, it is overwritten.
+
+**Options:**
+- EX seconds - Set expiry in seconds
+- PX milliseconds - Set expiry in milliseconds
+- NX - Only set if key doesn't exist
+- XX - Only set if key exists
+
+**Time complexity:** O(1)
+
+**Example:**
+```
+SET mykey "Hello"
+SET mykey "Hello" EX 60
+SET mykey "Hello" NX
+```
+"""
+
+[[keyword]]
+name = "MGET"
+category = "query"
+description = "Get values of multiple keys"
+snippet = "MGET ${1:key1} ${2:key2}"
+documentation = """
+Returns the values of all specified keys. For every key that does not exist, nil is returned.
+
+**Time complexity:** O(N) where N is the number of keys
+
+**Example:**
+```
+MGET key1 key2 key3
+```
+"""
+
+[[keyword]]
+name = "MSET"
+category = "mutation"
+description = "Set multiple key-value pairs"
+snippet = "MSET ${1:key1} ${2:value1} ${3:key2} ${4:value2}"
+documentation = """
+Sets the given keys to their respective values. MSET is atomic, so all keys are set at once.
+
+**Time complexity:** O(N) where N is the number of keys
+
+**Example:**
+```
+MSET key1 "Hello" key2 "World"
+```
+"""
+
+[[keyword]]
+name = "GETSET"
+category = "mutation"
+description = "Set value and return old value"
+snippet = "GETSET ${1:key} ${2:value}"
+
+[[keyword]]
+name = "INCR"
+category = "mutation"
+description = "Increment integer value by 1"
+snippet = "INCR ${1:key}"
+documentation = """
+Increments the number stored at key by one. If the key does not exist, it is set to 0 before the operation.
+
+**Time complexity:** O(1)
+"""
+
+[[keyword]]
+name = "DECR"
+category = "mutation"
+description = "Decrement integer value by 1"
+snippet = "DECR ${1:key}"
+
+[[keyword]]
+name = "INCRBY"
+category = "mutation"
+description = "Increment integer value by amount"
+snippet = "INCRBY ${1:key} ${2:amount}"
+
+[[keyword]]
+name = "DECRBY"
+category = "mutation"
+description = "Decrement integer value by amount"
+snippet = "DECRBY ${1:key} ${2:amount}"
+
+[[keyword]]
+name = "INCRBYFLOAT"
+category = "mutation"
+description = "Increment float value by amount"
+snippet = "INCRBYFLOAT ${1:key} ${2:amount}"
+
+[[keyword]]
+name = "APPEND"
+category = "mutation"
+description = "Append value to string"
+snippet = "APPEND ${1:key} ${2:value}"
+
+[[keyword]]
+name = "STRLEN"
+category = "query"
+description = "Get string length"
+snippet = "STRLEN ${1:key}"
+
+[[keyword]]
+name = "GETRANGE"
+category = "query"
+description = "Get substring of string"
+snippet = "GETRANGE ${1:key} ${2:start} ${3:end}"
+
+[[keyword]]
+name = "SETRANGE"
+category = "mutation"
+description = "Overwrite part of string"
+snippet = "SETRANGE ${1:key} ${2:offset} ${3:value}"
+
+[[keyword]]
+name = "SETNX"
+category = "mutation"
+description = "Set value only if key doesn't exist"
+snippet = "SETNX ${1:key} ${2:value}"
+
+[[keyword]]
+name = "SETEX"
+category = "mutation"
+description = "Set value with expiration in seconds"
+snippet = "SETEX ${1:key} ${2:seconds} ${3:value}"
+
+[[keyword]]
+name = "PSETEX"
+category = "mutation"
+description = "Set value with expiration in milliseconds"
+snippet = "PSETEX ${1:key} ${2:milliseconds} ${3:value}"
+
+[[keyword]]
+name = "GETDEL"
+category = "mutation"
+description = "Get value and delete key"
+snippet = "GETDEL ${1:key}"
+
+[[keyword]]
+name = "GETEX"
+category = "mutation"
+description = "Get value and set expiration"
+snippet = "GETEX ${1:key} EX ${2:seconds}"
+
+# =============================================================================
+# KEY COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "DEL"
+category = "mutation"
+description = "Delete one or more keys"
+snippet = "DEL ${1:key}"
+documentation = """
+Removes the specified keys. A key is ignored if it does not exist.
+
+**Time complexity:** O(N) where N is the number of keys
+
+**Returns:** The number of keys that were removed.
+"""
+
+[[keyword]]
+name = "EXISTS"
+category = "query"
+description = "Check if key exists"
+snippet = "EXISTS ${1:key}"
+documentation = """
+Returns 1 if the key exists, 0 if not. Supports multiple keys.
+
+**Time complexity:** O(N) where N is the number of keys
+"""
+
+[[keyword]]
+name = "EXPIRE"
+category = "mutation"
+description = "Set TTL in seconds"
+snippet = "EXPIRE ${1:key} ${2:seconds}"
+
+[[keyword]]
+name = "EXPIREAT"
+category = "mutation"
+description = "Set TTL as Unix timestamp"
+snippet = "EXPIREAT ${1:key} ${2:timestamp}"
+
+[[keyword]]
+name = "PEXPIRE"
+category = "mutation"
+description = "Set TTL in milliseconds"
+snippet = "PEXPIRE ${1:key} ${2:milliseconds}"
+
+[[keyword]]
+name = "PEXPIREAT"
+category = "mutation"
+description = "Set TTL as Unix timestamp in milliseconds"
+snippet = "PEXPIREAT ${1:key} ${2:timestamp_ms}"
+
+[[keyword]]
+name = "TTL"
+category = "query"
+description = "Get TTL in seconds"
+snippet = "TTL ${1:key}"
+documentation = """
+Returns the remaining time to live of a key with an expiration.
+
+**Returns:**
+- TTL in seconds
+- -1 if key exists but has no expiration
+- -2 if key does not exist
+"""
+
+[[keyword]]
+name = "PTTL"
+category = "query"
+description = "Get TTL in milliseconds"
+snippet = "PTTL ${1:key}"
+
+[[keyword]]
+name = "PERSIST"
+category = "mutation"
+description = "Remove TTL from key"
+snippet = "PERSIST ${1:key}"
+
+[[keyword]]
+name = "KEYS"
+category = "query"
+description = "Find keys by pattern"
+snippet = "KEYS ${1:pattern}"
+documentation = """
+Returns all keys matching pattern. Use SCAN for production workloads.
+
+**Patterns:**
+- `*` matches any characters
+- `?` matches single character
+- `[abc]` matches a, b, or c
+
+**Warning:** Blocks server on large datasets. Use SCAN instead.
+
+**Example:**
+```
+KEYS user:*
+KEYS *name*
+```
+"""
+
+[[keyword]]
+name = "SCAN"
+category = "query"
+description = "Iterate keys incrementally"
+snippet = "SCAN ${1:cursor} MATCH ${2:pattern} COUNT ${3:100}"
+documentation = """
+Incrementally iterate over keys. Preferred over KEYS for production.
+
+**Time complexity:** O(1) per call, O(N) to complete full iteration
+
+**Example:**
+```
+SCAN 0 MATCH user:* COUNT 100
+```
+"""
+
+[[keyword]]
+name = "TYPE"
+category = "query"
+description = "Get the type of a key"
+snippet = "TYPE ${1:key}"
+documentation = """
+Returns the type of value stored at key: string, list, set, zset, hash, stream.
+"""
+
+[[keyword]]
+name = "RENAME"
+category = "mutation"
+description = "Rename a key"
+snippet = "RENAME ${1:oldkey} ${2:newkey}"
+
+[[keyword]]
+name = "RENAMENX"
+category = "mutation"
+description = "Rename key only if new name doesn't exist"
+snippet = "RENAMENX ${1:oldkey} ${2:newkey}"
+
+[[keyword]]
+name = "COPY"
+category = "mutation"
+description = "Copy a key to another key"
+snippet = "COPY ${1:source} ${2:destination}"
+
+[[keyword]]
+name = "DUMP"
+category = "query"
+description = "Serialize key value"
+snippet = "DUMP ${1:key}"
+
+[[keyword]]
+name = "RESTORE"
+category = "mutation"
+description = "Restore serialized value"
+snippet = "RESTORE ${1:key} ${2:ttl} ${3:serialized_value}"
+
+[[keyword]]
+name = "TOUCH"
+category = "mutation"
+description = "Update last access time"
+snippet = "TOUCH ${1:key}"
+
+[[keyword]]
+name = "UNLINK"
+category = "mutation"
+description = "Delete keys asynchronously"
+snippet = "UNLINK ${1:key}"
+
+[[keyword]]
+name = "OBJECT"
+category = "query"
+description = "Inspect internals of key"
+snippet = "OBJECT ENCODING ${1:key}"
+
+[[keyword]]
+name = "RANDOMKEY"
+category = "query"
+description = "Return a random key"
+
+[[keyword]]
+name = "SORT"
+category = "query"
+description = "Sort elements in list, set, or sorted set"
+snippet = "SORT ${1:key}"
+
+# =============================================================================
+# HASH COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "HGET"
+category = "query"
+description = "Get hash field value"
+snippet = "HGET ${1:key} ${2:field}"
+
+[[keyword]]
+name = "HSET"
+category = "mutation"
+description = "Set hash field value"
+snippet = "HSET ${1:key} ${2:field} ${3:value}"
+documentation = """
+Sets field in the hash stored at key to value. If key doesn't exist, creates a new hash.
+
+**Time complexity:** O(1) for each field
+
+**Example:**
+```
+HSET myhash field1 "Hello"
+HSET myhash field1 "Hello" field2 "World"
+```
+"""
+
+[[keyword]]
+name = "HMGET"
+category = "query"
+description = "Get multiple hash field values"
+snippet = "HMGET ${1:key} ${2:field1} ${3:field2}"
+
+[[keyword]]
+name = "HMSET"
+category = "mutation"
+description = "Set multiple hash fields"
+snippet = "HMSET ${1:key} ${2:field1} ${3:value1}"
+
+[[keyword]]
+name = "HGETALL"
+category = "query"
+description = "Get all hash fields and values"
+snippet = "HGETALL ${1:key}"
+documentation = """
+Returns all fields and values of the hash stored at key.
+
+**Time complexity:** O(N) where N is the hash size
+"""
+
+[[keyword]]
+name = "HDEL"
+category = "mutation"
+description = "Delete hash fields"
+snippet = "HDEL ${1:key} ${2:field}"
+
+[[keyword]]
+name = "HEXISTS"
+category = "query"
+description = "Check if hash field exists"
+snippet = "HEXISTS ${1:key} ${2:field}"
+
+[[keyword]]
+name = "HKEYS"
+category = "query"
+description = "Get all hash field names"
+snippet = "HKEYS ${1:key}"
+
+[[keyword]]
+name = "HVALS"
+category = "query"
+description = "Get all hash values"
+snippet = "HVALS ${1:key}"
+
+[[keyword]]
+name = "HLEN"
+category = "query"
+description = "Get number of fields in hash"
+snippet = "HLEN ${1:key}"
+
+[[keyword]]
+name = "HINCRBY"
+category = "mutation"
+description = "Increment hash field by integer"
+snippet = "HINCRBY ${1:key} ${2:field} ${3:increment}"
+
+[[keyword]]
+name = "HINCRBYFLOAT"
+category = "mutation"
+description = "Increment hash field by float"
+snippet = "HINCRBYFLOAT ${1:key} ${2:field} ${3:increment}"
+
+[[keyword]]
+name = "HSETNX"
+category = "mutation"
+description = "Set hash field only if it doesn't exist"
+snippet = "HSETNX ${1:key} ${2:field} ${3:value}"
+
+[[keyword]]
+name = "HSCAN"
+category = "query"
+description = "Iterate hash fields"
+snippet = "HSCAN ${1:key} ${2:cursor}"
+
+[[keyword]]
+name = "HSTRLEN"
+category = "query"
+description = "Get length of hash field value"
+snippet = "HSTRLEN ${1:key} ${2:field}"
+
+[[keyword]]
+name = "HRANDFIELD"
+category = "query"
+description = "Get random field(s) from hash"
+snippet = "HRANDFIELD ${1:key}"
+
+# =============================================================================
+# LIST COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "LPUSH"
+category = "mutation"
+description = "Push element(s) to list head"
+snippet = "LPUSH ${1:key} ${2:value}"
+documentation = """
+Insert values at the head of the list. If key doesn't exist, creates empty list first.
+
+**Time complexity:** O(1) for each element
+
+**Example:**
+```
+LPUSH mylist "world"
+LPUSH mylist "hello"
+LRANGE mylist 0 -1  # Returns ["hello", "world"]
+```
+"""
+
+[[keyword]]
+name = "RPUSH"
+category = "mutation"
+description = "Push element(s) to list tail"
+snippet = "RPUSH ${1:key} ${2:value}"
+
+[[keyword]]
+name = "LPOP"
+category = "mutation"
+description = "Pop element from list head"
+snippet = "LPOP ${1:key}"
+
+[[keyword]]
+name = "RPOP"
+category = "mutation"
+description = "Pop element from list tail"
+snippet = "RPOP ${1:key}"
+
+[[keyword]]
+name = "LRANGE"
+category = "query"
+description = "Get list elements by range"
+snippet = "LRANGE ${1:key} ${2:start} ${3:stop}"
+documentation = """
+Returns elements from start to stop. Use -1 for last element, -2 for second-to-last, etc.
+
+**Example:**
+```
+LRANGE mylist 0 -1   # Get all elements
+LRANGE mylist 0 10   # Get first 11 elements
+```
+"""
+
+[[keyword]]
+name = "LLEN"
+category = "query"
+description = "Get list length"
+snippet = "LLEN ${1:key}"
+
+[[keyword]]
+name = "LINDEX"
+category = "query"
+description = "Get element by index"
+snippet = "LINDEX ${1:key} ${2:index}"
+
+[[keyword]]
+name = "LSET"
+category = "mutation"
+description = "Set element at index"
+snippet = "LSET ${1:key} ${2:index} ${3:value}"
+
+[[keyword]]
+name = "LREM"
+category = "mutation"
+description = "Remove elements from list"
+snippet = "LREM ${1:key} ${2:count} ${3:value}"
+
+[[keyword]]
+name = "LTRIM"
+category = "mutation"
+description = "Trim list to specified range"
+snippet = "LTRIM ${1:key} ${2:start} ${3:stop}"
+
+[[keyword]]
+name = "LINSERT"
+category = "mutation"
+description = "Insert element before or after pivot"
+snippet = "LINSERT ${1:key} BEFORE ${2:pivot} ${3:value}"
+
+[[keyword]]
+name = "LPUSHX"
+category = "mutation"
+description = "Push to head only if list exists"
+snippet = "LPUSHX ${1:key} ${2:value}"
+
+[[keyword]]
+name = "RPUSHX"
+category = "mutation"
+description = "Push to tail only if list exists"
+snippet = "RPUSHX ${1:key} ${2:value}"
+
+[[keyword]]
+name = "LPOS"
+category = "query"
+description = "Find position of element"
+snippet = "LPOS ${1:key} ${2:element}"
+
+[[keyword]]
+name = "LMOVE"
+category = "mutation"
+description = "Move element between lists"
+snippet = "LMOVE ${1:source} ${2:destination} LEFT RIGHT"
+
+[[keyword]]
+name = "BLPOP"
+category = "mutation"
+description = "Blocking pop from list head"
+snippet = "BLPOP ${1:key} ${2:timeout}"
+
+[[keyword]]
+name = "BRPOP"
+category = "mutation"
+description = "Blocking pop from list tail"
+snippet = "BRPOP ${1:key} ${2:timeout}"
+
+[[keyword]]
+name = "BRPOPLPUSH"
+category = "mutation"
+description = "Blocking pop and push between lists"
+snippet = "BRPOPLPUSH ${1:source} ${2:destination} ${3:timeout}"
+
+[[keyword]]
+name = "BLMOVE"
+category = "mutation"
+description = "Blocking move between lists"
+snippet = "BLMOVE ${1:source} ${2:destination} LEFT RIGHT ${3:timeout}"
+
+# =============================================================================
+# SET COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "SADD"
+category = "mutation"
+description = "Add member(s) to set"
+snippet = "SADD ${1:key} ${2:member}"
+documentation = """
+Add members to the set. Ignores members that already exist.
+
+**Time complexity:** O(1) for each member
+
+**Returns:** Number of members added (not counting existing)
+"""
+
+[[keyword]]
+name = "SREM"
+category = "mutation"
+description = "Remove member(s) from set"
+snippet = "SREM ${1:key} ${2:member}"
+
+[[keyword]]
+name = "SMEMBERS"
+category = "query"
+description = "Get all set members"
+snippet = "SMEMBERS ${1:key}"
+
+[[keyword]]
+name = "SISMEMBER"
+category = "query"
+description = "Check if member exists in set"
+snippet = "SISMEMBER ${1:key} ${2:member}"
+
+[[keyword]]
+name = "SMISMEMBER"
+category = "query"
+description = "Check multiple members"
+snippet = "SMISMEMBER ${1:key} ${2:member1} ${3:member2}"
+
+[[keyword]]
+name = "SCARD"
+category = "query"
+description = "Get set size"
+snippet = "SCARD ${1:key}"
+
+[[keyword]]
+name = "SINTER"
+category = "query"
+description = "Set intersection"
+snippet = "SINTER ${1:key1} ${2:key2}"
+
+[[keyword]]
+name = "SINTERSTORE"
+category = "mutation"
+description = "Store set intersection"
+snippet = "SINTERSTORE ${1:destination} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "SUNION"
+category = "query"
+description = "Set union"
+snippet = "SUNION ${1:key1} ${2:key2}"
+
+[[keyword]]
+name = "SUNIONSTORE"
+category = "mutation"
+description = "Store set union"
+snippet = "SUNIONSTORE ${1:destination} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "SDIFF"
+category = "query"
+description = "Set difference"
+snippet = "SDIFF ${1:key1} ${2:key2}"
+
+[[keyword]]
+name = "SDIFFSTORE"
+category = "mutation"
+description = "Store set difference"
+snippet = "SDIFFSTORE ${1:destination} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "SSCAN"
+category = "query"
+description = "Iterate set members"
+snippet = "SSCAN ${1:key} ${2:cursor}"
+
+[[keyword]]
+name = "SMOVE"
+category = "mutation"
+description = "Move member between sets"
+snippet = "SMOVE ${1:source} ${2:destination} ${3:member}"
+
+[[keyword]]
+name = "SPOP"
+category = "mutation"
+description = "Remove and return random member(s)"
+snippet = "SPOP ${1:key}"
+
+[[keyword]]
+name = "SRANDMEMBER"
+category = "query"
+description = "Get random member(s)"
+snippet = "SRANDMEMBER ${1:key}"
+
+# =============================================================================
+# SORTED SET COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "ZADD"
+category = "mutation"
+description = "Add member(s) to sorted set"
+snippet = "ZADD ${1:key} ${2:score} ${3:member}"
+documentation = """
+Add members with scores to the sorted set. Updates score if member exists.
+
+**Options:**
+- NX - Only add new elements
+- XX - Only update existing elements
+- GT - Only update if new score > current score
+- LT - Only update if new score < current score
+
+**Example:**
+```
+ZADD myset 1 "one"
+ZADD myset 2 "two" 3 "three"
+ZADD myset NX 4 "four"
+```
+"""
+
+[[keyword]]
+name = "ZREM"
+category = "mutation"
+description = "Remove member(s) from sorted set"
+snippet = "ZREM ${1:key} ${2:member}"
+
+[[keyword]]
+name = "ZRANGE"
+category = "query"
+description = "Get members by rank range"
+snippet = "ZRANGE ${1:key} ${2:start} ${3:stop}"
+documentation = """
+Returns members in the given rank range. Use WITHSCORES to include scores.
+
+**Example:**
+```
+ZRANGE myset 0 -1 WITHSCORES
+```
+"""
+
+[[keyword]]
+name = "ZREVRANGE"
+category = "query"
+description = "Get members by rank (descending)"
+snippet = "ZREVRANGE ${1:key} ${2:start} ${3:stop}"
+
+[[keyword]]
+name = "ZRANGEBYSCORE"
+category = "query"
+description = "Get members by score range"
+snippet = "ZRANGEBYSCORE ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZREVRANGEBYSCORE"
+category = "query"
+description = "Get members by score range (descending)"
+snippet = "ZREVRANGEBYSCORE ${1:key} ${2:max} ${3:min}"
+
+[[keyword]]
+name = "ZSCORE"
+category = "query"
+description = "Get member score"
+snippet = "ZSCORE ${1:key} ${2:member}"
+
+[[keyword]]
+name = "ZMSCORE"
+category = "query"
+description = "Get multiple member scores"
+snippet = "ZMSCORE ${1:key} ${2:member1} ${3:member2}"
+
+[[keyword]]
+name = "ZRANK"
+category = "query"
+description = "Get member rank (ascending)"
+snippet = "ZRANK ${1:key} ${2:member}"
+
+[[keyword]]
+name = "ZREVRANK"
+category = "query"
+description = "Get member rank (descending)"
+snippet = "ZREVRANK ${1:key} ${2:member}"
+
+[[keyword]]
+name = "ZCARD"
+category = "query"
+description = "Get sorted set size"
+snippet = "ZCARD ${1:key}"
+
+[[keyword]]
+name = "ZCOUNT"
+category = "query"
+description = "Count members in score range"
+snippet = "ZCOUNT ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZINCRBY"
+category = "mutation"
+description = "Increment member score"
+snippet = "ZINCRBY ${1:key} ${2:increment} ${3:member}"
+
+[[keyword]]
+name = "ZSCAN"
+category = "query"
+description = "Iterate sorted set"
+snippet = "ZSCAN ${1:key} ${2:cursor}"
+
+[[keyword]]
+name = "ZLEXCOUNT"
+category = "query"
+description = "Count members in lexicographical range"
+snippet = "ZLEXCOUNT ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZRANGEBYLEX"
+category = "query"
+description = "Get members by lexicographical range"
+snippet = "ZRANGEBYLEX ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZREMRANGEBYRANK"
+category = "mutation"
+description = "Remove members by rank range"
+snippet = "ZREMRANGEBYRANK ${1:key} ${2:start} ${3:stop}"
+
+[[keyword]]
+name = "ZREMRANGEBYSCORE"
+category = "mutation"
+description = "Remove members by score range"
+snippet = "ZREMRANGEBYSCORE ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZREMRANGEBYLEX"
+category = "mutation"
+description = "Remove members by lexicographical range"
+snippet = "ZREMRANGEBYLEX ${1:key} ${2:min} ${3:max}"
+
+[[keyword]]
+name = "ZUNION"
+category = "query"
+description = "Union of sorted sets"
+snippet = "ZUNION ${1:numkeys} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "ZUNIONSTORE"
+category = "mutation"
+description = "Store union of sorted sets"
+snippet = "ZUNIONSTORE ${1:destination} ${2:numkeys} ${3:key1} ${4:key2}"
+
+[[keyword]]
+name = "ZINTER"
+category = "query"
+description = "Intersection of sorted sets"
+snippet = "ZINTER ${1:numkeys} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "ZINTERSTORE"
+category = "mutation"
+description = "Store intersection of sorted sets"
+snippet = "ZINTERSTORE ${1:destination} ${2:numkeys} ${3:key1} ${4:key2}"
+
+[[keyword]]
+name = "ZDIFF"
+category = "query"
+description = "Difference of sorted sets"
+snippet = "ZDIFF ${1:numkeys} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "ZDIFFSTORE"
+category = "mutation"
+description = "Store difference of sorted sets"
+snippet = "ZDIFFSTORE ${1:destination} ${2:numkeys} ${3:key1} ${4:key2}"
+
+[[keyword]]
+name = "ZPOPMIN"
+category = "mutation"
+description = "Pop member with lowest score"
+snippet = "ZPOPMIN ${1:key}"
+
+[[keyword]]
+name = "ZPOPMAX"
+category = "mutation"
+description = "Pop member with highest score"
+snippet = "ZPOPMAX ${1:key}"
+
+[[keyword]]
+name = "BZPOPMIN"
+category = "mutation"
+description = "Blocking pop lowest score"
+snippet = "BZPOPMIN ${1:key} ${2:timeout}"
+
+[[keyword]]
+name = "BZPOPMAX"
+category = "mutation"
+description = "Blocking pop highest score"
+snippet = "BZPOPMAX ${1:key} ${2:timeout}"
+
+[[keyword]]
+name = "ZRANDMEMBER"
+category = "query"
+description = "Get random member(s)"
+snippet = "ZRANDMEMBER ${1:key}"
+
+# =============================================================================
+# TRANSACTION COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "MULTI"
+category = "transaction"
+description = "Start transaction"
+documentation = """
+Marks the start of a transaction block. Subsequent commands are queued for atomic execution with EXEC.
+
+**Example:**
+```
+MULTI
+INCR counter
+INCR counter
+EXEC
+```
+"""
+
+[[keyword]]
+name = "EXEC"
+category = "transaction"
+description = "Execute queued commands"
+documentation = """
+Executes all previously queued commands in a transaction and restores connection state to normal.
+"""
+
+[[keyword]]
+name = "DISCARD"
+category = "transaction"
+description = "Discard queued commands"
+
+[[keyword]]
+name = "WATCH"
+category = "transaction"
+description = "Watch keys for changes"
+snippet = "WATCH ${1:key}"
+documentation = """
+Marks keys to be watched for conditional execution of a transaction. If any watched key is modified before EXEC, the transaction is aborted.
+"""
+
+[[keyword]]
+name = "UNWATCH"
+category = "transaction"
+description = "Forget watched keys"
+
+# =============================================================================
+# SERVER COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "PING"
+category = "server"
+description = "Test connection"
+documentation = """
+Returns PONG if no argument is provided, otherwise returns a copy of the argument.
+
+**Example:**
+```
+PING
+PING "hello"
+```
+"""
+
+[[keyword]]
+name = "ECHO"
+category = "server"
+description = "Echo message"
+snippet = "ECHO ${1:message}"
+
+[[keyword]]
+name = "INFO"
+category = "server"
+description = "Get server information"
+snippet = "INFO"
+documentation = """
+Returns information and statistics about the server.
+
+**Sections:** server, clients, memory, persistence, stats, replication, cpu, cluster, keyspace
+
+**Example:**
+```
+INFO
+INFO memory
+```
+"""
+
+[[keyword]]
+name = "DBSIZE"
+category = "server"
+description = "Get number of keys"
+
+[[keyword]]
+name = "FLUSHDB"
+category = "server"
+description = "Clear current database"
+documentation = """
+**Warning:** Deletes all keys in the currently selected database. Use with caution!
+"""
+
+[[keyword]]
+name = "FLUSHALL"
+category = "server"
+description = "Clear all databases"
+documentation = """
+**Warning:** Deletes all keys in ALL databases. Use with extreme caution!
+"""
+
+[[keyword]]
+name = "SELECT"
+category = "server"
+description = "Select database by index"
+snippet = "SELECT ${1:index}"
+documentation = """
+Select the database specified by the index (0-15 by default).
+"""
+
+[[keyword]]
+name = "CLIENT"
+category = "server"
+description = "Client connection commands"
+snippet = "CLIENT LIST"
+
+[[keyword]]
+name = "CONFIG"
+category = "server"
+description = "Server configuration"
+snippet = "CONFIG GET ${1:parameter}"
+
+[[keyword]]
+name = "SLOWLOG"
+category = "server"
+description = "Slow query log"
+snippet = "SLOWLOG GET ${1:count}"
+
+[[keyword]]
+name = "DEBUG"
+category = "server"
+description = "Debug commands"
+
+[[keyword]]
+name = "TIME"
+category = "server"
+description = "Get server time"
+
+[[keyword]]
+name = "LASTSAVE"
+category = "server"
+description = "Get last save timestamp"
+
+[[keyword]]
+name = "BGSAVE"
+category = "server"
+description = "Background save to disk"
+
+[[keyword]]
+name = "BGREWRITEAOF"
+category = "server"
+description = "Background AOF rewrite"
+
+[[keyword]]
+name = "SAVE"
+category = "server"
+description = "Synchronous save to disk"
+
+[[keyword]]
+name = "SHUTDOWN"
+category = "server"
+description = "Shut down server"
+
+[[keyword]]
+name = "MEMORY"
+category = "server"
+description = "Memory usage commands"
+snippet = "MEMORY USAGE ${1:key}"
+
+[[keyword]]
+name = "ACL"
+category = "server"
+description = "Access control list commands"
+snippet = "ACL LIST"
+
+[[keyword]]
+name = "AUTH"
+category = "server"
+description = "Authenticate to server"
+snippet = "AUTH ${1:password}"
+
+# =============================================================================
+# PUB/SUB COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "PUBLISH"
+category = "server"
+description = "Publish message to channel"
+snippet = "PUBLISH ${1:channel} ${2:message}"
+
+[[keyword]]
+name = "SUBSCRIBE"
+category = "server"
+description = "Subscribe to channel(s)"
+snippet = "SUBSCRIBE ${1:channel}"
+
+[[keyword]]
+name = "UNSUBSCRIBE"
+category = "server"
+description = "Unsubscribe from channel(s)"
+
+[[keyword]]
+name = "PSUBSCRIBE"
+category = "server"
+description = "Subscribe to channel pattern"
+snippet = "PSUBSCRIBE ${1:pattern}"
+
+[[keyword]]
+name = "PUNSUBSCRIBE"
+category = "server"
+description = "Unsubscribe from pattern"
+
+[[keyword]]
+name = "PUBSUB"
+category = "server"
+description = "Pub/Sub introspection"
+snippet = "PUBSUB CHANNELS"
+
+# =============================================================================
+# SCRIPTING COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "EVAL"
+category = "server"
+description = "Execute Lua script"
+snippet = "EVAL \"${1:script}\" ${2:numkeys}"
+documentation = """
+Execute a Lua script server-side.
+
+**Example:**
+```
+EVAL "return redis.call('GET', KEYS[1])" 1 mykey
+```
+"""
+
+[[keyword]]
+name = "EVALSHA"
+category = "server"
+description = "Execute cached Lua script"
+snippet = "EVALSHA ${1:sha1} ${2:numkeys}"
+
+[[keyword]]
+name = "SCRIPT"
+category = "server"
+description = "Script management commands"
+snippet = "SCRIPT LOAD \"${1:script}\""
+
+[[keyword]]
+name = "FCALL"
+category = "server"
+description = "Call Redis function"
+snippet = "FCALL ${1:function} ${2:numkeys}"
+
+[[keyword]]
+name = "FUNCTION"
+category = "server"
+description = "Function management"
+snippet = "FUNCTION LIST"
+
+# =============================================================================
+# STREAM COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "XADD"
+category = "mutation"
+description = "Add entry to stream"
+snippet = "XADD ${1:key} * ${2:field} ${3:value}"
+documentation = """
+Appends an entry to the stream. Use `*` to auto-generate entry ID.
+
+**Example:**
+```
+XADD mystream * sensor-id 1234 temperature 19.8
+```
+"""
+
+[[keyword]]
+name = "XREAD"
+category = "query"
+description = "Read entries from stream(s)"
+snippet = "XREAD STREAMS ${1:key} ${2:id}"
+
+[[keyword]]
+name = "XRANGE"
+category = "query"
+description = "Read range of entries"
+snippet = "XRANGE ${1:key} ${2:start} ${3:end}"
+
+[[keyword]]
+name = "XREVRANGE"
+category = "query"
+description = "Read range in reverse"
+snippet = "XREVRANGE ${1:key} ${2:end} ${3:start}"
+
+[[keyword]]
+name = "XLEN"
+category = "query"
+description = "Get stream length"
+snippet = "XLEN ${1:key}"
+
+[[keyword]]
+name = "XINFO"
+category = "query"
+description = "Stream introspection"
+snippet = "XINFO STREAM ${1:key}"
+
+[[keyword]]
+name = "XTRIM"
+category = "mutation"
+description = "Trim stream to max length"
+snippet = "XTRIM ${1:key} MAXLEN ${2:count}"
+
+[[keyword]]
+name = "XDEL"
+category = "mutation"
+description = "Delete stream entries"
+snippet = "XDEL ${1:key} ${2:id}"
+
+[[keyword]]
+name = "XGROUP"
+category = "mutation"
+description = "Consumer group commands"
+snippet = "XGROUP CREATE ${1:key} ${2:groupname} $"
+
+[[keyword]]
+name = "XREADGROUP"
+category = "query"
+description = "Read from consumer group"
+snippet = "XREADGROUP GROUP ${1:groupname} ${2:consumer} STREAMS ${3:key} >"
+
+[[keyword]]
+name = "XACK"
+category = "mutation"
+description = "Acknowledge stream message"
+snippet = "XACK ${1:key} ${2:groupname} ${3:id}"
+
+[[keyword]]
+name = "XCLAIM"
+category = "mutation"
+description = "Claim pending message"
+snippet = "XCLAIM ${1:key} ${2:groupname} ${3:consumer} ${4:min_idle_time} ${5:id}"
+
+[[keyword]]
+name = "XPENDING"
+category = "query"
+description = "Get pending entries"
+snippet = "XPENDING ${1:key} ${2:groupname}"
+
+[[keyword]]
+name = "XAUTOCLAIM"
+category = "mutation"
+description = "Auto-claim idle messages"
+snippet = "XAUTOCLAIM ${1:key} ${2:groupname} ${3:consumer} ${4:min_idle_time} ${5:start}"
+
+# =============================================================================
+# HYPERLOGLOG COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "PFADD"
+category = "mutation"
+description = "Add to HyperLogLog"
+snippet = "PFADD ${1:key} ${2:element}"
+
+[[keyword]]
+name = "PFCOUNT"
+category = "query"
+description = "Count unique elements (estimate)"
+snippet = "PFCOUNT ${1:key}"
+
+[[keyword]]
+name = "PFMERGE"
+category = "mutation"
+description = "Merge HyperLogLogs"
+snippet = "PFMERGE ${1:destkey} ${2:sourcekey1} ${3:sourcekey2}"
+
+# =============================================================================
+# GEO COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "GEOADD"
+category = "mutation"
+description = "Add geospatial item"
+snippet = "GEOADD ${1:key} ${2:longitude} ${3:latitude} ${4:member}"
+
+[[keyword]]
+name = "GEOPOS"
+category = "query"
+description = "Get position of member"
+snippet = "GEOPOS ${1:key} ${2:member}"
+
+[[keyword]]
+name = "GEODIST"
+category = "query"
+description = "Distance between members"
+snippet = "GEODIST ${1:key} ${2:member1} ${3:member2}"
+
+[[keyword]]
+name = "GEOSEARCH"
+category = "query"
+description = "Search within radius/box"
+snippet = "GEOSEARCH ${1:key} FROMMEMBER ${2:member} BYRADIUS ${3:radius} km"
+
+[[keyword]]
+name = "GEOSEARCHSTORE"
+category = "mutation"
+description = "Store geosearch results"
+snippet = "GEOSEARCHSTORE ${1:destination} ${2:source} FROMMEMBER ${3:member} BYRADIUS ${4:radius} km"
+
+[[keyword]]
+name = "GEOHASH"
+category = "query"
+description = "Get geohash of members"
+snippet = "GEOHASH ${1:key} ${2:member}"
+
+[[keyword]]
+name = "GEORADIUS"
+category = "query"
+description = "Query by radius (deprecated)"
+snippet = "GEORADIUS ${1:key} ${2:longitude} ${3:latitude} ${4:radius} km"
+
+[[keyword]]
+name = "GEORADIUSBYMEMBER"
+category = "query"
+description = "Query by member radius (deprecated)"
+snippet = "GEORADIUSBYMEMBER ${1:key} ${2:member} ${3:radius} km"
+
+# =============================================================================
+# BITMAP COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "SETBIT"
+category = "mutation"
+description = "Set bit at offset"
+snippet = "SETBIT ${1:key} ${2:offset} ${3:value}"
+
+[[keyword]]
+name = "GETBIT"
+category = "query"
+description = "Get bit at offset"
+snippet = "GETBIT ${1:key} ${2:offset}"
+
+[[keyword]]
+name = "BITCOUNT"
+category = "query"
+description = "Count set bits"
+snippet = "BITCOUNT ${1:key}"
+
+[[keyword]]
+name = "BITOP"
+category = "mutation"
+description = "Bitwise operations"
+snippet = "BITOP AND ${1:destkey} ${2:key1} ${3:key2}"
+
+[[keyword]]
+name = "BITPOS"
+category = "query"
+description = "Find first bit set/clear"
+snippet = "BITPOS ${1:key} ${2:bit}"
+
+[[keyword]]
+name = "BITFIELD"
+category = "mutation"
+description = "Bitfield operations"
+snippet = "BITFIELD ${1:key} GET ${2:type} ${3:offset}"
+
+# =============================================================================
+# CLUSTER COMMANDS
+# =============================================================================
+
+[[keyword]]
+name = "CLUSTER"
+category = "server"
+description = "Cluster management"
+snippet = "CLUSTER INFO"
+
+[[keyword]]
+name = "READONLY"
+category = "server"
+description = "Enable read-only mode on replica"
+
+[[keyword]]
+name = "READWRITE"
+category = "server"
+description = "Disable read-only mode"
+
+[[keyword]]
+name = "ASKING"
+category = "server"
+description = "Send ASKING command"
+
+# =============================================================================
+# LUA SCRIPTING FUNCTIONS (for EVAL scripts)
+# =============================================================================
+
+[[function]]
+name = "redis.call"
+category = "scripting"
+signature = "redis.call(command, arg1, arg2, ...)"
+return_type = "any"
+description = "Call Redis command from Lua script"
+documentation = """
+Executes a Redis command and returns its reply. Raises an error if the command fails.
+
+**Example:**
+```lua
+local value = redis.call('GET', KEYS[1])
+redis.call('SET', KEYS[1], value + 1)
+```
+"""
+
+[[function]]
+name = "redis.pcall"
+category = "scripting"
+signature = "redis.pcall(command, arg1, arg2, ...)"
+return_type = "any"
+description = "Protected call - returns error instead of raising"
+documentation = """
+Like redis.call() but returns a Lua table with error info instead of raising an error.
+"""
+
+[[function]]
+name = "KEYS"
+category = "scripting"
+signature = "KEYS[n]"
+return_type = "string"
+description = "Access script key arguments"
+documentation = """
+KEYS is a Lua table containing the key names passed to EVAL. Index starts at 1.
+
+**Example:**
+```lua
+local key = KEYS[1]  -- First key argument
+```
+"""
+
+[[function]]
+name = "ARGV"
+category = "scripting"
+signature = "ARGV[n]"
+return_type = "string"
+description = "Access script value arguments"
+documentation = """
+ARGV is a Lua table containing additional arguments passed to EVAL. Index starts at 1.
+
+**Example:**
+```lua
+local value = ARGV[1]  -- First value argument
+```
+"""
+
+[[function]]
+name = "redis.log"
+category = "scripting"
+signature = "redis.log(loglevel, message)"
+return_type = "nil"
+description = "Log message to Redis log"
+
+[[function]]
+name = "redis.error_reply"
+category = "scripting"
+signature = "redis.error_reply(error_string)"
+return_type = "table"
+description = "Create error reply object"
+
+[[function]]
+name = "redis.status_reply"
+category = "scripting"
+signature = "redis.status_reply(status_string)"
+return_type = "table"
+description = "Create status reply object"
+
+[[function]]
+name = "cjson.encode"
+category = "json"
+signature = "cjson.encode(value)"
+return_type = "string"
+description = "Encode Lua value to JSON string"
+
+[[function]]
+name = "cjson.decode"
+category = "json"
+signature = "cjson.decode(json_string)"
+return_type = "any"
+description = "Decode JSON string to Lua value"
+
+[[function]]
+name = "cmsgpack.pack"
+category = "other"
+signature = "cmsgpack.pack(value)"
+return_type = "string"
+description = "Encode value to MessagePack"
+
+[[function]]
+name = "cmsgpack.unpack"
+category = "other"
+signature = "cmsgpack.unpack(msgpack_string)"
+return_type = "any"
+description = "Decode MessagePack to Lua value"
+
+# =============================================================================
+# DATA TYPES
+# =============================================================================
+
+[[data_type]]
+name = "string"
+category = "string"
+description = "Binary-safe string up to 512MB"
+
+[[data_type]]
+name = "list"
+category = "array"
+description = "Linked list of strings"
+
+[[data_type]]
+name = "set"
+category = "other"
+description = "Unordered collection of unique strings"
+
+[[data_type]]
+name = "zset"
+category = "other"
+aliases = ["sorted set", "sorted_set"]
+description = "Set with score-based ordering"
+
+[[data_type]]
+name = "hash"
+category = "other"
+description = "Map of field-value pairs"
+
+[[data_type]]
+name = "stream"
+category = "other"
+description = "Append-only log data structure"
+
+[[data_type]]
+name = "hyperloglog"
+category = "other"
+aliases = ["hll"]
+description = "Probabilistic unique count"
+
+[[data_type]]
+name = "bitmap"
+category = "other"
+description = "Bit array operations on strings"
+
+[[data_type]]
+name = "geospatial"
+category = "geometry"
+aliases = ["geo"]
+description = "Geospatial indexed data"
+
+# =============================================================================
+# SNIPPETS
+# =============================================================================
+
+[[snippet]]
+name = "Cache with TTL"
+prefix = "cacheset"
+body = "SET ${1:key} ${2:value} EX ${3:60}"
+description = "Set value with expiration"
+
+[[snippet]]
+name = "Atomic increment"
+prefix = "counter"
+body = "INCR ${1:counter_key}"
+description = "Increment counter atomically"
+
+[[snippet]]
+name = "Add to sorted set"
+prefix = "leaderboard"
+body = "ZADD ${1:leaderboard} ${2:score} ${3:member}"
+description = "Add score to leaderboard"
+
+[[snippet]]
+name = "Get leaderboard"
+prefix = "topn"
+body = "ZREVRANGE ${1:leaderboard} 0 ${2:9} WITHSCORES"
+description = "Get top N from leaderboard"
+
+[[snippet]]
+name = "Rate limiter check"
+prefix = "ratelimit"
+body = """MULTI
+INCR ${1:rate_key}
+EXPIRE ${1:rate_key} ${2:60}
+EXEC"""
+description = "Simple rate limiter pattern"
+
+[[snippet]]
+name = "Session store"
+prefix = "session"
+body = "HSET session:${1:id} ${2:field} ${3:value}"
+description = "Store session data in hash"
+
+[[snippet]]
+name = "Get all session data"
+prefix = "sessionget"
+body = "HGETALL session:${1:id}"
+description = "Retrieve all session fields"
+
+[[snippet]]
+name = "Pub/Sub publish"
+prefix = "pub"
+body = "PUBLISH ${1:channel} ${2:message}"
+description = "Publish to channel"
+
+[[snippet]]
+name = "Stream add"
+prefix = "streamadd"
+body = "XADD ${1:stream} * ${2:field} ${3:value}"
+description = "Add entry to stream"
+
+[[snippet]]
+name = "Stream read"
+prefix = "streamread"
+body = "XRANGE ${1:stream} - + COUNT ${2:10}"
+description = "Read recent stream entries"
+
+[[snippet]]
+name = "Lua script template"
+prefix = "lua"
+body = """EVAL "local key = KEYS[1]
+local value = redis.call('GET', key)
+${1:-- script logic}
+return value" 1 ${2:mykey}"""
+description = "Basic Lua script template"
+
+[[snippet]]
+name = "Pipeline pattern"
+prefix = "pipe"
+body = """MULTI
+${1:GET key1}
+${2:GET key2}
+EXEC"""
+description = "Transaction/pipeline pattern"
+
+[[snippet]]
+name = "Geo search nearby"
+prefix = "nearby"
+body = "GEOSEARCH ${1:locations} FROMMEMBER ${2:member} BYRADIUS ${3:10} km WITHDIST"
+description = "Find nearby geo members"
+
+[[snippet]]
+name = "Scan all keys"
+prefix = "scanall"
+body = "SCAN ${1:0} MATCH ${2:*} COUNT ${3:100}"
+description = "Iterate over all keys"
+
+[[snippet]]
+name = "Lock acquire"
+prefix = "lock"
+body = "SET ${1:lock_key} ${2:unique_id} NX EX ${3:30}"
+description = "Acquire distributed lock"
+
+[[snippet]]
+name = "Lock release"
+prefix = "unlock"
+body = """EVAL "if redis.call('GET', KEYS[1]) == ARGV[1] then return redis.call('DEL', KEYS[1]) else return 0 end" 1 ${1:lock_key} ${2:unique_id}"""
+description = "Release lock if owned"

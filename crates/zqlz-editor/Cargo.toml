@@ -1,0 +1,27 @@
+[package]
+name = "zqlz-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "SQL editor features for ZQLZ (formatter, bookmarks, find/replace)"
+
+[lib]
+path = "src/zqlz_editor.rs"
+
+[dependencies]
+zqlz-core = { path = "../zqlz-core" }
+sqlformat.workspace = true
+sqlparser.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+rusqlite = { workspace = true, features = ["bundled"] }
+chrono.workspace = true
+uuid.workspace = true
+regex.workspace = true
+
+[dev-dependencies]
+pretty_assertions.workspace = true
+indoc.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

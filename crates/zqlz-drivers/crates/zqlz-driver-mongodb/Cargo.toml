@@ -1,0 +1,27 @@
+[package]
+name = "zqlz-driver-mongodb"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "MongoDB driver for ZQLZ Database IDE"
+
+[lib]
+path = "src/zqlz_driver_mongodb.rs"
+
+[dependencies]
+zqlz-core.workspace = true
+async-trait.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+mongodb = "3.1"
+bson = "2.13"
+futures.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

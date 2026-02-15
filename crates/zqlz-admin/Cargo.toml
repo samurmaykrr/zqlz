@@ -1,0 +1,19 @@
+[package]
+name = "zqlz-admin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Database administration and security management for ZQLZ (users, roles, permissions)"
+
+[lib]
+path = "src/zqlz_admin.rs"
+
+[dependencies]
+zqlz-core = { path = "../zqlz-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true

@@ -1,0 +1,321 @@
+#!/usr/bin/env bash
+#
+# ZQLZ macOS Bundle Script
+# Creates a signed and notarized .app bundle and .dmg installer
+#
+# Usage: ./script/bundle-mac [target-triple]
+#   target-triple: aarch64-apple-darwin (default) or x86_64-apple-darwin
+#
+# Environment variables (for signing/notarization):
+#   MACOS_CERTIFICATE - Base64-encoded .p12 certificate
+#   MACOS_CERTIFICATE_PASSWORD - Certificate password
+#   APPLE_NOTARIZATION_KEY - Base64-encoded AuthKey .p8 file
+#   APPLE_NOTARIZATION_KEY_ID - Key ID for notarization
+#   APPLE_NOTARIZATION_ISSUER_ID - Issuer ID for notarization
+#   RELEASE_CHANNEL - stable, nightly, or dev (default: dev)
+
+set -euo pipefail
+
+# Configuration
+APP_NAME="ZQLZ"
+APP_IDENTIFIER="dev.zqlz.ZQLZ"
+BUNDLE_NAME="zqlz"
+VERSION="${ZQLZ_VERSION:-0.1.0}"
+
+# Determine release channel and set suffixes
+RELEASE_CHANNEL="${RELEASE_CHANNEL:-dev}"
+case "$RELEASE_CHANNEL" in
+    stable)
+        APP_DISPLAY_NAME="ZQLZ"
+        APP_IDENTIFIER="dev.zqlz.ZQLZ"
+        ICON_SUFFIX=""
+        ;;
+    nightly)
+        APP_DISPLAY_NAME="ZQLZ Nightly"
+        APP_IDENTIFIER="dev.zqlz.ZQLZ-Nightly"
+        ICON_SUFFIX="-nightly"
+        ;;
+    *)
+        APP_DISPLAY_NAME="ZQLZ Dev"
+        APP_IDENTIFIER="dev.zqlz.ZQLZ-Dev"
+        ICON_SUFFIX="-dev"
+        ;;
+esac
+
+# Get the script directory and project root
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+RESOURCES_DIR="$PROJECT_ROOT/crates/zqlz-app/resources"
+
+cd "$PROJECT_ROOT"
+
+# Parse arguments
+target_triple="${1:-aarch64-apple-darwin}"
+arch="${target_triple%%-*}"
+
+echo "==> Building ZQLZ for $target_triple (channel: $RELEASE_CHANNEL)"
+
+# Determine build flags
+if [[ "$RELEASE_CHANNEL" == "dev" ]]; then
+    build_flag=""
+    profile="debug"
+else
+    build_flag="--release"
+    profile="release"
+fi
+
+# Build the application
+echo "==> Building application..."
+cargo build $build_flag --package zqlz-app --target "$target_triple"
+
+# Create app bundle structure
+app_name="${APP_DISPLAY_NAME}.app"
+app_path="target/$target_triple/$profile/bundle/${app_name}"
+contents_path="$app_path/Contents"
+macos_path="$contents_path/MacOS"
+resources_path="$contents_path/Resources"
+
+echo "==> Creating app bundle at $app_path"
+rm -rf "$app_path"
+mkdir -p "$macos_path" "$resources_path"
+
+# Copy binary
+cp "target/$target_triple/$profile/zqlz" "$macos_path/zqlz"
+
+# Create Info.plist
+cat > "$contents_path/Info.plist" << EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleDisplayName</key>
+    <string>${APP_DISPLAY_NAME}</string>
+    <key>CFBundleExecutable</key>
+    <string>zqlz</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundleIdentifier</key>
+    <string>${APP_IDENTIFIER}</string>
+    <key>CFBundleInfoDictionaryVersion</key>
+    <string>6.0</string>
+    <key>CFBundleName</key>
+    <string>${APP_DISPLAY_NAME}</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>${VERSION}</string>
+    <key>CFBundleVersion</key>
+    <string>${VERSION}</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15.7</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSSupportsAutomaticGraphicsSwitching</key>
+    <true/>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>SQL File</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>sql</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>SQLite Database</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSHandlerRank</key>
+            <string>Default</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>db</string>
+                <string>sqlite</string>
+                <string>sqlite3</string>
+            </array>
+        </dict>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>DuckDB Database</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+                <string>duckdb</string>
+            </array>
+        </dict>
+    </array>
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>ZQLZ needs network access to connect to database servers on your local network.</string>
+</dict>
+</plist>
+EOF
+
+# Copy/create icons
+echo "==> Creating icons..."
+iconset_path="$resources_path/AppIcon.iconset"
+mkdir -p "$iconset_path"
+
+# Determine which icon to use
+icon_source="$RESOURCES_DIR/app-icon${ICON_SUFFIX}@2x.png"
+if [[ ! -f "$icon_source" ]]; then
+    icon_source="$RESOURCES_DIR/app-icon@2x.png"
+fi
+
+# Generate iconset sizes
+if command -v magick &> /dev/null; then
+    magick "$icon_source" -resize 16x16     "$iconset_path/icon_16x16.png"
+    magick "$icon_source" -resize 32x32     "$iconset_path/icon_16x16@2x.png"
+    magick "$icon_source" -resize 32x32     "$iconset_path/icon_32x32.png"
+    magick "$icon_source" -resize 64x64     "$iconset_path/icon_32x32@2x.png"
+    magick "$icon_source" -resize 128x128   "$iconset_path/icon_128x128.png"
+    magick "$icon_source" -resize 256x256   "$iconset_path/icon_128x128@2x.png"
+    magick "$icon_source" -resize 256x256   "$iconset_path/icon_256x256.png"
+    magick "$icon_source" -resize 512x512   "$iconset_path/icon_256x256@2x.png"
+    magick "$icon_source" -resize 512x512   "$iconset_path/icon_512x512.png"
+    magick "$icon_source" -resize 1024x1024 "$iconset_path/icon_512x512@2x.png"
+elif command -v sips &> /dev/null; then
+    # Fallback to sips on macOS
+    for size in 16 32 64 128 256 512 1024; do
+        sips -z $size $size "$icon_source" --out "$iconset_path/icon_${size}x${size}.png" 2>/dev/null || true
+    done
+    cp "$iconset_path/icon_32x32.png" "$iconset_path/icon_16x16@2x.png" 2>/dev/null || true
+    cp "$iconset_path/icon_64x64.png" "$iconset_path/icon_32x32@2x.png" 2>/dev/null || true
+    cp "$iconset_path/icon_256x256.png" "$iconset_path/icon_128x128@2x.png" 2>/dev/null || true
+    cp "$iconset_path/icon_512x512.png" "$iconset_path/icon_256x256@2x.png" 2>/dev/null || true
+    cp "$iconset_path/icon_1024x1024.png" "$iconset_path/icon_512x512@2x.png" 2>/dev/null || true
+fi
+
+# Convert iconset to icns
+iconutil -c icns "$iconset_path" -o "$resources_path/AppIcon.icns" 2>/dev/null || {
+    echo "Warning: Could not create .icns file. App will use default icon."
+}
+rm -rf "$iconset_path"
+
+# Signing configuration
+entitlements_path="$RESOURCES_DIR/zqlz.entitlements"
+should_sign=false
+should_notarize=false
+
+if [[ -n "${MACOS_CERTIFICATE:-}" ]] && [[ -n "${MACOS_CERTIFICATE_PASSWORD:-}" ]]; then
+    should_sign=true
+    
+    # Set up keychain
+    echo "==> Setting up keychain for signing..."
+    KEYCHAIN_PATH="$HOME/Library/Keychains/zqlz-build.keychain-db"
+    KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+    
+    security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" 2>/dev/null || true
+    security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+    security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+    
+    # Import certificate
+    echo "$MACOS_CERTIFICATE" | base64 --decode > /tmp/certificate.p12
+    security import /tmp/certificate.p12 -k "$KEYCHAIN_PATH" -P "$MACOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+    rm /tmp/certificate.p12
+    
+    security set-key-partition-list -S apple-tool:,apple: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+    security list-keychains -d user -s "$KEYCHAIN_PATH" "$(security list-keychains -d user | tr -d '"')"
+    
+    # Find signing identity
+    IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep "Developer ID Application" | head -1 | awk -F'"' '{print $2}')
+    if [[ -z "$IDENTITY" ]]; then
+        IDENTITY=$(security find-identity -v -p codesigning "$KEYCHAIN_PATH" | grep -v "^$" | head -1 | awk -F'"' '{print $2}')
+    fi
+    
+    if [[ -n "${APPLE_NOTARIZATION_KEY:-}" ]] && [[ -n "${APPLE_NOTARIZATION_KEY_ID:-}" ]] && [[ -n "${APPLE_NOTARIZATION_ISSUER_ID:-}" ]]; then
+        should_notarize=true
+    fi
+fi
+
+# Sign the app bundle
+if [[ "$should_sign" == "true" ]]; then
+    echo "==> Signing app bundle with identity: $IDENTITY"
+    
+    /usr/bin/codesign \
+        --deep \
+        --force \
+        --timestamp \
+        --options runtime \
+        --entitlements "$entitlements_path" \
+        --sign "$IDENTITY" \
+        "$app_path"
+else
+    echo "==> Skipping code signing (no certificate provided)"
+    # Ad-hoc sign for local testing
+    codesign --force --deep --sign - "$app_path" 2>/dev/null || true
+fi
+
+# Create DMG
+dmg_name="ZQLZ-${arch}.dmg"
+dmg_path="target/$target_triple/$profile/$dmg_name"
+
+echo "==> Creating DMG at $dmg_path"
+
+# Create DMG staging directory
+dmg_staging="target/$target_triple/$profile/dmg-staging"
+rm -rf "$dmg_staging"
+mkdir -p "$dmg_staging"
+cp -R "$app_path" "$dmg_staging/"
+ln -s /Applications "$dmg_staging/Applications"
+
+# Create DMG
+hdiutil create \
+    -volname "$APP_DISPLAY_NAME" \
+    -srcfolder "$dmg_staging" \
+    -ov \
+    -format UDZO \
+    "$dmg_path"
+
+rm -rf "$dmg_staging"
+
+# Sign DMG
+if [[ "$should_sign" == "true" ]]; then
+    echo "==> Signing DMG..."
+    /usr/bin/codesign \
+        --force \
+        --timestamp \
+        --sign "$IDENTITY" \
+        "$dmg_path"
+fi
+
+# Notarize
+if [[ "$should_notarize" == "true" ]]; then
+    echo "==> Notarizing DMG..."
+    
+    # Create notarization key file
+    echo "$APPLE_NOTARIZATION_KEY" | base64 --decode > /tmp/notarization-key.p8
+    
+    xcrun notarytool submit \
+        --wait \
+        --key /tmp/notarization-key.p8 \
+        --key-id "$APPLE_NOTARIZATION_KEY_ID" \
+        --issuer "$APPLE_NOTARIZATION_ISSUER_ID" \
+        "$dmg_path"
+    
+    rm /tmp/notarization-key.p8
+    
+    echo "==> Stapling notarization ticket..."
+    xcrun stapler staple "$dmg_path"
+fi
+
+# Clean up keychain
+if [[ "$should_sign" == "true" ]]; then
+    security delete-keychain "$KEYCHAIN_PATH" 2>/dev/null || true
+fi
+
+echo ""
+echo "==> Build complete!"
+echo "    App bundle: $app_path"
+echo "    DMG: $dmg_path"
+echo ""

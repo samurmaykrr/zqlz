@@ -1,0 +1,244 @@
+name: Database Driver Tests
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test Database Drivers
+    runs-on: ubuntu-latest
+    
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: test_user
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: pagila
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root_password
+          MYSQL_DATABASE: sakila
+          MYSQL_USER: test_user
+          MYSQL_PASSWORD: test_password
+        ports:
+          - 3307:3306
+        options: >-
+          --health-cmd "mysqladmin ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6380:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry/index
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-registry-
+
+      - name: Cache cargo git
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-git-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-git-
+
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-build-target-
+
+      - name: Install PostgreSQL client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Install MySQL client
+        run: |
+          sudo apt-get install -y mysql-client
+
+      - name: Wait for databases to be ready
+        run: |
+          echo "Waiting for PostgreSQL..."
+          until pg_isready -h localhost -p 5433 -U test_user; do
+            echo "PostgreSQL is unavailable - sleeping"
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+          
+          echo "Waiting for MySQL..."
+          until mysqladmin ping -h 127.0.0.1 -P 3307 -u test_user -ptest_password --silent; do
+            echo "MySQL is unavailable - sleeping"
+            sleep 2
+          done
+          echo "MySQL is ready!"
+          
+          echo "Waiting for Redis..."
+          until redis-cli -h localhost -p 6380 ping; do
+            echo "Redis is unavailable - sleeping"
+            sleep 2
+          done
+          echo "Redis is ready!"
+
+      - name: Download and initialize Pagila database (PostgreSQL)
+        run: |
+          echo "Downloading Pagila schema and data..."
+          cd /tmp
+          git clone --depth 1 https://github.com/devrimgunduz/pagila.git
+          cd pagila
+          
+          echo "Loading Pagila schema into PostgreSQL..."
+          PGPASSWORD=test_password psql -h localhost -p 5433 -U test_user -d pagila -f pagila-schema.sql
+          
+          echo "Loading Pagila data into PostgreSQL..."
+          PGPASSWORD=test_password psql -h localhost -p 5433 -U test_user -d pagila -f pagila-data.sql
+          
+          echo "Verifying Pagila installation..."
+          PGPASSWORD=test_password psql -h localhost -p 5433 -U test_user -d pagila -c "\dt" | grep actor
+
+      - name: Download and initialize Sakila database (MySQL)
+        run: |
+          echo "Downloading Sakila schema and data..."
+          cd /tmp
+          wget -q https://downloads.mysql.com/docs/sakila-db.tar.gz
+          tar -xzf sakila-db.tar.gz
+          cd sakila-db
+          
+          echo "Loading Sakila schema into MySQL..."
+          mysql -h 127.0.0.1 -P 3307 -u test_user -ptest_password sakila < sakila-schema.sql
+          
+          echo "Loading Sakila data into MySQL..."
+          mysql -h 127.0.0.1 -P 3307 -u test_user -ptest_password sakila < sakila-data.sql
+          
+          echo "Verifying Sakila installation..."
+          mysql -h 127.0.0.1 -P 3307 -u test_user -ptest_password sakila -e "SHOW TABLES;" | grep actor
+
+      - name: Check code formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy lints
+        run: ./script/clippy
+
+      - name: Build all driver crates
+        run: cargo build --workspace --all-features
+
+      - name: Run all tests
+        run: cargo test --workspace --all-features
+        env:
+          RUST_LOG: info
+
+      - name: Run driver-specific tests
+        run: |
+          echo "Running PostgreSQL driver tests..."
+          cargo test -p zqlz-driver-tests -- postgres --nocapture
+          
+          echo "Running MySQL driver tests..."
+          cargo test -p zqlz-driver-tests -- mysql --nocapture
+          
+          echo "Running SQLite driver tests..."
+          cargo test -p zqlz-driver-tests -- sqlite --nocapture
+          
+          echo "Running Redis driver tests..."
+          cargo test -p zqlz-driver-tests -- redis --nocapture
+        env:
+          RUST_LOG: debug
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            target/debug/
+            *.log
+          retention-days: 7
+
+      - name: Generate test summary
+        if: always()
+        run: |
+          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Database Driver Tests" >> $GITHUB_STEP_SUMMARY
+          echo "✅ PostgreSQL tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ MySQL tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ SQLite tests completed" >> $GITHUB_STEP_SUMMARY
+          echo "✅ Redis tests completed" >> $GITHUB_STEP_SUMMARY
+
+  integration-test-matrix:
+    name: Integration Tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git
+            target
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-
+
+      - name: Run SQLite integration tests (no Docker required)
+        run: |
+          cargo test -p zqlz-driver-tests integration_test
+        env:
+          RUST_LOG: info
+
+      - name: Build and test core driver functionality
+        run: |
+          cargo test -p zqlz-core
+          cargo test -p zqlz-drivers

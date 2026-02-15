@@ -1,0 +1,75 @@
+[package]
+name = "zqlz-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[features]
+default = []
+tree-sitter-languages = []
+
+[dependencies]
+# GUI Framework
+gpui.workspace = true
+gpui_macros.workspace = true
+
+# Core crates
+zqlz-core.workspace = true
+zqlz-drivers.workspace = true
+
+# Utilities
+anyhow.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+parking_lot.workspace = true
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_repr.workspace = true
+schemars.workspace = true
+rusqlite.workspace = true
+lsp-types.workspace = true
+ropey.workspace = true
+rust-i18n.workspace = true
+dirs = "5.0"
+sqlformat = "0.5.0"
+sqlparser = "0.52.0"
+regex = "1.11"
+smallvec.workspace = true
+itertools.workspace = true
+once_cell.workspace = true
+paste.workspace = true
+unicode-segmentation.workspace = true
+
+# Async
+futures.workspace = true
+tokio.workspace = true
+smol.workspace = true
+
+# Tree-sitter for syntax highlighting
+tree-sitter.workspace = true
+tree-sitter-json.workspace = true
+tree-sitter-sequel.workspace = true
+tree-sitter-md.workspace = true
+tree-sitter-yaml.workspace = true
+tree-sitter-rust.workspace = true
+tree-sitter-go.workspace = true
+tree-sitter-c.workspace = true
+tree-sitter-cpp.workspace = true
+tree-sitter-toml.workspace = true
+aho-corasick.workspace = true
+
+# Additional dependencies for widgets
+sum_tree.workspace = true
+notify.workspace = true
+enum-iterator = "2.1.0"
+
+# HTML parsing for text widgets
+html5ever.workspace = true
+markup5ever_rcdom.workspace = true
+
+# Markdown parsing for text widgets
+markdown.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

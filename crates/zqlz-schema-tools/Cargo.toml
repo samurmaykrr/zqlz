@@ -1,0 +1,19 @@
+[package]
+name = "zqlz-schema-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Schema comparison, diff, and migration generation tools for ZQLZ"
+
+[lib]
+path = "src/zqlz_schema_tools.rs"
+
+[dependencies]
+zqlz-core = { path = "../zqlz-core" }
+async-trait.workspace = true
+thiserror.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
+serde_json.workspace = true

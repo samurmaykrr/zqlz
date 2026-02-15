@@ -1,0 +1,11 @@
+[package]
+name = "zed_actions"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "src/zed_actions.rs"
+
+[dependencies]
+gpui.workspace = true

@@ -1,0 +1,26 @@
+[package]
+name = "zqlz-connection"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+zqlz-core.workspace = true
+zqlz-drivers.workspace = true
+zqlz-ui.workspace = true
+
+gpui.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+parking_lot.workspace = true
+uuid.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+ring.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+chrono.workspace = true
+keyring.workspace = true
+
+[dev-dependencies]

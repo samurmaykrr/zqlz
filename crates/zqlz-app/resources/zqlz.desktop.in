@@ -1,0 +1,18 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=$APP_NAME
+GenericName=Database Client
+Comment=A high-performance, modern database client and SQL editor.
+TryExec=$APP_CLI
+StartupNotify=$DO_STARTUP_NOTIFY
+Exec=$APP_CLI $APP_ARGS
+Icon=$APP_ICON
+Categories=Development;Database;Utility;
+Keywords=zqlz;sql;database;postgresql;mysql;sqlite;duckdb;
+MimeType=application/x-sqlite3;application/sql;text/x-sql;text/csv;
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Exec=$APP_CLI --new $APP_ARGS
+Name=Open a new window
