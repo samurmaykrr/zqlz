@@ -15,6 +15,7 @@ jobs:
   build-mac:
     name: Build macOS Bundle (${{ matrix.arch }})
     runs-on: macos-latest
+    if: ${{ !env.ACT }}
     strategy:
       fail-fast: false
       matrix:
@@ -40,6 +41,7 @@ jobs:
         run: rustup target add ${{ matrix.target }}
 
       - name: Install dependencies
+        if: ${{ !env.ACT }}
         run: |
           brew install imagemagick
 

@@ -32,4 +32,4 @@ cargo build --release
 
 ## License
 
-MIT
+GPL
