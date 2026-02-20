@@ -7,7 +7,7 @@ use std::rc::Rc;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _,
-    button::{ButtonVariant, ButtonVariants as _},
+    button::ButtonVariant,
     dialog::DialogButtonProps,
     v_flex,
     WindowExt,

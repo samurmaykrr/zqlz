@@ -4,24 +4,20 @@
 //! Uses sqlparser-rs for accurate SQL parsing and validation.
 
 use anyhow::Result;
-use gpui::{App, Context, Task, Window};
+use serde::{Deserialize, Serialize};
 use lsp_types::{
-    CodeAction, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, Diagnostic,
-    DiagnosticSeverity, GotoDefinitionResponse, Hover, HoverContents, MarkedString, Position,
-    Range, ParameterInformation, ParameterLabel, SignatureHelp, SignatureInformation, Location, Uri,
-    TextEdit, WorkspaceEdit,
+    CodeAction, CompletionItem, CompletionItemKind, Diagnostic, GotoDefinitionResponse, Hover,
+    HoverContents, MarkedString, Position, Range, ParameterInformation, ParameterLabel,
+    SignatureHelp, SignatureInformation, Location, Uri, TextEdit, WorkspaceEdit,
 };
-use sqlparser::ast::Statement;
 use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
-use sqlparser::parser::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, SchemaIntrospection};
-use zqlz_services::SchemaService;
+use zqlz_core::Connection;
+use zqlz_services::{DatabaseSchema, SchemaService};
 use zqlz_ui::widgets::Rope;
-use zqlz_ui::widgets::input::lsp::{CompletionProvider, HoverProvider};
-use zqlz_ui::widgets::input::{InputState, RopeExt};
+use zqlz_ui::widgets::input::RopeExt;
 
 mod command_tokenizer;
 mod completion_cache;
@@ -53,7 +49,7 @@ pub use hover::SqlHoverProvider;
 pub use schema_validator::{SchemaValidator, ValidationIssue, ValidationSeverity};
 
 /// Database object types that can be stored and shown in completions
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DatabaseObject {
     Table(TableInfo),
     View(ViewInfo),
@@ -64,7 +60,7 @@ pub enum DatabaseObject {
     Index(IndexInfo),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableInfo {
     pub name: String,
     pub schema: Option<String>,
@@ -72,14 +68,14 @@ pub struct TableInfo {
     pub row_count: Option<i64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ViewInfo {
     pub name: String,
     pub schema: Option<String>,
     pub definition: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {
     pub table_name: String,
     pub name: String,
@@ -91,7 +87,7 @@ pub struct ColumnInfo {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProcedureInfo {
     pub name: String,
     pub schema: Option<String>,
@@ -101,7 +97,7 @@ pub struct ProcedureInfo {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FunctionInfo {
     pub name: String,
     pub schema: Option<String>,
@@ -112,21 +108,21 @@ pub struct FunctionInfo {
     pub comment: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParameterInfo {
     pub name: String,
     pub data_type: String,
     pub direction: ParameterDirection,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ParameterDirection {
     In,
     Out,
     InOut,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TriggerInfo {
     pub name: String,
     pub table_name: String,
@@ -135,7 +131,7 @@ pub struct TriggerInfo {
     pub definition: Option<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexInfo {
     pub name: String,
     pub table_name: String,
@@ -144,6 +140,7 @@ pub struct IndexInfo {
 }
 
 /// SQL Language Server configuration
+#[allow(dead_code)]
 pub struct SqlLsp {
     /// Current database connection
     connection_id: Option<Uuid>,
@@ -177,9 +174,19 @@ pub struct SqlLsp {
 
     /// Completion cache for performance
     completion_cache: CompletionCache,
+
+    /// True while a background schema fetch is in flight.
+    /// Used to suppress the keyword fallback in table-name completion contexts so
+    /// the user sees an empty list (indicating "loading") rather than irrelevant keywords.
+    pub schema_loading: bool,
+
+    /// Monotonically-increasing counter incremented before each background fetch.
+    /// The fetching task captures its epoch; if the counter has advanced by the time
+    /// the result arrives, the result is discarded so a newer fetch can apply instead.
+    fetch_epoch: u64,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct SchemaCache {
     /// All database objects
     pub objects: Vec<DatabaseObject>,
@@ -200,10 +207,13 @@ pub struct SchemaCache {
     pub reverse_foreign_keys: HashMap<String, Vec<(String, zqlz_core::ForeignKeyInfo)>>,
 
     /// Last time the cache was refreshed
+    #[serde(skip)]
     pub last_refresh: Option<std::time::SystemTime>,
 }
 
+#[allow(dead_code)]
 impl SqlLsp {
+    #[allow(dead_code)]
     pub fn new(schema_service: Arc<SchemaService>) -> Self {
         Self {
             connection_id: None,
@@ -217,6 +227,8 @@ impl SqlLsp {
             sql_diagnostics: SqlDiagnostics::new(),
             fuzzy_matcher: FuzzyMatcher::new(false),
             completion_cache: CompletionCache::default(),
+            schema_loading: false,
+            fetch_epoch: 0,
         }
     }
 
@@ -239,6 +251,8 @@ impl SqlLsp {
             sql_diagnostics: SqlDiagnostics::new(),
             fuzzy_matcher: FuzzyMatcher::new(false),
             completion_cache: CompletionCache::default(),
+            schema_loading: false,
+            fetch_epoch: 0,
         }
     }
 
@@ -261,9 +275,11 @@ impl SqlLsp {
         }
 
         self.schema_cache = SchemaCache::default();
+        self.schema_loading = true;
     }
 
     /// Get the appropriate SQL dialect for parsing
+    #[allow(dead_code)]
     fn get_dialect(&self) -> Box<dyn Dialect> {
         match self.driver_type.to_lowercase().as_str() {
             "sqlite" => Box::new(SQLiteDialect {}),
@@ -285,26 +301,20 @@ impl SqlLsp {
         }
     }
 
-    /// Refresh schema cache from the database using SchemaService
-    /// This leverages the service layer caching (5-minute TTL) to avoid repeated database queries
-    pub async fn refresh_schema(&mut self) -> Result<()> {
-        tracing::info!("refresh_schema called - using SchemaService");
-
-        let Some(conn) = &self.connection else {
-            tracing::warn!("refresh_schema: No connection available");
-            return Ok(());
-        };
-
-        let Some(conn_id) = self.connection_id else {
-            tracing::warn!("refresh_schema: No connection ID available");
-            return Ok(());
-        };
-
-        // ✅ Use SchemaService to load schema with caching (5-minute TTL)
-        // This prevents repeated PRAGMA queries on subsequent refresh_schema() calls
-        let db_schema = self
-            .schema_service
-            .load_database_schema(conn.clone(), conn_id)
+    /// Fetches schema data from the database as a pure I/O operation, returning
+    /// a populated `SchemaCache` without touching `self`.
+    ///
+    /// This is intentionally an associated function so callers can run it from a
+    /// background task without holding the `RwLock<SqlLsp>` write guard across
+    /// any await point. Once the future resolves, pass the result to
+    /// [`Self::apply_schema_cache`] while holding the write guard only briefly.
+    pub async fn fetch_schema_cache(
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        schema_service: &SchemaService,
+    ) -> Result<SchemaCache> {
+        let db_schema = schema_service
+            .load_database_schema(connection.clone(), connection_id)
             .await?;
 
         tracing::info!(
@@ -313,10 +323,8 @@ impl SqlLsp {
             db_schema.views.len()
         );
 
-        // Clear existing cache
-        self.schema_cache = SchemaCache::default();
+        let mut cache = SchemaCache::default();
 
-        // Populate schema cache with table names
         for table_name in &db_schema.tables {
             let table_info = TableInfo {
                 name: table_name.clone(),
@@ -324,45 +332,50 @@ impl SqlLsp {
                 comment: None,
                 row_count: None,
             };
-            self.schema_cache
-                .tables
-                .insert(table_name.clone(), table_info.clone());
-            self.schema_cache
-                .objects
-                .push(DatabaseObject::Table(table_info));
+            cache.tables.insert(table_name.clone(), table_info.clone());
+            cache.objects.push(DatabaseObject::Table(table_info));
         }
 
-        // Populate views
         for view_name in &db_schema.views {
             let view_info = ViewInfo {
                 name: view_name.clone(),
                 schema: None,
                 definition: None,
             };
-            self.schema_cache
-                .views
-                .insert(view_name.clone(), view_info.clone());
-            self.schema_cache
-                .objects
-                .push(DatabaseObject::View(view_info));
+            cache.views.insert(view_name.clone(), view_info.clone());
+            cache.objects.push(DatabaseObject::View(view_info));
         }
 
-        // ✅ Load columns and foreign keys using SchemaService (cached per-table)
-        for table_name in &db_schema.tables {
-            match self
-                .schema_service
-                .get_table_details(conn.clone(), conn_id, table_name, None)
-                .await
-            {
+        // Fetch column details for all tables concurrently. For remote databases
+        // each call is a network round-trip, so serial fetching multiplies latency by
+        // the number of tables. Firing them in parallel reduces total time to roughly
+        // one round-trip regardless of schema size.
+        let table_detail_futures: Vec<_> = db_schema
+            .tables
+            .iter()
+            .map(|table_name| {
+                let connection = connection.clone();
+                let table_name = table_name.clone();
+                async move {
+                    let result = schema_service
+                        .get_table_details(connection, connection_id, &table_name, None)
+                        .await;
+                    (table_name, result)
+                }
+            })
+            .collect();
+
+        let table_detail_results = futures::future::join_all(table_detail_futures).await;
+
+        for (table_name, result) in table_detail_results {
+            match result {
                 Ok(details) => {
-                    // Build FK column set
                     let fk_columns: std::collections::HashSet<String> = details
                         .foreign_keys
                         .iter()
                         .flat_map(|fk| fk.columns.iter().cloned())
                         .collect();
 
-                    // Convert view_models::ColumnInfo to our ColumnInfo
                     let column_infos: Vec<ColumnInfo> = details
                         .columns
                         .iter()
@@ -374,37 +387,27 @@ impl SqlLsp {
                             default_value: c.default_value.clone(),
                             is_primary_key: c.is_primary_key,
                             is_foreign_key: fk_columns.contains(&c.name),
-                            comment: None, // view_models::ColumnInfo doesn't have comment
+                            comment: None,
                         })
                         .collect();
 
-                    // Add columns to cache
                     for col in &column_infos {
-                        self.schema_cache
-                            .objects
-                            .push(DatabaseObject::Column(col.clone()));
+                        cache.objects.push(DatabaseObject::Column(col.clone()));
                     }
-                    self.schema_cache
-                        .columns_by_table
-                        .insert(table_name.clone(), column_infos);
+                    cache.columns_by_table.insert(table_name.clone(), column_infos);
 
-                    // Store foreign key relationships
-                    if !details.foreign_keys.is_empty() {
-                        for fk in &details.foreign_keys {
-                            // Forward map: source_table -> foreign_keys
-                            self.schema_cache
-                                .foreign_keys_by_table
-                                .entry(table_name.clone())
-                                .or_default()
-                                .push(fk.clone());
+                    for fk in &details.foreign_keys {
+                        cache
+                            .foreign_keys_by_table
+                            .entry(table_name.clone())
+                            .or_default()
+                            .push(fk.clone());
 
-                            // Reverse map: referenced_table -> (source_table, foreign_key)
-                            self.schema_cache
-                                .reverse_foreign_keys
-                                .entry(fk.referenced_table.clone())
-                                .or_default()
-                                .push((table_name.clone(), fk.clone()));
-                        }
+                        cache
+                            .reverse_foreign_keys
+                            .entry(fk.referenced_table.clone())
+                            .or_default()
+                            .push((table_name.clone(), fk.clone()));
                     }
                 }
                 Err(e) => {
@@ -413,7 +416,6 @@ impl SqlLsp {
             }
         }
 
-        // Store triggers, functions, procedures (just names)
         for trigger_name in &db_schema.triggers {
             let trigger_info = TriggerInfo {
                 name: trigger_name.clone(),
@@ -422,12 +424,8 @@ impl SqlLsp {
                 timing: String::new(),
                 definition: None,
             };
-            self.schema_cache
-                .triggers
-                .insert(trigger_name.clone(), trigger_info.clone());
-            self.schema_cache
-                .objects
-                .push(DatabaseObject::Trigger(trigger_info));
+            cache.triggers.insert(trigger_name.clone(), trigger_info.clone());
+            cache.objects.push(DatabaseObject::Trigger(trigger_info));
         }
 
         for function_name in &db_schema.functions {
@@ -440,12 +438,8 @@ impl SqlLsp {
                 is_aggregate: false,
                 comment: None,
             };
-            self.schema_cache
-                .functions
-                .insert(function_name.clone(), function_info.clone());
-            self.schema_cache
-                .objects
-                .push(DatabaseObject::Function(function_info));
+            cache.functions.insert(function_name.clone(), function_info.clone());
+            cache.objects.push(DatabaseObject::Function(function_info));
         }
 
         for procedure_name in &db_schema.procedures {
@@ -457,53 +451,122 @@ impl SqlLsp {
                 definition: None,
                 comment: None,
             };
-            self.schema_cache
-                .procedures
-                .insert(procedure_name.clone(), procedure_info.clone());
-            self.schema_cache
-                .objects
-                .push(DatabaseObject::StoredProcedure(procedure_info));
+            cache.procedures.insert(procedure_name.clone(), procedure_info.clone());
+            cache.objects.push(DatabaseObject::StoredProcedure(procedure_info));
         }
 
-        // Store indexes from DatabaseSchema
         for (table_name, indexes) in &db_schema.table_indexes {
             for index in indexes {
-                // Convert zqlz_core::IndexInfo to our IndexInfo
                 let index_info = IndexInfo {
                     name: index.name.clone(),
                     table_name: table_name.clone(),
                     columns: index.columns.clone(),
                     is_unique: index.is_unique,
                 };
-                self.schema_cache
-                    .indexes
-                    .insert(index.name.clone(), index_info.clone());
-                self.schema_cache
-                    .objects
-                    .push(DatabaseObject::Index(index_info));
+                cache.indexes.insert(index.name.clone(), index_info.clone());
+                cache.objects.push(DatabaseObject::Index(index_info));
             }
         }
 
-        self.schema_cache.last_refresh = Some(std::time::SystemTime::now());
+        cache.last_refresh = Some(std::time::SystemTime::now());
 
-        let total_columns: usize = self
-            .schema_cache
-            .columns_by_table
-            .values()
-            .map(|v| v.len())
-            .sum();
-
+        let total_columns: usize = cache.columns_by_table.values().map(|v| v.len()).sum();
         tracing::info!(
-            "Schema cache refreshed via SchemaService: {} tables, {} views, {} columns, {} indexes, {} triggers, {} functions, {} procedures",
-            self.schema_cache.tables.len(),
-            self.schema_cache.views.len(),
+            "Schema cache built: {} tables, {} views, {} columns, {} indexes, {} triggers, {} functions, {} procedures",
+            cache.tables.len(),
+            cache.views.len(),
             total_columns,
-            self.schema_cache.indexes.len(),
-            self.schema_cache.triggers.len(),
-            self.schema_cache.functions.len(),
-            self.schema_cache.procedures.len()
+            cache.indexes.len(),
+            cache.triggers.len(),
+            cache.functions.len(),
+            cache.procedures.len()
         );
 
+        Ok(cache)
+    }
+
+    /// Applies a pre-fetched schema cache, replacing the current one.
+    ///
+    /// Intended to be called while holding the write lock only briefly, after
+    /// [`Self::fetch_schema_cache`] has finished all network I/O.
+    pub fn apply_schema_cache(&mut self, cache: SchemaCache) {
+        self.schema_cache = cache;
+        self.schema_loading = false;
+    }
+
+    /// Applies the cache only if `epoch` matches the current [`Self::fetch_epoch`].
+    ///
+    /// Use this variant from background fetch tasks to avoid overwriting a newer
+    /// result with an older one when concurrent fetches race (e.g. connect + DDL).
+    pub fn apply_schema_cache_if_current(&mut self, cache: SchemaCache, epoch: u64) {
+        if self.fetch_epoch == epoch {
+            self.apply_schema_cache(cache);
+        }
+    }
+
+    /// Increments the fetch epoch and returns the new value.
+    ///
+    /// Call this immediately before spawning a background schema fetch so the task
+    /// can pass the epoch back to [`Self::apply_schema_cache_if_current`].
+    pub fn next_fetch_epoch(&mut self) -> u64 {
+        self.fetch_epoch += 1;
+        self.fetch_epoch
+    }
+
+    /// Seeds the schema cache with bare table names so that FROM-clause completions
+    /// work immediately after the sidebar shows tables, without waiting for the
+    /// slower per-table column-detail fetches to complete.
+    ///
+    /// Uses `entry().or_insert_with()` so richer entries written by a concurrently
+    /// completing [`Self::fetch_schema_cache`] call are never overwritten.
+    /// Does NOT clear `schema_loading` — that remains the full fetch's responsibility.
+    pub fn pre_populate_tables(&mut self, table_names: &[String]) {
+        for name in table_names {
+            self.schema_cache.tables.entry(name.clone()).or_insert_with(|| TableInfo {
+                name: name.clone(),
+                schema: None,
+                comment: None,
+                row_count: None,
+            });
+        }
+    }
+
+    /// Returns the active connection ID, if any.
+    pub fn connection_id(&self) -> Option<Uuid> {
+        self.connection_id
+    }
+
+    /// Returns a clone of the schema service handle.
+    pub fn schema_service(&self) -> Arc<SchemaService> {
+        self.schema_service.clone()
+    }
+
+    /// Returns a clone of the active connection, if any.
+    pub fn connection(&self) -> Option<Arc<dyn Connection>> {
+        self.connection.clone()
+    }
+
+    /// Refresh schema cache from the database using SchemaService.
+    ///
+    /// Delegates to [`Self::fetch_schema_cache`] + [`Self::apply_schema_cache`].
+    /// Note: callers that hold a sync write lock on the containing `RwLock` across
+    /// this await will block any concurrent readers for the duration. Prefer the
+    /// background-spawn pattern in [`super`] for foreground-thread callers.
+    pub async fn refresh_schema(&mut self) -> Result<()> {
+        tracing::info!("refresh_schema called - using SchemaService");
+
+        let Some(conn) = self.connection.clone() else {
+            tracing::warn!("refresh_schema: No connection available");
+            return Ok(());
+        };
+
+        let Some(conn_id) = self.connection_id else {
+            tracing::warn!("refresh_schema: No connection ID available");
+            return Ok(());
+        };
+
+        let cache = Self::fetch_schema_cache(conn, conn_id, &self.schema_service).await?;
+        self.apply_schema_cache(cache);
         Ok(())
     }
 
@@ -931,14 +994,13 @@ impl SqlLsp {
 
         // Filter based on context and current input
         match context {
-            AstSqlContext::SelectList { available_tables } => {
+            AstSqlContext::SelectList { ref available_tables } => {
                 tracing::debug!("In SELECT list, available tables: {:?}", available_tables);
 
                 if available_tables.is_empty() {
-                    // No FROM clause yet - show all columns from all tables
-                    // This handles incomplete queries like "SELECT lo" where user is typing column names
-                    tracing::debug!("No tables in FROM clause, showing all columns from schema");
-                    self.add_filtered_columns(&current_word_lower, &mut completions);
+                    // No FROM clause yet — DataGrip-style: show functions and keywords only.
+                    // Showing unqualified column names here would be misleading noise because
+                    // we don't yet know which table the user intends to select from.
                 } else {
                     // Show columns from available tables only (higher priority)
                     self.add_columns_from_tables(
@@ -948,9 +1010,9 @@ impl SqlLsp {
                     );
                 }
 
-                // Show SQL functions
+                // Show SQL functions (sort_text "3_" / "4_" ranks them below columns "1_")
                 self.add_filtered_functions(&current_word_lower, &mut completions);
-                // Show only 5 relevant keywords
+                // Show only the most relevant keywords for SELECT expressions
                 self.add_specific_keywords(
                     &["DISTINCT", "AS", "FROM", "CASE", "CAST"],
                     &current_word_lower,
@@ -962,6 +1024,20 @@ impl SqlLsp {
                 // Show tables, views, and CTEs
                 self.add_filtered_tables(&current_word_lower, &mut completions);
                 self.add_filtered_views(&current_word_lower, &mut completions);
+
+                // If schema is still loading and no completions are available yet,
+                // surface a single informational item so the user knows to wait.
+                if completions.is_empty() && self.schema_loading {
+                    completions.push(lsp_types::CompletionItem {
+                        label: "Schema loading…".to_string(),
+                        kind: Some(lsp_types::CompletionItemKind::TEXT),
+                        detail: Some("Fetching tables from the database".to_string()),
+                        insert_text: Some(String::new()),
+                        preselect: Some(false),
+                        ..Default::default()
+                    });
+                    return completions;
+                }
 
                 // Add CTE names as available "tables"
                 if let Some(ref analyzer) = self.context_analyzer {
@@ -982,9 +1058,6 @@ impl SqlLsp {
                         }
                     }
                 }
-
-                // Add table-valued functions (like GENERATE_SERIES in PostgreSQL)
-                self.add_filtered_functions(&current_word_lower, &mut completions);
 
                 // Add dialect-specific keywords that can appear in FROM clause
                 // This allows keywords like LATERAL (PostgreSQL) to be suggested
@@ -1018,7 +1091,7 @@ impl SqlLsp {
                     }
                 }
             }
-            AstSqlContext::JoinClause { existing_tables } => {
+            AstSqlContext::JoinClause { ref existing_tables } => {
                 tracing::debug!("In JOIN clause, existing tables: {:?}", existing_tables);
                 // Show tables with suggested JOINs based on foreign keys
                 self.add_tables_with_fk_suggestions(
@@ -1050,25 +1123,16 @@ impl SqlLsp {
                 // Add only JOIN-related keywords
                 self.add_specific_keywords(&["ON", "USING"], &current_word_lower, &mut completions);
             }
-            AstSqlContext::ConditionClause { available_tables } => {
-                tracing::warn!(
-                    "🎯 In WHERE/HAVING clause, available tables count: {}",
+            AstSqlContext::ConditionClause { ref available_tables } => {
+                tracing::debug!(
+                    "In WHERE/HAVING clause, available tables count: {}",
                     available_tables.len()
                 );
-                for (i, table) in available_tables.iter().enumerate() {
-                    tracing::warn!(
-                        "  Table {}: table_name='{}' alias={:?}",
-                        i + 1,
-                        table.table_name,
-                        table.alias
-                    );
-                }
 
                 // Priority 1: Show columns from available tables (highest priority)
                 if available_tables.is_empty() {
                     // Fallback: If no tables detected by AST, show ALL columns
                     // This handles cases where AST analysis fails to extract table references
-                    tracing::warn!("  No available_tables detected, falling back to all columns");
                     self.add_filtered_columns(&current_word_lower, &mut completions);
                 } else {
                     self.add_columns_from_tables(
@@ -1077,15 +1141,10 @@ impl SqlLsp {
                         &mut completions,
                     );
                 }
-                tracing::warn!("  After add_columns: {} completions", completions.len());
 
                 // Priority 2: Add scalar functions ONLY (no aggregates like COUNT, SUM, AVG)
                 // Aggregate functions cannot be used in WHERE clause
                 self.add_scalar_functions(&current_word_lower, &mut completions);
-                tracing::warn!(
-                    "  After add_scalar_functions: {} completions",
-                    completions.len()
-                );
 
                 // Priority 3: Add condition/boolean operators and keywords
                 self.add_specific_keywords(
@@ -1095,10 +1154,6 @@ impl SqlLsp {
                     ],
                     &current_word_lower,
                     &mut completions,
-                );
-                tracing::warn!(
-                    "  After add_specific_keywords: {} completions",
-                    completions.len()
                 );
 
                 // Priority 4: Add comparison operators as snippets (low priority)
@@ -1113,7 +1168,7 @@ impl SqlLsp {
                     });
                 }
             }
-            AstSqlContext::AfterDot { table_or_alias, available_tables } => {
+            AstSqlContext::AfterDot { ref table_or_alias, ref available_tables } => {
                 tracing::debug!("After dot for table/alias: {}", table_or_alias);
 
                 // Resolve alias to actual table name using available_tables from context
@@ -1160,7 +1215,7 @@ impl SqlLsp {
                         }
                     }
                 } else {
-                    tracing::warn!("No columns found for table/alias '{}'", table_name);
+                    tracing::debug!("No columns found for table/alias '{}'", table_name);
                 }
             }
             AstSqlContext::CommonTableExpression { .. } => {
@@ -1172,7 +1227,7 @@ impl SqlLsp {
                     &mut completions,
                 );
             }
-            AstSqlContext::Subquery { parent_tables } => {
+            AstSqlContext::Subquery { ref parent_tables } => {
                 tracing::debug!("In subquery, parent tables: {:?}", parent_tables);
                 // Inside subquery - can reference parent tables
                 self.add_columns_from_tables(&parent_tables, &current_word_lower, &mut completions);
@@ -1196,11 +1251,16 @@ impl SqlLsp {
             }
         }
 
-        // Fallback: if no completions found and query is short, show keywords
-        // This handles edge cases like single characters ("s" → SELECT)
-        // BUT: Don't show fallback if we're after a dot (AfterDot context) - in that case,
-        // no completions means the table/alias doesn't exist, which is correct behavior
-        if completions.is_empty() && sql.len() < 20 && !is_after_dot {
+        // Fallback: if no completions found and query is short, show keywords.
+        // This handles edge cases like single characters ("s" → SELECT).
+        // Do NOT fall back when context is explicitly identified as a table-name position
+        // (FromClause / JoinClause): an empty result there means the schema cache is still
+        // loading, and showing keywords (e.g. CLUSTER for "cust") is misleading noise.
+        let is_table_name_context = matches!(
+            context,
+            AstSqlContext::FromClause | AstSqlContext::JoinClause { .. }
+        );
+        if completions.is_empty() && sql.len() < 20 && !is_after_dot && !is_table_name_context {
             #[cfg(test)]
             println!(
                 "DEBUG: No completions for short query '{}', adding fallback keywords",
@@ -1258,20 +1318,14 @@ impl SqlLsp {
     fn add_columns_from_tables(
         &self,
         tables: &[TableRef],
-        filter: &str,
+        _filter: &str,
         completions: &mut Vec<CompletionItem>,
     ) {
-        tracing::warn!(
-            "📋 add_columns_from_tables called with {} tables, filter: '{}'",
-            tables.len(),
-            filter
-        );
-
         for table_ref in tables {
-            tracing::warn!(
-                "  Processing table: {} (alias: {:?})",
-                table_ref.table_name,
-                table_ref.alias
+            tracing::debug!(
+                table_name = %table_ref.table_name,
+                alias = ?table_ref.alias,
+                "add_columns_from_tables: processing table"
             );
 
             if let Some(columns) = self
@@ -1279,12 +1333,6 @@ impl SqlLsp {
                 .columns_by_table
                 .get(&table_ref.table_name)
             {
-                tracing::warn!(
-                    "    Found {} columns for table {}",
-                    columns.len(),
-                    table_ref.table_name
-                );
-
                 for column in columns {
                     // Add column - fuzzy matching will filter if needed
                     let label = if table_ref.alias.is_some() {
@@ -1292,8 +1340,6 @@ impl SqlLsp {
                     } else {
                         column.name.clone()
                     };
-
-                    tracing::warn!("      Adding column: {}", label);
 
                     completions.push(CompletionItem {
                         label: label.clone(),
@@ -1312,16 +1358,9 @@ impl SqlLsp {
                     });
                 }
             } else {
-                tracing::warn!(
-                    "    ⚠️ NO COLUMNS FOUND for table {} in schema_cache!",
-                    table_ref.table_name
-                );
-                tracing::warn!(
-                    "    Available tables in cache: {:?}",
-                    self.schema_cache
-                        .columns_by_table
-                        .keys()
-                        .collect::<Vec<_>>()
+                tracing::debug!(
+                    table_name = %table_ref.table_name,
+                    "add_columns_from_tables: no columns found in schema cache"
                 );
             }
         }
@@ -1392,7 +1431,7 @@ impl SqlLsp {
     fn add_specific_keywords(
         &self,
         keywords: &[&str],
-        filter: &str,
+        _filter: &str,
         completions: &mut Vec<CompletionItem>,
     ) {
         for keyword in keywords {
@@ -1424,10 +1463,31 @@ impl SqlLsp {
             }
         }
 
-        // Check last significant keyword
+        // The SQL clause keywords we recognise
+        let clause_keywords: &[&str] = &[
+            "select", "from", "into", "update", "table", "join", "left", "right", "inner",
+            "outer", "cross", "full", "where", "and", "or", "not", "on", "having", "group",
+            "order", "limit", "offset", "union", "except", "intersect", "set", "values",
+            "with", "as",
+        ];
+
+        // Scan backward to find the most recent SQL clause keyword, then decide context.
+        // For FROM/JOIN we only return that clause if the token immediately after the keyword
+        // is still a table-name position (i.e., there are no additional non-keyword tokens
+        // between the clause keyword and the cursor). If the table name has already been typed,
+        // the user is now writing the next clause keyword, so we return General.
         for i in (0..words.len()).rev() {
             match words[i] {
-                "from" | "into" | "update" | "table" => return AstSqlContext::FromClause,
+                kw @ ("from" | "into" | "update" | "table") => {
+                    // Count non-keyword tokens after this clause keyword.
+                    let tokens_after = words[i + 1..].iter().filter(|&&w| !clause_keywords.contains(&w)).count();
+                    let _ = kw;
+                    if tokens_after <= 1 {
+                        return AstSqlContext::FromClause;
+                    }
+                    // Table name already typed - user is writing the next part of the query.
+                    return AstSqlContext::General;
+                }
                 "join" => {
                     return AstSqlContext::JoinClause {
                         existing_tables: vec![],
@@ -1452,7 +1512,7 @@ impl SqlLsp {
 
     fn add_filtered_keywords(
         &self,
-        filter: &str,
+        _filter: &str,
         context: &str,
         completions: &mut Vec<CompletionItem>,
     ) {
@@ -1463,7 +1523,7 @@ impl SqlLsp {
         #[cfg(test)]
         println!(
             "DEBUG add_filtered_keywords: filter='{}', context='{}'",
-            filter, context
+            _filter, context
         );
 
         // Context-specific keywords (max 5 per context)
@@ -1643,7 +1703,7 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_data_types(&self, filter: &str, completions: &mut Vec<CompletionItem>) {
+    fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         // Add SQL data types from dialect - let fuzzy matching filter them
         for data_type in self.dialect.data_types() {
             // Skip if already in completions
@@ -1668,7 +1728,7 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_tables(&self, filter: &str, completions: &mut Vec<CompletionItem>) {
+    fn add_filtered_tables(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         for (_, table) in &self.schema_cache.tables {
             // Add table - fuzzy matching will filter
             completions.push(CompletionItem {
@@ -1686,7 +1746,7 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_views(&self, filter: &str, completions: &mut Vec<CompletionItem>) {
+    fn add_filtered_views(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         for (_, view) in &self.schema_cache.views {
             // Add view - fuzzy matching will filter
             completions.push(CompletionItem {
@@ -1700,11 +1760,11 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_columns(&self, filter: &str, completions: &mut Vec<CompletionItem>) {
+    fn add_filtered_columns(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         #[cfg(test)]
         println!(
             "DEBUG add_filtered_columns: filter='{}', cache has {} tables",
-            filter,
+            _filter,
             self.schema_cache.columns_by_table.len()
         );
 
@@ -1740,7 +1800,7 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_functions(&self, filter: &str, completions: &mut Vec<CompletionItem>) {
+    fn add_filtered_functions(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         // Add user-defined functions from schema cache
         for (_, func) in &self.schema_cache.functions {
             // Add user function - fuzzy matching will filter
@@ -2753,10 +2813,9 @@ impl SqlLsp {
                 if col.name.to_lowercase() == *word_lower {
                     // Found a column - add a reference to indicate the table uses this column
                     // For now, we add a reference with the table name in the URI
+                    let Ok(uri) = format!("sql://internal/table/{}", table_name).parse::<Uri>() else { continue; };
                     let location = Location {
-                        uri: format!("sql://internal/table/{}", table_name)
-                            .parse::<Uri>()
-                            .unwrap(),
+                        uri,
                         range: Range {
                             start: Position { line: 0, character: 0 },
                             end: Position { line: 0, character: 0 },
@@ -2775,10 +2834,9 @@ impl SqlLsp {
             // Find views that join with this table
             for (view_name, _view) in &self.schema_cache.views {
                 // Simplified - could check actual JOINs in view definitions
+                let Ok(uri) = format!("sql://internal/view/{}", view_name).parse::<Uri>() else { continue; };
                 let location = Location {
-                    uri: format!("sql://internal/view/{}", view_name)
-                        .parse::<Uri>()
-                        .unwrap(),
+                    uri,
                     range: Range {
                         start: Position { line: 0, character: 0 },
                         end: Position { line: 0, character: 0 },
@@ -3087,7 +3145,7 @@ impl SqlLsp {
     }
 
     /// Generate context-based code actions (not tied to diagnostics)
-    fn generate_context_actions(&self, text: &str, offset: usize) -> Vec<CodeAction> {
+    fn generate_context_actions(&self, text: &str, _offset: usize) -> Vec<CodeAction> {
         let mut actions = Vec::new();
 
         // Action: Add semicolon at end of query if missing
@@ -3159,7 +3217,7 @@ impl SqlLsp {
     }
 
     /// Find an unquoted identifier that might need quoting
-    fn find_unquoted_identifier(&self, text: &str, range: Option<&Range>) -> Option<Range> {
+    fn find_unquoted_identifier(&self, _text: &str, range: Option<&Range>) -> Option<Range> {
         range.map(|r| r.clone())
     }
 
@@ -3290,7 +3348,7 @@ impl SqlLsp {
         let mut paren_depth = 0i32;
         let mut func_name = String::new();
         let mut param_count = 0usize;
-        let mut in_func = false;
+        let mut _in_func = false;
         let mut chars = text.chars().rev().peekable();
 
         while let Some(c) = chars.next() {
@@ -3304,7 +3362,7 @@ impl SqlLsp {
                 '(' => {
                     paren_depth -= 1;
                     if paren_depth == 0 {
-                        in_func = true;
+                        let _in_func = true;
                         while let Some(&next_c) = chars.peek() {
                             if next_c.is_alphanumeric() || next_c == '_' {
                                 func_name.insert(0, next_c);
@@ -3387,7 +3445,7 @@ impl SqlLsp {
         // Look for patterns like "FROM users u" or "FROM users AS u"
 
         // Split by common SQL keywords to find FROM/JOIN clauses
-        let patterns = [
+        let _patterns = [
             format!(" {} ", alias.to_lowercase()),
             format!(" as {} ", alias.to_lowercase()),
         ];
@@ -3524,6 +3582,70 @@ impl SqlLsp {
     #[cfg(test)]
     pub fn set_schema_cache(&mut self, cache: SchemaCache) {
         self.schema_cache = cache;
+    }
+
+    /// Get the current schema as DatabaseSchema format for use with SchemaMetadataProvider
+    ///
+    /// This exports the cached schema information in a format that can be used
+    /// by the schema metadata overlay to show table/column information.
+    pub fn get_schema_for_metadata(&self) -> DatabaseSchema {
+        let tables: Vec<String> = self.schema_cache.tables.keys().cloned().collect();
+        let views: Vec<String> = self.schema_cache.views.keys().cloned().collect();
+        
+        // Collect materialized views, functions, procedures, triggers
+        let materialized_views: Vec<String> = vec![]; // SchemaCache doesn't track this separately
+        let functions: Vec<String> = self.schema_cache.functions.keys().cloned().collect();
+        let procedures: Vec<String> = self.schema_cache.procedures.keys().cloned().collect();
+        let triggers: Vec<String> = self.schema_cache.triggers.keys().cloned().collect();
+        
+        // Convert table_infos to the expected format
+        let table_infos: Vec<zqlz_core::TableInfo> = self.schema_cache
+            .tables
+            .values()
+            .map(|t| zqlz_core::TableInfo {
+                name: t.name.clone(),
+                schema: t.schema.clone(),
+                table_type: zqlz_core::TableType::Table,
+                owner: None,
+                row_count: t.row_count,
+                size_bytes: None,
+                comment: t.comment.clone(),
+                index_count: None,
+                trigger_count: None,
+                key_value_info: None,
+            })
+            .collect();
+        
+        // Convert table_indexes to zqlz_core::IndexInfo format
+        let mut table_indexes: std::collections::HashMap<String, Vec<zqlz_core::IndexInfo>> = 
+            std::collections::HashMap::new();
+        for (table_name, index_info) in &self.schema_cache.indexes {
+            // SchemaCache stores single IndexInfo per name, wrap in Vec
+            let converted = vec![zqlz_core::IndexInfo {
+                name: index_info.name.clone(),
+                columns: index_info.columns.clone(),
+                is_unique: index_info.is_unique,
+                is_primary: false, // SchemaCache doesn't track this
+                index_type: "btree".to_string(), // Default
+                comment: None,
+                ..Default::default()
+            }];
+            table_indexes.insert(table_name.clone(), converted);
+        }
+
+        DatabaseSchema {
+            table_infos,
+            objects_panel_data: None,
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            table_indexes,
+            database_name: None,
+            schema_name: None,
+        }
     }
 }
 

@@ -25,4 +25,3 @@ mod trigger_menu;
 mod view_menu;
 
 // Re-export the ContextMenuState for use in parent module
-pub(super) use state::ContextMenuState;

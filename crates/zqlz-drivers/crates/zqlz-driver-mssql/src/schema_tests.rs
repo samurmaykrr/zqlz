@@ -59,6 +59,7 @@ fn test_column_info() -> ColumnInfo {
         is_unique: true,
         foreign_key: None,
         comment: None,
+        ..Default::default()
     }
 }
 
@@ -113,6 +114,7 @@ fn test_generate_table_ddl_simple() {
                 is_unique: true,
                 foreign_key: None,
                 comment: None,
+                ..Default::default()
             },
             ColumnInfo {
                 name: "Name".to_string(),
@@ -128,6 +130,7 @@ fn test_generate_table_ddl_simple() {
                 is_unique: false,
                 foreign_key: None,
                 comment: None,
+                ..Default::default()
             },
         ],
         primary_key: Some(PrimaryKeyInfo {
@@ -176,6 +179,7 @@ fn test_generate_table_ddl_with_default() {
             is_unique: false,
             foreign_key: None,
             comment: None,
+            ..Default::default()
         }],
         primary_key: None,
         foreign_keys: Vec::new(),
@@ -217,6 +221,7 @@ fn test_generate_table_ddl_nullable_column() {
             is_unique: false,
             foreign_key: None,
             comment: None,
+            ..Default::default()
         }],
         primary_key: None,
         foreign_keys: Vec::new(),
@@ -292,6 +297,7 @@ fn test_index_info_creation() {
         is_primary: false,
         index_type: "NONCLUSTERED".to_string(),
         comment: None,
+        ..Default::default()
     };
     assert_eq!(index.name, "IX_Users_Email");
     assert!(index.is_unique);
@@ -309,6 +315,8 @@ fn test_foreign_key_info_creation() {
         referenced_columns: vec!["Id".to_string()],
         on_update: ForeignKeyAction::Cascade,
         on_delete: ForeignKeyAction::SetNull,
+        is_deferrable: false,
+        initially_deferred: false,
     };
     assert_eq!(fk.name, "FK_Orders_Users");
     assert_eq!(fk.referenced_table, "Users");

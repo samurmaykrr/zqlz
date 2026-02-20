@@ -276,7 +276,7 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
             }
         }
         mysql_async::Value::Time(negative, days, hours, mins, secs, micros) => {
-            let total_hours = (days as u32) * 24 + (hours as u32);
+            let total_hours = days * 24 + (hours as u32);
             let sign = if negative { "-" } else { "" };
             Value::String(format!(
                 "{}{:02}:{:02}:{:02}.{:06}",
@@ -826,10 +826,10 @@ impl Drop for MySqlTransaction {
             std::thread::spawn(move || {
                 get_mysql_runtime().block_on(async move {
                     let mut guard = conn_mutex.lock().await;
-                    if let Some(ref mut conn) = *guard {
-                        if let Err(e) = conn.query_drop("ROLLBACK").await {
-                            tracing::error!("Failed to rollback dropped transaction: {}", e);
-                        }
+                    if let Some(ref mut conn) = *guard
+                        && let Err(e) = conn.query_drop("ROLLBACK").await
+                    {
+                        tracing::error!("Failed to rollback dropped transaction: {}", e);
                     }
                 });
             });

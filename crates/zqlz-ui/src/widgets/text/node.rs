@@ -30,6 +30,7 @@ use super::{utils::list_item_prefix, TextViewStyle};
 
 /// The block-level nodes.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub(crate) enum BlockNode {
     /// Something like a Div container in HTML.
     Root {
@@ -78,6 +79,7 @@ pub(crate) enum BlockNode {
     Unknown,
 }
 
+#[allow(dead_code)]
 impl BlockNode {
     pub(super) fn is_list_item(&self) -> bool {
         matches!(self, Self::ListItem { .. })
@@ -446,6 +448,7 @@ impl Paragraph {
         false
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_span(&mut self, span: Span) {
         self.span = Some(span);
     }
@@ -510,6 +513,7 @@ impl CodeBlock {
         self.state.lock().unwrap().text.clone()
     }
 
+    #[allow(dead_code)]
     pub(crate) fn new(
         code: SharedString,
         lang: Option<SharedString>,
@@ -600,6 +604,7 @@ pub(crate) struct NodeContext {
 }
 
 impl NodeContext {
+    #[allow(dead_code)]
     pub(super) fn add_ref(&mut self, identifier: SharedString, link: LinkMark) {
         self.link_refs.insert(identifier, link);
     }
@@ -778,6 +783,7 @@ impl Paragraph {
     }
 }
 
+#[allow(dead_code)]
 impl BlockNode {
     /// Converts the node to markdown format.
     ///
@@ -921,6 +927,7 @@ impl BlockNode {
     }
 }
 
+#[allow(dead_code)]
 impl BlockNode {
     fn render_list_item(
         item: &BlockNode,

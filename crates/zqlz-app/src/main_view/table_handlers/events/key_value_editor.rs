@@ -8,7 +8,6 @@
 //! - Syncing field changes between row editor and table grid
 
 use gpui::*;
-use uuid::Uuid;
 use zqlz_core::StatementResult;
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
@@ -91,6 +90,8 @@ impl MainView {
                         RedisValueType::List => {
                             // For lists, we need to delete and re-add all items
                             // First delete the existing key
+                            // DEL failures are intentionally ignored: if the key doesn't exist,
+                            // the subsequent write still creates it correctly.
                             let _ = connection.execute(&format!("DEL {}", key), &[]).await;
 
                             // Parse the value as JSON array or line-separated values
@@ -120,6 +121,7 @@ impl MainView {
                         }
                         RedisValueType::Set => {
                             // For sets, delete and re-add
+                            // DEL failures are intentionally ignored: a missing key is fine; the SADD below creates it.
                             let _ = connection.execute(&format!("DEL {}", key), &[]).await;
 
                             let items: Vec<String> = if new_value.trim().starts_with('[') {
@@ -146,6 +148,7 @@ impl MainView {
                         }
                         RedisValueType::ZSet => {
                             // For sorted sets, parse as JSON object with score:member pairs
+                            // DEL failures are intentionally ignored: a missing key is fine; the ZADD below creates it.
                             let _ = connection.execute(&format!("DEL {}", key), &[]).await;
 
                             // Try to parse as JSON object {"member": score, ...} or array of [score, member]
@@ -197,6 +200,7 @@ impl MainView {
                         }
                         RedisValueType::Hash => {
                             // For hashes, parse as JSON object
+                            // DEL failures are intentionally ignored: a missing key is fine; the HSET below creates it.
                             let _ = connection.execute(&format!("DEL {}", key), &[]).await;
 
                             let fields: Vec<(String, String)> = if let Ok(obj) =
@@ -252,13 +256,13 @@ impl MainView {
                     if result.is_ok() {
                         match new_ttl {
                             Some(ttl) => {
-                                // Set the TTL
+                                // Set the TTL — EXPIRE failures are intentionally ignored; the value write succeeded.
                                 let _ = connection
                                     .execute(&format!("EXPIRE {} {}", key, ttl), &[])
                                     .await;
                             }
                             None => {
-                                // Remove TTL (make key persistent) using PERSIST command
+                                // Remove TTL (make key persistent) — PERSIST failures are intentionally ignored.
                                 let _ = connection.execute(&format!("PERSIST {}", key), &[]).await;
                             }
                         }

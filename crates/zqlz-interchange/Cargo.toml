@@ -42,3 +42,4 @@ dirs = "5"
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }
+tempfile.workspace = true

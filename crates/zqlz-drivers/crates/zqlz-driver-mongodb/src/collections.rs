@@ -401,32 +401,32 @@ pub async fn list_databases(conn: &MongoDbConnection) -> Result<Vec<DatabaseInfo
 
     // Extract databases from the result
     for row in &result.rows {
-        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("databases") {
-            if let Some(arr) = json.as_array() {
-                for db_val in arr {
-                    if let Some(db_obj) = db_val.as_object() {
-                        let name = db_obj
-                            .get("name")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("")
-                            .to_string();
+        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("databases")
+            && let Some(arr) = json.as_array()
+        {
+            for db_val in arr {
+                if let Some(db_obj) = db_val.as_object() {
+                    let name = db_obj
+                        .get("name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
 
-                        if name.is_empty() {
-                            continue;
-                        }
-
-                        let size = db_obj.get("sizeOnDisk").and_then(|v| v.as_u64());
-                        let empty = db_obj
-                            .get("empty")
-                            .and_then(|v| v.as_bool())
-                            .unwrap_or(false);
-
-                        let mut info = DatabaseInfo::new(name).with_empty(empty);
-                        if let Some(s) = size {
-                            info = info.with_size(s);
-                        }
-                        databases.push(info);
+                    if name.is_empty() {
+                        continue;
                     }
+
+                    let size = db_obj.get("sizeOnDisk").and_then(|v| v.as_u64());
+                    let empty = db_obj
+                        .get("empty")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+
+                    let mut info = DatabaseInfo::new(name).with_empty(empty);
+                    if let Some(s) = size {
+                        info = info.with_size(s);
+                    }
+                    databases.push(info);
                 }
             }
         }
@@ -479,14 +479,13 @@ pub async fn list_collections_with_options(
     // Parse the cursor result
     for row in &result.rows {
         // listCollections returns a cursor with firstBatch
-        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor") {
-            if let Some(cursor_obj) = json.as_object() {
-                if let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array()) {
-                    for coll_val in batch {
-                        if let Some(info) = parse_collection_info(coll_val, options) {
-                            collections.push(info);
-                        }
-                    }
+        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor")
+            && let Some(cursor_obj) = json.as_object()
+            && let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array())
+        {
+            for coll_val in batch {
+                if let Some(info) = parse_collection_info(coll_val, options) {
+                    collections.push(info);
                 }
             }
         }
@@ -535,10 +534,10 @@ pub(crate) fn parse_collection_info(
     }
 
     // Apply name filter
-    if let Some(ref pattern) = options.name_filter {
-        if !name_matches_pattern(&name, pattern) {
-            return None;
-        }
+    if let Some(ref pattern) = options.name_filter
+        && !name_matches_pattern(&name, pattern)
+    {
+        return None;
     }
 
     // Get options for capped
@@ -639,14 +638,13 @@ pub async fn list_indexes(
 
     for row in &result.rows {
         // listIndexes returns a cursor
-        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor") {
-            if let Some(cursor_obj) = json.as_object() {
-                if let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array()) {
-                    for idx_val in batch {
-                        if let Some(info) = parse_index_info(idx_val) {
-                            indexes.push(info);
-                        }
-                    }
+        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor")
+            && let Some(cursor_obj) = json.as_object()
+            && let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array())
+        {
+            for idx_val in batch {
+                if let Some(info) = parse_index_info(idx_val) {
+                    indexes.push(info);
                 }
             }
         }
@@ -760,14 +758,13 @@ pub async fn infer_schema(
 
     // Process documents from the cursor
     for row in &result.rows {
-        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor") {
-            if let Some(cursor_obj) = json.as_object() {
-                if let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array()) {
-                    for doc in batch {
-                        total_docs += 1;
-                        collect_field_types(doc, "", &mut field_stats);
-                    }
-                }
+        if let Some(zqlz_core::Value::Json(json)) = row.get_by_name("cursor")
+            && let Some(cursor_obj) = json.as_object()
+            && let Some(batch) = cursor_obj.get("firstBatch").and_then(|v| v.as_array())
+        {
+            for doc in batch {
+                total_docs += 1;
+                collect_field_types(doc, "", &mut field_stats);
             }
         }
     }
@@ -803,32 +800,29 @@ pub(crate) fn collect_field_types(
     prefix: &str,
     stats: &mut HashMap<String, (Vec<String>, u64)>,
 ) {
-    match value {
-        serde_json::Value::Object(obj) => {
-            for (key, val) in obj {
-                let field_name = if prefix.is_empty() {
-                    key.clone()
-                } else {
-                    format!("{}.{}", prefix, key)
-                };
+    if let serde_json::Value::Object(obj) = value {
+        for (key, val) in obj {
+            let field_name = if prefix.is_empty() {
+                key.clone()
+            } else {
+                format!("{}.{}", prefix, key)
+            };
 
-                let type_name = json_type_name(val);
+            let type_name = json_type_name(val);
 
-                let entry = stats
-                    .entry(field_name.clone())
-                    .or_insert_with(|| (Vec::new(), 0));
-                entry.1 += 1;
-                if !entry.0.contains(&type_name) {
-                    entry.0.push(type_name);
-                }
+            let entry = stats
+                .entry(field_name.clone())
+                .or_insert_with(|| (Vec::new(), 0));
+            entry.1 += 1;
+            if !entry.0.contains(&type_name) {
+                entry.0.push(type_name);
+            }
 
-                // Recurse into nested objects
-                if val.is_object() {
-                    collect_field_types(val, &field_name, stats);
-                }
+            // Recurse into nested objects
+            if val.is_object() {
+                collect_field_types(val, &field_name, stats);
             }
         }
-        _ => {}
     }
 }
 

@@ -134,7 +134,7 @@ impl MainView {
                         let old_table_name = old_table_name.clone();
                         let driver_name = driver_name.clone();
 
-                        cx.spawn(async move |mut cx| {
+                        cx.spawn(async move |cx| {
                             let sql = if driver_name.contains("postgres") {
                                 format!(
                                     "ALTER TABLE \"{}\" RENAME TO \"{}\"",

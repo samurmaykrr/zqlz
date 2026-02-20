@@ -78,11 +78,11 @@ pub fn parse_sqlite_explain(output: &str) -> Result<QueryPlan> {
     if trimmed.starts_with("QUERY PLAN") || trimmed.contains("|--") || trimmed.contains("`--") {
         parse_tree_format(trimmed)
     } else if trimmed.contains('|')
-        && trimmed.lines().next().map_or(false, |l| {
+        && trimmed.lines().next().is_some_and(|l| {
             l.split('|').count() >= 4
                 && l.split('|')
                     .next()
-                    .map_or(false, |s| s.trim().parse::<u32>().is_ok())
+                    .is_some_and(|s| s.trim().parse::<u32>().is_ok())
         })
     {
         parse_tabular_format(trimmed)
@@ -136,12 +136,13 @@ pub fn parse_tree_format(output: &str) -> Result<QueryPlan> {
         let node = parse_detail(&detail)?;
 
         // Find parent based on indent level
-        while !stack.is_empty() && stack.last().unwrap().0 >= indent {
-            let (_, child) = stack.pop().unwrap();
-            if let Some((_, parent)) = stack.last_mut() {
-                parent.children.push(child);
-            } else {
-                root_children.push(child);
+        while stack.last().map_or(false, |(lvl, _)| *lvl >= indent) {
+            if let Some((_, child)) = stack.pop() {
+                if let Some((_, parent)) = stack.last_mut() {
+                    parent.children.push(child);
+                } else {
+                    root_children.push(child);
+                }
             }
         }
 
@@ -149,8 +150,7 @@ pub fn parse_tree_format(output: &str) -> Result<QueryPlan> {
     }
 
     // Pop remaining items from stack
-    while !stack.is_empty() {
-        let (_, child) = stack.pop().unwrap();
+    while let Some((_, child)) = stack.pop() {
         if let Some((_, parent)) = stack.last_mut() {
             parent.children.push(child);
         } else {
@@ -160,7 +160,7 @@ pub fn parse_tree_format(output: &str) -> Result<QueryPlan> {
 
     // Build final tree
     let root = if root_children.len() == 1 {
-        root_children.pop().unwrap()
+        root_children.remove(0)
     } else if root_children.is_empty() {
         PlanNode::new(NodeType::Result)
     } else {
@@ -249,7 +249,7 @@ pub fn parse_tabular_format(output: &str) -> Result<QueryPlan> {
 
     // Build tree from flat list
     let root = if nodes.len() == 1 {
-        nodes.pop().unwrap()
+        nodes.remove(0)
     } else {
         // Multiple nodes - wrap in join tree
         let mut current = nodes.remove(0);
@@ -313,9 +313,8 @@ fn parse_detail(detail: &str) -> Result<PlanNode> {
     } else if detail_upper.starts_with("USE TEMP B-TREE FOR ORDER BY")
         || detail_upper.starts_with("USE TEMP B-TREE FOR DISTINCT")
         || detail_upper.starts_with("USE TEMP B-TREE FOR GROUP BY")
+        || detail_upper.starts_with("USING TEMP B-TREE")
     {
-        parse_temp_btree_operation(detail)
-    } else if detail_upper.starts_with("USING TEMP B-TREE") {
         parse_temp_btree_operation(detail)
     } else if detail_upper.starts_with("COMPOUND SUBQUERIES") {
         parse_compound_operation(detail)

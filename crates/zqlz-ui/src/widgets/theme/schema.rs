@@ -1,13 +1,12 @@
 use std::{rc::Rc, sync::Arc};
 
-use gpui::{SharedString, px};
+use gpui::{px, SharedString};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::widgets::{
-    Colorize, Theme, ThemeColor, ThemeMode,
     highlighter::{HighlightTheme, HighlightThemeStyle},
-    try_parse_color,
+    try_parse_color, Colorize, Theme, ThemeColor, ThemeMode,
 };
 
 /// Represents a theme configuration.
@@ -25,8 +24,7 @@ pub struct ThemeSet {
     pub themes: Vec<ThemeConfig>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[derive(Debug, Clone, Default, Serialize, JsonSchema)]
 pub struct ThemeConfig {
     /// Whether this theme is the default theme.
     pub is_default: bool,
@@ -67,6 +65,162 @@ pub struct ThemeConfig {
     ///
     /// https://github.com/zed-industries/zed/blob/f50041779dcfd7a76c8aec293361c60c53f02d51/assets/themes/ayu/ayu.json#L9
     pub highlight: Option<HighlightThemeStyle>,
+}
+
+impl<'de> Deserialize<'de> for ThemeConfig {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = serde_json::Value::deserialize(deserializer)?;
+        deserialize_theme_config(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Deserializes a `ThemeConfig` from a raw JSON value, supporting both the internal
+/// format (with `"mode"` + `"colors"`) and Zed's theme format (with `"appearance"` + `"style"`).
+fn deserialize_theme_config(value: serde_json::Value) -> anyhow::Result<ThemeConfig> {
+    let obj = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("expected object"))?;
+
+    // Zed format uses "appearance"; internal format uses "mode".
+    if obj.contains_key("appearance") {
+        deserialize_zed_theme(obj)
+    } else {
+        deserialize_internal_theme(value)
+    }
+}
+
+/// Deserializes a theme entry using the internal format (used by default-theme.json).
+fn deserialize_internal_theme(value: serde_json::Value) -> anyhow::Result<ThemeConfig> {
+    // Helper struct that mirrors ThemeConfig with all serde renames, used only for internal format.
+    #[derive(Deserialize, Default)]
+    #[serde(default)]
+    struct Internal {
+        is_default: bool,
+        name: SharedString,
+        mode: ThemeMode,
+        #[serde(rename = "font.size")]
+        font_size: Option<f32>,
+        #[serde(rename = "font.family")]
+        font_family: Option<SharedString>,
+        #[serde(rename = "mono_font.family")]
+        mono_font_family: Option<SharedString>,
+        #[serde(rename = "mono_font.size")]
+        mono_font_size: Option<f32>,
+        #[serde(rename = "radius")]
+        radius: Option<usize>,
+        #[serde(rename = "radius.lg")]
+        radius_lg: Option<usize>,
+        shadow: Option<bool>,
+        colors: ThemeConfigColors,
+        highlight: Option<HighlightThemeStyle>,
+    }
+
+    let internal: Internal = serde_json::from_value(value)?;
+    Ok(ThemeConfig {
+        is_default: internal.is_default,
+        name: internal.name,
+        mode: internal.mode,
+        font_size: internal.font_size,
+        font_family: internal.font_family,
+        mono_font_family: internal.mono_font_family,
+        mono_font_size: internal.mono_font_size,
+        radius: internal.radius,
+        radius_lg: internal.radius_lg,
+        shadow: internal.shadow,
+        colors: internal.colors,
+        highlight: internal.highlight,
+    })
+}
+
+/// Extracts an optional string from a Zed style object by key.
+#[inline]
+fn style_str(
+    style: &serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> Option<SharedString> {
+    style
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(|s| SharedString::from(s.to_string()))
+}
+
+/// Deserializes a Zed-format theme entry, remapping Zed's `appearance` and `style`
+/// fields to the internal `ThemeConfig` structure.
+fn deserialize_zed_theme(
+    obj: &serde_json::Map<String, serde_json::Value>,
+) -> anyhow::Result<ThemeConfig> {
+    let name: SharedString = obj
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string()
+        .into();
+
+    let mode = match obj.get("appearance").and_then(|v| v.as_str()) {
+        Some("dark") => ThemeMode::Dark,
+        _ => ThemeMode::Light,
+    };
+
+    let style = obj
+        .get("style")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| anyhow::anyhow!("Zed theme missing 'style' object"))?;
+
+    let colors = ThemeConfigColors {
+        background: style_str(style, "background"),
+        foreground: style_str(style, "text"),
+        muted_foreground: style_str(style, "text.muted"),
+        accent_foreground: style_str(style, "text.accent"),
+        border: style_str(style, "border"),
+        ring: style_str(style, "border.focused")
+            .or_else(|| style_str(style, "panel.focused_border")),
+        tab_bar: style_str(style, "tab_bar.background"),
+        tab_active: style_str(style, "tab.active_background"),
+        tab: style_str(style, "tab.inactive_background"),
+        tab_foreground: style_str(style, "tab.text"),
+        tab_active_foreground: style_str(style, "tab.active_text"),
+        title_bar: style_str(style, "title_bar.background"),
+        accent: style_str(style, "icon.accent"),
+        secondary: style_str(style, "element.background")
+            .or_else(|| style_str(style, "surface.background"))
+            .or_else(|| style_str(style, "panel.background")),
+        secondary_hover: style_str(style, "element.hover"),
+        popover: style_str(style, "elevated_surface.background"),
+        list_active: style_str(style, "element.selected")
+            .or_else(|| style_str(style, "ghost_element.selected")),
+        list_hover: style_str(style, "ghost_element.hover"),
+        drop_target: style_str(style, "drop_target.background"),
+        link_hover: style_str(style, "link_text.hover"),
+        scrollbar: style_str(style, "scrollbar.track.background"),
+        scrollbar_thumb: style_str(style, "scrollbar.thumb.background"),
+        scrollbar_thumb_hover: style_str(style, "scrollbar.thumb.hover_background"),
+        danger: style_str(style, "error"),
+        info: style_str(style, "info"),
+        success: style_str(style, "success"),
+        warning: style_str(style, "warning"),
+        // Fields with no direct Zed mapping fall back to None (apply_config handles fallbacks).
+        ..ThemeConfigColors::default()
+    };
+
+    // The `style` object in Zed themes contains both UI colors and highlight/editor colors.
+    // We deserialize the whole style object into HighlightThemeStyle which uses matching key names.
+    let highlight: Option<HighlightThemeStyle> =
+        serde_json::from_value(serde_json::Value::Object(style.clone())).ok();
+
+    Ok(ThemeConfig {
+        is_default: false,
+        name,
+        mode,
+        font_size: None,
+        font_family: None,
+        mono_font_family: None,
+        mono_font_size: None,
+        radius: None,
+        radius_lg: None,
+        shadow: None,
+        colors,
+        highlight,
+    })
 }
 
 #[derive(Debug, Default, Clone, JsonSchema, Serialize, Deserialize)]
@@ -543,6 +697,10 @@ impl ThemeColor {
                 )
         );
         apply_color!(group_box_foreground, fallback = self.foreground);
+        apply_color!(
+            group_box_title_foreground,
+            fallback = self.group_box_foreground
+        );
         apply_color!(caret, fallback = self.primary);
         apply_color!(chart_1, fallback = self.blue.lighten(0.4));
         apply_color!(chart_2, fallback = self.blue.lighten(0.2));
@@ -695,5 +853,257 @@ impl Theme {
 
         self.colors.apply_config(&config, &default_theme.colors);
         self.mode = config.mode;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn str_val(opt: &Option<SharedString>) -> Option<&str> {
+        opt.as_ref().map(|s| s.as_ref())
+    }
+
+    // A minimal Zed-format theme set to validate parsing.
+    const ZED_THEME_JSON: &str = r##"
+    {
+        "name": "Test Zed",
+        "author": "Test",
+        "themes": [
+            {
+                "name": "Test Dark",
+                "appearance": "dark",
+                "style": {
+                    "background": "#1a1b26",
+                    "text": "#c0caf5",
+                    "text.muted": "#565f89",
+                    "border": "#292e42",
+                    "border.focused": "#7aa2f7",
+                    "tab_bar.background": "#161720",
+                    "tab.active_background": "#1a1b26",
+                    "tab.inactive_background": "#292e42",
+                    "tab.text": "#565f89",
+                    "tab.active_text": "#c0caf5",
+                    "title_bar.background": "#161720",
+                    "elevated_surface.background": "#1a1b26",
+                    "element.background": "#292e42",
+                    "element.hover": "#31374f",
+                    "element.selected": "#7aa2f722",
+                    "ghost_element.hover": "#7aa2f711",
+                    "icon.accent": "#7aa2f7",
+                    "scrollbar.track.background": "#1a1b2600",
+                    "scrollbar.thumb.background": "#414868",
+                    "scrollbar.thumb.hover_background": "#7aa2f7",
+                    "drop_target.background": "#7aa2f722",
+                    "link_text.hover": "#7aa2f7",
+                    "error": "#f7768e",
+                    "info": "#7aa2f7",
+                    "success": "#9ece6a",
+                    "warning": "#e0af68",
+                    "syntax": {
+                        "keyword": { "color": "#f7768e" },
+                        "string": { "color": "#9ece6a" },
+                        "function": { "color": "#7aa2f7" }
+                    }
+                }
+            },
+            {
+                "name": "Test Light",
+                "appearance": "light",
+                "style": {
+                    "background": "#ffffff",
+                    "text": "#000000",
+                    "border": "#cccccc"
+                }
+            }
+        ]
+    }
+    "##;
+
+    // A minimal internal-format theme set to validate that existing format still works.
+    const INTERNAL_THEME_JSON: &str = r##"
+    {
+        "name": "Test Internal",
+        "themes": [
+            {
+                "name": "Test Internal Dark",
+                "mode": "dark",
+                "colors": {
+                    "background": "#1a1b26",
+                    "foreground": "#c0caf5",
+                    "border": "#292e42"
+                }
+            }
+        ]
+    }
+    "##;
+
+    #[test]
+    fn test_zed_format_parses_appearance_as_mode() {
+        let theme_set: ThemeSet =
+            serde_json::from_str(ZED_THEME_JSON).expect("Zed format should parse");
+        assert_eq!(theme_set.themes.len(), 2);
+
+        let dark = &theme_set.themes[0];
+        assert_eq!(dark.name.as_ref(), "Test Dark");
+        assert_eq!(
+            dark.mode,
+            ThemeMode::Dark,
+            "appearance=dark must map to ThemeMode::Dark"
+        );
+
+        let light = &theme_set.themes[1];
+        assert_eq!(light.name.as_ref(), "Test Light");
+        assert_eq!(
+            light.mode,
+            ThemeMode::Light,
+            "appearance=light must map to ThemeMode::Light"
+        );
+    }
+
+    #[test]
+    fn test_zed_format_parses_style_colors() {
+        let theme_set: ThemeSet =
+            serde_json::from_str(ZED_THEME_JSON).expect("Zed format should parse");
+        let dark = &theme_set.themes[0];
+        let colors = &dark.colors;
+
+        assert!(colors.background.is_some(), "background should be parsed");
+        assert_eq!(str_val(&colors.background), Some("#1a1b26"));
+        assert_eq!(
+            str_val(&colors.foreground),
+            Some("#c0caf5"),
+            "text → foreground"
+        );
+        assert_eq!(
+            str_val(&colors.muted_foreground),
+            Some("#565f89"),
+            "text.muted → muted_foreground"
+        );
+        assert_eq!(str_val(&colors.border), Some("#292e42"));
+        assert_eq!(
+            str_val(&colors.ring),
+            Some("#7aa2f7"),
+            "border.focused → ring"
+        );
+        assert_eq!(
+            str_val(&colors.tab_bar),
+            Some("#161720"),
+            "tab_bar.background"
+        );
+        assert_eq!(
+            str_val(&colors.tab_active),
+            Some("#1a1b26"),
+            "tab.active_background"
+        );
+        assert_eq!(
+            str_val(&colors.tab),
+            Some("#292e42"),
+            "tab.inactive_background"
+        );
+        assert_eq!(str_val(&colors.tab_foreground), Some("#565f89"), "tab.text");
+        assert_eq!(
+            str_val(&colors.tab_active_foreground),
+            Some("#c0caf5"),
+            "tab.active_text"
+        );
+        assert_eq!(
+            str_val(&colors.title_bar),
+            Some("#161720"),
+            "title_bar.background"
+        );
+        assert_eq!(
+            str_val(&colors.accent),
+            Some("#7aa2f7"),
+            "icon.accent → accent"
+        );
+        assert_eq!(
+            str_val(&colors.secondary),
+            Some("#292e42"),
+            "element.background → secondary"
+        );
+        assert_eq!(
+            str_val(&colors.secondary_hover),
+            Some("#31374f"),
+            "element.hover → secondary_hover"
+        );
+        assert_eq!(
+            str_val(&colors.popover),
+            Some("#1a1b26"),
+            "elevated_surface.background → popover"
+        );
+        assert_eq!(
+            str_val(&colors.scrollbar_thumb),
+            Some("#414868"),
+            "scrollbar.thumb.background"
+        );
+        assert_eq!(
+            str_val(&colors.scrollbar_thumb_hover),
+            Some("#7aa2f7"),
+            "scrollbar.thumb.hover_background"
+        );
+        assert_eq!(str_val(&colors.danger), Some("#f7768e"), "error → danger");
+        assert_eq!(str_val(&colors.info), Some("#7aa2f7"), "info");
+        assert_eq!(str_val(&colors.success), Some("#9ece6a"), "success");
+        assert_eq!(str_val(&colors.warning), Some("#e0af68"), "warning");
+    }
+
+    #[test]
+    fn test_zed_format_parses_syntax_highlight() {
+        let theme_set: ThemeSet =
+            serde_json::from_str(ZED_THEME_JSON).expect("Zed format should parse");
+        let dark = &theme_set.themes[0];
+        let highlight = dark.highlight.as_ref().expect("highlight should be Some");
+        assert!(
+            highlight.syntax.keyword.is_some(),
+            "syntax.keyword should be parsed"
+        );
+        assert!(
+            highlight.syntax.string.is_some(),
+            "syntax.string should be parsed"
+        );
+        assert!(
+            highlight.syntax.function.is_some(),
+            "syntax.function should be parsed"
+        );
+    }
+
+    #[test]
+    fn test_internal_format_still_works() {
+        let theme_set: ThemeSet =
+            serde_json::from_str(INTERNAL_THEME_JSON).expect("internal format should parse");
+        assert_eq!(theme_set.themes.len(), 1);
+
+        let dark = &theme_set.themes[0];
+        assert_eq!(dark.name.as_ref(), "Test Internal Dark");
+        assert_eq!(
+            dark.mode,
+            ThemeMode::Dark,
+            "mode field should be read directly"
+        );
+        assert_eq!(str_val(&dark.colors.background), Some("#1a1b26"));
+        assert_eq!(str_val(&dark.colors.foreground), Some("#c0caf5"));
+    }
+
+    #[test]
+    fn test_default_theme_json_parses() {
+        const DEFAULT_THEME: &str = include_str!("./default-theme.json");
+        let theme_set: ThemeSet =
+            serde_json::from_str(DEFAULT_THEME).expect("default-theme.json should parse");
+        assert!(
+            !theme_set.themes.is_empty(),
+            "default-theme.json must contain at least one theme"
+        );
+        for theme in &theme_set.themes {
+            assert!(
+                !theme.name.is_empty(),
+                "default theme entry has an empty name"
+            );
+            assert!(
+                theme.colors.background.is_some(),
+                "default theme '{}' is missing a background color",
+                theme.name
+            );
+        }
     }
 }

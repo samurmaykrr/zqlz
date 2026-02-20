@@ -3,13 +3,11 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_query::ResultsPanel;
-use zqlz_ui::widgets::WindowExt;
 
 use crate::app::AppState;
 use crate::components::{InspectorPanel, InspectorView, SchemaDetailsPanel};
 use crate::main_view::table_handlers_utils::{
     conversion::{convert_to_schema_details, resolve_schema_qualifier},
-    generate_ddl_for_table,
 };
 
 pub(in crate::main_view) fn handle_became_active_event(
@@ -92,7 +90,9 @@ pub(in crate::main_view) fn handle_became_active_event(
                 .await
             {
                 Ok(table_details) => {
-                    let create_statement = generate_ddl_for_table(&conn, &table_name).await;
+                    let create_statement = schema_service
+                        .get_or_generate_ddl(&conn, connection_id, &table_name)
+                        .await;
                     let details = convert_to_schema_details(
                         connection_id,
                         &table_name,

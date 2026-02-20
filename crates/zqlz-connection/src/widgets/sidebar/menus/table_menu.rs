@@ -8,7 +8,6 @@
 //! - Dumping SQL with or without data
 //! - Copying table names and renaming tables
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};

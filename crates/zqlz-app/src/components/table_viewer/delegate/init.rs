@@ -89,6 +89,7 @@ impl TableViewerDelegate {
         self.driver_category = category;
     }
 
+    #[allow(dead_code)]
     pub fn is_inline_edit_disabled(&self) -> bool {
         self.disable_inline_edit
     }

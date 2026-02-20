@@ -11,11 +11,10 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult};
 use zqlz_ui::widgets::{
-    checkbox::Checkbox,
-    date_picker::{DatePickerInline, DatePickerMode, DatePickerPopover, DatePickerState},
-    input::{ArrowDirection, Input, InputEvent, InputState},
+    date_picker::{DatePickerInline, DatePickerPopover, DatePickerState},
+    input::{Input, InputEvent, InputState},
     menu::PopupMenu,
-    select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    select::{SearchableVec, Select, SelectState},
     table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState},
     ActiveTheme, Icon, IconName, Sizable, Size,
 };
@@ -44,6 +43,7 @@ pub use types::PendingCellChange; // ensure public re-export
 /// Table viewer delegate - implements the TableDelegate trait
 ///
 /// Fields are `pub(super)` so submodules under `delegate/` can access them.
+#[allow(dead_code)]
 pub struct TableViewerDelegate {
     /// Column definitions (includes row number column at index 0)
     pub(super) columns: Vec<Column>,
@@ -154,16 +154,3 @@ pub struct TableViewerDelegate {
 }
 
 // Re-export submodules' public items where appropriate
-pub use init::*;
-pub use inline_edit::*;
-pub use bulk_edit::*;
-pub use clipboard::*;
-pub use render::*;
-pub use column_types::*;
-pub use fk::*;
-pub use columns::*;
-pub use pending::*;
-pub use filtering::*;
-pub use sort::*;
-pub use context_menu::*;
-pub use trait_impl::*;

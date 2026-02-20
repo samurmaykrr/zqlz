@@ -11,7 +11,5 @@ mod open_viewer;
 mod refresh_objects;
 mod refresh_schema;
 
-pub(super) use cell_editor::*;
-pub(super) use key_value_editor::*;
 // open_viewer, refresh_objects, and refresh_schema define impl MainView methods
 // that are accessible throughout the main_view module via pub(in crate::main_view)

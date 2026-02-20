@@ -1,0 +1,43 @@
+[package]
+name = "zqlz-text-editor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+path = "src/text_editor.rs"
+
+[dependencies]
+# GUI Framework
+gpui.workspace = true
+zqlz-ui.workspace = true
+
+# Text buffer
+ropey = "1.6"
+
+# Syntax highlighting
+tree-sitter.workspace = true
+tree-sitter-sequel.workspace = true
+
+# LSP support
+lsp-types.workspace = true
+
+# Utilities
+anyhow.workspace = true
+tracing.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+chrono.workspace = true
+uuid.workspace = true
+convert_case.workspace = true
+rusqlite.workspace = true
+sqlformat.workspace = true
+sqlparser.workspace = true
+
+# Async
+futures.workspace = true
+
+[dev-dependencies]
+indoc.workspace = true

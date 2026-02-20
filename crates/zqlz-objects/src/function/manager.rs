@@ -697,7 +697,7 @@ impl FunctionManager {
         let qualified_name = self.quote_identifier(&spec.qualified_name());
         let params = self.build_parameters_clause(&spec.parameters);
         let returns = self.build_returns_clause(spec);
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(FunctionError::EmptyBody)?;
 
         let mut attributes = Vec::new();
 
@@ -752,7 +752,7 @@ impl FunctionManager {
     fn build_mysql_function(&self, spec: &FunctionSpec) -> Result<String, FunctionError> {
         let qualified_name = self.quote_identifier(&spec.qualified_name());
         let params = self.build_parameters_clause(&spec.parameters);
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(FunctionError::EmptyBody)?;
 
         let mut modifiers = Vec::new();
 
@@ -783,7 +783,7 @@ impl FunctionManager {
     fn build_mssql_function(&self, spec: &FunctionSpec) -> Result<String, FunctionError> {
         let qualified_name = self.quote_identifier(&spec.qualified_name());
         let params = self.build_mssql_parameters_clause(&spec.parameters);
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(FunctionError::EmptyBody)?;
 
         if let Some(table_cols) = &spec.returns_table {
             let table_def = table_cols
@@ -1040,10 +1040,9 @@ impl FunctionManager {
     }
 
     fn needs_quoting(name: &str) -> bool {
-        if name.is_empty() {
+        let Some(first) = name.chars().next() else {
             return true;
-        }
-        let first = name.chars().next().unwrap();
+        };
         if !first.is_ascii_alphabetic() && first != '_' {
             return true;
         }

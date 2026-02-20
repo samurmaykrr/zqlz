@@ -1,6 +1,5 @@
 use crate::widgets::highlighter::{HighlightTheme, LanguageRegistry};
 use crate::widgets::input::RopeExt;
-use crate::widgets::theme::Colorize;
 
 use anyhow::{anyhow, Context, Result};
 use gpui::{HighlightStyle, SharedString};

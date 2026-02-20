@@ -237,6 +237,7 @@ impl SchemaIntrospection for MockConnection {
                     is_unique: true,
                     foreign_key: None,
                     comment: None,
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "name".to_string(),
@@ -252,6 +253,7 @@ impl SchemaIntrospection for MockConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: None,
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "email".to_string(),
@@ -267,6 +269,7 @@ impl SchemaIntrospection for MockConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: None,
+                    ..Default::default()
                 },
             ]),
             _ => Ok(vec![]),
@@ -285,6 +288,7 @@ impl SchemaIntrospection for MockConnection {
             is_primary: false,
             index_type: "BTREE".to_string(),
             comment: None,
+            ..Default::default()
         }])
     }
 

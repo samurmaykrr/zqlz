@@ -8,14 +8,14 @@
 //!
 //! ```text
 //! AppState (Global)           WorkspaceState (Per-Window Entity)
+#![allow(dead_code)]
 //! ├── Services                ├── active_connection_id
 //! │   ├── query_service       ├── active_database
 //! │   ├── schema_service      ├── connected_ids
 //! │   ├── table_service       ├── active_editor_id
 //! │   └── connection_service  ├── editors
 //! ├── connection_manager      ├── running_queries
-//! └── storage                 ├── diagnostics
-//!                             └── schema_cache
+//! └── storage                 └── diagnostics
 //! ```
 //!
 //! # Usage
@@ -50,6 +50,7 @@ impl std::fmt::Display for EditorId {
 
 /// State of a single query editor
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct EditorState {
     /// Connection bound to this editor (can be None for unbound editors)
     pub connection_id: Option<Uuid>,
@@ -63,6 +64,7 @@ pub struct EditorState {
 
 /// State of a running query
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct QueryExecutionState {
     pub started_at: Instant,
     pub sql: String,
@@ -89,21 +91,13 @@ pub enum DiagnosticSeverity {
     Hint,
 }
 
-/// Cached schema information for a connection
-#[derive(Clone, Debug, Default)]
-pub struct SchemaCache {
-    pub tables: Vec<String>,
-    pub views: Vec<String>,
-    pub last_refreshed: Option<Instant>,
-    pub is_loading: bool,
-}
-
 // =============================================================================
 // Schema Object Actions
 // =============================================================================
 
 /// Type of database object for schema operations
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[allow(dead_code)]
 pub enum SchemaObjectType {
     Table,
     View,
@@ -113,6 +107,7 @@ pub enum SchemaObjectType {
     Index,
 }
 
+#[allow(dead_code)]
 impl SchemaObjectType {
     pub fn as_str(&self) -> &'static str {
         match self {
@@ -156,6 +151,7 @@ impl std::fmt::Display for SchemaObjectType {
 /// }
 /// ```
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum SchemaObjectAction {
     // ===== Open/View Actions =====
     /// Open an object to view its data/definition
@@ -249,6 +245,7 @@ pub enum SchemaObjectAction {
     RefreshSchema { connection_id: Option<Uuid> },
 }
 
+#[allow(dead_code)]
 impl SchemaObjectAction {
     /// Create an Open action for a table
     pub fn open_table(connection_id: Uuid, name: impl Into<String>) -> Self {
@@ -401,6 +398,7 @@ impl SchemaObjectAction {
 ///
 /// Panels subscribe to these events for automatic UI updates.
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum WorkspaceStateEvent {
     // ===== Connection Events =====
     /// The active connection changed (may be None if disconnected)
@@ -434,12 +432,6 @@ pub enum WorkspaceStateEvent {
     // ===== Diagnostics Events =====
     /// Diagnostics changed for an editor
     DiagnosticsChanged(EditorId),
-
-    // ===== Schema Events =====
-    /// Schema was refreshed for a connection
-    SchemaRefreshed(Uuid),
-    /// Schema loading started for a connection
-    SchemaLoadStarted(Uuid),
 }
 
 /// Central workspace state container
@@ -451,7 +443,6 @@ pub enum WorkspaceStateEvent {
 /// - Track active connection (replaces scattered `connection_id` fields)
 /// - Track active editor (for diagnostics, results panel)
 /// - Track running queries (for cancel functionality, status bar)
-/// - Cache schema information (for auto-refresh)
 pub struct WorkspaceState {
     // ===== Connection State =====
     /// Currently active connection (single source of truth)
@@ -480,15 +471,12 @@ pub struct WorkspaceState {
     // ===== Diagnostics =====
     /// Diagnostics per editor
     diagnostics: HashMap<EditorId, Vec<EditorDiagnostic>>,
-
-    // ===== Schema Cache =====
-    /// Cached schema information per connection
-    schema_cache: HashMap<Uuid, SchemaCache>,
 }
 
 impl EventEmitter<WorkspaceStateEvent> for WorkspaceState {}
 
 impl WorkspaceState {
+    #[allow(dead_code)]
     /// Create a new workspace state
     pub fn new() -> Self {
         Self {
@@ -502,7 +490,6 @@ impl WorkspaceState {
             running_queries: HashMap::new(),
             query_cancel_handles: HashMap::new(),
             diagnostics: HashMap::new(),
-            schema_cache: HashMap::new(),
         }
     }
 
@@ -537,6 +524,7 @@ impl WorkspaceState {
     }
 
     /// Set the active database (for multi-database connections)
+    #[allow(dead_code)]
     pub fn set_active_database(&mut self, database: Option<String>, cx: &mut Context<Self>) {
         if self.active_database != database {
             self.active_database = database.clone();
@@ -547,6 +535,7 @@ impl WorkspaceState {
     }
 
     /// Get the active database name
+    #[allow(dead_code)]
     pub fn active_database(&self) -> Option<&str> {
         self.active_database.as_deref()
     }
@@ -566,9 +555,6 @@ impl WorkspaceState {
             if self.active_connection_id == Some(id) {
                 self.set_active_connection(None, cx);
             }
-
-            // Clear schema cache for disconnected connection
-            self.schema_cache.remove(&id);
         }
 
         if was_connected != connected {
@@ -578,16 +564,19 @@ impl WorkspaceState {
     }
 
     /// Check if a connection is currently connected
+    #[allow(dead_code)]
     pub fn is_connected(&self, id: Uuid) -> bool {
         self.connected_ids.contains(&id)
     }
 
     /// Get all connected connection IDs
+    #[allow(dead_code)]
     pub fn connected_ids(&self) -> &[Uuid] {
         &self.connected_ids
     }
 
     /// Set a connection as currently connecting
+    #[allow(dead_code)]
     pub fn set_connecting(&mut self, id: Uuid, connecting: bool) {
         let is_connecting = self.connecting_ids.contains(&id);
 
@@ -601,6 +590,7 @@ impl WorkspaceState {
     }
 
     /// Check if a connection is currently connecting
+    #[allow(dead_code)]
     pub fn is_connecting(&self, id: Uuid) -> bool {
         self.connecting_ids.contains(&id)
     }
@@ -829,67 +819,6 @@ impl WorkspaceState {
     /// Get the cancel handle for a running query
     pub fn query_cancel_handle(&self, editor_id: EditorId) -> Option<Arc<dyn QueryCancelHandle>> {
         self.query_cancel_handles.get(&editor_id).cloned()
-    }
-
-    // =========================================================================
-    // Schema Cache Methods
-    // =========================================================================
-
-    /// Start loading schema for a connection
-    pub fn start_schema_load(&mut self, connection_id: Uuid, cx: &mut Context<Self>) {
-        let cache = self.schema_cache.entry(connection_id).or_default();
-        cache.is_loading = true;
-
-        tracing::debug!(
-            "WorkspaceState: schema load started for connection {}",
-            connection_id
-        );
-        cx.emit(WorkspaceStateEvent::SchemaLoadStarted(connection_id));
-        cx.notify();
-    }
-
-    /// Update schema cache for a connection
-    pub fn refresh_schema(
-        &mut self,
-        connection_id: Uuid,
-        tables: Vec<String>,
-        views: Vec<String>,
-        cx: &mut Context<Self>,
-    ) {
-        self.schema_cache.insert(
-            connection_id,
-            SchemaCache {
-                tables,
-                views,
-                last_refreshed: Some(Instant::now()),
-                is_loading: false,
-            },
-        );
-
-        tracing::debug!(
-            "WorkspaceState: schema refreshed for connection {}",
-            connection_id
-        );
-        cx.emit(WorkspaceStateEvent::SchemaRefreshed(connection_id));
-        cx.notify();
-    }
-
-    /// Get schema cache for a connection
-    pub fn schema_for_connection(&self, connection_id: Uuid) -> Option<&SchemaCache> {
-        self.schema_cache.get(&connection_id)
-    }
-
-    /// Check if schema is loading for a connection
-    pub fn is_schema_loading(&self, connection_id: Uuid) -> bool {
-        self.schema_cache
-            .get(&connection_id)
-            .map(|c| c.is_loading)
-            .unwrap_or(false)
-    }
-
-    /// Clear schema cache for a connection
-    pub fn clear_schema_cache(&mut self, connection_id: Uuid) {
-        self.schema_cache.remove(&connection_id);
     }
 }
 

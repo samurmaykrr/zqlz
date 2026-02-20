@@ -87,3 +87,42 @@ pub fn load_bundled_themes(cx: &mut App) {
         BUNDLED_THEMES.len()
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_bundled_themes_parse_without_error() {
+        let mut total = 0;
+        for (name, content) in BUNDLED_THEMES {
+            let theme_set = serde_json::from_str::<ThemeSet>(content)
+                .unwrap_or_else(|err| panic!("Theme '{}' failed to parse: {}", name, err));
+
+            assert!(
+                !theme_set.themes.is_empty(),
+                "Theme file '{}' contains no theme entries",
+                name
+            );
+
+            for theme in &theme_set.themes {
+                assert!(
+                    !theme.name.is_empty(),
+                    "A theme entry in '{}' has an empty name",
+                    name
+                );
+                // All Zed themes must be parsed with a non-default background color.
+                assert!(
+                    theme.colors.background.is_some(),
+                    "Theme '{}' in '{}' has no background color — style mapping may be broken",
+                    theme.name,
+                    name
+                );
+            }
+
+            total += theme_set.themes.len();
+        }
+
+        assert!(total > 0, "No themes were parsed from bundled files");
+    }
+}

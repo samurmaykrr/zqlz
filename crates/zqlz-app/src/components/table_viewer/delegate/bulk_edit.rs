@@ -75,11 +75,11 @@ impl TableViewerDelegate {
                 InputEvent::PressEnter { .. } => {
                     table.delegate_mut().stop_editing(true, cx);
                 }
-                InputEvent::PressTab { shift } => {
+                InputEvent::PressTab { shift: _ } => {
                     table.delegate_mut().stop_editing(true, cx);
                     // navigation omitted for brevity
                 }
-                InputEvent::PressArrow { direction } => {
+                InputEvent::PressArrow { direction: _ } => {
                     table.delegate_mut().stop_editing(true, cx);
                     // navigation omitted for brevity
                 }

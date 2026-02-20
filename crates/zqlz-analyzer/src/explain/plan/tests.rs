@@ -206,13 +206,13 @@ fn test_node_type_is_potentially_slow() {
 
 #[test]
 fn test_join_type_from_str() {
-    assert_eq!(JoinType::from_str("inner"), Some(JoinType::Inner));
-    assert_eq!(JoinType::from_str("INNER"), Some(JoinType::Inner));
-    assert_eq!(JoinType::from_str("left"), Some(JoinType::Left));
-    assert_eq!(JoinType::from_str("Left Outer"), Some(JoinType::Left));
-    assert_eq!(JoinType::from_str("full outer"), Some(JoinType::Full));
-    assert_eq!(JoinType::from_str("cross"), Some(JoinType::Cross));
-    assert_eq!(JoinType::from_str("invalid"), None);
+    assert_eq!(JoinType::parse("inner"), Some(JoinType::Inner));
+    assert_eq!(JoinType::parse("INNER"), Some(JoinType::Inner));
+    assert_eq!(JoinType::parse("left"), Some(JoinType::Left));
+    assert_eq!(JoinType::parse("Left Outer"), Some(JoinType::Left));
+    assert_eq!(JoinType::parse("full outer"), Some(JoinType::Full));
+    assert_eq!(JoinType::parse("cross"), Some(JoinType::Cross));
+    assert_eq!(JoinType::parse("invalid"), None);
 }
 
 #[test]

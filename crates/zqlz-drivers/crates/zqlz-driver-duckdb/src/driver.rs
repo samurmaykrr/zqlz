@@ -262,7 +262,7 @@ impl Connection for DuckDbConnection {
         {
             let mut values = Vec::with_capacity(column_count);
             for i in 0..column_count {
-                let value = row_to_value(&row, i);
+                let value = row_to_value(row, i);
                 values.push(value);
             }
             raw_rows.push(values);

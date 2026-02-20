@@ -242,6 +242,7 @@ impl ObjectsTableDelegate {
         self.database_name = database_name;
     }
 
+    #[allow(dead_code)]
     pub fn database_name(&self) -> Option<String> {
         self.database_name.clone()
     }
@@ -1216,6 +1217,7 @@ impl ObjectsTableDelegate {
             })
     }
 
+    #[allow(dead_code)]
     fn render_empty(
         &mut self,
         _window: &mut Window,

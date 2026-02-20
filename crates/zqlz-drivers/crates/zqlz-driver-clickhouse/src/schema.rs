@@ -193,6 +193,7 @@ impl SchemaIntrospection for ClickHouseConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: row.get(5).and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    ..Default::default()
                 }
             })
             .collect())
@@ -234,6 +235,7 @@ impl SchemaIntrospection for ClickHouseConnection {
                     .get(1)
                     .and_then(|v| v.as_str())
                     .map(|s| format!("expr: {}", s)),
+                ..Default::default()
             })
             .collect())
     }
@@ -367,10 +369,10 @@ impl SchemaIntrospection for ClickHouseConnection {
                     )
                     .await?;
 
-                if let Some(row) = result.rows.first() {
-                    if let Some(ddl) = row.get(0).and_then(|v| v.as_str()) {
-                        return Ok(ddl.to_string());
-                    }
+                if let Some(row) = result.rows.first()
+                    && let Some(ddl) = row.get(0).and_then(|v| v.as_str())
+                {
+                    return Ok(ddl.to_string());
                 }
                 Err(ZqlzError::NotFound(format!(
                     "DDL not found for {}.{}",

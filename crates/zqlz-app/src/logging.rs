@@ -80,6 +80,7 @@ impl LoggingConfig {
     }
 
     /// Create a testing configuration (console only, no files)
+    #[allow(dead_code)]
     pub fn testing() -> Self {
         Self {
             log_dir: PathBuf::from("/tmp/zqlz-tests"),
@@ -231,11 +232,13 @@ macro_rules! trace_timing {
 }
 
 /// Guard that logs timing information when dropped
+#[allow(dead_code)]
 pub struct TimingGuard {
     name: &'static str,
     start: std::time::Instant,
 }
 
+#[allow(dead_code)]
 impl TimingGuard {
     pub fn new(name: &'static str) -> Self {
         Self {

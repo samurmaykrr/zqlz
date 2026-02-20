@@ -74,7 +74,7 @@ mod json_parsing {
 
         let plan = parse_mysql_explain(json).unwrap();
         assert_eq!(plan.root.node_type, NodeType::IndexOnlyScan);
-        assert!(plan.root.extra.get("using_index").is_some());
+        assert!(plan.root.extra.contains_key("using_index"));
     }
 
     #[test]
@@ -219,7 +219,7 @@ mod json_operations {
 
         let plan = parse_mysql_explain(json).unwrap();
         assert_eq!(plan.root.node_type, NodeType::HashAggregate);
-        assert!(plan.root.extra.get("using_filesort").is_some());
+        assert!(plan.root.extra.contains_key("using_filesort"));
         assert_eq!(plan.root.children.len(), 1);
     }
 

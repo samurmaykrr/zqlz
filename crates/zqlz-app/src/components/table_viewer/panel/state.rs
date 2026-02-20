@@ -1,6 +1,7 @@
 use super::*;
 
 impl TableViewerPanel {
+    #[allow(dead_code)]
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.table_state = None;
         self.connection_id = None;

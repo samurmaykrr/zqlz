@@ -101,7 +101,8 @@ fn test_hover_on_aggregate_function() {
 fn test_hover_on_group_by_keyword() {
     let lsp = create_test_lsp();
     let text = Rope::from("SELECT name, COUNT(*) FROM users GROUP BY name");
-    let offset = 40; // Middle of "GROUP"
+    // "GROUP" starts at offset 33; use offset 35 to land in the middle of "GROUP"
+    let offset = 35;
 
     let hover = lsp.get_hover(&text, offset);
 

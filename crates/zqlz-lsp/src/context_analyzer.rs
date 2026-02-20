@@ -4,7 +4,7 @@
 
 use super::parser_pool::with_parser;
 use std::collections::HashMap;
-use tree_sitter::{Parser, Query, QueryCursor, Tree};
+use tree_sitter::Tree;
 use zqlz_ui::widgets::Rope;
 
 /// SQL context information derived from AST
@@ -200,9 +200,52 @@ impl ContextAnalyzer {
         let available_tables =
             self.extract_available_tables_at_position(tree.root_node(), node, source);
 
-        // Special case: Check if we're immediately after a dot by looking at the text
+        // Text-based special cases checked before AST traversal, because incomplete SQL
+        // causes tree-sitter to produce ERROR nodes that prevent accurate clause detection.
+
         if offset > 0 {
             let text_before = &source[..offset];
+
+            // Text-based token lookback is the only reliable way to detect table-name position
+            // when tree-sitter produces an ERROR or identifier node for incomplete SQL like
+            // `SELECT * FROM cus` — the AST walks up to `select_statement` and returns
+            // SelectList instead of FromClause. We check the last two tokens to cover both:
+            //   - bare keyword:   `... FROM |`  (last token is FROM)
+            //   - partial name:   `... FROM cus|` (second-to-last token is FROM)
+            let trimmed = text_before
+                .trim_end_matches(|c: char| c == ')' || c == ' ' || c == '\t' || c == '\n');
+            let tokens: Vec<&str> = trimmed
+                .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
+                .filter(|s| !s.is_empty())
+                .collect();
+
+            let last_token_upper = tokens.last().copied().unwrap_or("").to_uppercase();
+
+            if matches!(
+                last_token_upper.as_str(),
+                "FROM" | "INTO" | "UPDATE" | "TABLE"
+            ) {
+                tracing::trace!(last_token = %last_token_upper, "Detected FROM-style keyword before cursor");
+                return SqlContext::FromClause;
+            }
+
+            // User has started typing a table/view name after a clause keyword.
+            if tokens.len() >= 2 {
+                let prev_token_upper = tokens[tokens.len() - 2].to_uppercase();
+                if matches!(
+                    prev_token_upper.as_str(),
+                    "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE"
+                ) {
+                    tracing::trace!(
+                        prev_token = %prev_token_upper,
+                        partial = %last_token_upper,
+                        "Detected partial table name after clause keyword"
+                    );
+                    return SqlContext::FromClause;
+                }
+            }
+
+            // After a dot: cursor is requesting columns from a specific table/alias
             if text_before.ends_with('.') {
                 tracing::trace!("Text before cursor ends with dot");
                 // Find the identifier before the dot
@@ -217,9 +260,6 @@ impl ContextAnalyzer {
                 }
             }
         }
-
-        // Check if we're after a dot (table.column pattern) using AST or text analysis
-        // This is handled by the text check below
 
         // Walk up the tree to find the enclosing SQL clause
         let mut current = node;
@@ -310,6 +350,7 @@ impl ContextAnalyzer {
         }
     }
 
+    #[allow(dead_code)]
     fn analyze_cte(&self, node: tree_sitter::Node, source: &str) -> SqlContext {
         // Extract CTE name
         let mut cursor = node.walk();
@@ -439,7 +480,7 @@ impl ContextAnalyzer {
 
     /// Extract CTE (Common Table Expression) names from WITH clauses
     /// Returns a list of CTE names that can be referenced as tables
-    pub fn extract_cte_names(&self, text: &Rope, offset: usize) -> Vec<String> {
+    pub fn extract_cte_names(&self, text: &Rope, _offset: usize) -> Vec<String> {
         with_parser(|parser| {
             let source = text.to_string();
             let tree = match parser.parse(&source, None) {
@@ -530,12 +571,12 @@ impl ContextAnalyzer {
         );
 
         // First, try walking up the tree to find the enclosing SELECT statement
-        let mut depth = 0;
+        let mut _depth = 0;
         loop {
             #[cfg(test)]
             println!(
                 "DEBUG: Walking up depth={}, node kind = {}",
-                depth,
+                _depth,
                 node.kind()
             );
 
@@ -546,14 +587,14 @@ impl ContextAnalyzer {
                 #[cfg(test)]
                 println!(
                     "DEBUG: Found select_statement while walking up at depth {}",
-                    depth
+                    _depth
                 );
                 return self.extract_table_refs(node, source);
             }
 
             if let Some(parent) = node.parent() {
                 node = parent;
-                depth += 1;
+                _depth += 1;
             } else {
                 #[cfg(test)]
                 println!("DEBUG: Reached root without finding select_statement");

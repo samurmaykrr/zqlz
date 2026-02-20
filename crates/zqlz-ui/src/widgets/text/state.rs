@@ -27,7 +27,8 @@ use crate::widgets::{
 
 const UPDATE_DELAY: Duration = Duration::from_millis(50);
 
-const CONTEXT: &'static str = "TextView";
+const CONTEXT: &str = "TextView";
+#[allow(dead_code)]
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys(vec![
         #[cfg(target_os = "macos")]

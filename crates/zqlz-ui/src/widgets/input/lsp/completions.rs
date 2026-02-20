@@ -146,7 +146,7 @@ impl InputState {
         };
 
         let menu_trigger = menu.read(cx).trigger_start_offset;
-        let start_offset = menu_trigger.unwrap_or(start);
+        let _start_offset = menu_trigger.unwrap_or(start);
 
         // CRITICAL FIX: Only reset trigger if we've jumped ahead significantly (e.g., after whitespace)
         // If start is just 1 position ahead, we're continuing the same word

@@ -126,11 +126,13 @@ fn test_consecutive_characters_bonus() {
 
     let completions = lsp.get_completions(&text, offset);
 
-    // "users" has all consecutive chars, should rank higher than
-    // scattered matches if any exist
+    // "use" as a prefix should match columns starting with "use" like "user_id" or "username".
+    // In a SELECT list context, columns from the FROM table are prioritized over table names.
     assert!(
-        completions.iter().any(|c| c.label == "users"),
-        "Should match 'users' with consecutive chars. Got: {:?}",
+        completions
+            .iter()
+            .any(|c| c.label == "username" || c.label == "user_id"),
+        "Should match columns starting with 'use'. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );
 }
@@ -289,9 +291,12 @@ fn test_qualified_column_fuzzy_match() {
 
     let completions = lsp.get_completions(&text, offset);
 
-    // Should fuzzy match "user_id" after "u."
+    // When the table has an alias "u", columns are labelled as "u.column_name" in SelectList
+    // context. Fuzzy matching "usid" should find "u.user_id".
     assert!(
-        completions.iter().any(|c| c.label == "user_id"),
+        completions
+            .iter()
+            .any(|c| c.label == "u.user_id" || c.label == "user_id"),
         "Should fuzzy match qualified column 'u.user_id'. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );

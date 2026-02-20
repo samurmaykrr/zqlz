@@ -2,6 +2,8 @@
 //!
 //! This is the main entry point for the ZQLZ application.
 
+#![allow(unexpected_cfgs)]
+
 mod actions;
 mod app;
 mod app_init;
@@ -23,7 +25,6 @@ use panic_handler::{PanicData, PanicHandler};
 use std::sync::{Arc, Mutex};
 use zqlz_settings::ZqlzSettings;
 use zqlz_ui::widgets::menu::AppMenuBar;
-use zqlz_zed_adapter::{SettingsBridge, ThemeBridge};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -72,28 +73,12 @@ fn main() {
         // Initialize the UI system (widgets, actions, keybindings, etc.)
         tracing::info!("Initializing UI system...");
         zqlz_ui::init(cx);
-
-        // Initialize Zed editor subsystem (must be before creating any editors)
-        // Note: This initializes Zed's theme system but doesn't sync to ZQLZ yet
-        // because ZqlzSettings isn't available
-        tracing::info!("Initializing Zed editor adapter...");
-        zqlz_zed_adapter::init(cx);
+        zqlz_text_editor::actions::init(cx);
 
         // Initialize settings system with bundled themes
         // The bundled themes loader is passed to settings init so it can reload
         // themes after the theme directory watcher triggers a reload
         zqlz_settings::init_with_bundled_themes(cx, bundled_themes::load_bundled_themes);
-
-        // Apply ZQLZ settings to Zed's SettingsStore first.
-        // This updates Zed's GlobalTheme to match the user's chosen theme
-        // (e.g. "Catppuccin Mocha") before we sync colors to ZQLZ.
-        tracing::info!("Applying ZQLZ settings to Zed SettingsStore...");
-        SettingsBridge::apply_zqlz_settings_to_zed(cx);
-
-        // Now sync Zed's theme colors to ZQLZ's Theme global.
-        // Zed's GlobalTheme is now correct (set above), so ZQLZ gets the right colors.
-        tracing::info!("Syncing Zed theme to ZQLZ...");
-        ThemeBridge::sync_zed_theme_to_zqlz(cx);
 
         // Register panels and load keybindings from JSON files
         app_init::register_panels(cx);
@@ -156,11 +141,9 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
             window.activate_window();
             window.set_window_title("ZQLZ - Database IDE [DEBUG BUILD 2026-01-02]");
 
-            // Apply saved settings (fonts, scrollbar, mode) and sync Zed theme colors.
-            // ZqlzSettings::apply sets mode/fonts from ZQLZ settings, then
-            // ThemeBridge re-syncs the correct colors from Zed's GlobalTheme.
+            // Apply saved settings (fonts, scrollbar, mode)
+            // ZqlzSettings::apply sets mode/fonts from ZQLZ settings
             ZqlzSettings::global(cx).clone().apply(cx);
-            ThemeBridge::sync_zed_theme_to_zqlz(cx);
 
             // Create the main view
             let main_view = cx.new(|cx| MainView::new(window, cx));

@@ -11,7 +11,7 @@
 //! docker run -d --name clickhouse-test -p 8123:8123 -p 9000:9000 clickhouse/clickhouse-server
 //! ```
 
-use zqlz_core::{Connection, ConnectionConfig, DatabaseDriver, Value};
+use zqlz_core::{ConnectionConfig, DatabaseDriver};
 use zqlz_driver_clickhouse::ClickHouseDriver;
 
 /// Helper to create a test connection config

@@ -3,7 +3,6 @@
 // This module handles database object version control operations:
 // view history, compare versions, restore versions, and save versions.
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
@@ -13,7 +12,7 @@ use zqlz_ui::widgets::{
     notification::Notification,
 };
 use zqlz_versioning::{
-    DatabaseObjectType, VersionRepository,
+    DatabaseObjectType,
     widgets::{DiffViewer, DiffViewerEvent, VersionHistoryPanel, VersionHistoryPanelEvent},
 };
 

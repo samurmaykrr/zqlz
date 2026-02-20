@@ -109,14 +109,13 @@ pub fn parse_json_explain(json: &str) -> Result<QueryPlan> {
     let mut plan = QueryPlan::new(root);
 
     // Extract cost info from query_block
-    if let Some(cost_info) = query_block.get("cost_info") {
-        if let Some(query_cost) = cost_info
+    if let Some(cost_info) = query_block.get("cost_info")
+        && let Some(query_cost) = cost_info
             .get("query_cost")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok())
-        {
-            plan.total_cost = Some(query_cost);
-        }
+    {
+        plan.total_cost = Some(query_cost);
     }
 
     Ok(plan)
@@ -171,20 +170,19 @@ fn parse_ordering_operation(ordering: &Value, _parent: &Value) -> Result<PlanNod
     let mut node = PlanNode::new(NodeType::Sort);
 
     // Extract sort keys if available
-    if let Some(using_filesort) = ordering.get("using_filesort").and_then(|v| v.as_bool()) {
-        if using_filesort {
-            node.sort_method = Some("filesort".to_string());
-        }
+    if let Some(using_filesort) = ordering.get("using_filesort").and_then(|v| v.as_bool())
+        && using_filesort
+    {
+        node.sort_method = Some("filesort".to_string());
     }
 
     if let Some(using_tmptable) = ordering
         .get("using_temporary_table")
         .and_then(|v| v.as_bool())
+        && using_tmptable
     {
-        if using_tmptable {
-            node.extra
-                .insert("using_temporary_table".to_string(), Value::Bool(true));
-        }
+        node.extra
+            .insert("using_temporary_table".to_string(), Value::Bool(true));
     }
 
     // Parse the nested content
@@ -220,18 +218,17 @@ fn parse_grouping_operation(grouping: &Value, _parent: &Value) -> Result<PlanNod
     if let Some(using_tmptable) = grouping
         .get("using_temporary_table")
         .and_then(|v| v.as_bool())
+        && using_tmptable
     {
-        if using_tmptable {
-            // This indicates HashAggregate
-            node.node_type = NodeType::HashAggregate;
-        }
+        // This indicates HashAggregate
+        node.node_type = NodeType::HashAggregate;
     }
 
-    if let Some(using_filesort) = grouping.get("using_filesort").and_then(|v| v.as_bool()) {
-        if using_filesort {
-            node.extra
-                .insert("using_filesort".to_string(), Value::Bool(true));
-        }
+    if let Some(using_filesort) = grouping.get("using_filesort").and_then(|v| v.as_bool())
+        && using_filesort
+    {
+        node.extra
+            .insert("using_filesort".to_string(), Value::Bool(true));
     }
 
     // Parse the nested content
@@ -285,7 +282,7 @@ fn parse_nested_loop(nested_loop: &Value) -> Result<PlanNode> {
 
     // If only one table, return it directly
     if children.len() == 1 {
-        return Ok(children.pop().unwrap());
+        return Ok(children.remove(0));
     }
 
     // Build nested loop join tree
@@ -319,20 +316,19 @@ fn parse_table_access(table: &Value) -> Result<PlanNode> {
     }
 
     // Cost info
-    if let Some(cost_info) = table.get("cost_info") {
-        if let Some(read_cost) = cost_info
+    if let Some(cost_info) = table.get("cost_info")
+        && let Some(read_cost) = cost_info
             .get("read_cost")
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok())
-        {
-            let eval_cost = cost_info
-                .get("eval_cost")
-                .and_then(|v| v.as_str())
-                .and_then(|s| s.parse::<f64>().ok())
-                .unwrap_or(0.0);
-            let total = read_cost + eval_cost;
-            node.cost = Some(NodeCost::new(0.0, total));
-        }
+    {
+        let eval_cost = cost_info
+            .get("eval_cost")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.0);
+        let total = read_cost + eval_cost;
+        node.cost = Some(NodeCost::new(0.0, total));
     }
 
     // Rows examined
@@ -352,10 +348,10 @@ fn parse_table_access(table: &Value) -> Result<PlanNode> {
     }
 
     // Index used
-    if let Some(key) = table.get("key").and_then(|v| v.as_str()) {
-        if key != "null" {
-            node.index_name = Some(key.to_string());
-        }
+    if let Some(key) = table.get("key").and_then(|v| v.as_str())
+        && key != "null"
+    {
+        node.index_name = Some(key.to_string());
     }
 
     // Possible keys
@@ -400,15 +396,15 @@ fn parse_table_access(table: &Value) -> Result<PlanNode> {
     }
 
     // Using index (covering index)
-    if let Some(using_index) = table.get("using_index").and_then(|v| v.as_bool()) {
-        if using_index {
-            // This is effectively an index-only scan
-            if node.node_type == NodeType::IndexScan {
-                node.node_type = NodeType::IndexOnlyScan;
-            }
-            node.extra
-                .insert("using_index".to_string(), Value::Bool(true));
+    if let Some(using_index) = table.get("using_index").and_then(|v| v.as_bool())
+        && using_index
+    {
+        // This is effectively an index-only scan
+        if node.node_type == NodeType::IndexScan {
+            node.node_type = NodeType::IndexOnlyScan;
         }
+        node.extra
+            .insert("using_index".to_string(), Value::Bool(true));
     }
 
     // Using index for group-by
@@ -420,12 +416,12 @@ fn parse_table_access(table: &Value) -> Result<PlanNode> {
     // Subqueries in this table access
     if let Some(subqueries) = table.get("subqueries").and_then(|v| v.as_array()) {
         for subquery in subqueries {
-            if let Some(query_block) = subquery.get("query_block") {
-                if let Ok(child) = parse_query_block(query_block) {
-                    let mut subquery_scan = PlanNode::new(NodeType::SubqueryScan);
-                    subquery_scan.children.push(child);
-                    node.children.push(subquery_scan);
-                }
+            if let Some(query_block) = subquery.get("query_block")
+                && let Ok(child) = parse_query_block(query_block)
+            {
+                let mut subquery_scan = PlanNode::new(NodeType::SubqueryScan);
+                subquery_scan.children.push(child);
+                node.children.push(subquery_scan);
             }
         }
     }
@@ -441,20 +437,20 @@ fn parse_union_result(union: &Value) -> Result<PlanNode> {
         node.description = Some(format!("Union result: {}", table_name));
     }
 
-    if let Some(using_tmptable) = union.get("using_temporary_table").and_then(|v| v.as_bool()) {
-        if using_tmptable {
-            node.extra
-                .insert("using_temporary_table".to_string(), Value::Bool(true));
-        }
+    if let Some(using_tmptable) = union.get("using_temporary_table").and_then(|v| v.as_bool())
+        && using_tmptable
+    {
+        node.extra
+            .insert("using_temporary_table".to_string(), Value::Bool(true));
     }
 
     // Parse the query_specifications (UNION members)
     if let Some(query_specs) = union.get("query_specifications").and_then(|v| v.as_array()) {
         for spec in query_specs {
-            if let Some(query_block) = spec.get("query_block") {
-                if let Ok(child) = parse_query_block(query_block) {
-                    node.children.push(child);
-                }
+            if let Some(query_block) = spec.get("query_block")
+                && let Ok(child) = parse_query_block(query_block)
+            {
+                node.children.push(child);
             }
         }
     }
@@ -643,10 +639,10 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
 
         node.relation = Some(row.table.clone());
 
-        if let Some(ref key) = row.key {
-            if key != "NULL" {
-                node.index_name = Some(key.clone());
-            }
+        if let Some(ref key) = row.key
+            && key != "NULL"
+        {
+            node.index_name = Some(key.clone());
         }
 
         if let Some(rows) = row.rows {
@@ -667,29 +663,29 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
         }
 
         // Store possible_keys if available
-        if let Some(ref possible_keys) = row.possible_keys {
-            if possible_keys != "NULL" && !possible_keys.is_empty() {
-                node.extra.insert(
-                    "possible_keys".to_string(),
-                    Value::String(possible_keys.clone()),
-                );
-            }
+        if let Some(ref possible_keys) = row.possible_keys
+            && possible_keys != "NULL" && !possible_keys.is_empty()
+        {
+            node.extra.insert(
+                "possible_keys".to_string(),
+                Value::String(possible_keys.clone()),
+            );
         }
 
         // Store key_len if available
-        if let Some(ref key_len) = row.key_len {
-            if key_len != "NULL" && !key_len.is_empty() {
-                node.extra
-                    .insert("key_length".to_string(), Value::String(key_len.clone()));
-            }
+        if let Some(ref key_len) = row.key_len
+            && key_len != "NULL" && !key_len.is_empty()
+        {
+            node.extra
+                .insert("key_length".to_string(), Value::String(key_len.clone()));
         }
 
         // Store ref columns if available
-        if let Some(ref ref_cols) = row.ref_cols {
-            if ref_cols != "NULL" && !ref_cols.is_empty() {
-                node.extra
-                    .insert("ref".to_string(), Value::String(ref_cols.clone()));
-            }
+        if let Some(ref ref_cols) = row.ref_cols
+            && ref_cols != "NULL" && !ref_cols.is_empty()
+        {
+            node.extra
+                .insert("ref".to_string(), Value::String(ref_cols.clone()));
         }
 
         // Store select_type for building the tree
@@ -705,7 +701,7 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
 
     // If single node, return it
     if nodes.len() == 1 {
-        return Ok(nodes.pop().unwrap());
+        return Ok(nodes.remove(0));
     }
 
     // Build join tree (nested loop by default for MySQL)

@@ -8,7 +8,6 @@ mod problems_panel;
 mod query_editor;
 mod query_tabs_panel;
 mod results_panel;
-mod zed_input;
 
 pub use actions::{
     AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp,
@@ -26,4 +25,3 @@ pub use query_tabs_panel::{QueryTabsPanel, QueryTabsPanelEvent};
 pub use results_panel::{
     ExplainResult, QueryExecution, ResultsPanel, ResultsPanelEvent, StatementResult,
 };
-pub use zed_input::{ZedInput, ZedInputEvent, ZedInputState};

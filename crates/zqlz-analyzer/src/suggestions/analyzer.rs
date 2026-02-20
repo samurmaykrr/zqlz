@@ -368,8 +368,9 @@ impl QueryAnalyzer {
 
         for node in plan.iter_nodes() {
             // Check for seq scans with filters
-            if node.node_type == NodeType::SeqScan && node.filter.is_some() {
-                let filter = node.filter.as_ref().unwrap();
+            if node.node_type == NodeType::SeqScan
+                && let Some(filter) = node.filter.as_ref()
+            {
                 let table = node
                     .relation
                     .clone()
@@ -589,7 +590,7 @@ fn extract_columns_from_filter(filter: &str) -> Vec<String> {
                         .trim_start_matches('(')
                         .trim()
                         .split('.')
-                        .last()
+                        .next_back()
                         .unwrap_or(potential_col)
                         .to_string();
 

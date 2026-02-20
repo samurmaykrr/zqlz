@@ -22,7 +22,7 @@ use crate::widgets::{
     v_flex,
 };
 
-const CONTEXT: &'static str = "SearchPanel";
+const CONTEXT: &str = "SearchPanel";
 
 actions!(input, [Tab]);
 

@@ -307,7 +307,7 @@ pub enum JoinType {
 
 impl JoinType {
     /// Parses a join type from a string
-    pub fn from_str(s: &str) -> Option<Self> {
+    pub fn parse(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "inner" => Some(Self::Inner),
             "left" | "left outer" => Some(Self::Left),
@@ -401,7 +401,7 @@ pub enum NodeType {
     ProjectSet,
 
     // CTE
-    CTE,
+    Cte,
 
     // Unknown/Other
     Unknown,
@@ -454,7 +454,7 @@ impl NodeType {
             "Gather Merge" => Self::GatherMerge,
             "LockRows" | "Lock Rows" => Self::LockRows,
             "ProjectSet" | "Project Set" => Self::ProjectSet,
-            "CTE" => Self::CTE,
+            "CTE" => Self::Cte,
             _ => Self::Unknown,
         }
     }
@@ -505,7 +505,7 @@ impl NodeType {
             Self::GatherMerge => "Gather merge (merges sorted parallel results)",
             Self::LockRows => "Lock rows (FOR UPDATE/SHARE)",
             Self::ProjectSet => "Project set (generates rows from set-returning functions)",
-            Self::CTE => "Common Table Expression",
+            Self::Cte => "Common Table Expression",
             Self::Unknown => "Unknown operation",
         }
     }

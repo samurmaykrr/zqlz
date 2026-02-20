@@ -456,18 +456,16 @@ fn dbt_source(ctx: &DbtContext, args: &[Value]) -> Result<Value, Error> {
 
     if let Some(source_ref) = ctx.sources.get(&key) {
         Ok(Value::from(source_ref.qualified_name.clone()))
+    } else if ctx.execute {
+        Err(Error::new(
+            ErrorKind::InvalidOperation,
+            format!(
+                "Source '{}.{}' not found in sources",
+                source_name, table_name
+            ),
+        ))
     } else {
-        if ctx.execute {
-            Err(Error::new(
-                ErrorKind::InvalidOperation,
-                format!(
-                    "Source '{}.{}' not found in sources",
-                    source_name, table_name
-                ),
-            ))
-        } else {
-            Ok(Value::from(""))
-        }
+        Ok(Value::from(""))
     }
 }
 
@@ -523,51 +521,51 @@ fn dbt_config(ctx: &DbtContext, args: &[Value]) -> Result<Value, Error> {
         let mut config = ctx.config.lock().unwrap();
 
         for key in iter {
-            if let Some(key_str) = key.as_str() {
-                if let Ok(value) = config_value.get_item(&key) {
-                    match key_str {
-                        "materialized" => {
-                            config.materialized = value.as_str().map(|s| s.to_string());
+            if let Some(key_str) = key.as_str()
+                && let Ok(value) = config_value.get_item(&key)
+            {
+                match key_str {
+                    "materialized" => {
+                        config.materialized = value.as_str().map(|s| s.to_string());
+                    }
+                    "schema" => {
+                        config.schema = value.as_str().map(|s| s.to_string());
+                    }
+                    "database" => {
+                        config.database = value.as_str().map(|s| s.to_string());
+                    }
+                    "alias" => {
+                        config.alias = value.as_str().map(|s| s.to_string());
+                    }
+                    "tags" => {
+                        if let Ok(tags_iter) = value.try_iter() {
+                            config.tags = tags_iter
+                                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                                .collect();
                         }
-                        "schema" => {
-                            config.schema = value.as_str().map(|s| s.to_string());
+                    }
+                    "pre_hook" | "pre-hook" => {
+                        if let Some(hook) = value.as_str() {
+                            config.pre_hook.push(hook.to_string());
+                        } else if let Ok(hooks_iter) = value.try_iter() {
+                            config.pre_hook.extend(
+                                hooks_iter.filter_map(|v| v.as_str().map(|s| s.to_string())),
+                            );
                         }
-                        "database" => {
-                            config.database = value.as_str().map(|s| s.to_string());
+                    }
+                    "post_hook" | "post-hook" => {
+                        if let Some(hook) = value.as_str() {
+                            config.post_hook.push(hook.to_string());
+                        } else if let Ok(hooks_iter) = value.try_iter() {
+                            config.post_hook.extend(
+                                hooks_iter.filter_map(|v| v.as_str().map(|s| s.to_string())),
+                            );
                         }
-                        "alias" => {
-                            config.alias = value.as_str().map(|s| s.to_string());
-                        }
-                        "tags" => {
-                            if let Ok(tags_iter) = value.try_iter() {
-                                config.tags = tags_iter
-                                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                                    .collect();
-                            }
-                        }
-                        "pre_hook" | "pre-hook" => {
-                            if let Some(hook) = value.as_str() {
-                                config.pre_hook.push(hook.to_string());
-                            } else if let Ok(hooks_iter) = value.try_iter() {
-                                config.pre_hook.extend(
-                                    hooks_iter.filter_map(|v| v.as_str().map(|s| s.to_string())),
-                                );
-                            }
-                        }
-                        "post_hook" | "post-hook" => {
-                            if let Some(hook) = value.as_str() {
-                                config.post_hook.push(hook.to_string());
-                            } else if let Ok(hooks_iter) = value.try_iter() {
-                                config.post_hook.extend(
-                                    hooks_iter.filter_map(|v| v.as_str().map(|s| s.to_string())),
-                                );
-                            }
-                        }
-                        _ => {
-                            // Store in extra config
-                            if let Ok(json_value) = serde_json::to_value(&value) {
-                                config.extra.insert(key_str.to_string(), json_value);
-                            }
+                    }
+                    _ => {
+                        // Store in extra config
+                        if let Ok(json_value) = serde_json::to_value(&value) {
+                            config.extra.insert(key_str.to_string(), json_value);
                         }
                     }
                 }

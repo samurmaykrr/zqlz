@@ -14,7 +14,7 @@ use zqlz_ui::widgets::{
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
-    select::{Select, SelectEvent, SelectItem, SelectState},
+    select::{Select, SelectItem, SelectState},
     typography::{body_small, caption, label, muted_small},
     v_flex, ActiveTheme, Icon, IndexPath, Sizable, ZqlzIcon,
 };
@@ -25,6 +25,7 @@ use zqlz_query::QueryEditor;
 
 /// Events emitted by the template library panel
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum TemplateLibraryEvent {
     /// User selected a template to use
     UseTemplate {
@@ -42,12 +43,14 @@ pub enum TemplateLibraryEvent {
 
 /// SelectItem implementation for TemplateType dropdown
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 struct TemplateTypeOption {
     template_type: TemplateType,
     label: SharedString,
     description: SharedString,
 }
 
+#[allow(dead_code)]
 impl TemplateTypeOption {
     fn plain_sql() -> Self {
         Self {
@@ -87,6 +90,7 @@ impl SelectItem for TemplateTypeOption {
 }
 
 /// State for the save/edit template modal
+#[allow(dead_code)]
 struct TemplateEditState {
     template_id: Option<Uuid>,
     name_input: Entity<InputState>,
@@ -100,6 +104,7 @@ struct TemplateEditState {
 }
 
 /// Template Library Panel for browsing and managing SQL templates
+#[allow(dead_code)]
 pub struct TemplateLibraryPanel {
     focus_handle: FocusHandle,
     /// All loaded templates
@@ -126,6 +131,7 @@ pub struct TemplateLibraryPanel {
     _subscriptions: Vec<Subscription>,
 }
 
+#[allow(dead_code)]
 impl TemplateLibraryPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let storage = LocalStorage::default();
@@ -355,7 +361,7 @@ impl TemplateLibraryPanel {
             template
         } else {
             // Create new template based on type
-            let mut template = match template_type {
+            let template = match template_type {
                 TemplateType::PlainSql => {
                     SavedTemplate::new(name, description, template_sql, default_params, tags)
                 }

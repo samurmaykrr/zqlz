@@ -25,7 +25,7 @@ use crate::widgets::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::widgets::input::movement::MoveDirection;
 use crate::widgets::input::{
     element::RIGHT_MARGIN,
-    popovers::{ContextMenu, DiagnosticPopoverData, HoverPopoverData, MouseContextMenu},
+    popovers::{ContextMenu, DiagnosticPopoverData, MouseContextMenu},
     search::{self, SearchPanel},
     text_wrapper::LineLayout,
     HoverDefinition, Lsp, Position,
@@ -355,9 +355,9 @@ pub struct InputState {
     pub(super) mouse_context_menu: Entity<MouseContextMenu>,
     /// A flag to indicate if we are currently inserting a completion item.
     pub(super) completion_inserting: bool,
-    /// Hover popover data and cached text view state
-    pub(super) hover_popover_data: Option<HoverPopoverData>,
-    pub(super) hover_text_view_state: Option<Entity<TextViewState>>,
+    /// Whether hover is enabled. When disabled, hover popover will not be shown.
+    /// Schema metadata overlay (ShowHover action) provides similar functionality via keybinding.
+    pub(super) hover_enabled: bool,
     /// The LSP definitions locations for "Go to Definition" feature.
     pub(super) hover_definition: HoverDefinition,
 
@@ -397,6 +397,7 @@ pub struct InputState {
 
 impl EventEmitter<InputEvent> for InputState {}
 
+#[allow(dead_code)]
 impl InputState {
     /// Create a Input state with default [`InputMode::SingleLine`] mode.
     ///
@@ -469,8 +470,7 @@ impl InputState {
             context_menu: None,
             mouse_context_menu,
             completion_inserting: false,
-            hover_popover_data: None,
-            hover_text_view_state: None,
+            hover_enabled: true,
             hover_definition: HoverDefinition::default(),
             silent_replace_text: false,
             size: Size::default(),
@@ -556,6 +556,19 @@ impl InputState {
     /// so the table can commit and navigate to adjacent cells.
     pub fn emit_arrow_event(mut self, emit: bool) -> Self {
         self.emit_arrow_event = emit;
+        self
+    }
+
+    /// Set whether hover popover is enabled.
+    ///
+    /// When disabled, the hover popover will not be shown on mouse hover.
+    /// This respects user settings for LSP hover functionality.
+    ///
+    /// Default is true (hover enabled).
+    /// Note: When disabled, the legacy hover popover is not shown.
+    /// Schema metadata overlay provides similar functionality via ShowHover action (F1 keybinding).
+    pub fn hover_enabled(mut self, enabled: bool) -> Self {
+        self.hover_enabled = enabled;
         self
     }
 
@@ -651,8 +664,6 @@ impl InputState {
     }
 
     pub(crate) fn clear_inline_popovers(&mut self) {
-        self.hover_popover_data = None;
-        self.hover_text_view_state = None;
         self.diagnostic_popover_data = None;
         self.diagnostic_text_view_state = None;
     }
@@ -838,6 +849,16 @@ impl InputState {
     pub fn set_masked(&mut self, masked: bool, _: &mut Window, cx: &mut Context<Self>) {
         debug_assert!(self.mode.is_single_line());
         self.masked = masked;
+        cx.notify();
+    }
+
+    /// Set whether hover popover is enabled.
+    ///
+    /// When disabled, the hover popover will not be shown on mouse hover.
+    /// This respects user settings for LSP hover functionality.
+    /// Note: Schema metadata overlay (ShowHover action) provides similar functionality via F1 keybinding.
+    pub fn set_hover_enabled(&mut self, enabled: bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.hover_enabled = enabled;
         cx.notify();
     }
 
@@ -1342,7 +1363,7 @@ impl InputState {
             return;
         }
 
-        if self.diagnostic_popover_data.is_some() || self.hover_popover_data.is_some() {
+        if self.diagnostic_popover_data.is_some() {
             self.clear_inline_popovers();
             cx.notify();
             return;
@@ -1488,8 +1509,6 @@ impl InputState {
         let offset = self.index_for_mouse_position(event.position);
         if !self.mode.show_inline_diagnostics() {
             self.hover_definition.clear();
-            self.hover_popover_data = None;
-            self.hover_text_view_state = None;
             return;
         }
         self.handle_mouse_move(offset, event, window, cx);
@@ -2135,40 +2154,6 @@ impl InputState {
 
         Some(DiagnosticPopover::new(data, text_view_state, origin))
     }
-
-    /// Render the hover popover if there's data for it
-    fn render_hover_popover(&self, _cx: &App) -> Option<impl IntoElement> {
-        if !self.mode.show_inline_diagnostics() {
-            return None;
-        }
-        use crate::widgets::input::popovers::{hover_popover_origin, HoverPopover};
-
-        let data = self.hover_popover_data.as_ref()?;
-        tracing::debug!(
-            symbol_range = ?data.symbol_range,
-            content_len = data.content.len(),
-            "Rendering hover popover"
-        );
-        let text_view_state = self.hover_text_view_state.as_ref()?;
-
-        let last_layout = self.last_layout.as_ref()?;
-        let last_bounds = self.last_bounds?;
-
-        let (_, _, start_pos) = self.line_and_position_for_offset(data.symbol_range.start);
-        let (_, _, end_pos) = self.line_and_position_for_offset(data.symbol_range.end);
-
-        let start_pos = start_pos?;
-        let end_pos = end_pos?;
-
-        let origin = hover_popover_origin(
-            last_layout.line_height,
-            last_bounds.origin,
-            start_pos,
-            end_pos,
-        );
-
-        Some(HoverPopover::new(text_view_state, origin))
-    }
 }
 
 impl super::popovers::CompletionMenuEditor for InputState {
@@ -2493,6 +2478,5 @@ impl Render for InputState {
             .child(TextElement::new(cx.entity().clone()).placeholder(self.placeholder.clone()))
             .children(self.render_diagnostic_popover(cx))
             .children(self.context_menu.as_ref().map(|menu| menu.render()))
-            .children(self.render_hover_popover(cx))
     }
 }

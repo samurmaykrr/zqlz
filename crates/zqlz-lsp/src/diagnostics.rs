@@ -2,9 +2,9 @@
 
 use crate::{SchemaCache, SchemaValidator, ValidationSeverity};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use sqlparser::dialect::{Dialect, GenericDialect};
+use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-use tree_sitter::{Parser as TreeSitterParser, Query, QueryCursor};
+use tree_sitter::Parser as TreeSitterParser;
 use zqlz_core::DialectConfig;
 use zqlz_ui::widgets::{Rope, RopeExt};
 

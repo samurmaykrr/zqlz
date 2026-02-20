@@ -163,7 +163,7 @@ pub struct ViewInfo {
 }
 
 /// Column information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ColumnInfo {
     pub name: String,
     pub ordinal: usize,
@@ -178,6 +178,15 @@ pub struct ColumnInfo {
     pub is_unique: bool,
     pub foreign_key: Option<ForeignKeyRef>,
     pub comment: Option<String>,
+    /// GENERATED ALWAYS AS expression for computed columns.
+    /// Populated by drivers that support generated columns (PostgreSQL 12+, MySQL 5.7+, SQLite 3.31+).
+    /// None for regular columns.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation_expression: Option<String>,
+    /// Whether a generated column is STORED (materialised on disk) rather than VIRTUAL (recomputed on read).
+    /// Only meaningful when `generation_expression` is `Some`.
+    #[serde(default)]
+    pub is_generated_stored: bool,
 }
 
 /// Foreign key reference (for column info)
@@ -189,7 +198,7 @@ pub struct ForeignKeyRef {
 }
 
 /// Index information
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct IndexInfo {
     pub name: String,
     pub columns: Vec<String>,
@@ -197,6 +206,19 @@ pub struct IndexInfo {
     pub is_primary: bool,
     pub index_type: String,
     pub comment: Option<String>,
+    /// Partial index predicate (PostgreSQL / SQLite WHERE clause).
+    /// None for indexes that apply to all rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub where_clause: Option<String>,
+    /// Non-key columns pulled into a covering index (PostgreSQL INCLUDE).
+    /// Empty for drivers that do not support this feature.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub include_columns: Vec<String>,
+    /// Per-column sort direction — `true` means DESC, `false` (or absent) means ASC.
+    /// Parallel to `columns`; drivers that do not track direction leave this empty
+    /// (all columns default to ASC during export).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub column_descending: Vec<bool>,
 }
 
 /// Foreign key information
@@ -209,6 +231,14 @@ pub struct ForeignKeyInfo {
     pub referenced_columns: Vec<String>,
     pub on_update: ForeignKeyAction,
     pub on_delete: ForeignKeyAction,
+    /// Whether the constraint can be deferred within a transaction.
+    /// Only PostgreSQL supports this; defaults to `false` for all other drivers.
+    #[serde(default)]
+    pub is_deferrable: bool,
+    /// Whether the constraint starts in DEFERRED mode (only relevant when `is_deferrable`
+    /// is true).
+    #[serde(default)]
+    pub initially_deferred: bool,
 }
 
 /// Foreign key action

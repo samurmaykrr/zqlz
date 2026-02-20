@@ -1,5 +1,4 @@
 use crate::SchemaCache;
-use anyhow::Result;
 use sqlparser::ast::{
     Expr, Ident, ObjectName, Query, Select, SelectItem, SetExpr, Statement, TableFactor,
     TableWithJoins,
@@ -35,12 +34,17 @@ impl SchemaValidator {
     }
 
     pub fn validate(&self, sql: &str, schema: &SchemaCache) -> Vec<ValidationIssue> {
+        // Nothing useful can be inferred against an empty schema — the async
+        // refresh hasn't completed yet and every reference would be a false positive.
+        if schema.tables.is_empty() {
+            return Vec::new();
+        }
+
         let mut issues = Vec::new();
 
-        let parsed = Parser::parse_sql(&self.dialect, sql);
-        let statements = match parsed {
+        let statements = match Parser::parse_sql(&self.dialect, sql) {
             Ok(stmts) => stmts,
-            Err(_) => return issues, // Syntax errors handled by diagnostics
+            Err(_) => return issues, // Syntax errors handled by the tree-sitter pass
         };
 
         for statement in statements {
@@ -49,10 +53,8 @@ impl SchemaValidator {
                     self.validate_query(&query, schema, &mut issues);
                 }
                 Statement::Insert(insert) => {
-                    // Insert.table_name is ObjectName (not Option)
                     let table_name = &insert.table_name;
                     self.validate_table_reference(table_name, schema, &mut issues);
-                    // columns is Vec<Ident>, not Option<Vec<Ident>>
                     if !insert.columns.is_empty() {
                         self.validate_columns(table_name, &insert.columns, schema, &mut issues);
                     }
@@ -61,11 +63,9 @@ impl SchemaValidator {
                     self.validate_table_factor(&table.relation, schema, &mut issues);
                 }
                 Statement::Delete(delete) => {
-                    // Delete.tables is Vec<ObjectName> (table names to delete from)
                     for table_name in &delete.tables {
                         self.validate_table_reference(table_name, schema, &mut issues);
                     }
-                    // Validate using clause if present
                     if let Some(using_tables) = &delete.using {
                         for table_with_joins in using_tables {
                             self.validate_table_with_joins(table_with_joins, schema, &mut issues);
@@ -99,28 +99,47 @@ impl SchemaValidator {
         let mut available_tables = HashMap::new();
 
         for table_with_joins in &select.from {
-            self.collect_table_aliases(&table_with_joins, &mut available_tables, schema);
+            self.collect_table_aliases(table_with_joins, &mut available_tables, schema);
             self.validate_table_with_joins(table_with_joins, schema, issues);
         }
 
+        // Collect aliases defined in the SELECT list (e.g. `content_id AS ci`).
+        // These are valid identifiers in WHERE/HAVING on SQLite and should never
+        // be flagged as unknown columns.
+        let mut select_aliases: HashSet<String> = HashSet::new();
         for projection in &select.projection {
             match projection {
-                SelectItem::UnnamedExpr(expr) | SelectItem::ExprWithAlias { expr, .. } => {
-                    self.validate_expression(expr, &available_tables, schema, issues);
+                SelectItem::ExprWithAlias { expr, alias } => {
+                    select_aliases.insert(alias.value.to_lowercase());
+                    self.validate_expression(
+                        expr,
+                        &available_tables,
+                        &select_aliases,
+                        schema,
+                        issues,
+                    );
+                }
+                SelectItem::UnnamedExpr(expr) => {
+                    self.validate_expression(
+                        expr,
+                        &available_tables,
+                        &select_aliases,
+                        schema,
+                        issues,
+                    );
                 }
                 SelectItem::QualifiedWildcard(object_name, _) => {
-                    let table_name = object_name.to_string();
+                    let table_name = object_name.to_string().to_lowercase();
                     if !available_tables.contains_key(&table_name) {
                         issues.push(ValidationIssue {
                             severity: ValidationSeverity::Error,
-                            message: format!("Unknown table or alias: {}", table_name),
+                            message: format!("Unknown table or alias: {}", object_name),
                             line: 0,
                             column: 0,
                         });
                     }
                 }
                 SelectItem::Wildcard(_) => {
-                    // * is always valid if we have tables
                     if available_tables.is_empty() {
                         issues.push(ValidationIssue {
                             severity: ValidationSeverity::Warning,
@@ -134,7 +153,15 @@ impl SchemaValidator {
         }
 
         if let Some(selection) = &select.selection {
-            self.validate_expression(selection, &available_tables, schema, issues);
+            // Pass the full alias set so WHERE expressions like `ci = 'x'`
+            // (where `ci` is a SELECT alias) are not flagged.
+            self.validate_expression(
+                selection,
+                &available_tables,
+                &select_aliases,
+                schema,
+                issues,
+            );
         }
     }
 
@@ -179,12 +206,16 @@ impl SchemaValidator {
         schema: &SchemaCache,
         issues: &mut Vec<ValidationIssue>,
     ) {
-        let name = table_name.to_string();
+        // SQL identifiers are case-insensitive; normalize before lookup so that
+        // `web_html`, `Web_Html`, and `WEB_HTML` all match the same schema entry.
+        let name_lower = table_name.to_string().to_lowercase();
 
-        if !schema.tables.contains_key(&name) {
+        let exists = schema.tables.keys().any(|k| k.to_lowercase() == name_lower);
+
+        if !exists {
             issues.push(ValidationIssue {
                 severity: ValidationSeverity::Error,
-                message: format!("Table '{}' does not exist in schema", name),
+                message: format!("Table '{}' does not exist in schema", table_name),
                 line: 0,
                 column: 0,
             });
@@ -198,19 +229,24 @@ impl SchemaValidator {
         schema: &SchemaCache,
         issues: &mut Vec<ValidationIssue>,
     ) {
-        let table_str = table_name.to_string();
+        let table_lower = table_name.to_string().to_lowercase();
 
-        if let Some(columns_list) = schema.columns_by_table.get(&table_str) {
-            let column_names: HashSet<_> = columns_list.iter().map(|c| c.name.as_str()).collect();
+        // Find the canonical table entry using a case-insensitive key match.
+        let column_names: Option<HashSet<String>> = schema
+            .columns_by_table
+            .iter()
+            .find(|(k, _)| k.to_lowercase() == table_lower)
+            .map(|(_, cols)| cols.iter().map(|c| c.name.to_lowercase()).collect());
 
+        if let Some(column_names) = column_names {
             for column in columns {
-                let col_name = column.value.as_str();
-                if !column_names.contains(col_name) {
+                let col_lower = column.value.to_lowercase();
+                if !column_names.contains(&col_lower) {
                     issues.push(ValidationIssue {
                         severity: ValidationSeverity::Error,
                         message: format!(
                             "Column '{}' does not exist in table '{}'",
-                            col_name, table_str
+                            column.value, table_name
                         ),
                         line: 0,
                         column: 0,
@@ -224,18 +260,31 @@ impl SchemaValidator {
         &self,
         expr: &Expr,
         available_tables: &HashMap<String, String>,
+        select_aliases: &HashSet<String>,
         schema: &SchemaCache,
         issues: &mut Vec<ValidationIssue>,
     ) {
         match expr {
             Expr::Identifier(ident) => {
-                // Unqualified column reference - check if it exists in any available table
-                let column_name = ident.value.as_str();
-                let mut found = false;
+                let col_lower = ident.value.to_lowercase();
 
+                // Skip identifiers that are SELECT-list aliases — they are perfectly
+                // valid in WHERE/HAVING in SQLite and most SQL dialects.
+                if select_aliases.contains(&col_lower) {
+                    return;
+                }
+
+                let mut found = false;
                 for actual_table_name in available_tables.values() {
-                    if let Some(columns) = schema.columns_by_table.get(actual_table_name) {
-                        if columns.iter().any(|c| c.name == column_name) {
+                    // Case-insensitive column lookup.
+                    let canonical = schema
+                        .columns_by_table
+                        .iter()
+                        .find(|(k, _)| k.to_lowercase() == actual_table_name.to_lowercase())
+                        .map(|(_, v)| v);
+
+                    if let Some(columns) = canonical {
+                        if columns.iter().any(|c| c.name.to_lowercase() == col_lower) {
                             found = true;
                             break;
                         }
@@ -247,77 +296,92 @@ impl SchemaValidator {
                         severity: ValidationSeverity::Warning,
                         message: format!(
                             "Column '{}' may not exist in available tables",
-                            column_name
+                            ident.value
                         ),
                         line: 0,
                         column: 0,
                     });
                 }
             }
-            Expr::CompoundIdentifier(parts) => {
-                if parts.len() == 2 {
-                    let table_or_alias = parts[0].value.as_str();
-                    let column_name = parts[1].value.as_str();
+            Expr::CompoundIdentifier(parts) if parts.len() == 2 => {
+                let table_or_alias = parts[0].value.to_lowercase();
+                let col_lower = parts[1].value.to_lowercase();
 
-                    if let Some(actual_table_name) = available_tables.get(table_or_alias) {
-                        if let Some(columns) = schema.columns_by_table.get(actual_table_name) {
-                            if !columns.iter().any(|c| c.name == column_name) {
-                                issues.push(ValidationIssue {
-                                    severity: ValidationSeverity::Error,
-                                    message: format!(
-                                        "Column '{}' does not exist in table '{}'",
-                                        column_name, actual_table_name
-                                    ),
-                                    line: 0,
-                                    column: 0,
-                                });
-                            }
+                if let Some(actual_table_name) = available_tables.get(&table_or_alias) {
+                    let canonical = schema
+                        .columns_by_table
+                        .iter()
+                        .find(|(k, _)| k.to_lowercase() == actual_table_name.to_lowercase())
+                        .map(|(_, v)| v);
+
+                    if let Some(columns) = canonical {
+                        if !columns.iter().any(|c| c.name.to_lowercase() == col_lower) {
+                            issues.push(ValidationIssue {
+                                severity: ValidationSeverity::Error,
+                                message: format!(
+                                    "Column '{}' does not exist in table '{}'",
+                                    parts[1].value, actual_table_name
+                                ),
+                                line: 0,
+                                column: 0,
+                            });
                         }
-                    } else {
-                        issues.push(ValidationIssue {
-                            severity: ValidationSeverity::Warning,
-                            message: format!("Unknown table or alias: {}", table_or_alias),
-                            line: 0,
-                            column: 0,
-                        });
                     }
+                } else {
+                    issues.push(ValidationIssue {
+                        severity: ValidationSeverity::Warning,
+                        message: format!("Unknown table or alias: {}", parts[0].value),
+                        line: 0,
+                        column: 0,
+                    });
                 }
             }
             Expr::BinaryOp { left, right, .. } => {
-                self.validate_expression(left, available_tables, schema, issues);
-                self.validate_expression(right, available_tables, schema, issues);
+                self.validate_expression(left, available_tables, select_aliases, schema, issues);
+                self.validate_expression(right, available_tables, select_aliases, schema, issues);
             }
             Expr::UnaryOp { expr, .. } => {
-                self.validate_expression(expr, available_tables, schema, issues);
+                self.validate_expression(expr, available_tables, select_aliases, schema, issues);
             }
             Expr::Nested(expr) => {
-                self.validate_expression(expr, available_tables, schema, issues);
+                self.validate_expression(expr, available_tables, select_aliases, schema, issues);
             }
             Expr::Function(func) => {
-                // FunctionArguments can be None, List, or Subquery
                 if let sqlparser::ast::FunctionArguments::List(ref arg_list) = func.args {
                     for arg in &arg_list.args {
                         if let sqlparser::ast::FunctionArg::Unnamed(
                             sqlparser::ast::FunctionArgExpr::Expr(e),
                         ) = arg
                         {
-                            self.validate_expression(e, available_tables, schema, issues);
+                            self.validate_expression(
+                                e,
+                                available_tables,
+                                select_aliases,
+                                schema,
+                                issues,
+                            );
                         }
                     }
                 }
             }
             Expr::InList { expr, list, .. } => {
-                self.validate_expression(expr, available_tables, schema, issues);
+                self.validate_expression(expr, available_tables, select_aliases, schema, issues);
                 for item in list {
-                    self.validate_expression(item, available_tables, schema, issues);
+                    self.validate_expression(
+                        item,
+                        available_tables,
+                        select_aliases,
+                        schema,
+                        issues,
+                    );
                 }
             }
             Expr::Between {
                 expr, low, high, ..
             } => {
-                self.validate_expression(expr, available_tables, schema, issues);
-                self.validate_expression(low, available_tables, schema, issues);
-                self.validate_expression(high, available_tables, schema, issues);
+                self.validate_expression(expr, available_tables, select_aliases, schema, issues);
+                self.validate_expression(low, available_tables, select_aliases, schema, issues);
+                self.validate_expression(high, available_tables, select_aliases, schema, issues);
             }
             Expr::Case {
                 operand,
@@ -327,16 +391,34 @@ impl SchemaValidator {
                 ..
             } => {
                 if let Some(op) = operand {
-                    self.validate_expression(op, available_tables, schema, issues);
+                    self.validate_expression(op, available_tables, select_aliases, schema, issues);
                 }
                 for cond in conditions {
-                    self.validate_expression(cond, available_tables, schema, issues);
+                    self.validate_expression(
+                        cond,
+                        available_tables,
+                        select_aliases,
+                        schema,
+                        issues,
+                    );
                 }
                 for result in results {
-                    self.validate_expression(result, available_tables, schema, issues);
+                    self.validate_expression(
+                        result,
+                        available_tables,
+                        select_aliases,
+                        schema,
+                        issues,
+                    );
                 }
                 if let Some(else_expr) = else_result {
-                    self.validate_expression(else_expr, available_tables, schema, issues);
+                    self.validate_expression(
+                        else_expr,
+                        available_tables,
+                        select_aliases,
+                        schema,
+                        issues,
+                    );
                 }
             }
             Expr::Subquery(query) => {
@@ -368,17 +450,24 @@ impl SchemaValidator {
         match table_factor {
             TableFactor::Table { name, alias, .. } => {
                 let table_name = name.to_string();
-                if schema.tables.contains_key(&table_name) {
-                    if let Some(alias_obj) = alias {
-                        let alias_name = alias_obj.name.value.to_string();
-                        aliases.insert(alias_name, table_name.clone());
-                    }
-                    aliases.insert(table_name.clone(), table_name);
+                // Use case-insensitive lookup to find the canonical schema name.
+                let canonical = schema
+                    .tables
+                    .keys()
+                    .find(|k| k.to_lowercase() == table_name.to_lowercase())
+                    .cloned()
+                    .unwrap_or_else(|| table_name.clone());
+
+                let key = table_name.to_lowercase();
+                aliases.insert(key.clone(), canonical.clone());
+
+                if let Some(alias_obj) = alias {
+                    aliases.insert(alias_obj.name.value.to_lowercase(), canonical);
                 }
             }
             TableFactor::Derived { alias, .. } => {
                 if let Some(alias_obj) = alias {
-                    let alias_name = alias_obj.name.value.to_string();
+                    let alias_name = alias_obj.name.value.to_lowercase();
                     aliases.insert(alias_name.clone(), alias_name);
                 }
             }
@@ -401,7 +490,6 @@ mod tests {
     fn create_test_schema() -> SchemaCache {
         let mut schema = SchemaCache::default();
 
-        // Add users table
         schema.tables.insert(
             "users".to_string(),
             crate::TableInfo {
@@ -448,7 +536,6 @@ mod tests {
             ],
         );
 
-        // Add orders table
         schema.tables.insert(
             "orders".to_string(),
             crate::TableInfo {
@@ -502,10 +589,7 @@ mod tests {
     fn test_validate_valid_query() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT id, name FROM users WHERE id = 1";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate("SELECT id, name FROM users WHERE id = 1", &schema);
         assert!(issues.is_empty());
     }
 
@@ -513,10 +597,7 @@ mod tests {
     fn test_validate_unknown_table() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT * FROM products";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate("SELECT * FROM products", &schema);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.message.contains("does not exist")));
     }
@@ -525,10 +606,7 @@ mod tests {
     fn test_validate_unknown_column() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT id, age FROM users";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate("SELECT id, age FROM users", &schema);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.message.contains("age")));
     }
@@ -537,10 +615,10 @@ mod tests {
     fn test_validate_join_with_alias() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate(
+            "SELECT u.name, o.total FROM users u JOIN orders o ON u.id = o.user_id",
+            &schema,
+        );
         assert!(issues.is_empty());
     }
 
@@ -548,10 +626,7 @@ mod tests {
     fn test_validate_invalid_qualified_column() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT u.invalid_column FROM users u";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate("SELECT u.invalid_column FROM users u", &schema);
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.message.contains("invalid_column")));
     }
@@ -560,10 +635,10 @@ mod tests {
     fn test_validate_insert_unknown_column() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "INSERT INTO users (id, name, age) VALUES (1, 'test', 30)";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate(
+            "INSERT INTO users (id, name, age) VALUES (1, 'test', 30)",
+            &schema,
+        );
         assert!(!issues.is_empty());
         assert!(issues.iter().any(|i| i.message.contains("age")));
     }
@@ -572,10 +647,45 @@ mod tests {
     fn test_validate_complex_expression() {
         let validator = SchemaValidator::new();
         let schema = create_test_schema();
-
-        let sql = "SELECT name FROM users WHERE id IN (1, 2, 3) AND name LIKE '%test%'";
-        let issues = validator.validate(sql, &schema);
-
+        let issues = validator.validate(
+            "SELECT name FROM users WHERE id IN (1, 2, 3) AND name LIKE '%test%'",
+            &schema,
+        );
         assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_empty_schema_skips_validation() {
+        let validator = SchemaValidator::new();
+        let schema = SchemaCache::default(); // empty
+                                             // Should produce no issues, not a flood of "table not found" errors
+        let issues = validator.validate("SELECT * FROM any_table", &schema);
+        assert!(issues.is_empty());
+    }
+
+    #[test]
+    fn test_select_alias_in_where_is_not_flagged() {
+        let validator = SchemaValidator::new();
+        let schema = create_test_schema();
+        // `u` is a SELECT alias; it must not appear as an unknown column warning
+        let issues = validator.validate("SELECT id AS u FROM users WHERE u = 1", &schema);
+        assert!(
+            issues.iter().all(|i| !i.message.contains("'u'")),
+            "alias 'u' should not generate a warning: {:?}",
+            issues
+        );
+    }
+
+    #[test]
+    fn test_case_insensitive_table_lookup() {
+        let validator = SchemaValidator::new();
+        let schema = create_test_schema();
+        // Schema stores "users" lowercase; query uses mixed case
+        let issues = validator.validate("SELECT id FROM Users", &schema);
+        assert!(
+            issues.iter().all(|i| !i.message.contains("does not exist")),
+            "case-insensitive lookup should find 'users': {:?}",
+            issues
+        );
     }
 }

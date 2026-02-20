@@ -12,14 +12,14 @@ fn main() {
     }
 
     // Set commit SHA for version info
+    #[allow(clippy::disallowed_methods)]
     if let Ok(output) = std::process::Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let sha = String::from_utf8_lossy(&output.stdout);
-            println!("cargo:rustc-env=ZQLZ_COMMIT_SHA={}", sha.trim());
-        }
+        let sha = String::from_utf8_lossy(&output.stdout);
+        println!("cargo:rustc-env=ZQLZ_COMMIT_SHA={}", sha.trim());
     }
 
     // Windows-specific: embed icon and version info

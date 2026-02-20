@@ -133,7 +133,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
                         );
                     });
 
-                    cx.update(|window, cx| {
+                    cx.update(|_window, _cx| {
                         let msg = if filter_count == 0 && sort_count == 0 {
                             "Filters cleared".to_string()
                         } else {
@@ -169,7 +169,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
 /// This is called when user clicks a column header to sort.
 /// Instead of client-side sorting, we reload the table with ORDER BY.
 pub(in crate::main_view) fn handle_sort_column_event(
-    connection_id: Uuid,
+    _connection_id: Uuid,
     table_name: &str,
     column_name: &str,
     direction: crate::components::SortDirection,

@@ -882,10 +882,9 @@ impl RoleManagementService {
     }
 
     fn needs_quoting(name: &str) -> bool {
-        if name.is_empty() {
+        let Some(first) = name.chars().next() else {
             return true;
-        }
-        let first = name.chars().next().unwrap();
+        };
         if !first.is_ascii_alphabetic() && first != '_' {
             return true;
         }

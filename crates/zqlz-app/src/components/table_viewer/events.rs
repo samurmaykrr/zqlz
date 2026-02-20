@@ -16,6 +16,7 @@ use super::filter_types::{FilterCondition, SortCriterion};
 /// These events are used to communicate with the MainView, which coordinates
 /// between the table viewer and other panels (like CellEditorPanel).
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum TableViewerEvent {
     /// Cell value should be set to NULL (future feature)
     SetToNull { row: usize, col: usize },

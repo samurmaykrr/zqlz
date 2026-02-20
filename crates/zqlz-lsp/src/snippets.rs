@@ -1,10 +1,12 @@
 use lsp_types::{CompletionItem, CompletionItemKind, InsertTextFormat};
 
 /// SQL snippet templates for common patterns
+#[allow(dead_code)]
 pub struct SnippetProvider {
     snippets: Vec<SqlSnippet>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 struct SqlSnippet {
     label: String,
@@ -13,6 +15,7 @@ struct SqlSnippet {
     keywords: Vec<String>,
 }
 
+#[allow(dead_code)]
 impl SnippetProvider {
     pub fn new() -> Self {
         let mut provider = Self {
@@ -279,11 +282,9 @@ mod tests {
         let completions = provider.get_completions("");
 
         assert!(!completions.is_empty());
-        assert!(
-            completions
-                .iter()
-                .all(|c| c.kind == Some(CompletionItemKind::SNIPPET))
-        );
+        assert!(completions
+            .iter()
+            .all(|c| c.kind == Some(CompletionItemKind::SNIPPET)));
     }
 
     #[test]
@@ -292,11 +293,9 @@ mod tests {
         let completions = provider.get_completions("select");
 
         assert!(!completions.is_empty());
-        assert!(
-            completions
-                .iter()
-                .all(|c| c.label.to_lowercase().contains("select"))
-        );
+        assert!(completions
+            .iter()
+            .all(|c| c.label.to_lowercase().contains("select")));
     }
 
     #[test]

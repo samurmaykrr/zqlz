@@ -320,9 +320,14 @@ impl TypeMapper for PostgresTypeMapper {
             CanonicalType::Array { element_type } => {
                 format!("{}[]", self.from_canonical(element_type))
             }
-            CanonicalType::Enum { name, values } => name
-                .clone()
-                .unwrap_or_else(|| format!("text CHECK (value IN ({}))", values.join(", "))),
+            CanonicalType::Enum { name, values } => name.clone().unwrap_or_else(|| {
+                let quoted = values
+                    .iter()
+                    .map(|v| format!("'{}'", v.replace('\'', "''")))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("text CHECK (value IN ({}))", quoted)
+            }),
             CanonicalType::Set { .. } => "text[]".into(),
             CanonicalType::IpAddress => "inet".into(),
             CanonicalType::MacAddress => "macaddr".into(),
@@ -612,13 +617,37 @@ fn parse_enum_values(type_str: &str) -> Vec<String> {
     Vec::new()
 }
 
-/// Get a type mapper for a given driver name
+/// Returns true for driver names that have a dedicated TypeMapper implementation.
+///
+/// Useful for callers that want to detect unsupported drivers before calling
+/// `get_type_mapper` (e.g., to surface a user-facing error rather than silently
+/// falling back to the SQLite mapper).
+pub fn is_known_driver(driver: &str) -> bool {
+    matches!(
+        driver.to_lowercase().as_str(),
+        "sqlite" | "sqlite3" | "postgres" | "postgresql" | "pg" | "mysql" | "mariadb"
+    )
+}
+
+/// Get a type mapper for a given driver name.
+///
+/// Falls back to [`SqliteTypeMapper`] for unrecognised driver names so that
+/// callers always get a usable mapper, but emits a `tracing::warn!` so the
+/// fallback is visible in logs rather than silently producing wrong DDL.
 pub fn get_type_mapper(driver: &str) -> Box<dyn TypeMapper> {
     match driver.to_lowercase().as_str() {
         "sqlite" | "sqlite3" => Box::new(SqliteTypeMapper),
         "postgres" | "postgresql" | "pg" => Box::new(PostgresTypeMapper),
         "mysql" | "mariadb" => Box::new(MySqlTypeMapper),
-        _ => Box::new(SqliteTypeMapper),
+        unknown => {
+            tracing::warn!(
+                driver = unknown,
+                "no TypeMapper registered for driver '{}'; falling back to SQLite \
+                 — generated DDL may be semantically incorrect for the target database",
+                unknown
+            );
+            Box::new(SqliteTypeMapper)
+        }
     }
 }
 
@@ -695,5 +724,82 @@ mod tests {
         assert_eq!(parse_length("DECIMAL(10,2)"), Some(10));
         assert_eq!(parse_precision_scale("DECIMAL(10,2)"), (Some(10), Some(2)));
         assert_eq!(parse_enum_values("ENUM('a','b','c')"), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn is_known_driver_returns_true_for_all_supported_aliases() {
+        for name in &[
+            "sqlite",
+            "sqlite3",
+            "postgres",
+            "postgresql",
+            "pg",
+            "mysql",
+            "mariadb",
+        ] {
+            assert!(
+                is_known_driver(name),
+                "expected '{}' to be a known driver",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn is_known_driver_is_case_insensitive() {
+        assert!(is_known_driver("PostgreSQL"));
+        assert!(is_known_driver("MYSQL"));
+        assert!(is_known_driver("SQLite3"));
+    }
+
+    #[test]
+    fn is_known_driver_returns_false_for_unknown_drivers() {
+        for name in &["mssql", "duckdb", "oracle", "cockroachdb", ""] {
+            assert!(
+                !is_known_driver(name),
+                "expected '{}' to be an unknown driver",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn get_type_mapper_returns_postgres_mapper_for_postgresql_aliases() {
+        // All PostgreSQL aliases should map UUID → 'uuid', which SQLite maps to TEXT.
+        for alias in &["postgres", "postgresql", "pg"] {
+            let mapper = get_type_mapper(alias);
+            assert_eq!(
+                mapper.from_canonical(&CanonicalType::Uuid),
+                "uuid",
+                "alias '{}' should return PostgresTypeMapper",
+                alias
+            );
+        }
+    }
+
+    #[test]
+    fn get_type_mapper_returns_mysql_mapper_for_mysql_aliases() {
+        // MySQL maps UUID → CHAR(36), which is distinct from both SQLite (TEXT) and PG (uuid).
+        for alias in &["mysql", "mariadb"] {
+            let mapper = get_type_mapper(alias);
+            assert_eq!(
+                mapper.from_canonical(&CanonicalType::Uuid),
+                "CHAR(36)",
+                "alias '{}' should return MySqlTypeMapper",
+                alias
+            );
+        }
+    }
+
+    #[test]
+    fn get_type_mapper_falls_back_to_sqlite_for_unknown_driver() {
+        // The fallback mapper must still be usable — verify it produces the SQLite
+        // mapping for a well-known type so callers do not panic on the return value.
+        let mapper = get_type_mapper("mssql");
+        assert_eq!(
+            mapper.from_canonical(&CanonicalType::Uuid),
+            "TEXT",
+            "unknown driver should fall back to SqliteTypeMapper"
+        );
     }
 }

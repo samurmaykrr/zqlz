@@ -442,11 +442,6 @@ impl RenderOnce for Tree {
 
 #[cfg(test)]
 mod tests {
-    use indoc::indoc;
-
-    use super::TreeState;
-    use gpui::AppContext as _;
-
     fn assert_entries(entries: &Vec<super::TreeEntry>, expected: &str) {
         let actual: Vec<String> = entries
             .iter()

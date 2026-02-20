@@ -5,7 +5,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_query::{ZedInput, ZedInputEvent, ZedInputState};
+use zqlz_text_editor::TextEditor;
 use zqlz_ui::widgets::{
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
@@ -19,8 +19,7 @@ use zqlz_ui::widgets::{
 use crate::icons::ZqlzIcon;
 
 use super::filter_types::{
-    ColumnSelectItem, FilterCondition, FilterOperator, LogicalOperator, SortCriterion,
-    SortDirection,
+    ColumnSelectItem, FilterCondition, FilterOperator, SortCriterion, SortDirection,
 };
 
 /// Events emitted by the filter panel
@@ -39,7 +38,7 @@ pub struct FilterRowState {
     pub value_input: Entity<InputState>,
     pub value2_input: Option<Entity<InputState>>,
     /// Dedicated input for custom SQL expressions (has helpful placeholder)
-    pub custom_sql_input: Entity<ZedInputState>,
+    pub custom_sql_input: Entity<TextEditor>,
 }
 
 impl FilterRowState {
@@ -54,9 +53,7 @@ impl FilterRowState {
         });
 
         let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
-        let custom_sql_input = cx.new(|cx| {
-            ZedInputState::new(window, cx).with_placeholder("SQL expression (e.g. price > 100)")
-        });
+        let custom_sql_input = cx.new(|cx| TextEditor::new(window, cx));
 
         Self {
             condition: FilterCondition::new(id),
@@ -176,17 +173,12 @@ impl FilterPanelState {
         )
         .detach();
 
-        // Subscribe to custom SQL input changes
-        cx.subscribe_in(
-            &row_state.custom_sql_input,
-            window,
-            move |this, input, event: &ZedInputEvent, _window, cx| {
-                if let ZedInputEvent::Change = event {
-                    let value: SharedString = input.read(cx).value().to_string().into();
-                    this.on_value_changed(filter_id, value, cx);
-                }
-            },
-        )
+        // Observe the custom SQL editor for text changes.
+        // cx.observe fires on every cx.notify(), which TextEditor calls after every edit.
+        cx.observe(&row_state.custom_sql_input, move |this, input, cx| {
+            let value: SharedString = input.read(cx).get_text(cx).to_string().into();
+            this.on_value_changed(filter_id, value, cx);
+        })
         .detach();
 
         self.filters.push(row_state);
@@ -260,17 +252,11 @@ impl FilterPanelState {
         )
         .detach();
 
-        // Subscribe to custom SQL input changes
-        cx.subscribe_in(
-            &row_state.custom_sql_input,
-            window,
-            move |this, input, event: &ZedInputEvent, _window, cx| {
-                if let ZedInputEvent::Change = event {
-                    let value: SharedString = input.read(cx).value().to_string().into();
-                    this.on_value_changed(filter_id, value, cx);
-                }
-            },
-        )
+        // Observe the custom SQL editor for text changes.
+        cx.observe(&row_state.custom_sql_input, move |this, input, cx| {
+            let value: SharedString = input.read(cx).get_text(cx).to_string().into();
+            this.on_value_changed(filter_id, value, cx);
+        })
         .detach();
 
         // Create the row state with the pre-populated condition
@@ -818,7 +804,7 @@ fn render_filter_row(
     total: usize,
     cx: &App,
 ) -> impl IntoElement {
-    let theme = cx.theme();
+    let _theme = cx.theme();
     let filter_id = filter_row.condition.id;
     let enabled = filter_row.condition.enabled;
     let operator = filter_row.condition.operator;
@@ -866,7 +852,7 @@ fn render_filter_row(
                 div()
                     .w(px(280.0))
                     .h(px(32.0))
-                    .child(ZedInput::new(&filter_row.custom_sql_input)),
+                    .child(filter_row.custom_sql_input.clone()),
             )
         })
         // Regular value input (for non-custom filters)

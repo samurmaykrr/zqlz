@@ -61,7 +61,7 @@ impl InspectorPanel {
         // Subscribe to QueryHistoryPanel events
         let history_subscription = cx.subscribe(
             &query_history_panel,
-            |this, _panel, event: &QueryHistoryPanelEvent, cx| match event {
+            |_this, _panel, event: &QueryHistoryPanelEvent, cx| match event {
                 QueryHistoryPanelEvent::OpenQuery { sql } => {
                     cx.emit(InspectorPanelEvent::OpenQuery { sql: sql.clone() });
                 }

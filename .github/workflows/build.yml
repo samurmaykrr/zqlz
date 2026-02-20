@@ -1,0 +1,90 @@
+name: build-release
+
+on:
+  push:
+    branches:
+      - main
+    # tags: ["v*"]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+
+          - os: macos-latest
+            target: aarch64-apple-darwin
+
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux system dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxcb1-dev \
+            libxkbcommon-dev \
+            libxkbcommon-x11-dev
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Build
+        shell: bash
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Package artifacts
+        shell: bash
+        run: |
+          BIN=lince
+          mkdir -p artifacts
+
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            cp target/${{ matrix.target }}/release/${BIN}.exe \
+               artifacts/${BIN}-${{ matrix.target }}.exe
+          else
+            cp target/${{ matrix.target }}/release/${BIN} \
+               artifacts/${BIN}-${{ matrix.target }}
+
+            chmod +x artifacts/${BIN}-${{ matrix.target }}
+
+            tar -czf artifacts/${BIN}-${{ matrix.target }}.tar.gz \
+              -C artifacts ${BIN}-${{ matrix.target }}
+
+            zip -j artifacts/${BIN}-${{ matrix.target }}.zip \
+              artifacts/${BIN}-${{ matrix.target }}
+          fi
+
+      - name: Upload build artifact (temp)
+        uses: actions/upload-artifact@v4
+        with:
+          name: lince-artifacts-${{ matrix.target }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Upload assets to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*

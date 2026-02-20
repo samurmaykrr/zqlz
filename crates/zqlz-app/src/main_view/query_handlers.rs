@@ -69,6 +69,7 @@ impl MainView {
         };
 
         let query_service = app_state.query_service.clone();
+        let schema_service = app_state.schema_service.clone();
         let connection = connection_id.and_then(|id| app_state.connections.get(id));
 
         // Get connection info for display
@@ -90,8 +91,7 @@ impl MainView {
             panel.set_loading(true, cx);
         });
 
-        if let Some(conn) = connection {
-            let conn_id = connection_id.unwrap(); // Safe because we got connection from connection_id
+        if let (Some(conn_id), Some(conn)) = (connection_id, connection) {
 
             // Get and store the cancel handle for this query
             // This allows us to interrupt the actual database query, not just drop the task
@@ -108,6 +108,7 @@ impl MainView {
             let task = cx.spawn_in(window, async move |this, cx| {
                     // ✅ Use QueryService - all logic encapsulated
                     let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
+                    let is_schema_modifying_sql = QueryEngine::new().is_schema_modifying(&sql);
 
                     _ = query_tabs_panel.update(cx, |panel, cx| {
                         panel.set_editor_executing(editor_index, false, cx);
@@ -116,6 +117,21 @@ impl MainView {
                     // Convert service QueryExecution to component QueryExecution
                     let execution = match service_execution {
                         Ok(exec) => {
+                            // Invalidate schema cache if DDL was executed
+                            if is_schema_modifying_sql {
+                                schema_service.invalidate_connection_cache(conn_id);
+
+                                // Trigger LSP schema refresh on the editor so completions
+                                // reflect the new schema without requiring a reconnect.
+                                _ = query_tabs_panel.update(cx, |panel, cx| {
+                                    if let Some(editor) = panel.get_editor(editor_index) {
+                                        _ = editor.update(cx, |editor, cx| {
+                                            editor.notify_query_executed(&sql, cx);
+                                        });
+                                    }
+                                });
+                            }
+
                             let start_time = chrono::Utc::now()
                                 - chrono::Duration::milliseconds(exec.duration_ms as i64);
                             let end_time = chrono::Utc::now();
@@ -412,8 +428,7 @@ impl MainView {
             panel.set_loading(true, cx);
         });
 
-        if let Some(conn) = connection {
-            let conn_id = connection_id.unwrap();
+        if let (Some(conn_id), Some(conn)) = (connection_id, connection) {
 
             let sql = sql.clone();
             let query_tabs_panel = query_tabs_panel.downgrade();
@@ -633,7 +648,7 @@ impl MainView {
             cx,
         );
 
-        std::mem::forget(subscription);
+        self._subscriptions.push(subscription);
 
         // Track this query editor in MainView
         self.query_editors.push(query_editor.downgrade());
@@ -740,7 +755,11 @@ impl MainView {
                             // ✅ Use QueryService - all logic encapsulated
                             let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
                             let query_success = service_execution.is_ok();
-                            
+
+                            // Keep a copy for the DDL check below; `sql` may be moved
+                            // into the error-branch QueryExecution before we get to it.
+                            let sql_for_ddl = sql.clone();
+
                             // Convert service QueryExecution to component QueryExecution
                             let execution = match service_execution {
                                 Ok(exec) => {
@@ -803,7 +822,15 @@ impl MainView {
                             }) {
                                 tracing::warn!("Failed to reset executing state: {}", e);
                             }
-                            
+
+                            // On successful DDL execution, invalidate the schema cache so
+                            // column completions reflect the new database structure.
+                            if query_success {
+                                _ = editor_weak.update(cx, |editor, cx| {
+                                    editor.notify_query_executed(&sql_for_ddl, cx);
+                                });
+                            }
+
                             anyhow::Ok(())
                         }).detach();
                     }
@@ -876,10 +903,14 @@ impl MainView {
                         
                         cx.spawn_in(window, async move |_this, cx| {
                             tracing::debug!(sql = %sql, "Executing selection");
-                            
+
                             let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
                             let query_success = service_execution.is_ok();
-                            
+
+                            // Keep a copy for the DDL check below; `sql` may be moved
+                            // into the error-branch QueryExecution before we get to it.
+                            let sql_for_ddl = sql.clone();
+
                             let execution = match service_execution {
                                 Ok(exec) => {
                                     tracing::info!(statements = exec.statements.len(), duration_ms = exec.duration_ms, "Selection executed successfully");
@@ -941,7 +972,15 @@ impl MainView {
                             }) {
                                 tracing::warn!("Failed to reset executing state: {}", e);
                             }
-                            
+
+                            // On successful DDL execution, invalidate the schema cache so
+                            // column completions reflect the new database structure.
+                            if query_success {
+                                _ = editor_weak.update(cx, |editor, cx| {
+                                    editor.notify_query_executed(&sql_for_ddl, cx);
+                                });
+                            }
+
                             anyhow::Ok(())
                         }).detach();
                     }

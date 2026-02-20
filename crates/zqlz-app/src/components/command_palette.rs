@@ -13,16 +13,15 @@ use uuid::Uuid;
 use zqlz_ui::widgets::{
     h_flex,
     input::{Input, InputEvent, InputState},
-    scroll::ScrollableElement,
     v_flex, ActiveTheme, Sizable,
 };
 
 use crate::actions::*;
 use crate::app::AppState;
-use crate::workspace_state::SchemaCache;
 
 /// Types of commands available in the palette
 #[derive(Clone, Debug, PartialEq)]
+#[allow(dead_code)]
 pub enum CommandType {
     Static,
     Table {
@@ -219,6 +218,7 @@ impl Command {
 
 /// Events emitted by the command palette
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum CommandPaletteEvent {
     Dismissed,
     CommandExecuted(String),
@@ -530,7 +530,8 @@ impl CommandPalette {
         &mut self,
         connection_id: Uuid,
         connection_name: &str,
-        schema: &SchemaCache,
+        tables: &[String],
+        views: &[String],
     ) {
         self.commands.retain(|cmd| {
             !matches!(
@@ -540,7 +541,7 @@ impl CommandPalette {
             )
         });
 
-        for table_name in schema.tables.iter() {
+        for table_name in tables.iter() {
             let table_name_clone = table_name.clone();
             let cmd = Command::new_table(
                 connection_id,
@@ -553,7 +554,7 @@ impl CommandPalette {
             self.commands.push(cmd);
         }
 
-        for view_name in schema.views.iter() {
+        for view_name in views.iter() {
             let view_name_clone = view_name.clone();
             let cmd = Command::new_view(
                 connection_id,
@@ -762,7 +763,7 @@ impl Render for CommandPalette {
                     .overflow_y_scroll()
                     .p_1()
                     .children(command_items.into_iter().map(
-                        |(idx, id, label, category, shortcut, icon, is_selected)| {
+                        |(idx, _id, label, category, shortcut, icon, is_selected)| {
                             h_flex()
                                 .id(SharedString::from(format!("cmd-{}", idx)))
                                 .w_full()

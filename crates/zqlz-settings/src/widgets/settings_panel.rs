@@ -3,8 +3,8 @@
 //! A panel for viewing and editing application settings.
 
 use crate::{
-    AiProvider, InlineSuggestionProvider, ScrollbarVisibility, SqlDialect, ThemeModePreference,
-    ZqlzSettings,
+    AiProvider, CursorBlink, CursorShape, InlineSuggestionProvider, ScrollBeyondLastLine,
+    ScrollbarVisibility, SearchWrap, SqlDialect, ThemeModePreference, ZqlzSettings,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -17,9 +17,6 @@ use zqlz_ui::widgets::{
     switch::Switch,
     v_flex, ActiveTheme, Sizable,
 };
-
-#[cfg(feature = "zed")]
-use zqlz_zed_adapter::settings_bridge::SettingsBridge;
 
 /// Events emitted by the settings panel
 #[derive(Clone, Debug)]
@@ -158,6 +155,138 @@ impl SelectItem for AiProviderItem {
     }
 }
 
+/// A custom select item for cursor blink settings
+#[derive(Clone, Debug)]
+struct CursorBlinkItem {
+    value: CursorBlink,
+    label: SharedString,
+}
+
+impl SelectItem for CursorBlinkItem {
+    type Value = CursorBlink;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+impl CursorBlink {
+    fn display_name(&self) -> &'static str {
+        match self {
+            CursorBlink::On => "On",
+            CursorBlink::Off => "Off",
+            CursorBlink::System => "System",
+        }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::On, Self::Off, Self::System]
+    }
+}
+
+/// A custom select item for cursor shape settings
+#[derive(Clone, Debug)]
+struct CursorShapeItem {
+    value: CursorShape,
+    label: SharedString,
+}
+
+impl SelectItem for CursorShapeItem {
+    type Value = CursorShape;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+impl CursorShape {
+    fn display_name(&self) -> &'static str {
+        match self {
+            CursorShape::Block => "Block",
+            CursorShape::Line => "Line",
+            CursorShape::Underline => "Underline",
+        }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::Block, Self::Line, Self::Underline]
+    }
+}
+
+/// A custom select item for scroll beyond last line settings
+#[derive(Clone, Debug)]
+struct ScrollBeyondLastLineItem {
+    value: ScrollBeyondLastLine,
+    label: SharedString,
+}
+
+impl SelectItem for ScrollBeyondLastLineItem {
+    type Value = ScrollBeyondLastLine;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+impl ScrollBeyondLastLine {
+    fn display_name(&self) -> &'static str {
+        match self {
+            ScrollBeyondLastLine::Disabled => "Disabled",
+            ScrollBeyondLastLine::Enabled => "Enabled",
+            ScrollBeyondLastLine::HorizontalScrollbar => "Horizontal Scrollbar",
+        }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::Disabled, Self::Enabled, Self::HorizontalScrollbar]
+    }
+}
+
+/// A custom select item for search wrap settings
+#[derive(Clone, Debug)]
+struct SearchWrapItem {
+    value: SearchWrap,
+    label: SharedString,
+}
+
+impl SelectItem for SearchWrapItem {
+    type Value = SearchWrap;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+impl SearchWrap {
+    fn display_name(&self) -> &'static str {
+        match self {
+            SearchWrap::Disabled => "Disabled",
+            SearchWrap::Enabled => "Wrap",
+            SearchWrap::NoWrap => "No Wrap",
+        }
+    }
+
+    fn all() -> &'static [Self] {
+        &[Self::Disabled, Self::Enabled, Self::NoWrap]
+    }
+}
+
 /// Settings panel for editing application settings
 pub struct SettingsPanel {
     focus_handle: FocusHandle,
@@ -179,6 +308,19 @@ pub struct SettingsPanel {
     // Editor settings - tab size slider
     tab_size_state: Entity<SliderState>,
 
+    // Cursor and selection settings
+    cursor_blink_state: Entity<SelectState<SearchableVec<CursorBlinkItem>>>,
+    cursor_shape_state: Entity<SelectState<SearchableVec<CursorShapeItem>>>,
+
+    // Scroll behavior settings
+    scroll_beyond_last_line_state: Entity<SelectState<SearchableVec<ScrollBeyondLastLineItem>>>,
+    vertical_scroll_margin_state: Entity<SliderState>,
+    horizontal_scroll_margin_state: Entity<SliderState>,
+    scroll_sensitivity_state: Entity<SliderState>,
+
+    // Search behavior settings
+    search_wrap_state: Entity<SelectState<SearchableVec<SearchWrapItem>>>,
+
     // Syntax highlighting settings
     sql_dialect_state: Entity<SelectState<SearchableVec<SqlDialectItem>>>,
 
@@ -188,7 +330,7 @@ pub struct SettingsPanel {
     inline_suggestions_delay_state: Entity<SliderState>,
 
     // AI settings
-    ai_provider_state: Entity<SelectState<SearchableVec<AiProviderItem>>>,
+    _ai_provider_state: Entity<SelectState<SearchableVec<AiProviderItem>>>,
     ai_api_key_state: Entity<InputState>,
 
     _subscriptions: Vec<Subscription>,
@@ -223,7 +365,22 @@ impl SettingsPanel {
             inline_suggestions_provider,
             inline_suggestions_delay_ms,
             ai_provider,
-            ai_api_key,
+            _ai_api_key,
+            // Cursor and selection settings
+            cursor_blink,
+            cursor_shape,
+            _selection_highlight,
+            _rounded_selection,
+            _relative_line_numbers,
+            // Scroll behavior settings
+            scroll_beyond_last_line,
+            vertical_scroll_margin,
+            horizontal_scroll_margin,
+            scroll_sensitivity,
+            _autoscroll_on_clicks,
+            // Search behavior settings
+            search_wrap,
+            _use_smartcase_search,
         ) = {
             let settings = ZqlzSettings::global(cx);
             (
@@ -243,6 +400,21 @@ impl SettingsPanel {
                 settings.editor.inline_suggestions_delay_ms,
                 settings.editor.ai_provider,
                 settings.editor.ai_api_key.clone(),
+                // Cursor and selection settings
+                settings.editor.cursor_blink,
+                settings.editor.cursor_shape,
+                settings.editor.selection_highlight,
+                settings.editor.rounded_selection,
+                settings.editor.relative_line_numbers,
+                // Scroll behavior settings
+                settings.editor.scroll_beyond_last_line,
+                settings.editor.vertical_scroll_margin,
+                settings.editor.horizontal_scroll_margin,
+                settings.editor.scroll_sensitivity,
+                settings.editor.autoscroll_on_clicks,
+                // Search behavior settings
+                settings.editor.search_wrap,
+                settings.editor.use_smartcase_search,
             )
         };
 
@@ -388,6 +560,111 @@ impl SettingsPanel {
                 .max(8.0)
                 .step(1.0)
                 .default_value(tab_size as f32)
+        });
+
+        // Create cursor blink select
+        let cursor_blink_items: Vec<CursorBlinkItem> = CursorBlink::all()
+            .iter()
+            .map(|c| CursorBlinkItem {
+                value: *c,
+                label: c.display_name().into(),
+            })
+            .collect();
+        let cursor_blink_index = cursor_blink_items
+            .iter()
+            .position(|item| item.value == cursor_blink);
+        let cursor_blink_state = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(cursor_blink_items),
+                cursor_blink_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
+                window,
+                cx,
+            )
+        });
+
+        // Create cursor shape select
+        let cursor_shape_items: Vec<CursorShapeItem> = CursorShape::all()
+            .iter()
+            .map(|c| CursorShapeItem {
+                value: *c,
+                label: c.display_name().into(),
+            })
+            .collect();
+        let cursor_shape_index = cursor_shape_items
+            .iter()
+            .position(|item| item.value == cursor_shape);
+        let cursor_shape_state = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(cursor_shape_items),
+                cursor_shape_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
+                window,
+                cx,
+            )
+        });
+
+        // Create scroll beyond last line select
+        let scroll_beyond_items: Vec<ScrollBeyondLastLineItem> = ScrollBeyondLastLine::all()
+            .iter()
+            .map(|s| ScrollBeyondLastLineItem {
+                value: *s,
+                label: s.display_name().into(),
+            })
+            .collect();
+        let scroll_beyond_index = scroll_beyond_items
+            .iter()
+            .position(|item| item.value == scroll_beyond_last_line);
+        let scroll_beyond_last_line_state = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(scroll_beyond_items),
+                scroll_beyond_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
+                window,
+                cx,
+            )
+        });
+
+        // Create scroll margin sliders
+        let vertical_scroll_margin_state = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(20.0)
+                .step(1.0)
+                .default_value(vertical_scroll_margin as f32)
+        });
+
+        let horizontal_scroll_margin_state = cx.new(|_| {
+            SliderState::new()
+                .min(0.0)
+                .max(20.0)
+                .step(1.0)
+                .default_value(horizontal_scroll_margin as f32)
+        });
+
+        let scroll_sensitivity_state = cx.new(|_| {
+            SliderState::new()
+                .min(0.1)
+                .max(5.0)
+                .step(0.1)
+                .default_value(scroll_sensitivity)
+        });
+
+        // Create search wrap select
+        let search_wrap_items: Vec<SearchWrapItem> = SearchWrap::all()
+            .iter()
+            .map(|s| SearchWrapItem {
+                value: *s,
+                label: s.display_name().into(),
+            })
+            .collect();
+        let search_wrap_index = search_wrap_items
+            .iter()
+            .position(|item| item.value == search_wrap);
+        let search_wrap_state = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(search_wrap_items),
+                search_wrap_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
+                window,
+                cx,
+            )
         });
 
         // Create SQL dialect select
@@ -704,6 +981,92 @@ impl SettingsPanel {
             }),
         );
 
+        // Subscribe to cursor and selection settings changes
+        subscriptions.push(cx.subscribe(
+            &cursor_blink_state,
+            |this, _, event: &SelectEvent<SearchableVec<CursorBlinkItem>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.cursor_blink = *value;
+
+                    cx.notify();
+                    this.emit_changed(cx);
+                }
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &cursor_shape_state,
+            |this, _, event: &SelectEvent<SearchableVec<CursorShapeItem>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.cursor_shape = *value;
+
+                    cx.notify();
+                    this.emit_changed(cx);
+                }
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &scroll_beyond_last_line_state,
+            |this, _, event: &SelectEvent<SearchableVec<ScrollBeyondLastLineItem>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.scroll_beyond_last_line = *value;
+
+                    cx.notify();
+                    this.emit_changed(cx);
+                }
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &vertical_scroll_margin_state,
+            |this, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let settings = ZqlzSettings::global_mut(cx);
+                settings.editor.vertical_scroll_margin = value.end() as u32;
+                cx.notify();
+                this.emit_changed(cx);
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &horizontal_scroll_margin_state,
+            |this, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let settings = ZqlzSettings::global_mut(cx);
+                settings.editor.horizontal_scroll_margin = value.end() as u32;
+                cx.notify();
+                this.emit_changed(cx);
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &scroll_sensitivity_state,
+            |this, _, event: &SliderEvent, cx| {
+                let SliderEvent::Change(value) = event;
+                let settings = ZqlzSettings::global_mut(cx);
+                settings.editor.scroll_sensitivity = value.end();
+                cx.notify();
+                this.emit_changed(cx);
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &search_wrap_state,
+            |this, _, event: &SelectEvent<SearchableVec<SearchWrapItem>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.search_wrap = *value;
+
+                    cx.notify();
+                    this.emit_changed(cx);
+                }
+            },
+        ));
+
         Self {
             focus_handle: cx.focus_handle(),
             theme_mode_state,
@@ -717,10 +1080,20 @@ impl SettingsPanel {
             ui_font_state,
             editor_font_state,
             tab_size_state,
+            // Cursor and selection settings
+            cursor_blink_state,
+            cursor_shape_state,
+            // Scroll behavior settings
+            scroll_beyond_last_line_state,
+            vertical_scroll_margin_state,
+            horizontal_scroll_margin_state,
+            scroll_sensitivity_state,
+            // Search behavior settings
+            search_wrap_state,
             sql_dialect_state,
             inline_suggestions_provider_state,
             inline_suggestions_delay_state,
-            ai_provider_state,
+            _ai_provider_state: ai_provider_state,
             ai_api_key_state,
             _subscriptions: subscriptions,
         }
@@ -951,11 +1324,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.insert_spaces = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -967,11 +1336,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_line_numbers = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -983,11 +1348,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.word_wrap = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -999,11 +1360,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.highlight_current_line = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1015,11 +1372,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_inline_diagnostics = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1031,11 +1384,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.auto_indent = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1047,11 +1396,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.bracket_matching = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1063,11 +1408,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.vim_mode_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1079,11 +1420,118 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.highlight_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
+                },
+                cx,
+            ))
+            // Cursor & Selection settings subsection
+            .child(self.render_subsection_header("Cursor & Selection", cx))
+            .child(self.render_setting_row(
+                "Cursor Blink",
+                Some("Cursor blink behavior"),
+                Select::new(&self.cursor_blink_state).small(),
+                cx,
+            ))
+            .child(self.render_setting_row(
+                "Cursor Shape",
+                Some("Cursor shape in the editor"),
+                Select::new(&self.cursor_shape_state).small(),
+                cx,
+            ))
+            .child(self.render_toggle_row(
+                "selection-highlight",
+                "Selection Highlight",
+                Some("Highlight other selections containing the cursor"),
+                settings.editor.selection_highlight,
+                |checked, _window, cx| {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.selection_highlight = checked;
+                    let _ = _window;
+                },
+                cx,
+            ))
+            .child(self.render_toggle_row(
+                "rounded-selection",
+                "Rounded Selection",
+                Some("Use rounded corners for selections"),
+                settings.editor.rounded_selection,
+                |checked, _window, cx| {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.rounded_selection = checked;
+                    let _ = _window;
+                },
+                cx,
+            ))
+            .child(self.render_toggle_row(
+                "relative-line-numbers",
+                "Relative Line Numbers",
+                Some("Show line numbers relative to cursor position"),
+                settings.editor.relative_line_numbers,
+                |checked, _window, cx| {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.relative_line_numbers = checked;
+                    let _ = _window;
+                },
+                cx,
+            ))
+            // Scroll settings subsection
+            .child(self.render_subsection_header("Scroll", cx))
+            .child(self.render_setting_row(
+                "Scroll Beyond Last Line",
+                Some("Allow scrolling past the end of the document"),
+                Select::new(&self.scroll_beyond_last_line_state).small(),
+                cx,
+            ))
+            .child(self.render_setting_row(
+                "Vertical Scroll Margin",
+                Some(&format!("{} lines", settings.editor.vertical_scroll_margin)),
+                Slider::new(&self.vertical_scroll_margin_state),
+                cx,
+            ))
+            .child(self.render_setting_row(
+                "Horizontal Scroll Margin",
+                Some(&format!(
+                    "{} lines",
+                    settings.editor.horizontal_scroll_margin
+                )),
+                Slider::new(&self.horizontal_scroll_margin_state),
+                cx,
+            ))
+            .child(self.render_setting_row(
+                "Scroll Sensitivity",
+                Some(&format!("{:.1}x", settings.editor.scroll_sensitivity)),
+                Slider::new(&self.scroll_sensitivity_state),
+                cx,
+            ))
+            .child(self.render_toggle_row(
+                "autoscroll-on-clicks",
+                "Autoscroll on Clicks",
+                Some("Automatically scroll to keep cursor visible when clicking"),
+                settings.editor.autoscroll_on_clicks,
+                |checked, _window, cx| {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.autoscroll_on_clicks = checked;
+                    let _ = _window;
+                },
+                cx,
+            ))
+            // Search settings subsection
+            .child(self.render_subsection_header("Search", cx))
+            .child(self.render_setting_row(
+                "Search Wrap",
+                Some("Wrap around when searching"),
+                Select::new(&self.search_wrap_state).small(),
+                cx,
+            ))
+            .child(self.render_toggle_row(
+                "use-smartcase-search",
+                "Smart Case",
+                Some("Ignore case unless search contains uppercase"),
+                settings.editor.use_smartcase_search,
+                |checked, _window, cx| {
+                    let settings = ZqlzSettings::global_mut(cx);
+                    settings.editor.use_smartcase_search = checked;
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1097,11 +1545,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1113,11 +1557,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_completions_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1129,11 +1569,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_hover_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1145,11 +1581,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_diagnostics_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1161,11 +1593,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_code_actions_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1177,11 +1605,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_rename_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1195,11 +1619,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.inline_suggestions_enabled = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1242,11 +1662,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_gutter_diagnostics = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))
@@ -1258,11 +1674,7 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_folding = checked;
-                    #[cfg(feature = "zed")]
-                    {
-                        let _ = _window;
-                        SettingsBridge::sync_settings(cx);
-                    }
+                    let _ = _window;
                 },
                 cx,
             ))

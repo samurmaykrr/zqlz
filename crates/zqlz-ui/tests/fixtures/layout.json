@@ -24,7 +24,7 @@
   "left_dock": {
     "size": 350,
     "open": true,
-    "placement": "Left",
+    "placement": "left",
     "panel": {
       "panel_name": "TabPanel",
       "children": [
@@ -40,7 +40,7 @@
   "bottom_dock": {
     "size": 200,
     "open": true,
-    "placement": "Bottom",
+    "placement": "bottom",
     "panel": {
       "panel_name": "TabPanel",
       "children": [
@@ -59,12 +59,18 @@
     }
   },
   "right_dock": {
-    "size": 300,
-    "open": false,
-    "placement": "Right",
+    "size": 320,
+    "open": true,
+    "placement": "right",
     "panel": {
       "panel_name": "TabPanel",
-      "children": [],
+      "children": [
+        {
+          "panel_name": "StoryContainer",
+          "children": [],
+          "info": { "panel": {} }
+        }
+      ],
       "info": { "tabs": { "active_index": 0 } }
     }
   }

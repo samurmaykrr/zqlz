@@ -410,18 +410,12 @@ impl TextElement {
 
     fn layout_hover_highlight(
         &self,
-        last_layout: &LastLayout,
-        bounds: &Bounds<Pixels>,
-        cx: &mut App,
+        _last_layout: &LastLayout,
+        _bounds: &Bounds<Pixels>,
+        _cx: &mut App,
     ) -> Option<Path<Pixels>> {
-        let symbol_range = self
-            .state
-            .read(cx)
-            .hover_popover_data
-            .as_ref()?
-            .symbol_range
-            .clone();
-        Self::layout_match_range(symbol_range, last_layout, bounds)
+        // Hover highlight removed - use schema metadata overlay via ShowHover action (F1) instead
+        None
     }
 
     fn layout_document_colors(
@@ -810,6 +804,7 @@ impl TextElement {
     }
 }
 
+#[allow(dead_code)]
 pub(super) struct PrepaintState {
     /// The lines of entire lines.
     last_layout: LastLayout,

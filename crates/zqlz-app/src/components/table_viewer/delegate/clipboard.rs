@@ -5,7 +5,7 @@ impl TableViewerDelegate {
         &mut self,
         anchor: zqlz_ui::widgets::table::CellPosition,
         data: &str,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
         // Parse TSV data into rows and columns
@@ -18,8 +18,8 @@ impl TableViewerDelegate {
             return;
         }
 
-        let paste_height = paste_rows.len();
-        let paste_width = paste_rows.iter().map(|row| row.len()).max().unwrap_or(0);
+        let _paste_height = paste_rows.len();
+        let _paste_width = paste_rows.iter().map(|row| row.len()).max().unwrap_or(0);
 
         let start_row = anchor.row;
         let start_col = if anchor.col == 0 { 1 } else { anchor.col };

@@ -3,7 +3,7 @@
 //! These tests require a running ClickHouse server.
 //! Run with: cargo test -p zqlz-driver-clickhouse --test schema_integration -- --ignored
 
-use zqlz_core::{Connection, ConnectionConfig, DatabaseDriver, SchemaIntrospection};
+use zqlz_core::{ConnectionConfig, DatabaseDriver};
 use zqlz_driver_clickhouse::ClickHouseDriver;
 
 fn test_config() -> ConnectionConfig {

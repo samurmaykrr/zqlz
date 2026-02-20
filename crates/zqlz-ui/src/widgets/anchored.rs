@@ -1,5 +1,7 @@
 //! This is a fork of gpui's anchored element that adds support for offsetting
 //! https://github.com/zed-industries/zed/blob/b06f4088a3565c5e30663106ff79c1ced645d87a/crates/gpui/src/elements/anchored.rs
+#![allow(private_interfaces)]
+
 use gpui::{
     point, px, AnyElement, App, Axis, Bounds, Display, Edges, Element, GlobalElementId, Half,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,

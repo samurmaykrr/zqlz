@@ -1,19 +1,23 @@
 //! This module handles data import/export operations and SQL dump generation.
 
-use gpui::{prelude::FluentBuilder, AppContext, Context, ParentElement as _, Window};
+use gpui::{Context, Window};
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
 use zqlz_interchange::widgets::{
     ExportWizard, ExportWizardState, ImportWizard, ImportWizardState, TableExportConfig,
 };
-use zqlz_ui::widgets::{Placement, WindowExt, notification::Notification};
+use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
 use crate::main_view::table_handlers_utils::conversion::driver_name_to_category;
 
 impl MainView {
-    /// Exports data from multiple tables
+    /// Exports data from the given tables, or all tables if the list is empty.
+    ///
+    /// Delegates directly to `export_data` so that every call site — toolbar
+    /// button, context menu (single or multi), connection sidebar — goes through
+    /// the same code path.
     pub(in crate::main_view) fn export_tables(
         &mut self,
         connection_id: Uuid,
@@ -21,28 +25,7 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if table_names.is_empty() {
-            return;
-        }
-
-        // For single table, use the existing export
-        if table_names.len() == 1 {
-            self.export_data(connection_id, table_names.into_iter().next().unwrap(), window, cx);
-            return;
-        }
-
-        tracing::info!(
-            "Export {} tables: {:?} on connection {}",
-            table_names.len(),
-            table_names,
-            connection_id
-        );
-
-        // For multiple tables, suggest using Dump SQL
-        window.push_notification(
-            Notification::info("Multi-table export: Use 'Dump SQL' for multiple tables"),
-            cx,
-        );
+        self.export_data(connection_id, table_names, window, cx);
     }
 
     /// Dumps SQL for multiple tables (CREATE + optional INSERT statements)
@@ -242,8 +225,8 @@ impl MainView {
 
             let connection_for_wizard = connection.clone();
 
-            // Open the sheet on the UI thread
-            cx.update(|window, cx| {
+            // Open the import wizard in a new window on the UI thread
+            cx.update(|_window, cx| {
                 // Create initial wizard state with target table info
                 let mut state = ImportWizardState::new();
                 state
@@ -255,7 +238,10 @@ impl MainView {
                         create_new_table: false,
                     });
 
-                // Store columns in field mappings
+                // Store columns in field mappings.  The services layer's ColumnInfo does
+                // not carry auto_increment metadata, so we conservatively default to false
+                // here — the UDIF and CSV importers derive the flag from ColumnDefinition
+                // and FieldMapping respectively when they have richer schema information.
                 let mappings: Vec<zqlz_interchange::widgets::FieldMapping> = columns
                     .iter()
                     .map(|name| zqlz_interchange::widgets::FieldMapping {
@@ -263,28 +249,12 @@ impl MainView {
                         target_field: name.clone(),
                         is_primary_key: false,
                         skip: false,
+                        is_auto_increment: false,
                     })
                     .collect();
                 state.field_mappings.insert(0, mappings);
 
-                window.open_sheet_at(Placement::Right, cx, move |sheet, window, cx| {
-                    let wizard = cx.new(|cx| {
-                        ImportWizard::new(
-                            state.clone(),
-                            Some(connection_for_wizard.clone()),
-                            window,
-                            cx,
-                        )
-                    });
-
-                    sheet
-                        .title("Import Wizard")
-                        .size(gpui::px(700.))
-                        .on_close(|_, window, cx| {
-                            window.close_sheet(cx);
-                        })
-                        .child(wizard)
-                });
+                ImportWizard::open(state, Some(connection_for_wizard), cx);
             })?;
 
             anyhow::Ok(())
@@ -292,18 +262,25 @@ impl MainView {
         .detach();
     }
 
-    /// Opens the export data wizard
+    /// Opens the Export Wizard pre-populated with table/column information.
+    ///
+    /// `table_names` controls which tables are loaded into the wizard:
+    /// - Empty list → all tables in the connected database are fetched and
+    ///   pre-loaded, matching the behaviour of the toolbar "Export Wizard…" button.
+    /// - Non-empty list → only the specified tables are loaded, matching the
+    ///   context-menu behaviour for one or more selected tables.
     pub(in crate::main_view) fn export_data(
         &mut self,
         connection_id: Uuid,
-        table_name: String,
+        table_names: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!(
-            "Export data from table: '{}' on connection {}",
-            table_name,
-            connection_id
+            "Open Export Wizard for {} on connection {} (tables: {:?})",
+            if table_names.is_empty() { "all tables".to_string() } else { format!("{} table(s)", table_names.len()) },
+            connection_id,
+            table_names,
         );
 
         let Some(app_state) = cx.try_global::<AppState>() else {
@@ -318,29 +295,28 @@ impl MainView {
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
-        let table_name_for_wizard = table_name.clone();
-        let export_all_tables = table_name.is_empty();
+        let export_all_tables = table_names.is_empty();
         let driver_category = driver_name_to_category(connection.driver_name());
 
-        // Fetch table columns for field selection
         cx.spawn_in(window, async move |_this, cx| {
-            let mut table_configs: Vec<TableExportConfig> =
-                Vec::new();
+            let mut table_configs: Vec<TableExportConfig> = Vec::new();
 
             if export_all_tables {
-                // Export all items - behavior differs by driver category
+                // Fetch all items from the database — behaviour varies by driver category.
                 if let Some(schema_introspection) = connection.as_schema_introspection() {
                     match driver_category {
                         DriverCategory::KeyValue => {
-                            // For Redis/KeyValue: list databases (db0, db1, etc.)
                             match schema_introspection.list_databases().await {
                                 Ok(databases) => {
                                     for db_info in databases {
-                                        // For Redis databases, use the database name as the "table"
-                                        // and add placeholder columns (Redis is schemaless)
                                         let config = TableExportConfig::new(
                                             db_info.name,
-                                            vec!["key".to_string(), "value".to_string(), "type".to_string(), "ttl".to_string()],
+                                            vec![
+                                                "key".to_string(),
+                                                "value".to_string(),
+                                                "type".to_string(),
+                                                "ttl".to_string(),
+                                            ],
                                         );
                                         table_configs.push(config);
                                     }
@@ -351,11 +327,9 @@ impl MainView {
                             }
                         }
                         _ => {
-                            // For relational and other databases: list tables
                             match schema_introspection.list_tables(None).await {
                                 Ok(tables) => {
                                     for table_info in tables {
-                                        // Fetch columns for each table
                                         let columns = match schema_service
                                             .get_table_details(
                                                 connection.clone(),
@@ -372,18 +346,17 @@ impl MainView {
                                                 .collect::<Vec<_>>(),
                                             Err(e) => {
                                                 tracing::warn!(
-                                                    "Could not fetch columns for table '{}': {}",
+                                                    "Could not fetch columns for '{}': {}",
                                                     table_info.name,
                                                     e
                                                 );
                                                 Vec::new()
                                             }
                                         };
-                                        let config = TableExportConfig::new(
+                                        table_configs.push(TableExportConfig::new(
                                             table_info.name,
                                             columns,
-                                        );
-                                        table_configs.push(config);
+                                        ));
                                     }
                                 }
                                 Err(e) => {
@@ -394,47 +367,43 @@ impl MainView {
                     }
                 }
             } else {
-                // Export specific table
-                let columns = match schema_service
-                    .get_table_details(connection.clone(), connection_id, &table_name_for_wizard, None)
-                    .await
-                {
-                    Ok(details) => details
-                        .columns
-                        .into_iter()
-                        .map(|c| c.name)
-                        .collect::<Vec<_>>(),
-                    Err(e) => {
-                        tracing::warn!("Could not fetch columns for export: {}", e);
-                        Vec::new()
-                    }
-                };
-                let config = TableExportConfig::new(
-                    table_name_for_wizard.clone(),
-                    columns,
-                );
-                table_configs.push(config);
+                // Fetch only the requested tables.
+                for table_name in &table_names {
+                    let columns = match schema_service
+                        .get_table_details(connection.clone(), connection_id, table_name, None)
+                        .await
+                    {
+                        Ok(details) => details
+                            .columns
+                            .into_iter()
+                            .map(|c| c.name)
+                            .collect::<Vec<_>>(),
+                        Err(e) => {
+                            tracing::warn!(
+                                "Could not fetch columns for '{}': {}",
+                                table_name,
+                                e
+                            );
+                            Vec::new()
+                        }
+                    };
+                    table_configs.push(TableExportConfig::new(table_name.clone(), columns));
+                }
             }
 
             let connection_for_wizard = connection.clone();
 
-            // Open the export wizard window on the UI thread
             cx.update(|_window, cx| {
-                // Create initial wizard state with table info
                 let mut state = ExportWizardState::new();
 
-                // Set default output folder
                 if let Some(docs_dir) = dirs::document_dir() {
                     state.output_folder = docs_dir;
                 }
 
-                // Add all table configs
                 for config in table_configs {
                     state.add_table(config);
                 }
 
-                // Open the export wizard in a new window
-                // Context<T> derefs to App, so this works
                 ExportWizard::open(state, Some(connection_for_wizard), cx);
             })?;
 

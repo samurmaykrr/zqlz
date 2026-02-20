@@ -7,7 +7,6 @@
 //! - Copying view names and renaming views
 //! - Viewing version history
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};

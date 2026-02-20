@@ -9,10 +9,12 @@ use super::storage::FilterPresetStorage;
 use crate::components::table_viewer::filter_types::FilterProfile;
 
 /// Manager for filter presets with high-level CRUD operations
+#[allow(dead_code)]
 pub struct FilterPresetManager {
     storage: FilterPresetStorage,
 }
 
+#[allow(dead_code)]
 impl FilterPresetManager {
     /// Create a manager backed by file storage
     pub fn open(path: impl Into<std::path::PathBuf>) -> Result<Self> {
@@ -141,7 +143,7 @@ impl FilterPresetManager {
 mod tests {
     use super::*;
     use crate::components::table_viewer::filter_types::{
-        FilterCondition, FilterOperator, LogicalOperator, SortCriterion, SortDirection,
+        FilterCondition, FilterOperator, LogicalOperator,
     };
 
     fn create_test_preset(name: &str, table: &str) -> FilterProfile {

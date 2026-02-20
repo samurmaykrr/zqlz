@@ -2,14 +2,13 @@
 //!
 //! Handles rendering of Redis-specific database trees with numbered databases.
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 
 use crate::widgets::sidebar::{
     ConnectionSidebar, ConnectionSidebarEvent, RedisDatabaseInfo, SavedQueryInfo,
 };
-use zqlz_ui::widgets::{caption, h_flex, v_flex, ActiveTheme, Icon, Sizable, ZqlzIcon};
+use zqlz_ui::widgets::{caption, v_flex, ActiveTheme, Icon, ZqlzIcon};
 
 impl ConnectionSidebar {
     /// Render the Redis-specific schema tree.

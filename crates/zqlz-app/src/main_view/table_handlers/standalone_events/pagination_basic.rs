@@ -9,7 +9,6 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
-use zqlz_services::TableService;
 
 use crate::app::AppState;
 use crate::components::TableViewerPanel;

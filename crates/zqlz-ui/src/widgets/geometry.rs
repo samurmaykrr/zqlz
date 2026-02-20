@@ -361,51 +361,51 @@ mod tests {
 
         assert_eq!(
             serde_json::to_string(&Anchor::TopLeft).unwrap(),
-            r#"top-left"#
+            r#""top-left""#
         );
         assert_eq!(
             serde_json::to_string(&Anchor::TopCenter).unwrap(),
-            r#"top-center"#
+            r#""top-center""#
         );
         assert_eq!(
             serde_json::to_string(&Anchor::TopRight).unwrap(),
-            r#"top-right"#
+            r#""top-right""#
         );
         assert_eq!(
             serde_json::to_string(&Anchor::BottomLeft).unwrap(),
-            r#"bottom-left"#
+            r#""bottom-left""#
         );
         assert_eq!(
             serde_json::to_string(&Anchor::BottomCenter).unwrap(),
-            r#"bottom-center"#
+            r#""bottom-center""#
         );
         assert_eq!(
             serde_json::to_string(&Anchor::BottomRight).unwrap(),
-            r#"bottom-right"#
+            r#""bottom-right""#
         );
 
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"top-left"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""top-left""#).unwrap(),
             Anchor::TopLeft
         );
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"top-center"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""top-center""#).unwrap(),
             Anchor::TopCenter
         );
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"top-right"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""top-right""#).unwrap(),
             Anchor::TopRight
         );
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"bottom-left"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""bottom-left""#).unwrap(),
             Anchor::BottomLeft
         );
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"bottom-center"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""bottom-center""#).unwrap(),
             Anchor::BottomCenter
         );
         assert_eq!(
-            serde_json::from_str::<Anchor>(r#"bottom-right"#).unwrap(),
+            serde_json::from_str::<Anchor>(r#""bottom-right""#).unwrap(),
             Anchor::BottomRight
         );
 

@@ -5,7 +5,6 @@
 //! (sidebar, connection, table, view, etc.) has its own `ContextMenuState` instance
 //! that handles menu visibility, positioning, and event subscriptions.
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::menu::PopupMenu;
 use zqlz_ui::widgets::ActiveTheme;

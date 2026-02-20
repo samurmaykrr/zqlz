@@ -68,6 +68,18 @@ pub struct DatabaseSchemaData {
     pub triggers_expanded: bool,
     pub functions_expanded: bool,
     pub procedures_expanded: bool,
+    /// Whether tables are currently being fetched from the server
+    pub tables_loading: bool,
+    /// Whether views are currently being fetched from the server
+    pub views_loading: bool,
+    /// Whether materialized views are currently being fetched from the server
+    pub materialized_views_loading: bool,
+    /// Whether triggers are currently being fetched from the server
+    pub triggers_loading: bool,
+    /// Whether functions are currently being fetched from the server
+    pub functions_loading: bool,
+    /// Whether procedures are currently being fetched from the server
+    pub procedures_loading: bool,
 }
 
 /// A database connection entry
@@ -93,6 +105,18 @@ pub struct ConnectionEntry {
     pub functions_expanded: bool,
     pub procedures_expanded: bool,
     pub queries_expanded: bool,
+    /// Whether tables are currently being fetched from the server
+    pub tables_loading: bool,
+    /// Whether views are currently being fetched from the server
+    pub views_loading: bool,
+    /// Whether materialized views are currently being fetched from the server
+    pub materialized_views_loading: bool,
+    /// Whether triggers are currently being fetched from the server
+    pub triggers_loading: bool,
+    /// Whether functions are currently being fetched from the server
+    pub functions_loading: bool,
+    /// Whether procedures are currently being fetched from the server
+    pub procedures_loading: bool,
     /// Redis databases (only used for Redis connections)
     pub redis_databases: Vec<RedisDatabaseInfo>,
     /// Whether Redis databases section is expanded
@@ -121,18 +145,24 @@ impl ConnectionEntry {
             functions: Vec::new(),
             procedures: Vec::new(),
             queries: Vec::new(),
-            tables_expanded: true,
+            tables_expanded: false,
             views_expanded: false,
             materialized_views_expanded: false,
             triggers_expanded: false,
             functions_expanded: false,
             procedures_expanded: false,
-            queries_expanded: true,
+            queries_expanded: false,
+            tables_loading: false,
+            views_loading: false,
+            materialized_views_loading: false,
+            triggers_loading: false,
+            functions_loading: false,
+            procedures_loading: false,
             redis_databases: Vec::new(),
-            redis_databases_expanded: true,
+            redis_databases_expanded: false,
             databases: Vec::new(),
             schema_name: None,
-            schema_expanded: true,
+            schema_expanded: false,
         }
     }
 

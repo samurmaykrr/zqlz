@@ -297,8 +297,7 @@ impl RenderOnce for Text {
     }
 }
 
-/// Builder-style shortcuts for common text patterns
-
+/// Builder-style shortcuts for common text patterns.
 /// Create heading 1 text
 pub fn h1<S: Into<SharedString>>(content: S) -> Text {
     Text::new(content).variant(TextVariant::H1)

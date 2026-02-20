@@ -12,7 +12,7 @@ use zqlz_trigger_designer::{
 };
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
-    button::{ButtonVariant, ButtonVariants as _},
+    button::ButtonVariant,
     dialog::DialogButtonProps,
     dock::{DockPlacement, PanelView},
     input::{Input, InputState},
@@ -22,6 +22,7 @@ use zqlz_ui::widgets::{
 
 use crate::app::AppState;
 use crate::components::{ObjectsPanelEvent, QueryEditor};
+use zqlz_services::SchemaService;
 
 use super::MainView;
 
@@ -37,8 +38,10 @@ fn validate_view_name(name: &str) -> Option<&'static str> {
         return Some("View name is too long (max 128 characters)");
     }
 
-    // Check for invalid starting character
-    let first_char = name.chars().next().unwrap();
+    // Emptiness is already guarded above, so `next()` will always yield a char
+    let Some(first_char) = name.chars().next() else {
+        return Some("View name cannot be empty");
+    };
     if !first_char.is_alphabetic() && first_char != '_' {
         return Some("View name must start with a letter or underscore");
     }
@@ -293,7 +296,7 @@ impl MainView {
         // Format the editor title to include [View] indicator and connection name
         let editor_title = format!("[View] {} ({})", view_name, connection_name);
 
-        cx.spawn_in(window, async move |this, mut cx| {
+        cx.spawn_in(window, async move |this, cx| {
             // Fetch the view definition
             match fetch_view_definition(&connection, &view_name_for_spawn, &driver_name).await {
                 Ok(definition) => {
@@ -511,7 +514,7 @@ impl MainView {
                         .ok_text("Delete")
                         .ok_variant(ButtonVariant::Danger),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
                     let connection_sidebar = connection_sidebar.clone();
                     let objects_panel = objects_panel.clone();
@@ -1106,6 +1109,8 @@ impl MainView {
             .map(|c| c.driver.clone())
             .unwrap_or_else(|| "sqlite".to_string());
 
+        let schema_service = app_state.schema_service.clone();
+
         // For new views, we need to prompt for a name
         if is_new || name.is_none() {
             self.prompt_for_view_name(
@@ -1113,6 +1118,7 @@ impl MainView {
                 definition,
                 driver_name,
                 connection.clone(),
+                schema_service,
                 editor_weak,
                 window,
                 cx,
@@ -1120,9 +1126,12 @@ impl MainView {
             return;
         }
 
-        let view_name = name.unwrap();
+        let Some(view_name) = name else {
+            // Guarded by is_new || name.is_none() check above; this branch is unreachable
+            return;
+        };
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
+        let _connection_sidebar = self.connection_sidebar.downgrade();
 
         // Generate the appropriate DDL based on database type
         let ddl = if driver_name.contains("postgres") {
@@ -1158,6 +1167,8 @@ impl MainView {
 
             if success {
                 tracing::info!("View '{}' saved successfully", view_name);
+
+                schema_service.invalidate_connection_cache(connection_id);
 
                 _ = editor_weak.update(cx, |editor, cx| {
                     editor.mark_clean(cx);
@@ -1203,12 +1214,15 @@ impl MainView {
         };
 
         let connection = connection.clone();
+        let schema_service = app_state.schema_service.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
             // The editor content is the full DDL (e.g. CREATE OR REPLACE FUNCTION ...)
             match connection.execute(definition.trim(), &[]).await {
                 Ok(_) => {
                     tracing::info!("{} '{}' saved successfully", type_name, object_name);
+
+                    schema_service.invalidate_connection_cache(connection_id);
 
                     _ = editor_weak.update(cx, |editor, cx| {
                         editor.mark_clean(cx);
@@ -1251,6 +1265,7 @@ impl MainView {
         definition: String,
         driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
+        schema_service: Arc<SchemaService>,
         editor_weak: WeakEntity<QueryEditor>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1281,12 +1296,13 @@ impl MainView {
             move |dialog, _window, cx| {
                 let connection = connection.clone();
                 let definition = definition.clone();
-                let driver_name = driver_name.clone();
+                let _driver_name = driver_name.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
                 let editor_weak = editor_weak.clone();
                 let connection_sidebar = connection_sidebar.clone();
+                let schema_service = schema_service.clone();
 
                 dialog
                     .title("Save View As")
@@ -1318,6 +1334,7 @@ impl MainView {
                         let definition = definition.clone();
                         let editor_weak = editor_weak.clone();
                         let connection_sidebar = connection_sidebar.clone();
+                        let schema_service = schema_service.clone();
 
                         cx.spawn(async move |cx| {
                             let create_sql =
@@ -1326,6 +1343,8 @@ impl MainView {
                             match connection.execute(&create_sql, &[]).await {
                                 Ok(_) => {
                                     tracing::info!("View '{}' created successfully", view_name);
+
+                                    schema_service.invalidate_connection_cache(connection_id);
 
                                     // Update the editor's object type with the new name
                                     _ = editor_weak.update(cx, |editor, cx| {
@@ -1392,7 +1411,7 @@ impl MainView {
         let function_name_for_spawn = function_name.clone();
         let dock_area = self.dock_area.downgrade();
 
-        cx.spawn_in(window, async move |this, mut cx| {
+        cx.spawn_in(window, async move |this, cx| {
             // Fetch the function definition
             match fetch_function_definition(&connection, &function_name_for_spawn, &driver_name)
                 .await
@@ -1510,7 +1529,7 @@ impl MainView {
         let procedure_name_for_spawn = procedure_name.clone();
         let dock_area = self.dock_area.downgrade();
 
-        cx.spawn_in(window, async move |this, mut cx| {
+        cx.spawn_in(window, async move |this, cx| {
             // Fetch the procedure definition
             match fetch_procedure_definition(&connection, &procedure_name_for_spawn, &driver_name)
                 .await
@@ -1634,7 +1653,7 @@ impl MainView {
 
         let editor_title = format!("[Trigger] {} ({})", trigger_name, connection_name);
 
-        cx.spawn_in(window, async move |this, mut cx| {
+        cx.spawn_in(window, async move |this, cx| {
             match fetch_trigger_definition(&connection, &trigger_name_for_spawn, &driver_name).await
             {
                 Ok(definition) => {
@@ -1871,7 +1890,7 @@ END;"#
                         .ok_text("Delete")
                         .ok_variant(ButtonVariant::Danger),
                 )
-                .on_ok(move |_, window, cx| {
+                .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
                     let connection_sidebar = connection_sidebar.clone();
                     let trigger_name = trigger_name.clone();
@@ -1956,7 +1975,7 @@ END;"#
             let dock_area = self.dock_area.downgrade();
             let trigger_name_for_spawn = trigger_name.clone();
 
-            cx.spawn_in(window, async move |this, mut cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 // Fetch trigger definition
                 let definition =
                     fetch_trigger_definition(&connection, &trigger_name_for_spawn, &driver_name)
@@ -2033,7 +2052,7 @@ END;"#
             // Creating a new trigger
             let connection = connection.clone();
 
-            cx.spawn_in(window, async move |this, mut cx| {
+            cx.spawn_in(window, async move |this, cx| {
                 // Get available tables
                 let tables = match schema_service
                     .load_database_schema(connection.clone(), connection_id)
@@ -2047,7 +2066,7 @@ END;"#
                 };
 
                 cx.update(|window, cx| {
-                    let design = TriggerDesign::new(dialect);
+                    let _design = TriggerDesign::new(dialect);
 
                     // Create the trigger designer panel
                     let panel = cx.new(|cx| {
@@ -2171,11 +2190,12 @@ END;"#
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
         let trigger_name = design.name.clone();
+        let schema_service = app_state.schema_service.clone();
 
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
         let dock_area = self.dock_area.downgrade();
 
-        cx.spawn_in(window, async move |_this, mut cx| {
+        cx.spawn_in(window, async move |_this, cx| {
             // If editing an existing trigger, drop it first (for SQLite/MySQL)
             // Postgres uses CREATE OR REPLACE
             if !is_new && !driver_name.contains("postgres") {
@@ -2192,6 +2212,8 @@ END;"#
             match connection.execute(&ddl, &[]).await {
                 Ok(_) => {
                     tracing::info!("Trigger '{}' saved successfully", trigger_name);
+
+                    schema_service.invalidate_connection_cache(connection_id);
 
                     cx.update(|window, cx| {
                         // Update sidebar
@@ -2317,6 +2339,7 @@ END;"#
 
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
+        let schema_service = app_state.schema_service.clone();
 
         if is_new || name.is_none() {
             // For new triggers, the definition should be the full CREATE TRIGGER statement
@@ -2325,6 +2348,8 @@ END;"#
                 match connection.execute(&definition, &[]).await {
                     Ok(_) => {
                         tracing::info!("Trigger created successfully");
+
+                        schema_service.invalidate_connection_cache(connection_id);
 
                         _ = editor_weak.update(cx, |editor, cx| {
                             editor.mark_clean(cx);
@@ -2381,6 +2406,8 @@ END;"#
                 match connection.execute(&definition, &[]).await {
                     Ok(_) => {
                         tracing::info!("Trigger '{}' saved successfully", trigger_name);
+
+                        schema_service.invalidate_connection_cache(connection_id);
 
                         _ = editor_weak.update(cx, |editor, cx| {
                             editor.mark_clean(cx);
@@ -2532,7 +2559,7 @@ END;"#
                     let view_names = view_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let mut errors: Vec<String> = Vec::new();
                         let mut deleted_views: Vec<String> = Vec::new();
 
@@ -2700,7 +2727,7 @@ END;"#
                     let driver_name = driver_name.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let mut errors: Vec<String> = Vec::new();
                         let mut duplicated_views: Vec<String> = Vec::new();
 

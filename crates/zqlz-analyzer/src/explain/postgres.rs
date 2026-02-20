@@ -81,14 +81,14 @@ pub fn parse_json_explain(json: &str) -> Result<QueryPlan> {
     let mut plan = QueryPlan::new(root);
 
     // Extract timing information if available (from EXPLAIN ANALYZE)
-    if let Some(arr) = value.as_array() {
-        if let Some(first) = arr.first() {
-            if let Some(planning) = first.get("Planning Time").and_then(|v| v.as_f64()) {
-                plan.planning_time_ms = Some(planning);
-            }
-            if let Some(execution) = first.get("Execution Time").and_then(|v| v.as_f64()) {
-                plan.execution_time_ms = Some(execution);
-            }
+    if let Some(arr) = value.as_array()
+        && let Some(first) = arr.first()
+    {
+        if let Some(planning) = first.get("Planning Time").and_then(|v| v.as_f64()) {
+            plan.planning_time_ms = Some(planning);
+        }
+        if let Some(execution) = first.get("Execution Time").and_then(|v| v.as_f64()) {
+            plan.execution_time_ms = Some(execution);
         }
     }
 
@@ -169,7 +169,7 @@ fn parse_plan_node(value: &Value) -> Result<PlanNode> {
 
     // Join information
     if let Some(join_str) = value.get("Join Type").and_then(|v| v.as_str()) {
-        node.join_type = JoinType::from_str(join_str);
+        node.join_type = JoinType::parse(join_str);
     }
 
     if let Some(cond) = value.get("Join Filter").and_then(|v| v.as_str()) {
@@ -292,12 +292,11 @@ pub fn parse_text_explain(text: &str) -> Result<QueryPlan> {
             if let Some(ms) = extract_time_ms(line) {
                 plan.planning_time_ms = Some(ms);
             }
-        } else if line.trim().starts_with("Execution Time:")
-            || line.trim().starts_with("Execution time:")
+        } else if (line.trim().starts_with("Execution Time:")
+            || line.trim().starts_with("Execution time:"))
+            && let Some(ms) = extract_time_ms(line)
         {
-            if let Some(ms) = extract_time_ms(line) {
-                plan.execution_time_ms = Some(ms);
-            }
+            plan.execution_time_ms = Some(ms);
         }
     }
 
@@ -305,6 +304,7 @@ pub fn parse_text_explain(text: &str) -> Result<QueryPlan> {
 }
 
 /// Parses a single node from text format, returns the node and the next line index
+#[allow(clippy::only_used_in_recursion)]
 fn parse_text_node(
     lines: &[&str],
     start: usize,
@@ -508,10 +508,10 @@ fn parse_type_and_relation(text: &str) -> (NodeType, Option<String>, Option<Stri
             relation = Some(remaining[on_idx + 1].to_string());
         }
         // Check for "using index"
-        if let Some(using_idx) = remaining[..on_idx].iter().position(|&s| s == "using") {
-            if using_idx + 1 < on_idx {
-                index_name = Some(remaining[using_idx + 1].to_string());
-            }
+        if let Some(using_idx) = remaining[..on_idx].iter().position(|&s| s == "using")
+            && using_idx + 1 < on_idx
+        {
+            index_name = Some(remaining[using_idx + 1].to_string());
         }
     }
 
@@ -523,51 +523,48 @@ fn parse_cost_section(node: &mut PlanNode, cost_str: &str) {
     // Format: "(cost=0.00..10.00 rows=100 width=36) (actual time=0.01..0.05 rows=50 loops=1)"
 
     // Parse estimated cost
-    if let Some(cost_match) = extract_between(cost_str, "cost=", "..") {
-        if let Ok(startup) = cost_match.parse::<f64>() {
-            if let Some(total_match) = extract_between(cost_str, "..", " rows=") {
-                if let Ok(total) = total_match.parse::<f64>() {
-                    node.cost = Some(NodeCost::new(startup, total));
-                }
-            }
-        }
+    if let Some(cost_match) = extract_between(cost_str, "cost=", "..")
+        && let Ok(startup) = cost_match.parse::<f64>()
+        && let Some(total_match) = extract_between(cost_str, "..", " rows=")
+        && let Ok(total) = total_match.parse::<f64>()
+    {
+        node.cost = Some(NodeCost::new(startup, total));
     }
 
     // Parse estimated rows
-    if let Some(rows_match) = extract_between(cost_str, "rows=", " width=") {
-        if let Ok(rows) = rows_match.parse::<u64>() {
-            node.rows = Some(rows);
-        }
-    } else if let Some(rows_match) = extract_between(cost_str, "rows=", ")") {
-        if let Ok(rows) = rows_match.parse::<u64>() {
-            node.rows = Some(rows);
-        }
+    if let Some(rows_match) = extract_between(cost_str, "rows=", " width=")
+        && let Ok(rows) = rows_match.parse::<u64>()
+    {
+        node.rows = Some(rows);
+    } else if let Some(rows_match) = extract_between(cost_str, "rows=", ")")
+        && let Ok(rows) = rows_match.parse::<u64>()
+    {
+        node.rows = Some(rows);
     }
 
     // Parse width
-    if let Some(width_match) = extract_between(cost_str, "width=", ")") {
-        if let Ok(width) = width_match.parse::<u32>() {
-            node.width = Some(width);
-        }
+    if let Some(width_match) = extract_between(cost_str, "width=", ")")
+        && let Ok(width) = width_match.parse::<u32>()
+    {
+        node.width = Some(width);
     }
 
     // Parse actual time (from ANALYZE)
-    if let Some(actual_start) = extract_between(cost_str, "actual time=", "..") {
-        if let Ok(startup) = actual_start.parse::<f64>() {
-            if extract_between(cost_str, "..", " rows=").is_some() {
-                // Skip the first ".." which is for estimated cost
-                let second_dotdot = cost_str.find("actual time=").and_then(|idx| {
-                    let after = &cost_str[idx..];
-                    after.find("..").map(|i| idx + i)
-                });
-                if let Some(idx) = second_dotdot {
-                    let after_dotdot = &cost_str[idx + 2..];
-                    if let Some(end_idx) = after_dotdot.find(" rows=") {
-                        if let Ok(total) = after_dotdot[..end_idx].trim().parse::<f64>() {
-                            node.actual_time_ms = Some(ActualTime::new(startup, total));
-                        }
-                    }
-                }
+    if let Some(actual_start) = extract_between(cost_str, "actual time=", "..")
+        && let Ok(startup) = actual_start.parse::<f64>()
+        && extract_between(cost_str, "..", " rows=").is_some()
+    {
+        // Skip the first ".." which is for estimated cost
+        let second_dotdot = cost_str.find("actual time=").and_then(|idx| {
+            let after = &cost_str[idx..];
+            after.find("..").map(|i| idx + i)
+        });
+        if let Some(idx) = second_dotdot {
+            let after_dotdot = &cost_str[idx + 2..];
+            if let Some(end_idx) = after_dotdot.find(" rows=")
+                && let Ok(total) = after_dotdot[..end_idx].trim().parse::<f64>()
+            {
+                node.actual_time_ms = Some(ActualTime::new(startup, total));
             }
         }
     }
@@ -577,23 +574,23 @@ fn parse_cost_section(node: &mut PlanNode, cost_str: &str) {
         // Find the second "rows=" (after "actual")
         if let Some(actual_idx) = cost_str.find("actual") {
             let after_actual = &cost_str[actual_idx..];
-            if let Some(rows_match) = extract_between(after_actual, "rows=", " loops=") {
-                if let Ok(rows) = rows_match.parse::<u64>() {
-                    node.actual_rows = Some(rows);
-                }
-            } else if let Some(rows_match) = extract_between(after_actual, "rows=", ")") {
-                if let Ok(rows) = rows_match.parse::<u64>() {
-                    node.actual_rows = Some(rows);
-                }
+            if let Some(rows_match) = extract_between(after_actual, "rows=", " loops=")
+                && let Ok(rows) = rows_match.parse::<u64>()
+            {
+                node.actual_rows = Some(rows);
+            } else if let Some(rows_match) = extract_between(after_actual, "rows=", ")")
+                && let Ok(rows) = rows_match.parse::<u64>()
+            {
+                node.actual_rows = Some(rows);
             }
         }
     }
 
     // Parse loops
-    if let Some(loops_match) = extract_between(cost_str, "loops=", ")") {
-        if let Ok(loops) = loops_match.parse::<u64>() {
-            node.loops = Some(loops);
-        }
+    if let Some(loops_match) = extract_between(cost_str, "loops=", ")")
+        && let Ok(loops) = loops_match.parse::<u64>()
+    {
+        node.loops = Some(loops);
     }
 }
 

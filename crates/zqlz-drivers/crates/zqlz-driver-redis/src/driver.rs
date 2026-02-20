@@ -174,9 +174,9 @@ impl DatabaseDriver for RedisDriver {
                 let error_msg = e.to_string();
                 // Check for authentication errors
                 if error_msg.contains("NOAUTH") || error_msg.contains("Authentication") {
-                    return Err(ZqlzError::Driver(format!(
-                        "Redis authentication required. Please provide a password in connection settings."
-                    )));
+                    return Err(ZqlzError::Driver(
+                        "Redis authentication required. Please provide a password in connection settings.".to_string(),
+                    ));
                 }
                 return Err(ZqlzError::Driver(format!(
                     "Redis connection verification failed: {}",
@@ -205,7 +205,7 @@ impl DatabaseDriver for RedisDriver {
         let port = config
             .get_string("port")
             .and_then(|s| s.parse::<u16>().ok())
-            .unwrap_or_else(|| if config.port > 0 { config.port } else { 6379 });
+            .unwrap_or(if config.port > 0 { config.port } else { 6379 });
         let database: u16 = config
             .get_string("database")
             .and_then(|s| s.parse().ok())

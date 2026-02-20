@@ -4,9 +4,9 @@ use anyhow::Result;
 use gpui::{Context, Task, Window};
 use parking_lot::RwLock;
 use std::sync::Arc;
-use zqlz_ui::widgets::Rope;
-use zqlz_ui::widgets::input::InputState;
 use zqlz_ui::widgets::input::lsp::CompletionProvider;
+use zqlz_ui::widgets::input::InputState;
+use zqlz_ui::widgets::Rope;
 
 use super::SqlLsp;
 
@@ -63,7 +63,9 @@ impl CompletionProvider for SqlCompletionProvider {
 
         // Single character handling
         if new_text.len() == 1 {
-            let ch = new_text.chars().next().unwrap();
+            let Some(ch) = new_text.chars().next() else {
+                return false;
+            };
 
             // Only trigger on dot (for table.column pattern) or alphanumeric
             // Do NOT trigger on space - too aggressive

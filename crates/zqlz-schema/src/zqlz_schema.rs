@@ -1,7 +1,7 @@
 //! ZQLZ Schema - Schema introspection, DDL generation, and UI widgets
 //!
 //! This crate provides:
-//! - Schema caching (basic and lazy loading)
+//! - Schema caching
 //! - DDL generation
 //! - Schema comparison utilities
 //! - Dependency analysis between database objects
@@ -22,12 +22,6 @@ pub use ddl::DdlGenerator;
 pub use dependencies::{
     AnalyzerConfig, Dependencies, DependencyAnalyzer, DependencyGraph, ObjectRef,
     extract_table_references,
-};
-
-// Re-export lazy loading types for convenience
-pub use lazy::{
-    CacheEntry, LazyCacheConfig, LazyCacheStats, LazySchemaCache, SharedLazySchemaCache,
-    new_shared_cache, new_shared_cache_with_config,
 };
 
 // Re-export statistics types for convenience

@@ -4,13 +4,13 @@ use std::{
     usize,
 };
 
-use gpui::{App, HighlightStyle, Hsla, SharedString, UnderlineStyle, px};
+use gpui::{px, App, HighlightStyle, Hsla, SharedString, UnderlineStyle};
 use ropey::Rope;
 use sum_tree::{Bias, SeekTarget, SumTree};
 
 use crate::widgets::{
-    ActiveTheme,
     input::{Position, RopeExt as _},
+    ActiveTheme,
 };
 
 pub type DiagnosticRelatedInformation = lsp_types::DiagnosticRelatedInformation;
@@ -143,7 +143,7 @@ impl DiagnosticSeverity {
 
         let mut style = HighlightStyle::default();
         style.underline = Some(UnderlineStyle {
-            color: color,
+            color,
             thickness: px(1.),
             wavy: true,
         });

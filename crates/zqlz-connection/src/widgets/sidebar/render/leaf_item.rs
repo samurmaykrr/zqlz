@@ -2,7 +2,6 @@
 //!
 //! Renders terminal nodes in the tree hierarchy (tables, views, functions, etc.).
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::widgets::sidebar::ConnectionSidebar;

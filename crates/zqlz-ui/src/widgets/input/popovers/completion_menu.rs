@@ -14,7 +14,7 @@ const POPOVER_GAP: Pixels = px(4.);
 
 use crate::widgets::{
     ActiveTheme, IndexPath, Selectable, actions,
-    input::{self, InputState, popovers::editor_popover},
+    input::{self, popovers::editor_popover},
     label::Label,
     list::{List, ListDelegate, ListEvent, ListState},
     text::{TextView, TextViewState},
@@ -284,14 +284,14 @@ impl Default for FuzzyMatcher {
 }
 
 // ---------------------------------------------------------------------------
-// CompletionMenuEditor — trait that abstracts text replacement, cursor info,
-// and positioning so the menu works with both InputState and EditorWrapper.
+// CompletionMenuEditor — trait that abstracts text replacement and cursor info
+// so the completion menu can work with any editor implementation.
 // ---------------------------------------------------------------------------
 
 /// Abstraction over text editors that the completion menu can interact with.
 ///
-/// Both `InputState` (GPUI custom input) and `EditorWrapper` (Zed editor) implement
-/// this trait so a single `CompletionMenu` can serve both.
+/// Implementations provide text replacement, cursor position info, and popup
+/// anchor coordinates so a single `CompletionMenu` can serve any editor type.
 ///
 /// Methods receive `&mut Context<Self>` so implementations can interact with their
 /// own entity state (e.g. emit events, call methods that require `Context`).

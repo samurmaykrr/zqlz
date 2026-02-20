@@ -4,6 +4,7 @@ use std::ops::Range;
 
 /// Represents a foldable region in the text.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 pub struct FoldRegion {
     /// Start line (0-indexed)
     pub start_line: usize,
@@ -13,6 +14,7 @@ pub struct FoldRegion {
     pub level: usize,
 }
 
+#[allow(dead_code)]
 impl FoldRegion {
     pub fn new(start_line: usize, end_line: usize, level: usize) -> Self {
         Self {
@@ -33,6 +35,7 @@ impl FoldRegion {
 
 /// Manages the fold state for a text editor.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FoldState {
     /// All detected fold regions in the text
     regions: Vec<FoldRegion>,
@@ -42,6 +45,7 @@ pub struct FoldState {
     region_by_line: BTreeMap<usize, usize>,
 }
 
+#[allow(dead_code)]
 impl FoldState {
     pub fn new() -> Self {
         Self {
@@ -256,7 +260,7 @@ mod tests {
 
     #[test]
     fn test_fold_state_basic() {
-        let mut state = FoldState::new();
+        let state = FoldState::new();
         assert_eq!(state.regions().len(), 0);
         assert!(!state.is_folded(0));
     }

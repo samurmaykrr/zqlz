@@ -510,7 +510,10 @@ impl TriggerManager {
         let events = self.build_events_clause(spec);
         let table = self.quote_identifier(&spec.qualified_table());
         let level = spec.level.as_sql();
-        let function = spec.function_name.as_ref().unwrap();
+        let function = spec
+            .function_name
+            .as_ref()
+            .ok_or(TriggerError::MissingFunction)?;
 
         let when_clause = spec
             .when_condition
@@ -532,9 +535,9 @@ impl TriggerManager {
 
     fn build_mysql_trigger(&self, spec: &TriggerSpec) -> Result<String, TriggerError> {
         let timing = spec.timing.as_sql();
-        let event = spec.events.first().unwrap().as_sql();
+        let event = spec.events.first().ok_or(TriggerError::NoEvents)?.as_sql();
         let table = self.quote_identifier(&spec.qualified_table());
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(TriggerError::MissingBody)?;
 
         Ok(format!(
             "CREATE TRIGGER {}\n{} {} ON {}\nFOR EACH ROW\nBEGIN\n{}\nEND",
@@ -550,7 +553,7 @@ impl TriggerManager {
         let timing = spec.timing.as_sql();
         let events = self.build_events_clause(spec);
         let table = self.quote_identifier(&spec.qualified_table());
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(TriggerError::MissingBody)?;
 
         let when_clause = spec
             .when_condition
@@ -577,7 +580,7 @@ impl TriggerManager {
             .collect::<Vec<_>>()
             .join(", ");
         let table = self.quote_identifier(&spec.qualified_table());
-        let body = spec.body.as_ref().unwrap();
+        let body = spec.body.as_ref().ok_or(TriggerError::MissingBody)?;
 
         let timing_clause = if spec.timing.is_instead_of() {
             "INSTEAD OF"
@@ -792,10 +795,9 @@ impl TriggerManager {
     }
 
     fn needs_quoting(name: &str) -> bool {
-        if name.is_empty() {
+        let Some(first) = name.chars().next() else {
             return true;
-        }
-        let first = name.chars().next().unwrap();
+        };
         if !first.is_ascii_alphabetic() && first != '_' {
             return true;
         }

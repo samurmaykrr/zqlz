@@ -165,12 +165,12 @@ impl SshTunnelConfig {
             ));
         }
 
-        if let SshAuthMethod::PrivateKey { path, .. } = &self.auth {
-            if path.as_os_str().is_empty() {
-                return Err(ZqlzError::Configuration(
-                    "SSH private key path cannot be empty".to_string(),
-                ));
-            }
+        if let SshAuthMethod::PrivateKey { path, .. } = &self.auth
+            && path.as_os_str().is_empty()
+        {
+            return Err(ZqlzError::Configuration(
+                "SSH private key path cannot be empty".to_string(),
+            ));
         }
 
         Ok(())

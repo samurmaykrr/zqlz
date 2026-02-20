@@ -10,8 +10,3 @@
 mod duplicate;
 mod multi_row;
 
-pub use duplicate::{DuplicateOptions, DuplicatedRow, duplicate_row, duplicate_rows};
-pub use multi_row::{
-    MultiRowOperation, Operation, OperationResult, generate_bulk_delete_sql,
-    generate_bulk_update_sql,
-};

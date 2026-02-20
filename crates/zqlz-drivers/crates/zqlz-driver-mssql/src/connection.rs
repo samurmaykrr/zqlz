@@ -186,7 +186,7 @@ impl Connection for MssqlConnection {
             let tiberius_params = values_to_tiberius_params(params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> = tiberius_params
                 .iter()
-                .map(|p| p.as_ref() as &dyn tiberius::ToSql)
+                .map(|p| p as &dyn tiberius::ToSql)
                 .collect();
             client.execute(sql, &param_refs[..]).await
         };
@@ -226,7 +226,7 @@ impl Connection for MssqlConnection {
             let tiberius_params = values_to_tiberius_params(params)?;
             let param_refs: Vec<&dyn tiberius::ToSql> = tiberius_params
                 .iter()
-                .map(|p| p.as_ref() as &dyn tiberius::ToSql)
+                .map(|p| p as &dyn tiberius::ToSql)
                 .collect();
             client.query(sql, &param_refs[..]).await
         };
@@ -359,7 +359,8 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         ColumnData::DateTime(None) => Ok(Value::Null),
         ColumnData::DateTime(Some(v)) => {
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap()
+                chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .expect("1900-01-01 is a valid date")
                     + chrono::Duration::days(v.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (v.seconds_fragments() as f64 / 300.0) as u32,
@@ -372,7 +373,8 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         ColumnData::SmallDateTime(None) => Ok(Value::Null),
         ColumnData::SmallDateTime(Some(v)) => {
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap()
+                chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
+                    .expect("1900-01-01 is a valid date")
                     + chrono::Duration::days(v.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (v.seconds_fragments() as u32) * 60,
@@ -387,7 +389,8 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
             let date = v.date();
             let time = v.time();
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap()
+                chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+                    .expect("0001-01-01 is a valid date")
                     + chrono::Duration::days(date.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (time.increments() / 10_000_000) as u32,
@@ -403,7 +406,8 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
             let date = dt2.date();
             let time = dt2.time();
             let naive = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap()
+                chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+                    .expect("0001-01-01 is a valid date")
                     + chrono::Duration::days(date.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (time.increments() / 10_000_000) as u32,
@@ -417,7 +421,8 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         }
         ColumnData::Date(None) => Ok(Value::Null),
         ColumnData::Date(Some(v)) => {
-            let date = chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap()
+            let date = chrono::NaiveDate::from_ymd_opt(1, 1, 1)
+                .expect("0001-01-01 is a valid date")
                 + chrono::Duration::days(v.days() as i64);
             Ok(Value::Date(date))
         }
@@ -472,7 +477,7 @@ impl tiberius::ToSql for TiberiusParam {
 }
 
 /// Convert zqlz Values to tiberius parameters
-pub(crate) fn values_to_tiberius_params(values: &[Value]) -> Result<Vec<Box<TiberiusParam>>> {
+pub(crate) fn values_to_tiberius_params(values: &[Value]) -> Result<Vec<TiberiusParam>> {
     values
         .iter()
         .map(|v| {
@@ -499,7 +504,7 @@ pub(crate) fn values_to_tiberius_params(values: &[Value]) -> Result<Vec<Box<Tibe
                     TiberiusParam::String(json)
                 }
             };
-            Ok(Box::new(param))
+            Ok(param)
         })
         .collect()
 }

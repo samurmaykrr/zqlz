@@ -7,7 +7,6 @@
 //! - Managing connection settings
 //! - Duplicating and deleting connections
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};

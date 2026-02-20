@@ -59,7 +59,7 @@ impl TableViewerPanel {
                 cx.subscribe_in(
                     &input,
                     window,
-                    |this, input, event: &InputEvent, window, cx| {
+                    |this, input, event: &InputEvent, _window, cx| {
                         match event {
                             InputEvent::Change => {
                                 let text = input.read(cx).text().to_string();

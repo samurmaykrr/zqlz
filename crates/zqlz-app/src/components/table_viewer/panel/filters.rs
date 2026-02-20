@@ -118,7 +118,7 @@ impl TableViewerPanel {
         direction: super::super::filter_types::SortDirection,
         cx: &mut Context<Self>,
     ) {
-        use crate::components::table_viewer::filter_types::SortCriterion;
+        
 
         if let Some(filter_state) = &self.filter_panel_state {
             filter_state.update(cx, |state, cx| {

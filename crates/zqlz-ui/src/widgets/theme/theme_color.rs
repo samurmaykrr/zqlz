@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use crate::widgets::{ThemeMode, theme::DEFAULT_THEME_COLORS};
+use crate::widgets::{theme::DEFAULT_THEME_COLORS, ThemeMode};
 
 use gpui::Hsla;
 use schemars::JsonSchema;
@@ -25,6 +25,8 @@ pub struct ThemeColor {
     pub group_box: Hsla,
     /// Text color for GroupBox.
     pub group_box_foreground: Hsla,
+    /// Title text color for GroupBox.
+    pub group_box_title_foreground: Hsla,
     /// Input caret color (Blinking cursor).
     pub caret: Hsla,
     /// Chart 1 color.

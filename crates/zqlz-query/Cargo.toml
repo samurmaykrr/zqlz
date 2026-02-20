@@ -17,7 +17,7 @@ zqlz-services.workspace = true
 zqlz-lsp.workspace = true
 zqlz-templates.workspace = true
 zqlz-analyzer.workspace = true
-zqlz-zed-adapter.workspace = true
+zqlz-text-editor.workspace = true
 
 # GPUI
 gpui.workspace = true
@@ -28,6 +28,7 @@ lsp-types.workspace = true
 # Async
 async-trait.workspace = true
 tokio.workspace = true
+smol.workspace = true
 
 # SQL parsing
 sqlparser.workspace = true
@@ -46,8 +47,12 @@ chrono.workspace = true
 uuid.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
+dirs.workspace = true
 
 # HTTP client for AI providers
 reqwest.workspace = true
+
+# Rope data structure (same version as zqlz-text-editor for CompletionProvider trait compatibility)
+ropey = "1.6"
 
 [dev-dependencies]

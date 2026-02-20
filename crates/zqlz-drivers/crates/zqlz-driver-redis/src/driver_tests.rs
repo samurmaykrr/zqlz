@@ -44,7 +44,7 @@ mod driver_metadata_tests {
 
     #[test]
     fn test_redis_default_driver() {
-        let driver = RedisDriver::default();
+        let driver = RedisDriver;
         assert_eq!(driver.id(), "redis");
     }
 }

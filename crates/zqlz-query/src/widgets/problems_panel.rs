@@ -249,7 +249,7 @@ impl ProblemsPanel {
         let severity_icon = problem.severity.icon();
 
         // Format line:column display
-        let location = format!("{}:{}", problem.line + 1, problem.column + 1);
+        let _location = format!("{}:{}", problem.line + 1, problem.column + 1);
 
         div()
             .w_full()

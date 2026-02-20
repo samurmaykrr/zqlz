@@ -261,17 +261,10 @@ impl RopeExt for Rope {
         let line = self.line(row, LineType::LF);
         if line.len() > 0 {
             let mut line_end = line.len();
-            // Strip trailing \n
+            // Strip trailing \n only; preserve \r so callers can distinguish CRLF line endings.
             if line_end > 0
                 && line.is_char_boundary(line_end - 1)
                 && line.char(line_end - 1) == '\n'
-            {
-                line_end -= 1;
-            }
-            // Strip trailing \r (for CRLF line endings)
-            if line_end > 0
-                && line.is_char_boundary(line_end - 1)
-                && line.char(line_end - 1) == '\r'
             {
                 line_end -= 1;
             }
@@ -379,7 +372,11 @@ impl RopeExt for Rope {
 
         let end = offset + right.len();
 
-        if start == end { None } else { Some(start..end) }
+        if start == end {
+            None
+        } else {
+            Some(start..end)
+        }
     }
 
     fn word_at(&self, offset: usize) -> String {
@@ -447,7 +444,7 @@ mod tests {
     use sum_tree::Bias;
     use tree_sitter::Point;
 
-    use crate::widgets::{RopeExt, input::Position};
+    use crate::widgets::{input::Position, RopeExt};
 
     #[test]
     fn test_slice_line() {

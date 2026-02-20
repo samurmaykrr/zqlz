@@ -50,7 +50,6 @@ mod ui_components;
 mod versioning_handlers;
 mod view_handlers;
 
-pub use connection_window::ConnectionWindow;
 
 use gpui::*;
 use std::collections::HashMap;
@@ -63,28 +62,23 @@ use zqlz_ui::widgets::{
     v_flex,
 };
 use zqlz_versioning::{
-    DatabaseObjectType, VersionRepository,
-    widgets::{DiffViewer, DiffViewerEvent, VersionHistoryPanel, VersionHistoryPanelEvent},
+    VersionRepository,
+    widgets::{DiffViewer, VersionHistoryPanel},
 };
 
-use crate::actions::{
-    ExecuteSelection, NewConnection, NewQuery, OpenCommandPalette, OpenSettings, Quit, Refresh,
-    RefreshConnectionsList, StopQuery, ToggleBottomPanel, ToggleLeftSidebar, ToggleRightSidebar,
-};
 use crate::app::AppState;
 use crate::components::{
-    CellEditorPanel, CommandPalette, CommandPaletteEvent, ConnectionEntry, ConnectionSidebar,
-    ConnectionSidebarEvent, InspectorPanel, InspectorView, KeyValueEditorEvent,
+    CellEditorPanel, CommandPalette, ConnectionEntry, ConnectionSidebar,
+    ConnectionSidebarEvent, InspectorPanel, KeyValueEditorEvent,
     KeyValueEditorPanel, ObjectsPanel, ObjectsPanelEvent, ProblemEntry, ProblemsPanel,
-    ProblemsPanelEvent, ProblemSeverity, ProjectManagerEvent, ProjectManagerPanel,
+    ProblemsPanelEvent, ProblemSeverity,
     QueryHistoryPanel, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent,
-    SchemaDetailsPanel, SettingsPanel, SettingsPanelEvent, TemplateLibraryEvent, TemplateLibraryPanel,
+    SchemaDetailsPanel, SettingsPanel,
 };
 use crate::workspace_state::{
     DiagnosticSeverity, EditorDiagnostic, WorkspaceState, WorkspaceStateEvent,
 };
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
-use zqlz_zed_adapter::{SettingsBridge, ThemeBridge};
 
 pub use tab_menu::TabContextMenuState;
 
@@ -103,6 +97,7 @@ const DOCK_AREA_VERSION: usize = 2;
 
 /// Events emitted by the main view
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum MainViewEvent {
     /// A connection was established
     ConnectionEstablished(Uuid),
@@ -156,6 +151,10 @@ pub struct MainView {
     version_history_panel: Option<Entity<VersionHistoryPanel>>,
     /// Diff viewer panel (opened on demand)
     diff_viewer_panel: Option<Entity<DiffViewer>>,
+    /// Task for the most recent table-open async work. Replaced on every new
+    /// open_table_viewer call so that stale loads for a previous table are
+    /// automatically cancelled when the user rapidly clicks another table.
+    active_table_load_task: Option<Task<anyhow::Result<()>>>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -167,7 +166,7 @@ impl MainView {
         // Create centralized workspace state
         let workspace_state = cx.new(|_cx| WorkspaceState::new());
 
-        let (connection_manager, version_repository) = {
+        let (_connection_manager, version_repository) = {
             let Some(app_state) = cx.try_global::<AppState>() else {
                 panic!("AppState must be initialized before creating MainView");
             };
@@ -370,10 +369,6 @@ impl MainView {
                 tracing::debug!("System appearance changed, reapplying theme");
                 let settings = settings.clone();
                 settings.apply(cx);
-                // Sync Zed's theme selection (light/dark switch) and then sync
-                // colors back to ZQLZ's Theme global.
-                SettingsBridge::apply_zqlz_settings_to_zed(cx);
-                ThemeBridge::sync_zed_theme_to_zqlz(cx);
             }
         });
 
@@ -436,6 +431,7 @@ impl MainView {
             version_repository,
             version_history_panel: None,
             diff_viewer_panel: None,
+            active_table_load_task: None,
             _subscriptions: vec![
                 sidebar_subscription,
                 query_tabs_subscription,
@@ -470,6 +466,7 @@ impl MainView {
     }
 
     /// Get the centralized workspace state
+    #[allow(dead_code)]
     pub fn workspace_state(&self) -> &Entity<WorkspaceState> {
         &self.workspace_state
     }
@@ -483,6 +480,7 @@ impl MainView {
     }
 
     /// Refresh the query history panel with latest entries from AppState
+    #[allow(dead_code)]
     fn refresh_query_history(&self, cx: &mut Context<Self>) {
         if let Some(app_state) = cx.try_global::<AppState>() {
             let entries = app_state.query_history_entries();
@@ -579,16 +577,6 @@ impl MainView {
                             panel.clear(cx);
                         });
                     }
-                }
-            }
-
-            WorkspaceStateEvent::SchemaRefreshed(connection_id) => {
-                tracing::debug!("MainView: handling SchemaRefreshed({})", connection_id);
-
-                // Refresh the objects panel if it's showing this connection
-                let active_conn = self.workspace_state.read(cx).active_connection_id();
-                if active_conn == Some(*connection_id) {
-                    self.refresh_objects_panel(window, cx);
                 }
             }
 

@@ -143,7 +143,7 @@ impl TableViewerPanel {
                         let row = *row;
                         let col = *col;
                         let table_state_weak = table_state_weak.clone();
-                        let viewer_panel = viewer_panel.clone();
+                        let _viewer_panel = viewer_panel.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
                             _ = table_state_weak.update_in(cx, |table, window, cx| {
@@ -157,7 +157,7 @@ impl TableViewerPanel {
                     TableEvent::DoubleClickedCell { row, col } => {
                         let row = *row;
                         let col = *col;
-                        let viewer_panel = viewer_panel.clone();
+                        let _viewer_panel = viewer_panel.clone();
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {

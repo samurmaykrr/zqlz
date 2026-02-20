@@ -59,10 +59,10 @@ impl SchemaIntrospection for RedisConnection {
 
                         // Format 2: The value itself is the count (second element in array)
                         // Check if value is a number directly
-                        if let Some(v) = value {
-                            if let Ok(n) = v.parse::<u16>() {
-                                return Some(n);
-                            }
+                        if let Some(v) = value
+                            && let Ok(n) = v.parse::<u16>()
+                        {
+                            return Some(n);
                         }
 
                         None
@@ -250,6 +250,7 @@ impl SchemaIntrospection for RedisConnection {
                 is_unique: false,
                 foreign_key: None,
                 comment: Some("String value".to_string()),
+                ..Default::default()
             }],
             KeyType::Hash => vec![
                 ColumnInfo {
@@ -266,6 +267,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: true,
                     foreign_key: None,
                     comment: Some("Hash field name".to_string()),
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "value".to_string(),
@@ -281,6 +283,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: Some("Hash field value".to_string()),
+                    ..Default::default()
                 },
             ],
             KeyType::List => vec![
@@ -298,6 +301,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: true,
                     foreign_key: None,
                     comment: Some("List index (0-based)".to_string()),
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "value".to_string(),
@@ -313,6 +317,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: Some("List element value".to_string()),
+                    ..Default::default()
                 },
             ],
             KeyType::Set => vec![ColumnInfo {
@@ -329,6 +334,7 @@ impl SchemaIntrospection for RedisConnection {
                 is_unique: true,
                 foreign_key: None,
                 comment: Some("Set member".to_string()),
+                ..Default::default()
             }],
             KeyType::Zset => vec![
                 ColumnInfo {
@@ -345,6 +351,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: true,
                     foreign_key: None,
                     comment: Some("Sorted set member".to_string()),
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "score".to_string(),
@@ -360,6 +367,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: Some("Sorted set score".to_string()),
+                    ..Default::default()
                 },
             ],
             KeyType::Stream => vec![
@@ -377,6 +385,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: true,
                     foreign_key: None,
                     comment: Some("Stream entry ID (timestamp-sequence)".to_string()),
+                    ..Default::default()
                 },
                 ColumnInfo {
                     name: "fields".to_string(),
@@ -392,6 +401,7 @@ impl SchemaIntrospection for RedisConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: Some("Stream entry fields".to_string()),
+                    ..Default::default()
                 },
             ],
             KeyType::None => vec![],
@@ -529,19 +539,19 @@ impl SchemaIntrospection for RedisConnection {
                 let mut cmd = format!("ZADD {}", key);
                 // ZRANGE WITHSCORES returns alternating member, score
                 let mut iter = result.rows.iter();
-                while let Some(member_row) = iter.next() {
-                    if let Some(score_row) = iter.next() {
-                        if let (Some(member), Some(score)) = (
-                            member_row.get_by_name("value").and_then(|v| v.as_str()),
-                            score_row.get_by_name("value").and_then(|v| v.as_str()),
-                        ) {
+                    while let Some(member_row) = iter.next() {
+                        if let Some(score_row) = iter.next()
+                            && let (Some(member), Some(score)) = (
+                                member_row.get_by_name("value").and_then(|v| v.as_str()),
+                                score_row.get_by_name("value").and_then(|v| v.as_str()),
+                            )
+                        {
                             cmd.push_str(&format!(
                                 " {} \"{}\"",
                                 score,
                                 escape_redis_string(member)
                             ));
                         }
-                    }
                 }
                 cmd
             }
