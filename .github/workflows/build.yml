@@ -56,7 +56,7 @@ jobs:
       - name: Package artifacts
         shell: bash
         run: |
-          BIN=lince
+          BIN=zqlz
           mkdir -p artifacts
 
           if [[ "${{ runner.os }}" == "Windows" ]]; then
@@ -78,7 +78,7 @@ jobs:
       - name: Upload build artifact (temp)
         uses: actions/upload-artifact@v4
         with:
-          name: lince-artifacts-${{ matrix.target }}
+          name: zqlz-artifacts-${{ matrix.target }}
           path: artifacts/*
           if-no-files-found: error
           retention-days: 1
