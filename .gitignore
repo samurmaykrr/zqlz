@@ -76,7 +76,6 @@ build/
 
 # Rust-specific
 .cargo/
-Cargo.lock
 rustup/
 incremental/
 *.rlib

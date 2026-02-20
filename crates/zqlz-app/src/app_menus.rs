@@ -6,9 +6,11 @@
 use gpui::{App, Entity, Menu, MenuItem};
 use zqlz_ui::widgets::menu::AppMenuBar;
 
+#[cfg(target_os = "macos")]
+use crate::actions::CloseActiveTab;
 use crate::actions::{
-    CloseActiveTab, ExecuteQuery, NewConnection, NewQuery, OpenSettings, Quit, StopQuery,
-    ToggleBottomPanel, ToggleLeftSidebar, ToggleRightSidebar,
+    ExecuteQuery, NewConnection, NewQuery, OpenSettings, Quit, StopQuery, ToggleBottomPanel,
+    ToggleLeftSidebar, ToggleRightSidebar,
 };
 
 /// Initialize the application menus.
