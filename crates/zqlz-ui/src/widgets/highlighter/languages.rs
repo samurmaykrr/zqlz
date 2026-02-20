@@ -201,6 +201,11 @@ impl Language {
                 "",
                 "",
             ),
+            // When the `tree-sitter-languages` feature is enabled the enum gains many
+            // more variants (Bash, Python, Rust, …). Those fall through to this arm.
+            // Without the feature the enum is exhausted by the arms above, so this
+            // arm would be unreachable — hence the cfg guard.
+            #[cfg(feature = "tree-sitter-languages")]
             _ => (tree_sitter_json::LANGUAGE, "", "", ""),
         };
 
