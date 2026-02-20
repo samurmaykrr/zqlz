@@ -12,6 +12,7 @@ pub use state::*;
 pub use style::*;
 pub use text_view::*;
 
+#[allow(dead_code)]
 pub(crate) fn init(cx: &mut App) {
     state::init(cx);
 }
@@ -60,6 +61,7 @@ impl From<TextView> for Text {
     }
 }
 
+#[allow(dead_code)]
 impl Text {
     /// Set the style for [`TextView`].
     ///

@@ -7,9 +7,9 @@
 //! - Provides structured panic data for display in the UI
 
 use chrono::{DateTime, Utc};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::io::Write;
-use std::panic::{self, PanicInfo};
+use std::panic::{self, PanicHookInfo};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -95,7 +95,7 @@ impl PanicHandler {
     }
 
     /// Capture panic information into a structured format
-    fn capture_panic_data(panic_info: &PanicInfo) -> PanicData {
+    fn capture_panic_data(panic_info: &PanicHookInfo) -> PanicData {
         let timestamp = Utc::now();
 
         let message = if let Some(s) = panic_info.payload().downcast_ref::<&str>() {
@@ -248,6 +248,7 @@ impl PanicHandler {
 }
 
 /// Safely extract the last panic data from the global handler
+#[allow(dead_code)]
 pub fn get_last_panic(panic_data: &Arc<Mutex<Option<PanicData>>>) -> Option<PanicData> {
     panic_data.lock().ok().and_then(|guard| guard.clone())
 }

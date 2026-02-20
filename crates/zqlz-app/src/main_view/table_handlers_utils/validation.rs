@@ -15,8 +15,10 @@ pub(in crate::main_view) fn validate_table_name(name: &str) -> Option<&'static s
         return Some("Table name is too long (max 128 characters)");
     }
 
-    // Check for invalid starting character
-    let first_char = name.chars().next().unwrap();
+    // Emptiness is already guarded above, so `next()` will always yield a char
+    let Some(first_char) = name.chars().next() else {
+        return Some("Table name cannot be empty");
+    };
     if !first_char.is_alphabetic() && first_char != '_' {
         return Some("Table name must start with a letter or underscore");
     }

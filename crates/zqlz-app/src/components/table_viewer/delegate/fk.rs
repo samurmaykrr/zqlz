@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 impl TableViewerDelegate {
     pub fn set_foreign_keys(&mut self, foreign_keys: Vec<ForeignKeyInfo>) {
         self.fk_by_column.clear();

@@ -195,7 +195,7 @@ impl TableViewerDelegate {
     }
 
     pub fn stop_editing(&mut self, save: bool, cx: &mut Context<TableState<Self>>) {
-        let editing_position = self.editing_cell;
+        let _editing_position = self.editing_cell;
         let bulk_cells = self.bulk_edit_cells.take();
 
         if let (Some((row, col)), Some(input)) = (self.editing_cell, &self.cell_input) {

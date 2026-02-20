@@ -15,7 +15,7 @@ use zqlz_core::ColumnMeta;
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
-    button::{ButtonVariant, ButtonVariants as _},
+    button::ButtonVariant,
     dialog::DialogButtonProps,
     notification::Notification,
     v_flex,

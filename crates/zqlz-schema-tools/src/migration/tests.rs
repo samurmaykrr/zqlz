@@ -117,6 +117,7 @@ fn test_migration_sql_ordering() {
         is_unique: false,
         foreign_key: None,
         comment: None,
+        ..Default::default()
     });
     diff.modified_tables.push(table_diff);
 
@@ -178,6 +179,7 @@ fn test_add_index_migration() {
         is_primary: false,
         index_type: "btree".to_string(),
         comment: None,
+        ..Default::default()
     };
 
     let mut table_diff = TableDiff::new("users", Some("public".to_string()));

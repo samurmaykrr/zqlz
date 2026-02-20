@@ -66,22 +66,22 @@ fn format_postgres_error(error: &tokio_postgres::Error) -> String {
     let code = db_error.code();
     let mut message = db_error.message().to_string();
 
-    if let Some(detail) = db_error.detail() {
-        if !detail.trim().is_empty() {
-            message.push_str(&format!(" (detail: {})", detail));
-        }
+    if let Some(detail) = db_error.detail()
+        && !detail.trim().is_empty()
+    {
+        message.push_str(&format!(" (detail: {})", detail));
     }
 
-    if let Some(hint) = db_error.hint() {
-        if !hint.trim().is_empty() {
-            message.push_str(&format!(" (hint: {})", hint));
-        }
+    if let Some(hint) = db_error.hint()
+        && !hint.trim().is_empty()
+    {
+        message.push_str(&format!(" (hint: {})", hint));
     }
 
-    if let Some(column) = db_error.column() {
-        if !column.trim().is_empty() {
-            message.push_str(&format!(" (column: {})", column));
-        }
+    if let Some(column) = db_error.column()
+        && !column.trim().is_empty()
+    {
+        message.push_str(&format!(" (column: {})", column));
     }
 
     match code.code() {
@@ -102,6 +102,7 @@ pub struct PostgresConnection {
 
 impl PostgresConnection {
     /// Connect to a PostgreSQL database
+    #[allow(clippy::too_many_arguments)]
     pub async fn connect(
         host: &str,
         port: u16,
@@ -155,44 +156,41 @@ impl PostgresConnection {
             let mut tls_builder = TlsConnector::builder();
             
             // Load CA certificate if provided
-            if let Some(ca_cert_path) = ssl_ca_cert {
-                if !ca_cert_path.is_empty() {
-                    let ca_cert_data = fs::read(ca_cert_path)
-                        .map_err(|e| ZqlzError::Connection(format!("Failed to read CA certificate: {}", e)))?;
-                    let ca_cert = Certificate::from_pem(&ca_cert_data)
-                        .map_err(|e| ZqlzError::Connection(format!("Failed to parse CA certificate: {}", e)))?;
-                    tls_builder.add_root_certificate(ca_cert);
-                }
+            if let Some(ca_cert_path) = ssl_ca_cert
+                && !ca_cert_path.is_empty()
+            {
+                let ca_cert_data = fs::read(ca_cert_path)
+                    .map_err(|e| ZqlzError::Connection(format!("Failed to read CA certificate: {}", e)))?;
+                let ca_cert = Certificate::from_pem(&ca_cert_data)
+                    .map_err(|e| ZqlzError::Connection(format!("Failed to parse CA certificate: {}", e)))?;
+                tls_builder.add_root_certificate(ca_cert);
             }
             
             // Load client certificate and key if provided
-            if let (Some(client_cert_path), Some(client_key_path)) = (ssl_client_cert, ssl_client_key) {
-                if !client_cert_path.is_empty() && !client_key_path.is_empty() {
-                    let client_cert_data = fs::read(client_cert_path)
-                        .map_err(|e| ZqlzError::Connection(format!("Failed to read client certificate: {}", e)))?;
-                    let client_key_data = fs::read(client_key_path)
-                        .map_err(|e| ZqlzError::Connection(format!("Failed to read client key: {}", e)))?;
-                    
-                    // Combine cert and key into PKCS12 identity
-                    let identity = Identity::from_pkcs8(&client_cert_data, &client_key_data)
-                        .map_err(|e| ZqlzError::Connection(format!("Failed to create identity from certificate and key: {}", e)))?;
-                    tls_builder.identity(identity);
-                }
+            if let (Some(client_cert_path), Some(client_key_path)) = (ssl_client_cert, ssl_client_key)
+                && !client_cert_path.is_empty() && !client_key_path.is_empty()
+            {
+                let client_cert_data = fs::read(client_cert_path)
+                    .map_err(|e| ZqlzError::Connection(format!("Failed to read client certificate: {}", e)))?;
+                let client_key_data = fs::read(client_key_path)
+                    .map_err(|e| ZqlzError::Connection(format!("Failed to read client key: {}", e)))?;
+                
+                // Combine cert and key into PKCS12 identity
+                let identity = Identity::from_pkcs8(&client_cert_data, &client_key_data)
+                    .map_err(|e| ZqlzError::Connection(format!("Failed to create identity from certificate and key: {}", e)))?;
+                tls_builder.identity(identity);
             }
             
             // For verify-full mode, enable hostname verification
-            let danger_accept_invalid = match ssl_mode.to_lowercase().as_str() {
-                "require" => true,
-                "verify-ca" | "verify_ca" => true,
-                _ => false,
-            };
+            let danger_accept_invalid = matches!(
+                ssl_mode.to_lowercase().as_str(),
+                "require" | "verify-ca" | "verify_ca"
+            );
             tls_builder.danger_accept_invalid_hostnames(danger_accept_invalid);
             
             // For require mode without CA cert, accept invalid certs
-            let danger_accept_invalid_certs = match ssl_mode.to_lowercase().as_str() {
-                "require" if ssl_ca_cert.is_none() => true,
-                _ => false,
-            };
+            let danger_accept_invalid_certs =
+                ssl_mode.to_lowercase() == "require" && ssl_ca_cert.is_none();
             tls_builder.danger_accept_invalid_certs(danger_accept_invalid_certs);
             
             let tls_connector = tls_builder

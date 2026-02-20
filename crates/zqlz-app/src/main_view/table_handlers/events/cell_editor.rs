@@ -10,12 +10,10 @@
 //! - Rollback changes and show error dialogs on failure
 //! - Manage the full lifecycle of cell editing from user input to database persistence
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
-use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
-    button::{ButtonVariant, ButtonVariants as _},
+    button::ButtonVariant,
     dialog::DialogButtonProps,
     v_flex,
 };

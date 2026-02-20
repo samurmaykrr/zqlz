@@ -68,11 +68,12 @@ impl TableViewerDelegate {
             })
     }
 
+    #[allow(dead_code)]
     pub fn render_cell_simple(
         &mut self,
         row_ix: usize,
         col_ix: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<TableState<TableViewerDelegate>>,
     ) -> impl IntoElement {
         let actual_row_ix = self.get_actual_row_index(row_ix);

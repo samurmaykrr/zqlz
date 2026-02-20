@@ -26,6 +26,7 @@ use zqlz_query::QueryEditor;
 
 /// Events emitted by the Project Manager Panel
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum ProjectManagerEvent {
     /// A project was selected for editing
     ProjectSelected(Uuid),
@@ -40,6 +41,7 @@ pub enum ProjectManagerEvent {
 }
 
 /// State for the project edit modal
+#[allow(dead_code)]
 struct ProjectEditState {
     project_id: Option<Uuid>,
     name_input: Entity<InputState>,
@@ -48,6 +50,7 @@ struct ProjectEditState {
 }
 
 /// State for the model edit modal
+#[allow(dead_code)]
 struct ModelEditState {
     project_id: Uuid,
     model_id: Option<Uuid>,
@@ -57,6 +60,7 @@ struct ModelEditState {
 }
 
 /// State for the source edit modal
+#[allow(dead_code)]
 struct SourceEditState {
     project_id: Uuid,
     source_id: Option<Uuid>,
@@ -66,6 +70,7 @@ struct SourceEditState {
 }
 
 /// The Project Manager Panel
+#[allow(dead_code)]
 pub struct ProjectManagerPanel {
     focus_handle: FocusHandle,
     projects: Vec<Project>,
@@ -84,6 +89,7 @@ pub struct ProjectManagerPanel {
     _subscriptions: Vec<Subscription>,
 }
 
+#[allow(dead_code)]
 impl ProjectManagerPanel {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input = cx.new(|cx| {
@@ -484,7 +490,7 @@ impl ProjectManagerPanel {
             .unwrap_or_default();
         let sources = project.sources.clone();
         let model_count = models.len();
-        let source_count = sources.len();
+        let _source_count = sources.len();
 
         let expand_icon = if is_expanded {
             ZqlzIcon::CaretDown
@@ -648,7 +654,7 @@ impl ProjectManagerPanel {
                             .hover(|this| this.bg(theme.list_hover))
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |this, event: &MouseDownEvent, _window, cx| {
+                                cx.listener(move |_this, event: &MouseDownEvent, _window, cx| {
                                     if event.click_count == 2 {
                                         cx.emit(ProjectManagerEvent::OpenModel {
                                             project_id,

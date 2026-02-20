@@ -13,6 +13,7 @@ use zqlz_ui::widgets::{
     button::{Button, ButtonVariants as _},
     h_flex,
     input::{Input, InputState},
+    title_bar::TitleBar,
     v_flex,
 };
 
@@ -126,8 +127,6 @@ impl ConnectionWindow {
 
     /// Open a new connection window
     pub fn open(cx: &mut App) {
-        use zqlz_ui::widgets::TitleBar;
-
         let window_options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::centered(size(px(700.0), px(550.0)), cx)),
@@ -153,8 +152,6 @@ impl ConnectionWindow {
 
     /// Open a window to edit an existing connection
     pub fn open_for_edit(saved: SavedConnection, cx: &mut App) {
-        use zqlz_ui::widgets::TitleBar;
-
         let window_title = format!("Edit Connection - {}", saved.name);
 
         let window_options = WindowOptions {
@@ -1027,14 +1024,22 @@ impl Render for ConnectionWindow {
             self.search_query = current_search;
         }
 
-        div()
+        v_flex()
             .size_full()
             .bg(cx.theme().background)
             .text_color(cx.theme().foreground)
-            .child(match self.step {
-                0 => self.render_step_0(window, cx).into_any_element(),
-                1 => self.render_step_1(window, cx),
-                _ => div().into_any_element(),
-            })
+            // Title bar reserves space for the macOS traffic light buttons and provides a drag region
+            .child(TitleBar::new())
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(match self.step {
+                        0 => self.render_step_0(window, cx).into_any_element(),
+                        1 => self.render_step_1(window, cx),
+                        _ => div().into_any_element(),
+                    }),
+            )
     }
 }

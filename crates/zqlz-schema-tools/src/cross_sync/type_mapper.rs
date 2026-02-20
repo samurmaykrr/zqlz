@@ -29,6 +29,7 @@ impl Dialect {
     }
 
     /// Parses a dialect from string (case-insensitive)
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "postgresql" | "postgres" | "pg" => Some(Dialect::PostgreSQL),
@@ -86,6 +87,7 @@ impl ParsedType {
     }
 
     /// Marks the type as an array
+    #[allow(clippy::wrong_self_convention)]
     pub fn as_array(mut self) -> Self {
         self.is_array = true;
         self
@@ -158,10 +160,10 @@ impl TypeMapper {
         let parsed = self.parse_type(source_type)?;
         let source_key = (source_dialect, parsed.base_type.to_uppercase());
 
-        if let Some(custom_targets) = self.custom_mappings.get(&source_key) {
-            if let Some(target_type) = custom_targets.get(&target_dialect) {
-                return Ok(self.apply_params(target_type, &parsed.params, parsed.is_array));
-            }
+        if let Some(custom_targets) = self.custom_mappings.get(&source_key)
+            && let Some(target_type) = custom_targets.get(&target_dialect)
+        {
+            return Ok(self.apply_params(target_type, &parsed.params, parsed.is_array));
         }
 
         let mapped = self.map_base_type(&parsed.base_type, source_dialect, target_dialect)?;

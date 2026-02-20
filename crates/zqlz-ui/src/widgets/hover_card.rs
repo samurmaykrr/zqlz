@@ -1,7 +1,7 @@
 use gpui::{
     AnyElement, App, Bounds, Context, ElementId, InteractiveElement, IntoElement, ParentElement,
     Pixels, Render, RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled, Task,
-    Window, div, prelude::FluentBuilder as _,
+    Window, div,
 };
 use std::rc::Rc;
 use std::time::Duration;

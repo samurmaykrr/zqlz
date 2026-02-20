@@ -7,6 +7,7 @@ license.workspace = true
 [features]
 default = []
 tree-sitter-languages = []
+inspector = []
 
 [dependencies]
 # GUI Framework
@@ -68,8 +69,8 @@ enum-iterator = "2.1.0"
 html5ever.workspace = true
 markup5ever_rcdom.workspace = true
 
-# Markdown parsing for text widgets
-markdown.workspace = true
+# TODO: Markdown parsing - currently disabled, need to replace Zed's markdown crate
+# markdown.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true

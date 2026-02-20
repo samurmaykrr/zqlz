@@ -1,7 +1,5 @@
 use super::*;
-use zqlz_ui::widgets::{
-    button::ButtonVariant, dialog::DialogButtonProps, ActiveTheme as _, WindowExt as _,
-};
+use zqlz_ui::widgets::{button::ButtonVariant, dialog::DialogButtonProps, WindowExt as _};
 
 impl TableViewerPanel {
     pub fn emit_add_row(&mut self, cx: &mut Context<Self>) {
@@ -38,6 +36,7 @@ impl TableViewerPanel {
     }
 
     /// Emit AddRowForm event to open the form-based row editor for inserting a new row
+    #[allow(dead_code)]
     pub fn emit_add_row_form(&mut self, cx: &mut Context<Self>) {
         let Some(connection_id) = self.connection_id else {
             return;

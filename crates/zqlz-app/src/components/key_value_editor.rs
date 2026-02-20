@@ -36,6 +36,7 @@ pub enum RedisValueType {
 }
 
 impl RedisValueType {
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &'static str {
         match self {
             RedisValueType::String => "string",
@@ -174,6 +175,7 @@ impl SelectItem for TtlOption {
 
 /// A single item in a List or Set
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ListItem {
     pub value: String,
     pub input: Entity<InputState>,
@@ -199,6 +201,7 @@ pub struct ZSetMember {
 
 /// Data for a key-value entry being edited
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct KeyValueData {
     pub key: String,
     pub value_type: RedisValueType,
@@ -209,6 +212,7 @@ pub struct KeyValueData {
     pub is_new: bool,
 }
 
+#[allow(dead_code)]
 impl KeyValueData {
     pub fn new(key: String, connection_id: Uuid) -> Self {
         Self {
@@ -278,6 +282,7 @@ pub struct RowField {
 
 /// Events emitted by the KeyValueEditor
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum KeyValueEditorEvent {
     ValueSaved {
         original_key: String,
@@ -323,6 +328,7 @@ pub enum KeyValueEditorEvent {
 }
 
 /// Key-Value / Row Editor Panel
+#[allow(dead_code)]
 pub struct KeyValueEditorPanel {
     focus_handle: FocusHandle,
 
@@ -660,6 +666,7 @@ impl KeyValueEditorPanel {
         });
     }
 
+    #[allow(dead_code)]
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.data = None;
         self.row_data = None;
@@ -675,6 +682,7 @@ impl KeyValueEditorPanel {
     }
 
     /// Check if the editor is currently editing the specified key for a given connection
+    #[allow(dead_code)]
     pub fn is_editing_key(&self, key: &str, connection_id: Uuid) -> bool {
         self.data
             .as_ref()
@@ -683,6 +691,7 @@ impl KeyValueEditorPanel {
     }
 
     /// Clear the editor if it's currently editing the specified key
+    #[allow(dead_code)]
     pub fn clear_if_editing_key(&mut self, key: &str, connection_id: Uuid, cx: &mut Context<Self>) {
         if self.is_editing_key(key, connection_id) {
             self.clear(cx);
@@ -810,6 +819,7 @@ impl KeyValueEditorPanel {
     }
 
     /// Check if the editor is currently showing the given table row
+    #[allow(dead_code)]
     pub fn is_editing_row(&self, table_name: &str, row_index: usize) -> bool {
         self.row_data
             .as_ref()
@@ -1227,6 +1237,7 @@ impl KeyValueEditorPanel {
         }
     }
 
+    #[allow(dead_code)]
     fn move_list_item_up(&mut self, index: usize, cx: &mut Context<Self>) {
         if index > 0 && index < self.list_items.len() {
             self.list_items.swap(index, index - 1);
@@ -1235,6 +1246,7 @@ impl KeyValueEditorPanel {
         }
     }
 
+    #[allow(dead_code)]
     fn move_list_item_down(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.list_items.len() - 1 {
             self.list_items.swap(index, index + 1);
@@ -2045,7 +2057,7 @@ impl KeyValueEditorPanel {
         false
     }
 
-    fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         match self.mode {
             RowEditorMode::RedisKey => {
                 let Some(_data) = self.data.clone() else {

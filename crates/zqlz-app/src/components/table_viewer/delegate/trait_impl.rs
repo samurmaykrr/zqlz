@@ -293,6 +293,8 @@ impl TableDelegate for TableViewerDelegate {
                                             .text_color(theme.muted_foreground.opacity(0.6)),
                                     )
                                     .on_click(move |_, _window, cx| {
+                                        // WeakEntity update is expected to fail silently if the panel
+                                        // was dropped before the click event fires.
                                         let _ = viewer_panel.update(cx, |panel, cx| {
                                             cx.emit(TableViewerEvent::NavigateToFkTable {
                                                 connection_id,
@@ -359,7 +361,7 @@ impl TableDelegate for TableViewerDelegate {
         let viewer_panel = self.viewer_panel.clone();
         let current_row_count = self.rows.len();
         cx.spawn_in(_window, async move |_this, cx| {
-            _ = viewer_panel.update_in(cx, |panel, _window, cx| {
+            _ = viewer_panel.update_in(cx, |_panel, _window, cx| {
                 cx.emit(TableViewerEvent::LoadMore { current_offset: current_row_count });
             });
             anyhow::Ok(())

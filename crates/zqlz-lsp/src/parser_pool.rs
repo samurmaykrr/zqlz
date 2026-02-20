@@ -34,16 +34,12 @@ impl Drop for ParserHandle {
 
 /// Acquire a parser from the pool, or create a new one
 pub fn acquire_parser() -> anyhow::Result<ParserHandle> {
-    let mut parser = {
+    let parser = {
         let mut pool = PARSER_POOL.lock();
         pool.pop()
     };
 
-    if parser.is_none() {
-        parser = Some(Parser::new());
-    }
-
-    let mut p = parser.unwrap();
+    let mut p = parser.unwrap_or_else(Parser::new);
     p.set_language(&tree_sitter_sequel::LANGUAGE.into())?;
 
     Ok(ParserHandle { parser: Some(p) })

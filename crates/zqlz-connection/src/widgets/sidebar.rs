@@ -18,10 +18,8 @@ use zqlz_ui::widgets::{
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::PopupMenu,
-    typography::{body_small, caption},
-    v_flex, ActiveTheme, ConnectionStatus, DatabaseLogo, Icon, IconName, Sizable, StatusDot,
-    ZqlzIcon,
+    typography::body_small,
+    v_flex, ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
 };
 
 /// Events emitted by the connection sidebar
@@ -220,6 +218,13 @@ pub enum ConnectionSidebarEvent {
         connection_id: Uuid,
         database_name: String,
     },
+
+    /// User expanded a section that has not been loaded yet (lazy loading)
+    LoadSection {
+        connection_id: Uuid,
+        /// One of: "views", "materialized_views", "triggers", "functions", "procedures"
+        section: &'static str,
+    },
 }
 
 /// Connection sidebar showing all connections and their schema objects
@@ -336,6 +341,7 @@ impl ConnectionSidebar {
     }
 
     /// Toggle Redis database expand/collapse and trigger key loading if needed
+    #[allow(dead_code)]
     fn toggle_redis_database_expand(
         &mut self,
         conn_id: Uuid,
@@ -400,42 +406,100 @@ impl ConnectionSidebar {
 
     /// Toggle views section expand/collapse
     fn toggle_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.views_expanded = !conn.views_expanded;
+            if conn.views_expanded && conn.views.is_empty() && !conn.views_loading {
+                conn.views_loading = true;
+                should_load = true;
+            }
         }
         cx.notify();
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadSection {
+                connection_id: id,
+                section: "views",
+            });
+        }
     }
 
     /// Toggle materialized views section expand/collapse
     fn toggle_materialized_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.materialized_views_expanded = !conn.materialized_views_expanded;
+            if conn.materialized_views_expanded
+                && conn.materialized_views.is_empty()
+                && !conn.materialized_views_loading
+            {
+                conn.materialized_views_loading = true;
+                should_load = true;
+            }
         }
         cx.notify();
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadSection {
+                connection_id: id,
+                section: "materialized_views",
+            });
+        }
     }
 
     /// Toggle triggers section expand/collapse
     fn toggle_triggers_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.triggers_expanded = !conn.triggers_expanded;
+            if conn.triggers_expanded && conn.triggers.is_empty() && !conn.triggers_loading {
+                conn.triggers_loading = true;
+                should_load = true;
+            }
         }
         cx.notify();
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadSection {
+                connection_id: id,
+                section: "triggers",
+            });
+        }
     }
 
     /// Toggle functions section expand/collapse
     fn toggle_functions_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.functions_expanded = !conn.functions_expanded;
+            if conn.functions_expanded && conn.functions.is_empty() && !conn.functions_loading {
+                conn.functions_loading = true;
+                should_load = true;
+            }
         }
         cx.notify();
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadSection {
+                connection_id: id,
+                section: "functions",
+            });
+        }
     }
 
     /// Toggle procedures section expand/collapse
     fn toggle_procedures_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.procedures_expanded = !conn.procedures_expanded;
+            if conn.procedures_expanded && conn.procedures.is_empty() && !conn.procedures_loading {
+                conn.procedures_loading = true;
+                should_load = true;
+            }
         }
         cx.notify();
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadSection {
+                connection_id: id,
+                section: "procedures",
+            });
+        }
     }
 
     /// Toggle a schema section within a specific database node.
@@ -499,6 +563,7 @@ impl ConnectionSidebar {
     }
 
     /// Toggle schema-level node expand/collapse
+    #[allow(dead_code)]
     fn toggle_schema_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.schema_expanded = !conn.schema_expanded;

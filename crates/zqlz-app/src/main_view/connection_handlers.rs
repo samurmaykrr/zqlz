@@ -1,6 +1,5 @@
 // Connection management methods for MainView
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
@@ -163,6 +162,9 @@ impl MainView {
         let workspace_state = self.workspace_state.downgrade();
         let driver_type = saved.driver.clone(); // Capture driver type for LSP
         let connection_name = saved.name.clone(); // Capture connection name for UI
+        // Known up-front from the saved config; used to pre-populate the sidebar
+        // with the active database node before any async queries complete.
+        let active_db_from_config = saved.params.get("database").cloned();
 
         // Set connecting state immediately
         workspace_state
@@ -194,6 +196,9 @@ impl MainView {
                     // Step 2: Immediately show connected state in UI
                     _ = sidebar.update_in(cx, |sidebar, _window, cx| {
                         sidebar.set_connected(conn_id, true, cx);
+                        // Mark all sections as loading immediately so headers appear with
+                        // spinners before any schema queries complete.
+                        sidebar.set_all_sections_loading(conn_id, cx);
                     });
 
                     // Clear connecting state
@@ -289,7 +294,7 @@ impl MainView {
                                 }
                                 Err(e) => {
                                     tracing::error!("Failed to list Redis databases: {}", e);
-                                    _ = sidebar.update_in(cx, |sidebar, window, cx| {
+                                    _ = sidebar.update_in(cx, |_sidebar, window, cx| {
                                         window.push_notification(
                                             Notification::warning(format!(
                                                 "Connected but failed to list databases: {}",
@@ -310,16 +315,65 @@ impl MainView {
                             panel.clear_if_not_connection(conn_id, cx);
                         });
 
-                        // Step 1: Load tables first (fast and most important)
+                        // Show the database hierarchy immediately using the database name
+                        // from the saved connection config, so the multi-DB structure is
+                        // visible before any async queries complete. This prevents the
+                        // jarring flat-table-list → database-nodes restructuring.
+                        if let Some(ref db_name) = active_db_from_config {
+                            _ = sidebar.update_in(cx, |sidebar, _window, cx| {
+                                sidebar.init_database_view(conn_id, db_name, cx);
+                            });
+                        }
+
+                        // Fetch the full database list concurrently with the table load.
+                        // Spawned as a detached foreground task so that a slow
+                        // pg_database_size() on serverless Postgres (Neon etc.) does not
+                        // delay the tables section from appearing in the sidebar.
+                        {
+                            let sidebar = sidebar.clone();
+                            let active_db_from_config = active_db_from_config.clone();
+                            let conn_for_dbs = conn.clone();
+                            cx.spawn(async move |cx| {
+                                if let Some(schema_introspection) = conn_for_dbs.as_schema_introspection() {
+                                    match schema_introspection.list_databases().await {
+                                        Ok(databases) => {
+                                            let dbs: Vec<(String, Option<i64>)> = databases
+                                                .iter()
+                                                .map(|db| (db.name.clone(), db.size_bytes))
+                                                .collect();
+
+                                            _ = sidebar.update_in(cx, |sidebar, _window, cx| {
+                                                sidebar.merge_databases(
+                                                    conn_id,
+                                                    dbs,
+                                                    active_db_from_config.as_deref(),
+                                                    cx,
+                                                );
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to list databases: {}", e);
+                                        }
+                                    }
+                                }
+                            })
+                            .detach();
+                        }
+
+                        // Load tables first — they are the most important objects in the sidebar.
                         match schema_service.load_tables_only(conn.clone(), conn_id).await {
                             Ok(tables) => {
                                 tracing::info!("Loaded {} tables", tables.len());
-                                
+
                                 let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
-                                
-                                // Update sidebar with tables immediately
+
+                                // Clear the tables spinner and the database-level loading
+                                // indicator now that we have actual data.
                                 _ = sidebar.update_in(cx, |sidebar, _window, cx| {
                                     sidebar.set_tables_only(conn_id, table_names.clone(), cx);
+                                    if let Some(ref db_name) = active_db_from_config {
+                                        sidebar.set_database_loading(conn_id, db_name, false, cx);
+                                    }
                                 });
 
                                 // Update objects panel with basic table list
@@ -329,108 +383,143 @@ impl MainView {
                                 _ = objects_panel.update(cx, |panel, cx| {
                                     panel.load_objects(conn_id, conn_name, None, objects_data, driver_category, cx);
                                 });
+
+                                // Push table names into every open QueryEditor's LSP cache
+                                // immediately, so FROM-clause completions work as soon as the
+                                // sidebar shows tables — without waiting for the slower
+                                // per-table column-detail fetches to finish.
+                                _ = this.update(cx, |main_view, cx| {
+                                    for weak_editor in &main_view.query_editors {
+                                        if let Some(editor) = weak_editor.upgrade() {
+                                            editor.update(cx, |ed, cx| {
+                                                ed.notify_tables_available(table_names.clone(), cx);
+                                            });
+                                        }
+                                    }
+                                });
+
+                                // Load remaining schema sections sequentially to avoid
+                                // waker contention on the shared Postgres mutex. Each
+                                // result clears its own spinner as soon as it arrives.
+                                match schema_service.load_views(conn.clone(), conn_id).await {
+                                    Ok(v) => {
+                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.set_views_only(conn_id, names, cx);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load views: {}", e);
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.clear_section_loading(conn_id, "views", cx);
+                                        });
+                                    }
+                                }
+
+                                match schema_service.load_materialized_views(conn.clone(), conn_id).await {
+                                    Ok(v) => {
+                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.set_materialized_views_only(conn_id, names, cx);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load materialized views: {}", e);
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.clear_section_loading(conn_id, "materialized_views", cx);
+                                        });
+                                    }
+                                }
+
+                                match schema_service.load_functions(conn.clone(), conn_id).await {
+                                    Ok(v) => {
+                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.set_functions_only(conn_id, names, cx);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load functions: {}", e);
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.clear_section_loading(conn_id, "functions", cx);
+                                        });
+                                    }
+                                }
+
+                                match schema_service.load_procedures(conn.clone(), conn_id).await {
+                                    Ok(v) => {
+                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.set_procedures_only(conn_id, names, cx);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load procedures: {}", e);
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.clear_section_loading(conn_id, "procedures", cx);
+                                        });
+                                    }
+                                }
+
+                                match schema_service.load_triggers(conn.clone(), conn_id).await {
+                                    Ok(v) => {
+                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.set_triggers_only(conn_id, names, cx);
+                                        });
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("Failed to load triggers: {}", e);
+                                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                                            s.clear_section_loading(conn_id, "triggers", cx);
+                                        });
+                                    }
+                                }
+
+                                tracing::info!("Sequential schema load complete");
+
+                                // Pre-warm the table details cache and then signal every open
+                                // editor to re-fetch its LSP schema cache, so column completions
+                                // become available as soon as the per-table detail round-trips
+                                // finish (rather than never, which was the fire-and-forget case).
+                                let introspection_schema = schema_service
+                                    .get_introspection_schema_cached(&conn, conn_id)
+                                    .await;
+                                cx.background_spawn({
+                                    let schema_service = schema_service.clone();
+                                    let conn = conn.clone();
+                                    async move {
+                                        schema_service
+                                            .prefetch_all_table_details(
+                                                conn,
+                                                conn_id,
+                                                table_names,
+                                                introspection_schema,
+                                            )
+                                            .await;
+                                    }
+                                })
+                                .await;
+
+                                tracing::info!("Table details pre-warmed; triggering LSP schema refresh for open editors");
+                                _ = this.update(cx, |main_view, cx| {
+                                    for weak_editor in &main_view.query_editors {
+                                        if let Some(editor) = weak_editor.upgrade() {
+                                            editor.update(cx, |ed, cx| {
+                                                ed.trigger_lsp_schema_refresh(cx);
+                                            });
+                                        }
+                                    }
+                                });
                             }
                             Err(e) => {
                                 tracing::warn!("Failed to load tables: {}", e);
-                            }
-                        }
-
-                        // Step 2: Load views
-                        match schema_service.load_views(conn.clone(), conn_id).await {
-                            Ok(views) => {
-                                let view_names: Vec<String> = views.into_iter().map(|v| v.name).collect();
-                                tracing::info!("Loaded {} views", view_names.len());
                                 _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_views_only(conn_id, view_names, cx);
+                                    sidebar.clear_section_loading(conn_id, "tables", cx);
+                                    if let Some(ref db_name) = active_db_from_config {
+                                        sidebar.set_database_loading(conn_id, db_name, false, cx);
+                                    }
                                 });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load views: {}", e);
-                            }
-                        }
-
-                        // Step 3: Load materialized views
-                        match schema_service.load_materialized_views(conn.clone(), conn_id).await {
-                            Ok(mat_views) => {
-                                let mat_view_names: Vec<String> = mat_views.into_iter().map(|v| v.name).collect();
-                                tracing::info!("Loaded {} materialized views", mat_view_names.len());
-                                _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_materialized_views_only(conn_id, mat_view_names, cx);
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load materialized views: {}", e);
-                            }
-                        }
-
-                        // Step 4: Load functions
-                        match schema_service.load_functions(conn.clone(), conn_id).await {
-                            Ok(functions) => {
-                                let function_names: Vec<String> = functions.into_iter().map(|f| f.name).collect();
-                                tracing::info!("Loaded {} functions", function_names.len());
-                                _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_functions_only(conn_id, function_names, cx);
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load functions: {}", e);
-                            }
-                        }
-
-                        // Step 5: Load procedures
-                        match schema_service.load_procedures(conn.clone(), conn_id).await {
-                            Ok(procedures) => {
-                                let procedure_names: Vec<String> = procedures.into_iter().map(|p| p.name).collect();
-                                tracing::info!("Loaded {} procedures", procedure_names.len());
-                                _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_procedures_only(conn_id, procedure_names, cx);
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load procedures: {}", e);
-                            }
-                        }
-
-                        // Step 6: Load triggers
-                        match schema_service.load_triggers(conn.clone(), conn_id).await {
-                            Ok(triggers) => {
-                                let trigger_names: Vec<String> = triggers.into_iter().map(|t| t.name).collect();
-                                tracing::info!("Loaded {} triggers", trigger_names.len());
-                                _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_triggers_only(conn_id, trigger_names, cx);
-                                });
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to load triggers: {}", e);
-                            }
-                        }
-
-                        // Step 7: Load database list (for multi-database support)
-                        if let Some(schema_introspection) = conn.as_schema_introspection() {
-                            match schema_introspection.list_databases().await {
-                                Ok(databases) => {
-                                    let dbs: Vec<(String, Option<i64>)> = databases
-                                        .iter()
-                                        .map(|db| (db.name.clone(), db.size_bytes))
-                                        .collect();
-                                    
-                                    // Try to get active database name
-                                    let active_db = schema_service
-                                        .get_introspection_schema(&conn)
-                                        .await;
-                                    
-                                    _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                        sidebar.set_databases(
-                                            conn_id,
-                                            dbs,
-                                            active_db.as_deref(),
-                                            cx,
-                                        );
-                                    });
-                                }
-                                Err(e) => {
-                                    tracing::warn!("Failed to list databases: {}", e);
-                                }
                             }
                         }
                     }
@@ -607,52 +696,24 @@ impl MainView {
 
         let schema_param = Some(database_name);
 
-        let tables = introspection
-            .list_tables(schema_param)
-            .await?
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // All schema queries are independent reads — fire them all concurrently.
+        let (tables_result, views_result, mat_views_result, triggers_result, functions_result, procedures_result, extended_result) = futures::join!(
+            introspection.list_tables(schema_param),
+            introspection.list_views(schema_param),
+            introspection.list_materialized_views(schema_param),
+            introspection.list_triggers(schema_param, None),
+            introspection.list_functions(schema_param),
+            introspection.list_procedures(schema_param),
+            introspection.list_tables_extended(schema_param),
+        );
 
-        let views = introspection
-            .list_views(schema_param)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect();
-
-        let materialized_views = introspection
-            .list_materialized_views(schema_param)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect();
-
-        let triggers = introspection
-            .list_triggers(schema_param, None)
-            .await?
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
-
-        let functions = introspection
-            .list_functions(schema_param)
-            .await?
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
-
-        let procedures = introspection
-            .list_procedures(schema_param)
-            .await?
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
-
-        let objects_panel_data = introspection
-            .list_tables_extended(schema_param)
-            .await
-            .ok();
+        let tables = tables_result?.into_iter().map(|t| t.name).collect();
+        let views = views_result?.into_iter().map(|v| v.name).collect();
+        let materialized_views = mat_views_result?.into_iter().map(|v| v.name).collect();
+        let triggers = triggers_result?.into_iter().map(|t| t.name).collect();
+        let functions = functions_result?.into_iter().map(|f| f.name).collect();
+        let procedures = procedures_result?.into_iter().map(|p| p.name).collect();
+        let objects_panel_data = extended_result.ok();
 
         Ok((tables, views, materialized_views, triggers, functions, procedures, Some(database_name.to_string()), objects_panel_data))
     }
@@ -692,58 +753,33 @@ impl MainView {
             });
 
         let schema_param = schema_name.as_deref();
+        let is_postgres = saved.driver == "postgres";
 
-        let tables = introspection
-            .list_tables(schema_param)
-            .await?
-            .into_iter()
-            .map(|t| t.name)
-            .collect();
+        // All schema queries are independent reads — fire them all concurrently.
+        let (tables_result, views_result, mat_views_result, triggers_result, functions_result, procedures_result, extended_result) = futures::join!(
+            introspection.list_tables(schema_param),
+            introspection.list_views(schema_param),
+            introspection.list_materialized_views(schema_param),
+            async {
+                // PostgreSQL triggers are table-level objects, not top-level sidebar items
+                if is_postgres {
+                    Ok(Vec::new())
+                } else {
+                    introspection.list_triggers(schema_param, None).await
+                }
+            },
+            introspection.list_functions(schema_param),
+            introspection.list_procedures(schema_param),
+            introspection.list_tables_extended(schema_param),
+        );
 
-        let views = introspection
-            .list_views(schema_param)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect();
-
-        let materialized_views = introspection
-            .list_materialized_views(schema_param)
-            .await?
-            .into_iter()
-            .map(|v| v.name)
-            .collect();
-
-        // PostgreSQL triggers are table-level objects, not top-level sidebar items
-        let triggers: Vec<String> = if saved.driver == "postgres" {
-            Vec::new()
-        } else {
-            introspection
-                .list_triggers(schema_param, None)
-                .await?
-                .into_iter()
-                .map(|t| t.name)
-                .collect()
-        };
-
-        let functions = introspection
-            .list_functions(schema_param)
-            .await?
-            .into_iter()
-            .map(|f| f.name)
-            .collect();
-
-        let procedures = introspection
-            .list_procedures(schema_param)
-            .await?
-            .into_iter()
-            .map(|p| p.name)
-            .collect();
-
-        let objects_panel_data = introspection
-            .list_tables_extended(schema_param)
-            .await
-            .ok();
+        let tables = tables_result?.into_iter().map(|t| t.name).collect();
+        let views = views_result?.into_iter().map(|v| v.name).collect();
+        let materialized_views = mat_views_result?.into_iter().map(|v| v.name).collect();
+        let triggers = triggers_result?.into_iter().map(|t| t.name).collect();
+        let functions = functions_result?.into_iter().map(|f| f.name).collect();
+        let procedures = procedures_result?.into_iter().map(|p| p.name).collect();
+        let objects_panel_data = extended_result.ok();
 
         if let Err(e) = temp_conn.close().await {
             tracing::warn!("Failed to close temp connection to '{}': {}", database_name, e);
@@ -938,5 +974,136 @@ impl MainView {
     ) {
         tracing::info!("Opening new connection window");
         super::connection_window::ConnectionWindow::open(cx);
+    }
+
+    /// Fetch a single sidebar section on demand (lazy loading).
+    ///
+    /// Called when the user first expands a section that has never been loaded.
+    /// The `section` string must match one of the arms below and the keys used in
+    /// `clear_section_loading`.
+    pub(super) fn load_sidebar_section(
+        &mut self,
+        connection_id: Uuid,
+        section: &'static str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+
+        let Some(connection) = app_state.connections.get(connection_id) else {
+            // Connection was removed between the expand click and this handler running.
+            self.connection_sidebar.update(cx, |sidebar, cx| {
+                sidebar.clear_section_loading(connection_id, section, cx);
+            });
+            return;
+        };
+
+        let connection = connection.clone();
+        let schema_service = app_state.schema_service.clone();
+        let sidebar = self.connection_sidebar.downgrade();
+
+        cx.spawn_in(window, async move |_this, cx| {
+            match section {
+                "views" => {
+                    match schema_service.load_views(connection, connection_id).await {
+                        Ok(views) => {
+                            let names: Vec<String> = views.into_iter().map(|v| v.name).collect();
+                            tracing::info!("Lazy-loaded {} views", names.len());
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.set_views_only(connection_id, names, cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lazy-load views: {}", e);
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.clear_section_loading(connection_id, "views", cx);
+                            });
+                        }
+                    }
+                }
+                "materialized_views" => {
+                    match schema_service
+                        .load_materialized_views(connection, connection_id)
+                        .await
+                    {
+                        Ok(views) => {
+                            let names: Vec<String> = views.into_iter().map(|v| v.name).collect();
+                            tracing::info!("Lazy-loaded {} materialized views", names.len());
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.set_materialized_views_only(connection_id, names, cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lazy-load materialized views: {}", e);
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.clear_section_loading(connection_id, "materialized_views", cx);
+                            });
+                        }
+                    }
+                }
+                "functions" => {
+                    match schema_service.load_functions(connection, connection_id).await {
+                        Ok(functions) => {
+                            let names: Vec<String> =
+                                functions.into_iter().map(|f| f.name).collect();
+                            tracing::info!("Lazy-loaded {} functions", names.len());
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.set_functions_only(connection_id, names, cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lazy-load functions: {}", e);
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.clear_section_loading(connection_id, "functions", cx);
+                            });
+                        }
+                    }
+                }
+                "procedures" => {
+                    match schema_service.load_procedures(connection, connection_id).await {
+                        Ok(procedures) => {
+                            let names: Vec<String> =
+                                procedures.into_iter().map(|p| p.name).collect();
+                            tracing::info!("Lazy-loaded {} procedures", names.len());
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.set_procedures_only(connection_id, names, cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lazy-load procedures: {}", e);
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.clear_section_loading(connection_id, "procedures", cx);
+                            });
+                        }
+                    }
+                }
+                "triggers" => {
+                    match schema_service.load_triggers(connection, connection_id).await {
+                        Ok(triggers) => {
+                            let names: Vec<String> =
+                                triggers.into_iter().map(|t| t.name).collect();
+                            tracing::info!("Lazy-loaded {} triggers", names.len());
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.set_triggers_only(connection_id, names, cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::warn!("Failed to lazy-load triggers: {}", e);
+                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                s.clear_section_loading(connection_id, "triggers", cx);
+                            });
+                        }
+                    }
+                }
+                _ => {
+                    tracing::warn!("load_sidebar_section: unknown section '{}'", section);
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
     }
 }

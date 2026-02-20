@@ -275,7 +275,7 @@ fn test_duckdb_connection_not_memory() {
 
 #[test]
 fn test_duckdb_default_driver() {
-    let driver = DuckDbDriver::default();
+    let driver = DuckDbDriver;
     assert_eq!(driver.id(), "duckdb");
 }
 

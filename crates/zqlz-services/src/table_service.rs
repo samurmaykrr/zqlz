@@ -173,27 +173,25 @@ impl TableService {
                 .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
             (result, None, false)
         } else {
-            // Slow-count driver, no filters: use estimated count from metadata
+            // Slow-count driver, no filters: use estimated count from metadata.
+            // Sequential execution is required — concurrent futures on the same
+            // async-mutex-guarded connection cause waker contention on GPUI's
+            // executor, producing spurious "connection closed" errors.
             tracing::debug!("Driver '{}': using estimated row count from metadata", driver);
             let estimate_sql = Self::estimate_row_count_sql(driver, table_name, schema);
-            let estimate_conn = connection.clone();
-            let data_future = connection.query(&data_sql, &[]);
-            let estimate_future = estimate_conn.query(&estimate_sql, &[]);
 
-            let (data_result, estimate_result) = tokio::join!(data_future, estimate_future);
-
-            let result = data_result
+            let result = connection
+                .query(&data_sql, &[])
+                .await
                 .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
-            let estimated_total = match estimate_result {
-                Ok(est_res) => {
-                    est_res
-                        .rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|v| v.as_i64())
-                        .map(|i| (i as u64).max(0))
-                }
+            let estimated_total = match connection.query(&estimate_sql, &[]).await {
+                Ok(est_res) => est_res
+                    .rows
+                    .first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|v| v.as_i64())
+                    .map(|i| (i as u64).max(0)),
                 Err(e) => {
                     tracing::warn!("Estimated row count query failed: {}", e);
                     None
@@ -337,33 +335,31 @@ impl TableService {
         tracing::debug!("Last-page data SQL: {}", data_sql);
         tracing::debug!("Last-page count SQL: {}", count_sql);
 
-        let count_conn = connection.clone();
-        let data_future = connection.query(&data_sql, &[]);
-        let count_future = count_conn.query(&count_sql, &[]);
-
-        let (data_result, count_result) = tokio::join!(data_future, count_future);
-
-        let mut result = data_result
+        // Run data query first, then count. Using tokio::join! on the same
+        // async-mutex-guarded connection causes waker contention on GPUI's
+        // executor, producing spurious "connection closed" errors.
+        let mut result = connection
+            .query(&data_sql, &[])
+            .await
             .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
-        let total = match count_result {
-            Ok(count_res) => {
-                count_res
-                    .rows
-                    .first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|v| v.as_i64())
-                    .map(|i| i as u64)
-                    .ok_or_else(|| {
-                        ServiceError::TableOperationFailed(
-                            "COUNT(*) query returned no result".to_string(),
-                        )
-                    })?
-            }
+        let total = match connection.query(&count_sql, &[]).await {
+            Ok(count_res) => count_res
+                .rows
+                .first()
+                .and_then(|row| row.values.first())
+                .and_then(|v| v.as_i64())
+                .map(|i| i as u64)
+                .ok_or_else(|| {
+                    ServiceError::TableOperationFailed(
+                        "COUNT(*) query returned no result".to_string(),
+                    )
+                })?,
             Err(e) => {
-                return Err(ServiceError::TableOperationFailed(
-                    format!("COUNT(*) query failed: {}", e),
-                ));
+                return Err(ServiceError::TableOperationFailed(format!(
+                    "COUNT(*) query failed: {}",
+                    e
+                )));
             }
         };
 
@@ -375,7 +371,7 @@ impl TableService {
             table_name = %table_name,
             rows = result.rows.len(),
             total = total,
-            "Last-page data loaded concurrently"
+            "Last-page data loaded"
         );
 
         Ok(result)
@@ -720,28 +716,27 @@ impl TableService {
 
             (result, total_rows, false)
         } else {
-            // MySQL/PostgreSQL/MSSQL/ClickHouse: use estimated count from
-            // database metadata concurrently with the data query.
+            // MySQL/PostgreSQL/MSSQL/ClickHouse: fetch data first, then the estimated
+            // row count. These drivers share a single underlying connection protected by
+            // an async mutex, so running two futures concurrently on the same connection
+            // causes pathological waker contention that results in "connection closed"
+            // errors. Sequential execution is correct because the mutex serializes them
+            // anyway — there is no real parallelism to be gained.
             tracing::debug!("Driver '{}': using estimated row count from metadata", driver);
             let estimate_sql = Self::estimate_row_count_sql(driver, table_name, schema);
-            let estimate_conn = connection.clone();
-            let data_future = connection.query(&data_sql, &[]);
-            let estimate_future = estimate_conn.query(&estimate_sql, &[]);
 
-            let (data_result, estimate_result) = tokio::join!(data_future, estimate_future);
-
-            let result = data_result
+            let result = connection
+                .query(&data_sql, &[])
+                .await
                 .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
-            let estimated_total = match estimate_result {
-                Ok(est_res) => {
-                    est_res
-                        .rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|v| v.as_i64())
-                        .map(|i| (i as u64).max(0))
-                }
+            let estimated_total = match connection.query(&estimate_sql, &[]).await {
+                Ok(est_res) => est_res
+                    .rows
+                    .first()
+                    .and_then(|row| row.values.first())
+                    .and_then(|v| v.as_i64())
+                    .map(|i| (i as u64).max(0)),
                 Err(e) => {
                     tracing::warn!("Estimated row count query failed: {}", e);
                     None

@@ -3,7 +3,7 @@
 //! Provides centralized query execution with automatic history tracking,
 //! timing, and error handling.
 
-use parking_lot::{Mutex, RwLock};
+use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_analyzer::{QueryAnalyzer, parse_postgres_explain, parse_mysql_explain, parse_sqlite_explain};
@@ -211,7 +211,9 @@ impl QueryService {
                         if sc == '\'' {
                             // Check for escaped quote ('')
                             if chars.peek() == Some(&'\'') {
-                                current_statement.push(chars.next().unwrap());
+                                if let Some(next_char) = chars.next() {
+                                    current_statement.push(next_char);
+                                }
                             } else {
                                 break;
                             }
@@ -227,7 +229,9 @@ impl QueryService {
                         if sc == '"' {
                             // Check for escaped quote ("")
                             if chars.peek() == Some(&'"') {
-                                current_statement.push(chars.next().unwrap());
+                                if let Some(next_char) = chars.next() {
+                                    current_statement.push(next_char);
+                                }
                             } else {
                                 break;
                             }
@@ -239,7 +243,9 @@ impl QueryService {
                     if chars.peek() == Some(&'-') {
                         // Single-line comment
                         current_statement.push(c);
-                        current_statement.push(chars.next().unwrap());
+                        if let Some(next_char) = chars.next() {
+                            current_statement.push(next_char);
+                        }
                         // Consume until newline
                         while let Some(sc) = chars.next() {
                             current_statement.push(sc);
@@ -255,7 +261,9 @@ impl QueryService {
                     if chars.peek() == Some(&'*') {
                         // Multi-line comment
                         current_statement.push(c);
-                        current_statement.push(chars.next().unwrap());
+                        if let Some(next_char) = chars.next() {
+                            current_statement.push(next_char);
+                        }
                         // Consume until */
                         let mut prev = '\0';
                         while let Some(sc) = chars.next() {

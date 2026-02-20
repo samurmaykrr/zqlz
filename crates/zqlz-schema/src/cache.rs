@@ -4,16 +4,47 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
-use zqlz_core::{ColumnInfo, IndexInfo, ObjectsPanelData, TableInfo};
+use zqlz_core::{
+    ColumnInfo, FunctionInfo, IndexInfo, ObjectsPanelData, ProcedureInfo, TableInfo, TriggerInfo,
+    ViewInfo,
+};
 
 /// Cached schema information
 pub struct CachedSchema {
     pub tables: Vec<TableInfo>,
     pub columns: HashMap<String, Vec<ColumnInfo>>,
-    #[allow(dead_code)]
     pub indexes: HashMap<String, Vec<IndexInfo>>,
+    pub views: Vec<ViewInfo>,
+    pub materialized_views: Vec<ViewInfo>,
+    pub triggers: Vec<TriggerInfo>,
+    pub functions: Vec<FunctionInfo>,
+    pub procedures: Vec<ProcedureInfo>,
     pub objects_panel_data: Option<ObjectsPanelData>,
     pub cached_at: Instant,
+    /// Resolved database name (e.g. `mydb`). Cached so callers avoid repeated
+    /// `SELECT DATABASE()` / `SELECT current_database()` round-trips.
+    pub database_name: Option<String>,
+    /// Resolved schema name (e.g. `public`). Cached for the same reason.
+    pub schema_name: Option<String>,
+}
+
+impl CachedSchema {
+    fn empty() -> Self {
+        Self {
+            tables: Vec::new(),
+            columns: HashMap::new(),
+            indexes: HashMap::new(),
+            views: Vec::new(),
+            materialized_views: Vec::new(),
+            triggers: Vec::new(),
+            functions: Vec::new(),
+            procedures: Vec::new(),
+            objects_panel_data: None,
+            cached_at: Instant::now(),
+            database_name: None,
+            schema_name: None,
+        }
+    }
 }
 
 /// Schema cache for a connection
@@ -70,27 +101,159 @@ impl SchemaCache {
         result
     }
 
-    /// Store tables in cache
+    /// Get all cached views
+    pub fn get_views(&self, connection_id: Uuid) -> Option<Vec<ViewInfo>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.views.clone())
+    }
+
+    /// Get all cached materialized views
+    pub fn get_materialized_views(&self, connection_id: Uuid) -> Option<Vec<ViewInfo>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.materialized_views.clone())
+    }
+
+    /// Get all cached triggers
+    pub fn get_triggers(&self, connection_id: Uuid) -> Option<Vec<TriggerInfo>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.triggers.clone())
+    }
+
+    /// Get all cached functions
+    pub fn get_functions(&self, connection_id: Uuid) -> Option<Vec<FunctionInfo>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.functions.clone())
+    }
+
+    /// Get all cached procedures
+    pub fn get_procedures(&self, connection_id: Uuid) -> Option<Vec<ProcedureInfo>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.procedures.clone())
+    }
+
+    /// Get the cached resolved database name for a connection, if any.
+    pub fn get_database_name(&self, connection_id: Uuid) -> Option<String> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .and_then(|c| c.database_name.clone())
+    }
+
+    /// Get the cached resolved schema name for a connection, if any.
+    pub fn get_schema_name(&self, connection_id: Uuid) -> Option<String> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .and_then(|c| c.schema_name.clone())
+    }
+
+    /// Store resolved database and schema names. Creates the cache entry if it
+    /// does not yet exist so this can be called before `set_tables`.
+    pub fn set_connection_names(
+        &self,
+        connection_id: Uuid,
+        database_name: Option<String>,
+        schema_name: Option<String>,
+    ) {
+        let mut cache = self.cache.write();
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(|| CachedSchema::empty());
+        entry.database_name = database_name;
+        entry.schema_name = schema_name;
+    }
+
+    /// Store tables in cache. Creates the entry if it does not yet exist.
     pub fn set_tables(&self, connection_id: Uuid, tables: Vec<TableInfo>) {
         tracing::debug!(connection_id = %connection_id, table_count = tables.len(), "caching tables");
         let mut cache = self.cache.write();
-        let entry = cache.entry(connection_id).or_insert_with(|| CachedSchema {
-            tables: Vec::new(),
-            columns: HashMap::new(),
-            indexes: HashMap::new(),
-            objects_panel_data: None,
-            cached_at: Instant::now(),
-        });
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(|| CachedSchema::empty());
         entry.tables = tables;
         entry.cached_at = Instant::now();
     }
 
-    /// Store columns in cache
+    /// Store columns in cache. Creates the entry if it does not yet exist so
+    /// that callers do not need to call `set_tables` first.
     pub fn set_columns(&self, connection_id: Uuid, table: &str, columns: Vec<ColumnInfo>) {
         tracing::debug!(connection_id = %connection_id, table = %table, column_count = columns.len(), "caching columns");
         let mut cache = self.cache.write();
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(|| CachedSchema::empty());
+        entry.columns.insert(table.to_string(), columns);
+    }
+
+    /// Get all cached indexes (keyed by table name)
+    pub fn get_all_indexes(&self, connection_id: Uuid) -> Option<HashMap<String, Vec<IndexInfo>>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.indexes.clone())
+    }
+
+    /// Store all table indexes in cache.
+    pub fn set_all_indexes(&self, connection_id: Uuid, indexes: HashMap<String, Vec<IndexInfo>>) {
+        tracing::debug!(connection_id = %connection_id, table_count = indexes.len(), "caching table indexes");
+        let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.columns.insert(table.to_string(), columns);
+            entry.indexes = indexes;
+        }
+    }
+
+    /// Store views in cache
+    pub fn set_views(&self, connection_id: Uuid, views: Vec<ViewInfo>) {
+        tracing::debug!(connection_id = %connection_id, view_count = views.len(), "caching views");
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.views = views;
+        }
+    }
+
+    /// Store materialized views in cache
+    pub fn set_materialized_views(&self, connection_id: Uuid, views: Vec<ViewInfo>) {
+        tracing::debug!(connection_id = %connection_id, view_count = views.len(), "caching materialized views");
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.materialized_views = views;
+        }
+    }
+
+    /// Store triggers in cache
+    pub fn set_triggers(&self, connection_id: Uuid, triggers: Vec<TriggerInfo>) {
+        tracing::debug!(connection_id = %connection_id, trigger_count = triggers.len(), "caching triggers");
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.triggers = triggers;
+        }
+    }
+
+    /// Store functions in cache
+    pub fn set_functions(&self, connection_id: Uuid, functions: Vec<FunctionInfo>) {
+        tracing::debug!(connection_id = %connection_id, function_count = functions.len(), "caching functions");
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.functions = functions;
+        }
+    }
+
+    /// Store procedures in cache
+    pub fn set_procedures(&self, connection_id: Uuid, procedures: Vec<ProcedureInfo>) {
+        tracing::debug!(connection_id = %connection_id, procedure_count = procedures.len(), "caching procedures");
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.procedures = procedures;
         }
     }
 

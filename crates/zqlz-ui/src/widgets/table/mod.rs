@@ -1,6 +1,6 @@
 use crate::widgets::{
     ActiveTheme, Sizable, Size,
-    actions::{Cancel, SelectDown, SelectUp},
+    actions::Cancel,
 };
 use gpui::{
     App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
@@ -37,7 +37,7 @@ actions!(table, [
     StartEditingCell,
 ]);
 
-const CONTEXT: &'static str = "Table";
+const CONTEXT: &str = "Table";
 pub(crate) fn init(cx: &mut App) {
         cx.bind_keys([
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),

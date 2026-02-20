@@ -70,6 +70,12 @@ impl ConnectionSidebar {
         let functions_expanded = conn.functions_expanded;
         let procedures_expanded = conn.procedures_expanded;
         let queries_expanded = conn.queries_expanded;
+        let tables_loading = conn.tables_loading;
+        let views_loading = conn.views_loading;
+        let materialized_views_loading = conn.materialized_views_loading;
+        let triggers_loading = conn.triggers_loading;
+        let functions_loading = conn.functions_loading;
+        let procedures_loading = conn.procedures_loading;
         let redis_databases = conn.redis_databases.clone();
         let redis_databases_expanded = conn.redis_databases_expanded;
         let databases = conn.databases.clone();
@@ -276,6 +282,12 @@ impl ConnectionSidebar {
                     functions_expanded,
                     procedures_expanded,
                     queries_expanded,
+                    tables_loading,
+                    views_loading,
+                    materialized_views_loading,
+                    triggers_loading,
+                    functions_loading,
+                    procedures_loading,
                     &databases,
                     schema_name.as_deref(),
                     schema_expanded,

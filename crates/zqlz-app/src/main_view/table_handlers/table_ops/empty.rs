@@ -1,4 +1,3 @@
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -76,7 +75,7 @@ impl MainView {
                     let objects_panel = objects_panel.clone();
                     let table_name = table_name.clone();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let sql = format!("DELETE FROM \"{}\"", table_name);
                         match connection.execute(&sql, &[]).await {
                             Ok(result) => {
@@ -199,7 +198,7 @@ impl MainView {
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let mut errors: Vec<String> = Vec::new();
                         let mut emptied_tables: Vec<String> = Vec::new();
                         let mut total_rows = 0u64;

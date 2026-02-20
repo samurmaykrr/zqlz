@@ -270,6 +270,7 @@ impl SchemaIntrospection for MySqlConnection {
                     is_unique,
                     foreign_key: None,
                     comment,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -338,6 +339,7 @@ impl SchemaIntrospection for MySqlConnection {
                     is_primary,
                     index_type,
                     comment: None,
+                    ..Default::default()
                 })
             })
             .collect();
@@ -425,6 +427,8 @@ impl SchemaIntrospection for MySqlConnection {
                         referenced_columns: vec![ref_column],
                         on_update: ForeignKeyAction::NoAction,
                         on_delete: ForeignKeyAction::NoAction,
+                        is_deferrable: false,
+                        initially_deferred: false,
                     },
                 );
             }

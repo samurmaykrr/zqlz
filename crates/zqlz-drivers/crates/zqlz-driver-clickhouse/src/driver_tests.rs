@@ -39,7 +39,7 @@ mod driver_metadata_tests {
 
     #[test]
     fn test_clickhouse_default() {
-        let driver = ClickHouseDriver::default();
+        let driver = ClickHouseDriver;
         assert_eq!(driver.id(), "clickhouse");
     }
 }
@@ -235,24 +235,18 @@ mod dialect_tests {
             .iter()
             .find(|o| o.key == "engine")
             .unwrap();
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "MergeTree")
-        );
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "ReplacingMergeTree")
-        );
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "Distributed")
-        );
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "MergeTree"));
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "ReplacingMergeTree"));
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "Distributed"));
     }
 }
 

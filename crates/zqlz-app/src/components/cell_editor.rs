@@ -22,6 +22,7 @@ use super::TableViewerPanel;
 
 /// Cell data being edited
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct CellData {
     pub table_name: String,
     pub column_name: String,
@@ -61,6 +62,7 @@ enum BinaryViewMode {
 }
 
 /// Cell editor panel
+#[allow(dead_code)]
 pub struct CellEditorPanel {
     focus_handle: FocusHandle,
 
@@ -121,7 +123,9 @@ struct HexDumpLine {
 /// Bytes per line in the hex dump display
 const HEX_BYTES_PER_LINE: usize = 16;
 
+#[allow(dead_code)]
 impl CellEditorPanel {
+    #[allow(dead_code)]
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -560,6 +564,7 @@ impl CellEditorPanel {
         cx.notify();
     }
 
+    #[allow(dead_code)]
     pub fn is_editing_row(&self, table_name: &str, row_index: usize) -> bool {
         self.cell_data
             .as_ref()

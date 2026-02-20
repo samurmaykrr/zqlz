@@ -1,11 +1,10 @@
 //! This module contains standalone event handlers for cell editing operations.
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
-    button::{ButtonVariant, ButtonVariants as _},
+    button::ButtonVariant,
     dialog::DialogButtonProps,
     v_flex,
 };

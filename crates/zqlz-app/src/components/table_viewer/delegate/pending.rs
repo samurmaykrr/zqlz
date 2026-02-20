@@ -34,10 +34,12 @@ impl TableViewerDelegate {
         );
     }
 
+    #[allow(dead_code)]
     pub fn unmark_row_for_deletion(&mut self, row_index: usize) {
         self.pending_changes.deleted_rows.remove(&row_index);
     }
 
+    #[allow(dead_code)]
     pub fn is_new_row_ready_to_commit(&self, row_idx: usize) -> Option<usize> {
         let total_rows = self.rows.len();
         if let Some(new_row_idx) = self.pending_changes.get_new_row_index(row_idx, total_rows) {

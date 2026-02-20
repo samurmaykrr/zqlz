@@ -5,5 +5,3 @@
 mod manager;
 mod storage;
 
-pub use manager::FilterPresetManager;
-pub use storage::FilterPresetStorage;

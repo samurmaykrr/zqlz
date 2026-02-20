@@ -99,7 +99,7 @@ impl CompletionCache {
     /// Create a cache key from query context
     pub fn create_key(sql_prefix: &str, cursor_offset: usize, context_type: &str) -> String {
         // Use last 100 chars + offset + context for cache key
-        let prefix_len = sql_prefix.len().min(100);
+        let _prefix_len = sql_prefix.len().min(100);
         let sql_part = if sql_prefix.len() > 100 {
             &sql_prefix[sql_prefix.len() - 100..]
         } else {

@@ -1,7 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
-use zqlz_core::ForeignKeyInfo;
 use zqlz_ui::widgets::select::SelectItem;
 
 /// Item for FK dropdown with value and display label

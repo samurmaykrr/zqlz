@@ -8,7 +8,6 @@
 //! - **View History**: Shows the version history of the procedure
 //! - **Refresh**: Reloads the schema information
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};

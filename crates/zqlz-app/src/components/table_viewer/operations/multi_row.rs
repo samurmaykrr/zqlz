@@ -9,6 +9,7 @@ use super::duplicate::{duplicate_row, DuplicateOptions, DuplicatedRow};
 
 /// An operation to perform on multiple rows
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum Operation {
     /// Set a specific column to a value for all selected rows
     SetValue(usize, Value),
@@ -20,16 +21,19 @@ pub enum Operation {
 
 impl Operation {
     /// Create a SetValue operation
+    #[allow(dead_code)]
     pub fn set_value(column_index: usize, value: Value) -> Self {
         Operation::SetValue(column_index, value)
     }
 
     /// Create a Delete operation
+    #[allow(dead_code)]
     pub fn delete() -> Self {
         Operation::Delete
     }
 
     /// Create a Duplicate operation
+    #[allow(dead_code)]
     pub fn duplicate() -> Self {
         Operation::Duplicate
     }
@@ -37,6 +41,7 @@ impl Operation {
 
 /// Result of a multi-row operation
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum OperationResult {
     /// Rows that were modified with new values
     Modified(Vec<Vec<Value>>),
@@ -48,6 +53,7 @@ pub enum OperationResult {
 
 impl OperationResult {
     /// Returns the number of affected rows
+    #[allow(dead_code)]
     pub fn affected_count(&self) -> usize {
         match self {
             OperationResult::Modified(rows) => rows.len(),
@@ -57,6 +63,7 @@ impl OperationResult {
     }
 
     /// Returns true if no rows were affected
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.affected_count() == 0
     }
@@ -64,6 +71,7 @@ impl OperationResult {
 
 /// Executor for multi-row operations
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct MultiRowOperation {
     /// The operation to perform
     operation: Operation,
@@ -73,6 +81,7 @@ pub struct MultiRowOperation {
 
 impl MultiRowOperation {
     /// Create a new multi-row operation
+    #[allow(dead_code)]
     pub fn new(operation: Operation) -> Self {
         Self {
             operation,
@@ -81,12 +90,14 @@ impl MultiRowOperation {
     }
 
     /// Set duplicate options (only used for Duplicate operation)
+    #[allow(dead_code)]
     pub fn with_duplicate_options(mut self, options: DuplicateOptions) -> Self {
         self.duplicate_options = options;
         self
     }
 
     /// Execute the operation on the given rows
+    #[allow(dead_code)]
     pub fn execute(
         &self,
         rows: &[Vec<Value>],
@@ -124,6 +135,7 @@ impl MultiRowOperation {
 }
 
 /// Generate a bulk UPDATE SQL statement for setting a column value
+#[allow(dead_code)]
 pub fn generate_bulk_update_sql(
     table_name: &str,
     column_name: &str,
@@ -153,6 +165,7 @@ pub fn generate_bulk_update_sql(
 }
 
 /// Generate a bulk DELETE SQL statement
+#[allow(dead_code)]
 pub fn generate_bulk_delete_sql(
     table_name: &str,
     primary_key_column: &str,
@@ -178,6 +191,7 @@ pub fn generate_bulk_delete_sql(
 }
 
 /// Quote a SQL identifier using the appropriate style for the target database.
+#[allow(dead_code)]
 fn quote_identifier(name: &str, driver_name: &str) -> String {
     match driver_name {
         "mysql" => format!("`{}`", name.replace('`', "``")),
@@ -187,6 +201,7 @@ fn quote_identifier(name: &str, driver_name: &str) -> String {
 }
 
 /// Format a value for SQL
+#[allow(dead_code)]
 fn format_value(value: &Value) -> String {
     match value {
         Value::Null => "NULL".to_string(),
@@ -214,6 +229,7 @@ fn format_value(value: &Value) -> String {
 }
 
 /// Encode bytes as hex string
+#[allow(dead_code)]
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02X}", b)).collect()
 }

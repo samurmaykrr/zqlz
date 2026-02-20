@@ -229,7 +229,7 @@ impl FuzzyMatcher {
     ) {
         // All pattern characters matched
         if pattern_idx >= pattern.len() {
-            if best_score.is_none() || current_score > best_score.unwrap() {
+            if best_score.map_or(true, |s| current_score > s) {
                 *best_score = Some(current_score);
                 *best_indices = current_indices;
             }

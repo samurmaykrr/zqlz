@@ -141,30 +141,30 @@ impl TlsConfig {
         }
 
         // Check CA cert path is not empty if provided
-        if let Some(ca_cert) = &self.ca_cert {
-            if ca_cert.as_os_str().is_empty() {
-                return Err(ZqlzError::Configuration(
-                    "CA certificate path cannot be empty".to_string(),
-                ));
-            }
+        if let Some(ca_cert) = &self.ca_cert
+            && ca_cert.as_os_str().is_empty()
+        {
+            return Err(ZqlzError::Configuration(
+                "CA certificate path cannot be empty".to_string(),
+            ));
         }
 
         // Check client cert path is not empty if provided
-        if let Some(client_cert) = &self.client_cert {
-            if client_cert.as_os_str().is_empty() {
-                return Err(ZqlzError::Configuration(
-                    "Client certificate path cannot be empty".to_string(),
-                ));
-            }
+        if let Some(client_cert) = &self.client_cert
+            && client_cert.as_os_str().is_empty()
+        {
+            return Err(ZqlzError::Configuration(
+                "Client certificate path cannot be empty".to_string(),
+            ));
         }
 
         // Check client key path is not empty if provided
-        if let Some(client_key) = &self.client_key {
-            if client_key.as_os_str().is_empty() {
-                return Err(ZqlzError::Configuration(
-                    "Client key path cannot be empty".to_string(),
-                ));
-            }
+        if let Some(client_key) = &self.client_key
+            && client_key.as_os_str().is_empty()
+        {
+            return Err(ZqlzError::Configuration(
+                "Client key path cannot be empty".to_string(),
+            ));
         }
 
         // If client cert is provided, client key must also be provided

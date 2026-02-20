@@ -4,7 +4,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_analyzer::{QueryAnalysis, QueryAnalyzer, QueryPlan};
+use zqlz_analyzer::QueryAnalysis;
 use zqlz_core::QueryResult;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Selectable, Sizable,
@@ -12,7 +12,6 @@ use zqlz_ui::widgets::{
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     table::{Column, ColumnSort, Table, TableDelegate, TableState},
-    typography::code,
     v_flex,
 };
 
@@ -2175,7 +2174,7 @@ impl ResultsPanel {
                                 )
                             })
                             .children(
-                                analysis.sorted_suggestions().iter().enumerate().map(|(idx, suggestion)| {
+                                analysis.sorted_suggestions().iter().enumerate().map(|(_idx, suggestion)| {
                                     let severity_color = match suggestion.severity {
                                         zqlz_analyzer::SeverityLevel::Critical => theme.danger,
                                         zqlz_analyzer::SeverityLevel::Warning => theme.warning,

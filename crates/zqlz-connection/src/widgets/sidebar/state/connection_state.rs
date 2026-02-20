@@ -46,6 +46,12 @@ impl ConnectionSidebar {
                 conn.redis_databases.clear();
                 conn.databases.clear();
                 conn.schema_name = None;
+                conn.tables_loading = false;
+                conn.views_loading = false;
+                conn.materialized_views_loading = false;
+                conn.triggers_loading = false;
+                conn.functions_loading = false;
+                conn.procedures_loading = false;
             }
         }
         cx.notify();
@@ -63,23 +69,22 @@ impl ConnectionSidebar {
     pub fn set_tables_only(&mut self, id: Uuid, tables: Vec<String>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.tables = tables;
+            conn.tables_loading = false;
             conn.is_expanded = true;
-            conn.schema_expanded = true;
-            conn.tables_expanded = true;
         }
         cx.notify();
     }
 
-    /// Update views only (progressive loading - step 2)
+    /// Update views only (lazy or eager load).
     pub fn set_views_only(&mut self, id: Uuid, views: Vec<String>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.views = views;
-            conn.views_expanded = !conn.views.is_empty();
+            conn.views_loading = false;
         }
         cx.notify();
     }
 
-    /// Update materialized views only (progressive loading - step 3)
+    /// Update materialized views only (lazy or eager load).
     pub fn set_materialized_views_only(
         &mut self,
         id: Uuid,
@@ -88,21 +93,21 @@ impl ConnectionSidebar {
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.materialized_views = materialized_views;
-            conn.materialized_views_expanded = !conn.materialized_views.is_empty();
+            conn.materialized_views_loading = false;
         }
         cx.notify();
     }
 
-    /// Update functions only (progressive loading - step 4)
+    /// Update functions only (lazy or eager load).
     pub fn set_functions_only(&mut self, id: Uuid, functions: Vec<String>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.functions = functions;
-            conn.functions_expanded = !conn.functions.is_empty();
+            conn.functions_loading = false;
         }
         cx.notify();
     }
 
-    /// Update procedures only (progressive loading - step 5)
+    /// Update procedures only (lazy or eager load).
     pub fn set_procedures_only(
         &mut self,
         id: Uuid,
@@ -111,16 +116,34 @@ impl ConnectionSidebar {
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.procedures = procedures;
-            conn.procedures_expanded = !conn.procedures.is_empty();
+            conn.procedures_loading = false;
         }
         cx.notify();
     }
 
-    /// Update triggers only (progressive loading - step 6)
+    /// Update triggers only (lazy or eager load).
     pub fn set_triggers_only(&mut self, id: Uuid, triggers: Vec<String>, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.triggers = triggers;
-            conn.triggers_expanded = !conn.triggers.is_empty();
+            conn.triggers_loading = false;
+        }
+        cx.notify();
+    }
+
+    /// Clear the loading spinner for a section without updating its data.
+    ///
+    /// Used when a lazy-load fetch fails so the spinner doesn't spin forever.
+    pub fn clear_section_loading(&mut self, conn_id: Uuid, section: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            match section {
+                "tables" => conn.tables_loading = false,
+                "views" => conn.views_loading = false,
+                "materialized_views" => conn.materialized_views_loading = false,
+                "triggers" => conn.triggers_loading = false,
+                "functions" => conn.functions_loading = false,
+                "procedures" => conn.procedures_loading = false,
+                _ => {}
+            }
         }
         cx.notify();
     }
@@ -153,6 +176,71 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
+    /// Pre-populate the sidebar with the known active database immediately after
+    /// connecting, before any async schema queries complete.
+    ///
+    /// Creates a single loading database node so the multi-DB hierarchy is visible
+    /// right away, preventing the jarring flat-tables → database-nodes transition.
+    pub fn init_database_view(&mut self, id: Uuid, active_db_name: &str, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            conn.is_expanded = true;
+            conn.databases = vec![SidebarDatabaseInfo {
+                name: active_db_name.to_string(),
+                size_bytes: None,
+                is_active: true,
+                is_expanded: true,
+                is_loading: true,
+                schema: None,
+            }];
+        }
+        cx.notify();
+    }
+
+    /// Merge a freshly fetched database list into the sidebar without discarding
+    /// state for databases that are already visible.
+    ///
+    /// For databases already in the list: keeps existing schema, expansion state,
+    /// and loading flags; only updates `size_bytes` and `is_active`.
+    /// For databases not yet present: appends them with default (collapsed) state.
+    pub fn merge_databases(
+        &mut self,
+        id: Uuid,
+        databases: Vec<(String, Option<i64>)>,
+        active_database: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            use std::collections::HashMap;
+            let mut existing: HashMap<String, SidebarDatabaseInfo> = conn
+                .databases
+                .drain(..)
+                .map(|db| (db.name.clone(), db))
+                .collect();
+
+            conn.databases = databases
+                .into_iter()
+                .map(|(name, size_bytes)| {
+                    let is_active = active_database.map_or(false, |a| a == name);
+                    if let Some(mut db) = existing.remove(&name) {
+                        db.size_bytes = size_bytes;
+                        db.is_active = is_active;
+                        db
+                    } else {
+                        SidebarDatabaseInfo {
+                            name,
+                            size_bytes,
+                            is_active,
+                            is_expanded: is_active,
+                            is_loading: false,
+                            schema: None,
+                        }
+                    }
+                })
+                .collect();
+        }
+        cx.notify();
+    }
+
     /// Set the list of all databases on the server for a connection.
     /// Migrates existing connection-level schema data into the active database node.
     pub fn set_databases(
@@ -180,6 +268,12 @@ impl ConnectionSidebar {
                 triggers_expanded: conn.triggers_expanded,
                 functions_expanded: conn.functions_expanded,
                 procedures_expanded: conn.procedures_expanded,
+                tables_loading: conn.tables_loading,
+                views_loading: conn.views_loading,
+                materialized_views_loading: conn.materialized_views_loading,
+                triggers_loading: conn.triggers_loading,
+                functions_loading: conn.functions_loading,
+                procedures_loading: conn.procedures_loading,
             };
 
             conn.databases = databases
@@ -237,6 +331,12 @@ impl ConnectionSidebar {
                     triggers_expanded: false,
                     functions_expanded: false,
                     procedures_expanded: false,
+                    tables_loading: false,
+                    views_loading: false,
+                    materialized_views_loading: false,
+                    triggers_loading: false,
+                    functions_loading: false,
+                    procedures_loading: false,
                 });
             }
         }
@@ -366,6 +466,22 @@ impl ConnectionSidebar {
                 query.name = new_name;
             }
             conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
+        }
+        cx.notify();
+    }
+
+    /// Mark all schema sections as loading for a connection.
+    ///
+    /// Called immediately after connect so every section header shows a spinner
+    /// before the parallel eager-load queries complete.
+    pub fn set_all_sections_loading(&mut self, conn_id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            conn.tables_loading = true;
+            conn.views_loading = true;
+            conn.materialized_views_loading = true;
+            conn.triggers_loading = true;
+            conn.functions_loading = true;
+            conn.procedures_loading = true;
         }
         cx.notify();
     }

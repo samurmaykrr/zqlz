@@ -484,6 +484,7 @@ async fn get_table_details_uses_cached_columns() {
             is_unique: false,
             foreign_key: None,
             comment: None,
+            ..Default::default()
         }],
     );
 

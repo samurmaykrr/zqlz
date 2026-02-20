@@ -8,7 +8,6 @@ use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     checkbox::Checkbox,
-    dialog::DialogButtonProps,
     input::{Input, InputState},
     v_flex,
 };
@@ -133,7 +132,7 @@ impl MainView {
                         let objects_panel = objects_panel.clone();
                         let source_table_name = source_table_name.clone();
 
-                        cx.spawn(async move |mut cx| {
+                        cx.spawn(async move |cx| {
                             let sql = format!(
                                 "CREATE TABLE \"{}\" AS SELECT * FROM \"{}\"",
                                 new_table_name, source_table_name
@@ -258,7 +257,7 @@ impl MainView {
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let mut errors: Vec<String> = Vec::new();
                         let mut duplicated_tables: Vec<String> = Vec::new();
 

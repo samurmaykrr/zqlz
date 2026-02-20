@@ -16,6 +16,8 @@ zqlz-table-designer = { path = "../zqlz-table-designer" }
 
 # Async runtime
 tokio = { version = "1.42", features = ["full"] }
+futures = "0.3"
+smol.workspace = true
 
 # Error handling
 thiserror = "2.0"

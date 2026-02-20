@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use zqlz_core::{
-    ColumnInfo, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
-    ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectsPanelColumn,
+    ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
+    Dependency, ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectsPanelColumn,
     ObjectsPanelData, ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, Result, SchemaInfo,
     SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType, TriggerEvent,
     TriggerForEach, TriggerInfo, TriggerTiming, TypeInfo, TypeKind, ViewInfo, ZqlzError,
@@ -305,6 +305,7 @@ impl SchemaIntrospection for PostgresConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: None,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -315,20 +316,38 @@ impl SchemaIntrospection for PostgresConnection {
     #[tracing::instrument(skip(self))]
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
         let schema = schema.unwrap_or("public");
+        // indnkeyatts is the number of key columns (introduced in PostgreSQL 11).
+        // Columns beyond that index are non-key INCLUDE columns.  We use a fallback
+        // of array_length(ix.indkey, 1) so the query works on older PostgreSQL versions.
         let result = self
             .query(
-                "SELECT 
-                    i.relname as index_name,
-                    ix.indisunique as is_unique,
-                    ix.indisprimary as is_primary,
-                    array_agg(a.attname ORDER BY array_position(ix.indkey, a.attnum)) as columns
+                "SELECT
+                    i.relname AS index_name,
+                    ix.indisunique AS is_unique,
+                    ix.indisprimary AS is_primary,
+                    array_agg(
+                        a.attname
+                        ORDER BY array_position(ix.indkey, a.attnum)
+                    ) FILTER (
+                        WHERE a.attnum <= coalesce(ix.indnkeyatts, array_length(ix.indkey, 1))
+                    ) AS key_columns,
+                    array_agg(
+                        a.attname
+                        ORDER BY array_position(ix.indkey, a.attnum)
+                    ) FILTER (
+                        WHERE a.attnum > coalesce(ix.indnkeyatts, array_length(ix.indkey, 1))
+                    ) AS include_columns,
+                    am.amname AS index_method,
+                    pg_get_expr(ix.indpred, ix.indrelid) AS where_clause
                  FROM pg_class t
                  JOIN pg_index ix ON t.oid = ix.indrelid
                  JOIN pg_class i ON i.oid = ix.indexrelid
+                 JOIN pg_am am ON am.oid = i.relam
                  JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = ANY(ix.indkey)
                  JOIN pg_namespace n ON n.oid = t.relnamespace
                  WHERE n.nspname = $1 AND t.relname = $2
-                 GROUP BY i.relname, ix.indisunique, ix.indisprimary
+                 GROUP BY i.relname, ix.indisunique, ix.indisprimary, ix.indnkeyatts,
+                          ix.indkey, ix.indpred, ix.indrelid, am.amname
                  ORDER BY i.relname",
                 &[
                     zqlz_core::Value::String(schema.to_string()),
@@ -344,19 +363,31 @@ impl SchemaIntrospection for PostgresConnection {
                 let name = row.get(0).and_then(|v| v.as_str())?.to_string();
                 let is_unique = row.get(1).and_then(|v| v.as_bool()).unwrap_or(false);
                 let is_primary = row.get(2).and_then(|v| v.as_bool()).unwrap_or(false);
-                // Parse the array_agg column which returns a string array
                 let columns = row
                     .get(3)
                     .and_then(|v| v.as_string_array())
                     .unwrap_or_default();
+                let include_columns = row
+                    .get(4)
+                    .and_then(|v| v.as_string_array())
+                    .unwrap_or_default();
+                let index_type = row
+                    .get(5)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("btree")
+                    .to_string();
+                let where_clause = row.get(6).and_then(|v| v.as_str()).map(|s| s.to_string());
 
                 Some(IndexInfo {
                     name,
                     columns,
                     is_unique,
                     is_primary,
-                    index_type: "btree".to_string(),
+                    index_type,
                     comment: None,
+                    where_clause,
+                    include_columns,
+                    column_descending: vec![],
                 })
             })
             .collect();
@@ -434,6 +465,8 @@ impl SchemaIntrospection for PostgresConnection {
                     referenced_columns: vec![ref_column],
                     on_update: parse_fk_action(on_update_str),
                     on_delete: parse_fk_action(on_delete_str),
+                    is_deferrable: false,
+                    initially_deferred: false,
                 }
             })
             .collect();
@@ -483,10 +516,58 @@ impl SchemaIntrospection for PostgresConnection {
 
     async fn get_constraints(
         &self,
-        _schema: Option<&str>,
-        _table: &str,
+        schema: Option<&str>,
+        table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        Ok(Vec::new())
+        let schema = schema.unwrap_or("public");
+        // pg_get_constraintdef returns the full constraint definition including the CHECK keyword;
+        // we store it as-is so importers have the verbatim expression without needing to
+        // reconstruct it from raw column-level data.
+        let result = self
+            .query(
+                "SELECT
+                    con.conname AS constraint_name,
+                    pg_get_constraintdef(con.oid) AS definition,
+                    array_agg(att.attname ORDER BY att.attnum) AS columns
+                 FROM pg_constraint con
+                 JOIN pg_class rel ON rel.oid = con.conrelid
+                 JOIN pg_namespace nsp ON nsp.oid = rel.relnamespace
+                 LEFT JOIN pg_attribute att
+                   ON att.attrelid = rel.oid
+                   AND att.attnum = ANY(con.conkey)
+                 WHERE con.contype = 'c'
+                   AND nsp.nspname = $1
+                   AND rel.relname = $2
+                 GROUP BY con.conname, con.oid
+                 ORDER BY con.conname",
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(table.to_string()),
+                ],
+            )
+            .await?;
+
+        let constraints = result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let name = row.get(0).and_then(|v| v.as_str())?.to_string();
+                let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let columns = row
+                    .get(2)
+                    .and_then(|v| v.as_string_array())
+                    .unwrap_or_default();
+
+                Some(ConstraintInfo {
+                    name,
+                    constraint_type: ConstraintType::Check,
+                    columns,
+                    definition,
+                })
+            })
+            .collect();
+
+        Ok(constraints)
     }
 
     async fn list_functions(&self, schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
@@ -531,7 +612,7 @@ impl SchemaIntrospection for PostgresConnection {
                     name,
                     schema: Some(schema.to_string()),
                     language: "sql".to_string(), // Default to SQL
-                    return_type: return_type,
+                    return_type,
                     parameters: vec![], // TODO: Parse parameters properly
                     definition: None,
                     owner: None,

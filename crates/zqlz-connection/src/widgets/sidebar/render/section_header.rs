@@ -2,7 +2,6 @@
 //!
 //! Renders collapsible section headers with count indicators.
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::widgets::sidebar::ConnectionSidebar;

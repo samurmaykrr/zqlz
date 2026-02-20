@@ -624,6 +624,7 @@ impl MainView {
     }
 
     /// Load saved queries for a connection
+    #[allow(dead_code)]
     pub fn load_saved_queries_for_connection(
         &self,
         connection_id: Uuid,

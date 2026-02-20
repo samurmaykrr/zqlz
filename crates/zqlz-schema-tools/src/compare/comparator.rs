@@ -179,11 +179,11 @@ impl SchemaComparator {
             } else if let (Some(source_detail), Some(target_detail)) = (
                 source_details.get(&table.name),
                 target_details.get(&table.name),
-            ) {
-                if let Some(table_diff) = self.compare_table_details(source_detail, target_detail) {
-                    if !table_diff.is_empty() {
-                        diff.modified_tables.push(table_diff);
-                    }
+            )
+                && let Some(table_diff) = self.compare_table_details(source_detail, target_detail)
+            {
+                if !table_diff.is_empty() {
+                    diff.modified_tables.push(table_diff);
                 }
             }
         }
@@ -244,11 +244,11 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&col.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_columns.push(col.clone());
-            } else if let Some(target_col) = target_map.get(&normalized) {
-                if let Some(col_diff) = self.compare_column(col, target_col) {
-                    if !col_diff.is_empty() {
-                        diff.modified_columns.push(col_diff);
-                    }
+            } else if let Some(target_col) = target_map.get(&normalized)
+                && let Some(col_diff) = self.compare_column(col, target_col)
+            {
+                if !col_diff.is_empty() {
+                    diff.modified_columns.push(col_diff);
                 }
             }
         }
@@ -316,14 +316,14 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&idx.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_indexes.push(idx.clone());
-            } else if let Some(target_idx) = target_map.get(&normalized) {
-                if !self.indexes_equal(idx, target_idx) {
-                    diff.modified_indexes.push(IndexDiff::new(
-                        &idx.name,
-                        (*target_idx).clone(),
-                        idx.clone(),
-                    ));
-                }
+            } else if let Some(target_idx) = target_map.get(&normalized)
+                && !self.indexes_equal(idx, target_idx)
+            {
+                diff.modified_indexes.push(IndexDiff::new(
+                    &idx.name,
+                    (*target_idx).clone(),
+                    idx.clone(),
+                ));
             }
         }
 
@@ -363,10 +363,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&fk.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_foreign_keys.push(fk.clone());
-            } else if let Some(target_fk) = target_map.get(&normalized) {
-                if let Some(fk_diff) = self.compare_foreign_key(fk, target_fk) {
-                    diff.modified_foreign_keys.push(fk_diff);
-                }
+            } else if let Some(target_fk) = target_map.get(&normalized)
+                && let Some(fk_diff) = self.compare_foreign_key(fk, target_fk)
+            {
+                diff.modified_foreign_keys.push(fk_diff);
             }
         }
 
@@ -438,14 +438,14 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&constraint.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_constraints.push(constraint.clone());
-            } else if let Some(target_constraint) = target_map.get(&normalized) {
-                if !self.constraints_equal(constraint, target_constraint) {
-                    diff.modified_constraints.push(ConstraintDiff::new(
-                        &constraint.name,
-                        (*target_constraint).clone(),
-                        constraint.clone(),
-                    ));
-                }
+            } else if let Some(target_constraint) = target_map.get(&normalized)
+                && !self.constraints_equal(constraint, target_constraint)
+            {
+                diff.modified_constraints.push(ConstraintDiff::new(
+                    &constraint.name,
+                    (*target_constraint).clone(),
+                    constraint.clone(),
+                ));
             }
         }
 
@@ -505,10 +505,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&view.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_views.push(view.clone());
-            } else if let Some(target_view) = target_map.get(&normalized) {
-                if let Some(view_diff) = self.compare_view(view, target_view) {
-                    diff.modified_views.push(view_diff);
-                }
+            } else if let Some(target_view) = target_map.get(&normalized)
+                && let Some(view_diff) = self.compare_view(view, target_view)
+            {
+                diff.modified_views.push(view_diff);
             }
         }
 
@@ -563,10 +563,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&func.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_functions.push(func.clone());
-            } else if let Some(target_func) = target_map.get(&normalized) {
-                if let Some(func_diff) = self.compare_function(func, target_func) {
-                    diff.modified_functions.push(func_diff);
-                }
+            } else if let Some(target_func) = target_map.get(&normalized)
+                && let Some(func_diff) = self.compare_function(func, target_func)
+            {
+                diff.modified_functions.push(func_diff);
             }
         }
 
@@ -633,10 +633,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&proc.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_procedures.push(proc.clone());
-            } else if let Some(target_proc) = target_map.get(&normalized) {
-                if let Some(proc_diff) = self.compare_procedure(proc, target_proc) {
-                    diff.modified_procedures.push(proc_diff);
-                }
+            } else if let Some(target_proc) = target_map.get(&normalized)
+                && let Some(proc_diff) = self.compare_procedure(proc, target_proc)
+            {
+                diff.modified_procedures.push(proc_diff);
             }
         }
 
@@ -695,10 +695,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&trigger.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_triggers.push(trigger.clone());
-            } else if let Some(target_trigger) = target_map.get(&normalized) {
-                if let Some(trigger_diff) = self.compare_trigger(trigger, target_trigger) {
-                    diff.modified_triggers.push(trigger_diff);
-                }
+            } else if let Some(target_trigger) = target_map.get(&normalized)
+                && let Some(trigger_diff) = self.compare_trigger(trigger, target_trigger)
+            {
+                diff.modified_triggers.push(trigger_diff);
             }
         }
 
@@ -754,10 +754,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&seq.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_sequences.push(seq.clone());
-            } else if let Some(target_seq) = target_map.get(&normalized) {
-                if let Some(seq_diff) = self.compare_sequence(seq, target_seq) {
-                    diff.modified_sequences.push(seq_diff);
-                }
+            } else if let Some(target_seq) = target_map.get(&normalized)
+                && let Some(seq_diff) = self.compare_sequence(seq, target_seq)
+            {
+                diff.modified_sequences.push(seq_diff);
             }
         }
 
@@ -823,10 +823,10 @@ impl SchemaComparator {
             let normalized = self.normalize_name(&type_info.name);
             if !target_map.contains_key(&normalized) {
                 diff.added_types.push(type_info.clone());
-            } else if let Some(target_type) = target_map.get(&normalized) {
-                if let Some(type_diff) = self.compare_type(type_info, target_type) {
-                    diff.modified_types.push(type_diff);
-                }
+            } else if let Some(target_type) = target_map.get(&normalized)
+                && let Some(type_diff) = self.compare_type(type_info, target_type)
+            {
+                diff.modified_types.push(type_diff);
             }
         }
 

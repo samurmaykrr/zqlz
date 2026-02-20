@@ -11,7 +11,6 @@ use crate::components::{
 };
 use zqlz_ui::widgets::{WindowExt, dialog::DialogButtonProps, dock::Panel};
 use zqlz_versioning::DatabaseObjectType;
-use zqlz_zed_adapter::SettingsBridge;
 
 use super::MainView;
 
@@ -201,7 +200,12 @@ impl MainView {
                 connection_id,
                 table_name,
             } => {
-                self.export_data(connection_id, table_name, window, cx);
+                let table_names = if table_name.is_empty() {
+                    vec![]
+                } else {
+                    vec![table_name.clone()]
+                };
+                self.export_data(connection_id, table_names, window, cx);
             }
             ConnectionSidebarEvent::DumpTableSql {
                 connection_id,
@@ -333,6 +337,12 @@ impl MainView {
                     connection_id
                 );
                 self.load_database_schema(connection_id, database_name, window, cx);
+            }
+            ConnectionSidebarEvent::LoadSection {
+                connection_id,
+                section,
+            } => {
+                self.load_sidebar_section(connection_id, section, window, cx);
             }
         }
     }
@@ -472,32 +482,33 @@ impl MainView {
         if self.command_palette.is_none() {
             let palette = cx.new(|cx| CommandPalette::new(window, cx));
 
-            // Load schema data for the active connection if available
-            let schema_data = {
-                let workspace_state = self.workspace_state.read(cx);
-                workspace_state.active_connection_id().and_then(|connection_id| {
-                    workspace_state
-                        .schema_for_connection(connection_id)
-                        .map(|schema| (connection_id, schema.clone()))
-                })
-            };
-
-            if let Some((connection_id, schema)) = schema_data {
-                // Get connection name from AppState
-                let connection_name = if let Some(app_state) = cx.try_global::<AppState>() {
-                    app_state
+            // Load schema data for the active connection from the SchemaService cache.
+            // This avoids keeping a duplicate schema list in WorkspaceState.
+            let active_connection_id = self.workspace_state.read(cx).active_connection_id();
+            if let Some(connection_id) = active_connection_id {
+                if let Some(app_state) = cx.try_global::<AppState>() {
+                    let schema_service = app_state.schema_service.clone();
+                    let connection_name = app_state
                         .saved_connections()
                         .iter()
                         .find(|c| c.id == connection_id)
                         .map(|c| c.name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string())
-                } else {
-                    "Unknown".to_string()
-                };
+                        .unwrap_or_else(|| "Unknown".to_string());
 
-                palette.update(cx, |palette, _cx| {
-                    palette.add_schema_commands(connection_id, &connection_name, &schema);
-                });
+                    let tables: Vec<String> = schema_service
+                        .get_cached_tables(connection_id)
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(|t| t.name)
+                        .collect();
+                    let views: Vec<String> = schema_service
+                        .get_cached_view_names(connection_id)
+                        .unwrap_or_default();
+
+                    palette.update(cx, |palette, _cx| {
+                        palette.add_schema_commands(connection_id, &connection_name, &tables, &views);
+                    });
+                }
             }
 
             // Subscribe to dismiss events
@@ -1029,13 +1040,13 @@ impl MainView {
             let settings_panel = cx.new(|cx| SettingsPanel::new(window, cx));
             self.settings_panel = Some(settings_panel.clone());
             
-            // Subscribe to settings changes to sync with Zed editor
-            let settings_panel_for_sub = settings_panel.clone();
-            cx.subscribe(&settings_panel, move |_this, _, event: &SettingsPanelEvent, cx| {
+            // Subscribe to settings changes
+            let _settings_panel_for_sub = settings_panel.clone();
+            cx.subscribe(&settings_panel, move |_this, _, event: &SettingsPanelEvent, _cx| {
                 match event {
                     SettingsPanelEvent::SettingsChanged => {
-                        tracing::debug!("Settings changed, syncing to Zed editor");
-                        SettingsBridge::sync_settings(cx);
+                        tracing::debug!("Settings changed");
+                        // TODO: When we implement custom text editor, sync settings here
                     }
                 }
             }).detach();
@@ -1269,6 +1280,7 @@ impl MainView {
     }
 
     /// Handle events from the template library panel
+    #[allow(dead_code)]
     pub(super) fn handle_template_library_event(
         &mut self,
         event: &TemplateLibraryEvent,
@@ -1322,6 +1334,7 @@ impl MainView {
     }
 
     /// Handle events from the project manager panel
+    #[allow(dead_code)]
     pub(super) fn handle_project_manager_event(
         &mut self,
         event: &ProjectManagerEvent,
@@ -1408,24 +1421,54 @@ impl MainView {
             ResultsPanelEvent::ReloadDiagnostics => {
                 tracing::debug!("ReloadDiagnostics event received");
 
-                // Set loading state
                 self.results_panel.update(cx, |panel, cx| {
                     panel.set_diagnostics_loading(true, cx);
                 });
 
-                // TODO: Implement proper diagnostics reloading
-                // This requires tracking EditorId -> QueryEditor mapping
-                tracing::debug!("Diagnostics reload requested (not yet fully implemented)");
-                
-                // Clear loading state
-                self.results_panel.update(cx, |panel, cx| {
-                    panel.set_diagnostics_loading(false, cx);
-                });
+                // Re-run diagnostics on the active editor. QueryTabsPanel's active
+                // editor is tried first; if none exists (e.g. the common dock-based
+                // "Query N" editors), fall back to the most recently opened dock
+                // editor. The editor re-validates, emits DiagnosticsChanged, and
+                // set_problems clears the loading state when results arrive.
+                let editor_found =
+                    if let Some(editor) = self.query_tabs_panel.read(cx).active_editor() {
+                        editor.update(cx, |editor, cx| {
+                            editor.reload_diagnostics(cx);
+                        });
+                        true
+                    } else {
+                        // query_editors are pushed in open order; the last live one
+                        // is the most recently opened dock-based editor.
+                        let editor = self
+                            .query_editors
+                            .iter()
+                            .rev()
+                            .find_map(|weak| weak.upgrade());
+                        if let Some(editor) = editor {
+                            editor.update(cx, |editor, cx| {
+                                editor.reload_diagnostics(cx);
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    };
+
+                if !editor_found {
+                    tracing::debug!("ReloadDiagnostics: no active editor found");
+                    // No work was done so clear the loading state immediately.
+                    self.results_panel.update(cx, |panel, cx| {
+                        panel.set_diagnostics_loading(false, cx);
+                    });
+                }
+                // When an editor was found, set_problems (called via the
+                // DiagnosticsChanged subscription) clears diagnostics_loading.
             }
         }
     }
 
     /// Convert UI Diagnostic to EditorDiagnostic for WorkspaceState
+    #[allow(dead_code)]
     fn convert_to_editor_diagnostic(
         diag: &zqlz_ui::widgets::highlighter::Diagnostic,
     ) -> crate::workspace_state::EditorDiagnostic {

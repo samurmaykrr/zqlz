@@ -30,7 +30,7 @@ impl QueryCancelHandle for SqliteCancelHandle {
 
 /// SQLite connection wrapper
 pub struct SqliteConnection {
-    conn: Mutex<RusqliteConnection>,
+    conn: Arc<Mutex<RusqliteConnection>>,
     interrupt_handle: Arc<InterruptHandle>,
 }
 
@@ -89,7 +89,7 @@ impl SqliteConnection {
 
         tracing::info!(path = %expanded_path, "SQLite database connection established");
         Ok(Self {
-            conn: Mutex::new(conn),
+            conn: Arc::new(Mutex::new(conn)),
             interrupt_handle,
         })
     }
@@ -407,9 +407,20 @@ impl Connection for SqliteConnection {
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
-        Err(ZqlzError::NotImplemented(
-            "Transactions not yet implemented for SQLite".into(),
-        ))
+        tracing::debug!("beginning SQLite transaction");
+        {
+            let conn = self.conn.lock();
+            // DEFERRED means the write lock is only acquired when the first write occurs,
+            // which matches the typical behaviour expected from a default transaction.
+            conn.execute_batch("BEGIN DEFERRED")
+                .map_err(|e| ZqlzError::Query(format!("Failed to begin transaction: {}", e)))?;
+        }
+        tracing::debug!("SQLite transaction started");
+        Ok(Box::new(SqliteTransaction {
+            conn: Arc::clone(&self.conn),
+            committed: false,
+            rolled_back: false,
+        }))
     }
 
     async fn close(&self) -> Result<()> {
@@ -604,6 +615,7 @@ impl SchemaIntrospection for SqliteConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: None,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -644,6 +656,7 @@ impl SchemaIntrospection for SqliteConnection {
                 is_primary: false,
                 index_type: "btree".to_string(),
                 comment: None,
+                ..Default::default()
             });
         }
 
@@ -691,6 +704,8 @@ impl SchemaIntrospection for SqliteConnection {
                     referenced_columns: vec![to_col],
                     on_update: parse_fk_action(on_update_str),
                     on_delete: parse_fk_action(on_delete_str),
+                    is_deferrable: false,
+                    initially_deferred: false,
                 }
             })
             .collect();
@@ -902,6 +917,157 @@ impl SchemaIntrospection for SqliteConnection {
         }
 
         Ok(ObjectsPanelData { columns, rows })
+    }
+}
+
+/// SQLite transaction wrapper.
+///
+/// Issues raw `BEGIN DEFERRED` / `COMMIT` / `ROLLBACK` SQL so that it can share
+/// the connection `Arc<Mutex<…>>` without running into rusqlite's borrow-based
+/// transaction lifetime requirements.
+pub struct SqliteTransaction {
+    conn: Arc<Mutex<RusqliteConnection>>,
+    committed: bool,
+    rolled_back: bool,
+}
+
+impl Drop for SqliteTransaction {
+    fn drop(&mut self) {
+        // If the transaction is abandoned without an explicit commit/rollback, issue a
+        // best-effort rollback so the connection is left in a clean state.
+        if !self.committed && !self.rolled_back {
+            tracing::warn!("SQLite transaction dropped without commit or rollback, issuing automatic rollback");
+            let conn = self.conn.lock();
+            if let Err(e) = conn.execute_batch("ROLLBACK") {
+                tracing::error!(error = %e, "automatic rollback on drop failed");
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Transaction for SqliteTransaction {
+    async fn commit(mut self: Box<Self>) -> Result<()> {
+        tracing::debug!("committing SQLite transaction");
+
+        if self.rolled_back {
+            return Err(ZqlzError::Query("Transaction already rolled back".into()));
+        }
+        if self.committed {
+            return Err(ZqlzError::Query("Transaction already committed".into()));
+        }
+
+        let conn = self.conn.lock();
+        conn.execute_batch("COMMIT")
+            .map_err(|e| ZqlzError::Query(format!("Failed to commit transaction: {}", e)))?;
+
+        self.committed = true;
+        tracing::debug!("SQLite transaction committed successfully");
+        Ok(())
+    }
+
+    async fn rollback(mut self: Box<Self>) -> Result<()> {
+        tracing::debug!("rolling back SQLite transaction");
+
+        if self.committed {
+            return Err(ZqlzError::Query("Transaction already committed".into()));
+        }
+        if self.rolled_back {
+            return Ok(());
+        }
+
+        let conn = self.conn.lock();
+        conn.execute_batch("ROLLBACK")
+            .map_err(|e| ZqlzError::Query(format!("Failed to rollback transaction: {}", e)))?;
+
+        self.rolled_back = true;
+        tracing::debug!("SQLite transaction rolled back successfully");
+        Ok(())
+    }
+
+    async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
+        tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing query in SQLite transaction");
+
+        let start_time = std::time::Instant::now();
+        let conn = self.conn.lock();
+        let rusqlite_params = values_to_rusqlite(params);
+
+        let mut stmt = conn
+            .prepare(sql)
+            .map_err(|e| ZqlzError::Query(format!("Failed to prepare query: {}", e)))?;
+
+        let column_count = stmt.column_count();
+        let mut column_names: Vec<String> = Vec::with_capacity(column_count);
+        let mut columns: Vec<ColumnMeta> = Vec::with_capacity(column_count);
+
+        let stmt_columns = stmt.columns();
+        for (idx, col) in stmt_columns.iter().enumerate() {
+            let name = col.name().to_string();
+            let data_type = col.decl_type().unwrap_or("DYNAMIC").to_string();
+            column_names.push(name.clone());
+            columns.push(ColumnMeta {
+                name,
+                data_type,
+                nullable: true,
+                ordinal: idx,
+                max_length: None,
+                precision: None,
+                scale: None,
+                auto_increment: false,
+                default_value: None,
+                comment: None,
+                enum_values: None,
+            });
+        }
+
+        let mut rows = Vec::new();
+        let mut query_rows = stmt
+            .query(params_from_iter(rusqlite_params.iter()))
+            .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
+
+        while let Some(row) = query_rows
+            .next()
+            .map_err(|e| ZqlzError::Query(format!("Failed to fetch row: {}", e)))?
+        {
+            let mut values = Vec::with_capacity(columns.len());
+            for i in 0..columns.len() {
+                let value = rusqlite_to_value(row, i)?;
+                values.push(value);
+            }
+            rows.push(Row::new(column_names.clone(), values));
+        }
+
+        let execution_time_ms = start_time.elapsed().as_millis() as u64;
+        let total_rows = rows.len();
+        Ok(QueryResult {
+            id: uuid::Uuid::new_v4(),
+            columns,
+            rows,
+            total_rows: Some(total_rows as u64),
+            is_estimated_total: false,
+            affected_rows: 0,
+            execution_time_ms,
+            warnings: Vec::new(),
+        })
+    }
+
+    async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
+        tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing statement in SQLite transaction");
+
+        let conn = self.conn.lock();
+        let rusqlite_params = values_to_rusqlite(params);
+
+        let rows_affected = conn
+            .execute(sql, params_from_iter(rusqlite_params.iter()))
+            .map_err(|e| ZqlzError::Query(format!("Failed to execute statement: {}", e)))?;
+
+        tracing::debug!(affected_rows = rows_affected, "statement executed in SQLite transaction");
+        Ok(StatementResult {
+            is_query: false,
+            result: None,
+            affected_rows: rows_affected as u64,
+            error: None,
+        })
     }
 }
 

@@ -182,6 +182,7 @@ impl SchemaIntrospection for DuckDbConnection {
                 is_unique: false,
                 foreign_key: None,
                 comment: None,
+                ..Default::default()
             })
             .collect())
     }
@@ -214,6 +215,7 @@ impl SchemaIntrospection for DuckDbConnection {
                 is_primary: row.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
                 index_type: "ART".to_string(), // DuckDB uses ART indexes
                 comment: None,
+                ..Default::default()
             })
             .collect())
     }
@@ -286,6 +288,8 @@ impl SchemaIntrospection for DuckDbConnection {
                     referenced_columns: vec![ref_column],
                     on_update: ForeignKeyAction::NoAction,
                     on_delete: ForeignKeyAction::NoAction,
+                    is_deferrable: false,
+                    initially_deferred: false,
                 });
         }
 

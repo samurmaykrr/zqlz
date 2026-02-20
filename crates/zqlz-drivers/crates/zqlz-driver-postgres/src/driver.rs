@@ -129,7 +129,7 @@ impl DatabaseDriver for PostgresDriver {
             .get_string("user")
             .or_else(|| config.get_string("username"));
 
-        let mut conn_str = format!("postgresql://");
+        let mut conn_str = "postgresql://".to_string();
 
         if let Some(u) = user {
             conn_str.push_str(&u);

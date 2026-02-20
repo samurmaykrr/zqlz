@@ -368,6 +368,7 @@ impl SortDirection {
         }
     }
 
+    #[allow(dead_code)]
     pub fn icon_name(&self) -> &'static str {
         match self {
             Self::Ascending => "arrow-up",
@@ -433,6 +434,7 @@ impl ColumnVisibility {
 
 /// A saved filter/sort profile
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct FilterProfile {
     /// Profile name
     pub name: String,
@@ -452,6 +454,7 @@ pub struct FilterProfile {
     pub connection_id: Option<String>,
 }
 
+#[allow(dead_code)]
 impl FilterProfile {
     pub fn new(name: String, table_name: String) -> Self {
         Self {
@@ -475,6 +478,7 @@ pub struct ColumnSelectItem {
     pub is_custom: bool,
 }
 
+#[allow(dead_code)]
 impl ColumnSelectItem {
     pub fn new(name: impl Into<SharedString>, data_type: impl Into<SharedString>) -> Self {
         Self {
@@ -495,12 +499,14 @@ impl ColumnSelectItem {
 
 /// Operator item for the dropdown
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct OperatorSelectItem {
     pub operator: FilterOperator,
     pub label: SharedString,
 }
 
 impl OperatorSelectItem {
+    #[allow(dead_code)]
     pub fn new(operator: FilterOperator) -> Self {
         Self {
             operator,
@@ -508,6 +514,7 @@ impl OperatorSelectItem {
         }
     }
 
+    #[allow(dead_code)]
     pub fn all() -> Vec<Self> {
         FilterOperator::all()
             .iter()

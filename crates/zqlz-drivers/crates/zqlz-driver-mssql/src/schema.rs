@@ -316,6 +316,7 @@ impl SchemaIntrospection for MssqlConnection {
                     is_unique,
                     foreign_key: None, // Will be filled if needed
                     comment: None,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -376,6 +377,7 @@ impl SchemaIntrospection for MssqlConnection {
                     is_primary,
                     index_type,
                     comment: None,
+                    ..Default::default()
                 }
             })
             .collect();
@@ -458,6 +460,8 @@ impl SchemaIntrospection for MssqlConnection {
                     referenced_columns: vec![ref_column],
                     on_update: parse_fk_action(on_update_str),
                     on_delete: parse_fk_action(on_delete_str),
+                    is_deferrable: false,
+                    initially_deferred: false,
                 });
         }
 

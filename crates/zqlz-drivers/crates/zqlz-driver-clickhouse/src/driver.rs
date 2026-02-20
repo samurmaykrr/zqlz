@@ -320,10 +320,10 @@ impl Connection for ClickHouseConnection {
         let content = String::from_utf8_lossy(&all_bytes);
         let mut result: Vec<serde_json::Value> = Vec::new();
         for line in content.lines() {
-            if !line.trim().is_empty() {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(line) {
-                    result.push(value);
-                }
+            if !line.trim().is_empty()
+                && let Ok(value) = serde_json::from_str::<serde_json::Value>(line)
+            {
+                result.push(value);
             }
         }
 

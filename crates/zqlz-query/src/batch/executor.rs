@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use zqlz_core::{Connection, QueryResult, Result, StatementResult as CoreStatementResult, Value};
+use zqlz_core::{Connection, QueryResult, Result};
 
 /// Configuration options for batch execution
 #[derive(Debug, Clone, Serialize, Deserialize)]

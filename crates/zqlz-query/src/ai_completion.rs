@@ -483,7 +483,9 @@ struct OpenAiResponse {
 #[derive(Deserialize)]
 struct OpenAiChoice {
     text: String,
+    #[allow(dead_code)]
     index: usize,
+    #[allow(dead_code)]
     finish_reason: Option<String>,
 }
 
@@ -650,8 +652,10 @@ struct AnthropicRequest {
 #[derive(Deserialize)]
 struct AnthropicResponse {
     completion: String,
+    #[allow(dead_code)]
     stop_reason: Option<String>,
     #[serde(default)]
+    #[allow(dead_code)]
     log_id: String,
 }
 

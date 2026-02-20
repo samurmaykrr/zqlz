@@ -26,6 +26,7 @@ fn create_test_column(name: &str, data_type: &str, nullable: bool) -> ColumnInfo
         is_unique: false,
         foreign_key: None,
         comment: None,
+        ..Default::default()
     }
 }
 
@@ -361,6 +362,7 @@ mod index_comparison_tests {
             is_primary: false,
             index_type: "btree".to_string(),
             comment: None,
+            ..Default::default()
         }
     }
 
@@ -447,6 +449,8 @@ mod foreign_key_comparison_tests {
             referenced_columns: vec!["id".to_string()],
             on_update: ForeignKeyAction::NoAction,
             on_delete: ForeignKeyAction::Cascade,
+            is_deferrable: false,
+            initially_deferred: false,
         }
     }
 

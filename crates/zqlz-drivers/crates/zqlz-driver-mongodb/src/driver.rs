@@ -380,19 +380,19 @@ impl Connection for MongoDbConnection {
         let execution_time_ms = start.elapsed().as_millis() as u64;
 
         // Check for errors in the response
-        if let Some(ok) = result.get("ok") {
-            if ok.as_f64().unwrap_or(0.0) != 1.0 {
-                let err_msg = result
-                    .get("errmsg")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("Unknown error");
-                return Ok(StatementResult {
-                    is_query: false,
-                    result: None,
-                    affected_rows: 0,
-                    error: Some(format!("MongoDB error: {}", err_msg)),
-                });
-            }
+        if let Some(ok) = result.get("ok")
+            && ok.as_f64().unwrap_or(0.0) != 1.0
+        {
+            let err_msg = result
+                .get("errmsg")
+                .and_then(|e| e.as_str())
+                .unwrap_or("Unknown error");
+            return Ok(StatementResult {
+                is_query: false,
+                result: None,
+                affected_rows: 0,
+                error: Some(format!("MongoDB error: {}", err_msg)),
+            });
         }
 
         // Extract affected count if present
@@ -425,14 +425,14 @@ impl Connection for MongoDbConnection {
         let execution_time_ms = start.elapsed().as_millis() as u64;
 
         // Check for errors
-        if let Some(ok) = result.get("ok") {
-            if ok.as_f64().unwrap_or(0.0) != 1.0 {
-                let err_msg = result
-                    .get("errmsg")
-                    .and_then(|e| e.as_str())
-                    .unwrap_or("Unknown error");
-                return Err(ZqlzError::Driver(format!("MongoDB error: {}", err_msg)));
-            }
+        if let Some(ok) = result.get("ok")
+            && ok.as_f64().unwrap_or(0.0) != 1.0
+        {
+            let err_msg = result
+                .get("errmsg")
+                .and_then(|e| e.as_str())
+                .unwrap_or("Unknown error");
+            return Err(ZqlzError::Driver(format!("MongoDB error: {}", err_msg)));
         }
 
         // Convert result document to rows
@@ -440,58 +440,57 @@ impl Connection for MongoDbConnection {
         let mut columns = Vec::new();
 
         // Handle different result types
-        if let Some(cursor) = result.get("cursor") {
+        if let Some(cursor) = result.get("cursor")
+            && let Some(first_batch) = cursor.as_document().and_then(|d| d.get("firstBatch"))
+            && let Some(arr) = first_batch.as_array()
+        {
             // Cursor-based result (find, aggregate)
-            if let Some(first_batch) = cursor.as_document().and_then(|d| d.get("firstBatch")) {
-                if let Some(arr) = first_batch.as_array() {
-                    for (i, doc) in arr.iter().enumerate() {
-                        if let Some(d) = doc.as_document() {
-                            if i == 0 {
-                                columns = d
-                                    .keys()
-                                    .enumerate()
-                                    .map(|(ordinal, k)| ColumnMeta {
-                                        name: k.clone(),
-                                        data_type: "bson".to_string(),
-                                        nullable: true,
-                                        ordinal,
-                                        max_length: None,
-                                        precision: None,
-                                        scale: None,
-                                        auto_increment: false,
-                                        default_value: None,
-                                        comment: None,
-                                        enum_values: None,
-                                    })
-                                    .collect();
-                            }
-                            let column_names: Vec<String> = d.keys().cloned().collect();
-                            let values: Vec<Value> =
-                                d.iter().map(|(_, v)| Self::bson_to_value(v)).collect();
-                            rows.push(Row::new(column_names, values));
-                        }
+            for (i, doc) in arr.iter().enumerate() {
+                if let Some(d) = doc.as_document() {
+                    if i == 0 {
+                        columns = d
+                            .keys()
+                            .enumerate()
+                            .map(|(ordinal, k)| ColumnMeta {
+                                name: k.clone(),
+                                data_type: "bson".to_string(),
+                                nullable: true,
+                                ordinal,
+                                max_length: None,
+                                precision: None,
+                                scale: None,
+                                auto_increment: false,
+                                default_value: None,
+                                comment: None,
+                                enum_values: None,
+                            })
+                            .collect();
                     }
+                    let column_names: Vec<String> = d.keys().cloned().collect();
+                    let values: Vec<Value> =
+                        d.iter().map(|(_, v)| Self::bson_to_value(v)).collect();
+                    rows.push(Row::new(column_names, values));
                 }
             }
         } else {
             // Single document result
-                columns = result
-                    .keys()
-                    .enumerate()
-                    .map(|(ordinal, k)| ColumnMeta {
-                        name: k.clone(),
-                        data_type: "bson".to_string(),
-                        nullable: true,
-                        ordinal,
-                        max_length: None,
-                        precision: None,
-                        scale: None,
-                        auto_increment: false,
-                        default_value: None,
+            columns = result
+                .keys()
+                .enumerate()
+                .map(|(ordinal, k)| ColumnMeta {
+                    name: k.clone(),
+                    data_type: "bson".to_string(),
+                    nullable: true,
+                    ordinal,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    auto_increment: false,
+                    default_value: None,
                     comment: None,
                     enum_values: None,
-                    })
-                    .collect();
+                })
+                .collect();
             let column_names: Vec<String> = result.keys().cloned().collect();
             let values: Vec<Value> = result.iter().map(|(_, v)| Self::bson_to_value(v)).collect();
             rows.push(Row::new(column_names, values));

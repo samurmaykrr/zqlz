@@ -20,7 +20,7 @@ use uuid::Uuid;
 use zqlz_core::Connection;
 use zqlz_lsp::SqlLsp;
 use crate::ai_completion::{
-    AiProviderFactory, CompletionRequest, CompletionResponse,
+    AiProviderFactory, CompletionRequest,
 };
 use zqlz_services::SchemaService;
 use zqlz_settings::{InlineSuggestionProvider, ZqlzSettings};
@@ -30,15 +30,14 @@ use zqlz_ui::widgets::{
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
-    input::{Input, InputEvent, InputState},
     menu::DropdownMenu,
     scroll::ScrollableElement,
     v_flex,
 };
-use zqlz_zed_adapter::{editor_wrapper::EditorWrapper, Confirm, SelectDown, SelectUp};
+use zqlz_text_editor::TextEditor;
 
 use super::actions::{AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CancelCompletionMenu, ConfirmCompletion, DismissInlineSuggestion, FindReferences, FormatQuery, GoToDefinition, NextCompletion, PreviousCompletion, RenameSymbol, SaveQuery, ShowCodeActions, ShowHover, TriggerCompletion, TriggerParameterHints};
-use super::zed_input::{ZedInput, ZedInputEvent, ZedInputState};
+use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
 
 /// Convert serde_json::Value to minijinja::Value
 fn json_to_minijinja_value(value: serde_json::Value) -> minijinja::Value {
@@ -76,6 +75,78 @@ fn driver_type_to_highlight_language(driver_type: Option<&str>) -> &'static str 
     driver_type
         .map(|driver| zqlz_core::dialects::get_highlight_language(driver))
         .unwrap_or("sql")
+}
+
+/// Adapter that implements CompletionProvider for SqlLsp
+
+/// Adapter that implements HoverProvider for SqlLsp
+///
+/// Wraps `SqlLsp` and exposes it as a `zqlz_text_editor::HoverProvider` so that
+/// the TextEditor can request schema-aware hover documentation.
+struct SqlLspHoverAdapter {
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+}
+
+impl SqlLspHoverAdapter {
+    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
+        Self { sql_lsp }
+    }
+}
+
+impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
+    fn hover(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _window: &mut Window,
+        _cx: &App,
+    ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        let text_string = text.to_string();
+        let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
+        let result = self.sql_lsp.read().get_hover(&ui_rope, offset);
+        Task::ready(Ok(result))
+    }
+}
+
+///
+/// This adapter wraps the zqlz-lsp SqlLsp instance and provides completions to the TextEditor.
+/// It enables schema-aware completions (table names, column names, etc.) by delegating to SqlLsp.
+struct SqlLspCompletionAdapter {
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+}
+
+impl SqlLspCompletionAdapter {
+    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
+        Self { sql_lsp }
+    }
+}
+
+impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
+    fn completions(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _trigger: lsp_types::CompletionContext,
+        _window: &mut Window,
+        _cx: &mut Context<zqlz_text_editor::TextEditor>,
+    ) -> Task<Result<lsp_types::CompletionResponse, anyhow::Error>> {
+        // Convert ropey 1.x Rope to zqlz_ui Rope for SqlLsp, then delegate
+        let text_string = text.to_string();
+        let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
+        let mut lsp = self.sql_lsp.write();
+        let items = lsp.get_completions(&ui_rope, offset);
+        Task::ready(Ok(lsp_types::CompletionResponse::Array(items)))
+    }
+
+    fn is_completion_trigger(
+        &self,
+        _offset: usize,
+        new_text: &str,
+        _cx: &mut Context<zqlz_text_editor::TextEditor>,
+    ) -> bool {
+        // Trigger on dot (table.column), space (after keywords), or alphanumeric characters
+        new_text == "." || new_text == " " || new_text.chars().all(|c| c.is_alphanumeric())
+    }
 }
 
 /// Editor mode - SQL or Template (MiniJinja)
@@ -217,6 +288,7 @@ pub struct ReferenceItem {
     /// Column number (0-indexed, displayed as 1-indexed)
     pub column: u32,
     /// The text of the reference (for display)
+    #[allow(dead_code)]
     pub text: Option<String>,
 }
 
@@ -228,6 +300,7 @@ pub struct CodeActionItem {
     /// The kind of code action (e.g., QUICKFIX, REFACTOR)
     pub kind: Option<String>,
     /// Index into the code actions list for applying the action
+    #[allow(dead_code)]
     pub index: usize,
 }
 
@@ -360,8 +433,8 @@ pub struct QueryEditor {
     /// If this editor is for a saved query, the query ID
     saved_query_id: Option<Uuid>,
 
-    /// The Zed editor wrapper for SQL code editing
-    editor: Entity<EditorWrapper>,
+    /// The text editor for SQL code editing
+    editor: Entity<TextEditor>,
 
     /// SQL LSP instance for IntelliSense
     sql_lsp: Arc<RwLock<SqlLsp>>,
@@ -381,8 +454,12 @@ pub struct QueryEditor {
     /// Template engine for MiniJinja rendering
     template_engine: TemplateEngine,
 
-    /// Template parameters as JSON string (using ZedInput for code editing)
-    template_params: Entity<ZedInputState>,
+    /// Own focus handle so track_focus on the outer wrapper doesn't steal the
+    /// inner TextEditor's handle. Focus is forwarded to the editor on click.
+    focus_handle: FocusHandle,
+
+    /// Template parameters as JSON editor for MiniJinja variable values
+    template_params: Entity<TextEditor>,
 
     /// Last rendered SQL from template (for preview)
     rendered_sql: Option<String>,
@@ -425,6 +502,18 @@ pub struct QueryEditor {
 
     /// Debounce timer for inline suggestions
     _inline_suggestion_debounce: Option<gpui::Task<()>>,
+
+    /// Debounce timer for diagnostics (triggers after typing stops)
+    _diagnostics_debounce: Option<gpui::Task<()>>,
+
+    /// Last text content (used to detect changes for diagnostics)
+    _last_diagnostics_text: Option<String>,
+
+    /// Schema metadata provider for hover overlay (created on demand)
+    schema_metadata: Option<SchemaMetadata>,
+
+    /// Current schema symbol info (for metadata overlay)
+    schema_symbol_info: Option<SchemaSymbolInfo>,
 
     /// Subscriptions to keep alive
     _subscriptions: Vec<Subscription>,
@@ -471,29 +560,41 @@ impl QueryEditor {
         let _word_wrap = editor_settings.word_wrap;
         let _show_inline_diagnostics = editor_settings.show_inline_diagnostics;
 
-        tracing::debug!("Creating EditorWrapper for Zed editor");
+        tracing::debug!("Creating TextEditor for SQL code editing");
         let editor = cx.new(|cx| {
-            EditorWrapper::new(window, cx)
+            TextEditor::new(window, cx)
         });
 
-        editor.update(cx, |wrapper, cx| {
-            wrapper.set_sql_lsp(sql_lsp.clone());
-            tracing::info!("QueryEditor: set_sql_lsp called on EditorWrapper");
-            let _ = cx;
-        });
+        // Wire up the SqlLsp completion provider for schema-aware completions
+        {
+            let adapter = std::rc::Rc::new(SqlLspCompletionAdapter::new(sql_lsp.clone()));
+            editor.update(cx, |text_editor, _cx| {
+                text_editor.set_completion_provider(adapter);
+                tracing::info!("QueryEditor: SqlLspCompletionAdapter wired up");
+            });
+        }
 
-        // Create template parameters input (JSON editor using ZedInput)
+        // Wire up the SqlLsp hover provider for schema-aware hover documentation
+        {
+            let hover_adapter = std::rc::Rc::new(SqlLspHoverAdapter::new(sql_lsp.clone()));
+            editor.update(cx, |text_editor, _cx| {
+                text_editor.set_hover_provider(hover_adapter);
+                tracing::info!("QueryEditor: SqlLspHoverAdapter wired up");
+            });
+        }
+
+        // Get initial text and run diagnostics
+        let initial_text = editor.read(cx).get_text(cx);
+
+        // Create template parameters JSON editor (multi-line, plain TextEditor)
         let template_params = cx.new(|cx| {
-            ZedInputState::new(window, cx)
-                .with_value("{\n  \n}")
-                .with_placeholder("{\n  \"variable\": \"value\"\n}")
+            let mut editor = TextEditor::new(window, cx);
+            editor.set_text("{\n  \n}".to_string(), window, cx);
+            editor
         });
 
-        // TODO: Subscribe to editor events in Phase 3 task-3.3
-        // For now, we'll track changes through direct editor usage
-        let _subscriptions = vec![
-            // Editor event subscription will be added here
-        ];
+        // Subscriptions are stored here to keep them alive for the lifetime of the editor
+        let _subscriptions: Vec<Subscription> = vec![];
 
         Self {
             name,
@@ -508,6 +609,7 @@ impl QueryEditor {
             object_type: EditorObjectType::Query,
             template_engine: TemplateEngine::new(),
             template_params,
+            focus_handle: cx.focus_handle(),
             rendered_sql: None,
             template_error: None,
             current_database: None,
@@ -522,6 +624,10 @@ impl QueryEditor {
             inline_suggestion: None,
             _inline_suggestion_debounce: None,
             _completion_debounce: None,
+            _diagnostics_debounce: None,
+            _last_diagnostics_text: Some(initial_text.to_string()),
+            schema_metadata: None,
+            schema_symbol_info: None,
             _subscriptions,
         }
     }
@@ -556,13 +662,24 @@ impl QueryEditor {
         let _show_inline_diagnostics = editor_settings.show_inline_diagnostics;
 
         let editor = cx.new(|cx| {
-            EditorWrapper::new(window, cx)
+            TextEditor::new(window, cx)
         });
 
-        editor.update(cx, |wrapper, cx| {
-            wrapper.set_sql_lsp(sql_lsp.clone());
-            let _ = cx;
-        });
+        // Wire up the SqlLsp completion provider for schema-aware completions
+        {
+            let adapter = std::rc::Rc::new(SqlLspCompletionAdapter::new(sql_lsp.clone()));
+            editor.update(cx, |text_editor, _cx| {
+                text_editor.set_completion_provider(adapter);
+            });
+        }
+
+        // Wire up the SqlLsp hover provider for schema-aware hover documentation
+        {
+            let hover_adapter = std::rc::Rc::new(SqlLspHoverAdapter::new(sql_lsp.clone()));
+            editor.update(cx, |text_editor, _cx| {
+                text_editor.set_hover_provider(hover_adapter);
+            });
+        }
 
         if let Some(content) = initial_content {
             editor.update(cx, |editor, cx| {
@@ -570,14 +687,17 @@ impl QueryEditor {
             });
         }
 
+        // Get initial text and run diagnostics
+        let initial_text = editor.read(cx).get_text(cx);
+
         let template_params = cx.new(|cx| {
-            ZedInputState::new(window, cx)
-                .with_value("{\n  \n}")
-                .with_placeholder("{\n  \"variable\": \"value\"\n}")
+            let mut editor = TextEditor::new(window, cx);
+            editor.set_text("{\n  \n}".to_string(), window, cx);
+            editor
         });
 
-        // TODO: Subscribe to editor events in Phase 3 task-3.3
-        let _subscriptions = vec![];
+        // Subscriptions are stored here to keep them alive for the lifetime of the editor
+        let _subscriptions: Vec<Subscription> = vec![];
 
         Self {
             name,
@@ -592,6 +712,7 @@ impl QueryEditor {
             object_type,
             template_engine: TemplateEngine::new(),
             template_params,
+            focus_handle: cx.focus_handle(),
             rendered_sql: None,
             template_error: None,
             current_database: None,
@@ -606,6 +727,10 @@ impl QueryEditor {
             inline_suggestion: None,
             _inline_suggestion_debounce: None,
             _completion_debounce: None,
+            _diagnostics_debounce: None,
+            _last_diagnostics_text: Some(initial_text.to_string()),
+            schema_metadata: None,
+            schema_symbol_info: None,
             _subscriptions,
         }
     }
@@ -623,40 +748,186 @@ impl QueryEditor {
         self.connection_id = connection_id;
         self.connection_name = connection_name;
 
-        // TODO: Syntax highlighter will be configured via Zed's language system in Phase 5
+        // Dialect determines syntax highlighting language; currently unused since
+        // the TextEditor's tree-sitter highlighter handles generic SQL.
         let _dialect_language = driver_type_to_highlight_language(driver_type.as_deref());
 
         // Update SQL LSP with new connection and driver type
         {
             let mut lsp = self.sql_lsp.write();
             lsp.set_connection(connection_id, connection.clone(), driver_type.clone());
+
+            // If a cache was persisted from the last session, apply it immediately so
+            // completions work from the first keystroke.  The background refresh below
+            // always runs regardless (stale-while-revalidate).
+            if let Some(conn_id) = connection_id {
+                if let Some(cached) = load_schema_cache_from_disk(conn_id) {
+                    lsp.apply_schema_cache(cached);
+                }
+            }
         }
 
-        // Refresh schema in background, then re-validate diagnostics once loaded
+        // Refresh schema in background, then re-validate diagnostics once loaded.
+        //
+        // The write lock must NEVER be held across any await point: doing so
+        // blocks the GPUI foreground thread for the entire duration of remote I/O,
+        // freezing input processing and rendering. Instead we:
+        //   1. Extract the needed handles with a brief read lock.
+        //   2. Run all database I/O on a background thread (no lock held).
+        //   3. Apply the completed cache with a brief write lock.
         if let Some(_conn) = connection {
             tracing::debug!("Starting schema refresh in background");
             let lsp = self.sql_lsp.clone();
-            cx.spawn(async move |this, cx| {
-                {
-                    let mut lsp = lsp.write();
-                    if let Err(e) = lsp.refresh_schema().await {
-                        tracing::error!(error = %e, "Failed to refresh SQL schema");
-                        return;
+
+            let (connection_for_refresh, connection_id_for_refresh, schema_service) = {
+                let guard = lsp.read();
+                (guard.connection(), guard.connection_id(), guard.schema_service())
+            };
+
+            if let (Some(connection_for_refresh), Some(connection_id_for_refresh)) =
+                (connection_for_refresh, connection_id_for_refresh)
+            {
+                let epoch = lsp.write().next_fetch_epoch();
+                cx.spawn(async move |this, cx| {
+                    // Attempt the schema fetch up to 3 times with an exponential back-off.
+                    const MAX_ATTEMPTS: u32 = 3;
+                    let mut attempt = 0u32;
+
+                    let result = loop {
+                        let fetch_result = cx
+                            .background_spawn({
+                                let schema_service: Arc<SchemaService> = schema_service.clone();
+                                let conn: Arc<dyn Connection> = connection_for_refresh.clone();
+                                async move {
+                                    SqlLsp::fetch_schema_cache(
+                                        conn,
+                                        connection_id_for_refresh,
+                                        &schema_service,
+                                    )
+                                    .await
+                                }
+                            })
+                            .await;
+
+                        match fetch_result {
+                            Ok(cache) => break Ok(cache),
+                            Err(e) => {
+                                attempt += 1;
+                                if attempt >= MAX_ATTEMPTS {
+                                    break Err(e.to_string());
+                                }
+                                let delay = std::time::Duration::from_secs(2u64.pow(attempt - 1));
+                                tracing::warn!(
+                                    attempt,
+                                    delay_secs = delay.as_secs(),
+                                    error = %e,
+                                    "Schema fetch failed, retrying"
+                                );
+                                cx.background_spawn(async move {
+                                    smol::Timer::after(delay).await;
+                                })
+                                .await;
+                            }
+                        }
+                    };
+
+                    match result {
+                        Ok(cache) => {
+                            save_schema_cache_to_disk(connection_id_for_refresh, &cache);
+                            lsp.write().apply_schema_cache_if_current(cache, epoch);
+                            tracing::debug!("SQL schema refreshed successfully");
+                            _ = this.update(cx, |editor, cx| {
+                                editor.update_diagnostics(cx);
+                            });
+                        }
+                        Err(e) => {
+                            tracing::error!(error = %e, "Failed to refresh SQL schema after retries");
+                            lsp.write().schema_loading = false;
+                        }
                     }
-                    tracing::debug!("SQL schema refreshed successfully");
-                }
-                // RwLock is dropped here before calling back into the editor,
-                // since update_diagnostics also acquires the sql_lsp lock.
-                _ = this.update(cx, |editor, cx| {
-                    editor.update_diagnostics(cx);
-                });
-            })
-            .detach();
+                })
+                .detach();
+            }
         } else {
             tracing::debug!("No connection provided, skipping schema refresh");
         }
 
         cx.notify();
+    }
+
+    /// Seeds the LSP schema cache with bare table names as soon as the sidebar's
+    /// `load_tables_only` call completes — well before the per-table column-detail
+    /// fetches finish.  This makes FROM-clause completions available immediately,
+    /// without waiting for the full [`SqlLsp::fetch_schema_cache`] round-trip.
+    ///
+    /// No-op if the full cache has already been applied (`schema_loading == false`).
+    pub fn notify_tables_available(&mut self, table_names: Vec<String>, _cx: &mut Context<Self>) {
+        let mut lsp = self.sql_lsp.write();
+        if lsp.schema_loading {
+            lsp.pre_populate_tables(&table_names);
+        }
+    }
+
+    /// Called after a query successfully executes so the LSP can react to schema changes.
+    ///
+    /// DDL statements (CREATE, ALTER, DROP, etc.) may invalidate the cached schema, so this
+    /// deletes the disk cache and kicks off a silent background re-fetch to pick up the new
+    /// structure for future completions.
+    pub fn notify_query_executed(&mut self, sql: &str, cx: &mut Context<Self>) {
+        if !crate::QueryEngine::new().is_schema_modifying(sql) {
+            return;
+        }
+        if let Some(conn_id) = self.connection_id {
+            if let Some(path) = schema_cache_path(conn_id) {
+                std::fs::remove_file(path).ok();
+            }
+        }
+        // Mark schema as loading so completions don't surface stale objects
+        // (e.g. a just-dropped table) during the background re-fetch window.
+        self.sql_lsp.write().schema_loading = true;
+        self.trigger_lsp_schema_refresh(cx);
+    }
+
+    /// Re-fetches the full schema cache in the background and applies the result without
+    /// interrupting existing completions (does NOT set `schema_loading = true`).
+    ///
+    /// Called after `prefetch_all_table_details` completes so that column data already
+    /// warmed into `SchemaService`'s per-table cache is picked up by the LSP immediately.
+    pub fn trigger_lsp_schema_refresh(&mut self, cx: &mut Context<Self>) {
+        let (connection, connection_id, schema_service) = {
+            let guard = self.sql_lsp.read();
+            (guard.connection(), guard.connection_id(), guard.schema_service())
+        };
+
+        let (Some(connection), Some(connection_id)) = (connection, connection_id) else {
+            return;
+        };
+
+        let lsp = self.sql_lsp.clone();
+        let epoch = lsp.write().next_fetch_epoch();
+        cx.spawn(async move |_this, cx| {
+            let result = cx
+                .background_spawn({
+                    let schema_service = schema_service.clone();
+                    let connection = connection.clone();
+                    async move {
+                        SqlLsp::fetch_schema_cache(connection, connection_id, &schema_service).await
+                    }
+                })
+                .await;
+
+            match result {
+                Ok(cache) => {
+                    save_schema_cache_to_disk(connection_id, &cache);
+                    lsp.write().apply_schema_cache_if_current(cache, epoch);
+                    tracing::debug!("Schema cache refreshed after prefetch completion");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Schema refresh after prefetch failed");
+                }
+            }
+        })
+        .detach();
     }
 
     /// Set the list of available connections for the connection switcher
@@ -681,14 +952,122 @@ impl QueryEditor {
     /// Set the SQL content
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| {
-            editor.set_text(content, window, cx);
+            editor.set_text(content.clone(), window, cx);
         });
         self.is_dirty = true;
+        // Update diagnostics immediately for set_content
         self.update_diagnostics(cx);
+        // Also update the tracked text for future change detection
+        self._last_diagnostics_text = Some(content);
         cx.notify();
     }
 
+    /// Trigger diagnostics update with debounce (for automatic updates on typing)
+    /// This is called when text changes to avoid updating diagnostics on every keystroke
+    pub fn trigger_diagnostics_debounced(
+        &mut self,
+        new_text: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        // Skip if text hasn't changed
+        if self._last_diagnostics_text.as_ref() == Some(&new_text) {
+            return;
+        }
+
+        // Cancel any existing debounce task
+        self._diagnostics_debounce = None;
+
+        // Spawn a new debounced task
+        let editor = self.editor.clone();
+        let sql_lsp = self.sql_lsp.clone();
+
+        self._diagnostics_debounce = Some(cx.spawn_in(window, async move |this, cx| {
+            // Wait for typing to stop (300ms debounce)
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(300))
+                .await;
+
+            // Update diagnostics after debounce
+            let _ = this.update_in(cx, |this, _window, cx| {
+                // Get fresh text (in case it changed during debounce)
+                let text_content = editor.read(cx).get_text(cx);
+                let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
+
+                // Run LSP validation
+                let lsp_diagnostics = {
+                    let mut lsp = sql_lsp.write();
+                    lsp.validate_sql(&rope)
+                };
+
+                // Convert to TextEditor format
+                let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
+                    .iter()
+                    .filter_map(|lsp_diag| {
+                        use lsp_types::DiagnosticSeverity;
+                        use zqlz_text_editor::DiagnosticLevel;
+
+                        let start_offset = rope.position_to_offset(&lsp_diag.range.start);
+                        let end_offset = rope.position_to_offset(&lsp_diag.range.end);
+
+                        let severity = match lsp_diag.severity {
+                            Some(DiagnosticSeverity::ERROR) => DiagnosticLevel::Error,
+                            Some(DiagnosticSeverity::WARNING) => DiagnosticLevel::Warning,
+                            Some(DiagnosticSeverity::INFORMATION) => DiagnosticLevel::Info,
+                            Some(DiagnosticSeverity::HINT) => DiagnosticLevel::Hint,
+                            _ => DiagnosticLevel::Error,
+                        };
+
+                        // Convert offsets to line/column for TextEditor Diagnostic
+                        let start_line = rope.offset_to_position(start_offset).line as usize;
+                        let start_column = rope.offset_to_position(start_offset).character as usize;
+                        let end_line = rope.offset_to_position(end_offset).line as usize;
+                        let end_column = rope.offset_to_position(end_offset).character as usize;
+
+                        Some(zqlz_text_editor::Diagnostic {
+                            line: start_line,
+                            column: start_column,
+                            end_line: Some(end_line),
+                            end_column: Some(end_column),
+                            severity,
+                            message: lsp_diag.message.clone(),
+                            source: lsp_diag.source.clone(),
+                        })
+                    })
+                    .collect();
+
+                // Update editor diagnostics
+                let text_editor_diagnostics_clone = text_editor_diagnostics.clone();
+                editor.update(cx, |_editor, cx| {
+                    // TODO: Fix set_diagnostics to not require Window in Phase 1
+                    // For now we can't call it without a Window reference
+                    // editor.set_diagnostics(text_editor_diagnostics_clone, window, cx);
+                    let _ = (text_editor_diagnostics_clone, cx);
+                });
+
+                // Update tracked text
+                this._last_diagnostics_text = Some(text_content.to_string());
+
+                // Emit diagnostics changed event for Problems panel
+                let diagnostic_infos = this.collect_diagnostic_infos(cx);
+                cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                    diagnostics: diagnostic_infos,
+                });
+
+                cx.notify();
+            });
+        }));
+    }
+
     /// Update SQL diagnostics based on current content
+    /// Re-run LSP validation against the current buffer and emit `DiagnosticsChanged`.
+    ///
+    /// Called by the Reload button in the Problems panel so users can force a
+    /// fresh diagnostic pass after a schema refresh.
+    pub fn reload_diagnostics(&mut self, cx: &mut Context<Self>) {
+        self.update_diagnostics(cx);
+    }
+
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
         // Get current editor text as a Rope for LSP analysis
         let text_content = self.editor.read(cx).get_text(cx);
@@ -700,46 +1079,77 @@ impl QueryEditor {
             lsp.validate_sql(&rope)
         };
         
-        // Convert LSP diagnostics (lsp_types::Diagnostic) to Zed format
-        let zed_diagnostics: Vec<zqlz_zed_adapter::editor_wrapper::Diagnostic> = lsp_diagnostics
+        // Convert LSP diagnostics (lsp_types::Diagnostic) to TextEditor format
+        let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
             .iter()
             .filter_map(|lsp_diag| {
                 // Convert LSP Range (line/col) to byte offsets using rope
                 let start_offset = rope.position_to_offset(&lsp_diag.range.start);
                 let end_offset = rope.position_to_offset(&lsp_diag.range.end);
                 
-                // Convert LSP severity to Zed severity
+                // Convert LSP severity to TextEditor severity
                 let severity = match lsp_diag.severity {
                     Some(DiagnosticSeverity::ERROR) => {
-                        zqlz_zed_adapter::editor_wrapper::DiagnosticLevel::Error
+                        zqlz_text_editor::DiagnosticLevel::Error
                     }
                     Some(DiagnosticSeverity::WARNING) => {
-                        zqlz_zed_adapter::editor_wrapper::DiagnosticLevel::Warning
+                        zqlz_text_editor::DiagnosticLevel::Warning
                     }
                     Some(DiagnosticSeverity::INFORMATION) => {
-                        zqlz_zed_adapter::editor_wrapper::DiagnosticLevel::Info
+                        zqlz_text_editor::DiagnosticLevel::Info
                     }
                     Some(DiagnosticSeverity::HINT) => {
-                        zqlz_zed_adapter::editor_wrapper::DiagnosticLevel::Hint
+                        zqlz_text_editor::DiagnosticLevel::Hint
                     }
-                    _ => zqlz_zed_adapter::editor_wrapper::DiagnosticLevel::Error,
+                    _ => zqlz_text_editor::DiagnosticLevel::Error,
                 };
                 
-                Some(zqlz_zed_adapter::editor_wrapper::Diagnostic {
-                    range: start_offset..end_offset,
+                // Convert offsets to line/column for TextEditor Diagnostic
+                let start_line = rope.offset_to_position(start_offset).line as usize;
+                let start_column = rope.offset_to_position(start_offset).character as usize;
+                let end_line = rope.offset_to_position(end_offset).line as usize;
+                let end_column = rope.offset_to_position(end_offset).character as usize;
+                
+                Some(zqlz_text_editor::Diagnostic {
+                    line: start_line,
+                    column: start_column,
+                    end_line: Some(end_line),
+                    end_column: Some(end_column),
                     severity,
                     message: lsp_diag.message.clone(),
+                    source: lsp_diag.source.clone(),
                 })
             })
             .collect();
         
         // Update editor diagnostics
-        self.editor.update(cx, |editor, cx| {
-            editor.set_diagnostics(zed_diagnostics, cx);
-        });
+        // TODO: Fix set_diagnostics to not require Window in Phase 1
+        // For now we skip calling set_diagnostics
+        let _ = (self.editor.clone(), text_editor_diagnostics);
         
-        // Emit diagnostics changed event
-        let diagnostic_infos = self.collect_diagnostic_infos(cx);
+        // Convert the already-computed LSP diagnostics to DiagnosticInfo directly,
+        // avoiding a second validate_sql call that collect_diagnostic_infos would make.
+        let diagnostic_infos: Vec<DiagnosticInfo> = lsp_diagnostics
+            .into_iter()
+            .map(|lsp_diag| {
+                let severity = match lsp_diag.severity {
+                    Some(DiagnosticSeverity::ERROR) => DiagnosticInfoSeverity::Error,
+                    Some(DiagnosticSeverity::WARNING) => DiagnosticInfoSeverity::Warning,
+                    Some(DiagnosticSeverity::INFORMATION) => DiagnosticInfoSeverity::Info,
+                    Some(DiagnosticSeverity::HINT) => DiagnosticInfoSeverity::Hint,
+                    _ => DiagnosticInfoSeverity::Error,
+                };
+                DiagnosticInfo {
+                    line: lsp_diag.range.start.line as usize,
+                    column: lsp_diag.range.start.character as usize,
+                    end_line: lsp_diag.range.end.line as usize,
+                    end_column: lsp_diag.range.end.character as usize,
+                    severity,
+                    message: lsp_diag.message.clone(),
+                    source: lsp_diag.source.clone(),
+                }
+            })
+            .collect();
         cx.emit(QueryEditorEvent::DiagnosticsChanged {
             diagnostics: diagnostic_infos,
         });
@@ -839,12 +1249,19 @@ impl QueryEditor {
     /// Navigate to a specific line and column (0-indexed)
     pub fn go_to_line(
         &mut self,
-        _line: usize,
-        _column: usize,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        line: usize,
+        column: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) {
-        // TODO: Navigation will be implemented using Zed's editor API in Phase 3 task-3.3
+        self.editor.update(cx, |editor, cx| {
+            editor.set_cursor_position(
+                zqlz_text_editor::Position { line, column },
+                window,
+                cx,
+            );
+            editor.scroll_to_cursor();
+        });
     }
 
     /// Set the SQL content
@@ -873,15 +1290,6 @@ impl QueryEditor {
             EditorMode::Template => EditorMode::Sql,
         };
 
-        // TODO: Update placeholder via Zed editor API
-        let _placeholder = match self.editor_mode {
-            EditorMode::Sql => "Write your SQL query here...",
-            EditorMode::Template => {
-                "Write your MiniJinja template here...\n\nExample:\nSELECT * FROM {{ table }}\nWHERE id IN {{ ids|inclause }}"
-            }
-        };
-        // Placeholder setting will be implemented with full editor integration
-
         // Update template preview if switching to template mode
         if self.editor_mode == EditorMode::Template {
             self.update_template_preview(cx);
@@ -896,7 +1304,7 @@ impl QueryEditor {
     /// Update the template preview based on current content and params
     fn update_template_preview(&mut self, cx: &mut Context<Self>) {
         let template = self.content(cx).to_string();
-        let params_json = self.template_params.read(cx).value().to_string();
+        let params_json = self.template_params.read(cx).get_text(cx).to_string();
 
         // Parse JSON params
         let context: HashMap<String, minijinja::Value> = match serde_json::from_str(&params_json) {
@@ -937,11 +1345,12 @@ impl QueryEditor {
 
     /// Get selected text, or entire content if nothing is selected
     pub fn selected_or_all_content(&self, cx: &App) -> String {
-        // Get selected text from Zed editor, or fall back to all content if no selection
+        // Get selected text from TextEditor, or fall back to all content if no selection
         self.editor
             .read(cx)
             .get_selected_text(cx)
-            .unwrap_or_else(|| self.content(cx).to_string())
+            .unwrap_or_else(|| self.content(cx))
+            .to_string()
     }
 
     /// Navigate to a specific position in the editor
@@ -1172,15 +1581,14 @@ impl QueryEditor {
         cx: &mut Context<Self>,
     ) {
         // If there's an inline suggestion, accept it
-        if let Some(inline_suggestion) = &self.inline_suggestion {
+        if let Some(_inline_suggestion) = &self.inline_suggestion {
             self.accept_inline_suggestion(window, cx);
             return;
         }
 
         // Check if completion menu is open and handle the action
-        let handled = self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(Box::new(Confirm), window, cx)
-        });
+        // TODO: Implement completion confirmation in Phase 3
+        let handled = false;
 
         if !handled {
             tracing::debug!("AcceptCompletion: no completion menu open");
@@ -1204,7 +1612,7 @@ impl QueryEditor {
     fn handle_next_completion(
         &mut self,
         _action: &NextCompletion,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.editor.read(cx).is_completion_menu_open(cx) {
@@ -1212,7 +1620,8 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(Box::new(SelectDown), window, cx);
+            editor.completion_menu_select_next();
+            cx.notify();
         });
     }
 
@@ -1221,7 +1630,7 @@ impl QueryEditor {
     fn handle_previous_completion(
         &mut self,
         _action: &PreviousCompletion,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.editor.read(cx).is_completion_menu_open(cx) {
@@ -1229,7 +1638,8 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(Box::new(SelectUp), window, cx);
+            editor.completion_menu_select_previous();
+            cx.notify();
         });
     }
 
@@ -1245,14 +1655,9 @@ impl QueryEditor {
             cx.propagate();
             return;
         }
-        let handled = self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(Box::new(Confirm), window, cx)
+        self.editor.update(cx, |editor, cx| {
+            editor.accept_completion(window, cx);
         });
-        if !handled {
-            self.editor.update(cx, |editor, cx| {
-                editor.hide_completions(cx);
-            });
-        }
     }
 
     /// Cancels/hides the completion menu. Propagates the event when the menu is closed.
@@ -1295,12 +1700,14 @@ impl QueryEditor {
         tracing::debug!("Dismissed inline suggestion via action");
     }
 
-    /// Trigger inline suggestion at current cursor position
-    /// This is called automatically when typing or explicitly via trigger action
+    /// Trigger inline suggestion at current cursor position.
+    ///
+    /// LSP suggestions are resolved synchronously (they use cached completion state).
+    /// AI suggestions are dispatched as a background task so the GPUI foreground
+    /// thread is never blocked on a network call.
     pub fn trigger_inline_suggestion(&mut self, cx: &mut Context<Self>) {
         let settings = ZqlzSettings::global(cx);
 
-        // Check if inline suggestions are enabled
         if !settings.editor.inline_suggestions_enabled {
             return;
         }
@@ -1308,7 +1715,6 @@ impl QueryEditor {
         let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
         let text = self.editor.read(cx).get_text(cx);
 
-        // Get prefix (text before cursor) and suffix (text after cursor)
         let prefix = if cursor_offset <= text.len() {
             text[..cursor_offset].to_string()
         } else {
@@ -1320,52 +1726,92 @@ impl QueryEditor {
             String::new()
         };
 
-        // Get inline suggestion based on provider setting
-        let provider = settings.editor.inline_suggestions_provider;
-        let suggestion = match provider {
-            InlineSuggestionProvider::LspOnly => {
+        let provider_setting = settings.editor.inline_suggestions_provider;
+
+        // LSP path is synchronous — uses cached completion state, no I/O.
+        let lsp_suggestion = match provider_setting {
+            InlineSuggestionProvider::LspOnly | InlineSuggestionProvider::Both => {
                 self.get_lsp_inline_suggestion(prefix.clone(), suffix.clone(), cursor_offset, cx)
             }
-            InlineSuggestionProvider::AiOnly => {
-                self.get_ai_inline_suggestion(prefix.clone(), suffix.clone(), cursor_offset, cx)
-            }
-            InlineSuggestionProvider::Both => {
-                // Try LSP first, then fall back to AI
-                if let Some(suggestion) =
-                    self.get_lsp_inline_suggestion(prefix.clone(), suffix.clone(), cursor_offset, cx)
-                {
-                    Some(suggestion)
-                } else {
-                    self.get_ai_inline_suggestion(prefix, suffix, cursor_offset, cx)
-                }
-            }
+            InlineSuggestionProvider::AiOnly => None,
         };
 
-        if let Some((suggestion_text, start, end, source)) = suggestion {
-            let source = match source {
-                "LSP" => InlineSuggestionSource::Lsp,
-                _ => InlineSuggestionSource::Ai,
-            };
+        if let Some((suggestion_text, start, end, _)) = lsp_suggestion {
             self.inline_suggestion = Some(InlineSuggestionState {
-                suggestion: suggestion_text,
+                suggestion: suggestion_text.clone(),
                 start_offset: start,
                 end_offset: end,
-                source,
+                source: InlineSuggestionSource::Lsp,
+            });
+            self.editor.update(cx, |editor, cx| {
+                editor.set_inline_suggestion(suggestion_text, start, cx);
             });
             cx.notify();
-            tracing::debug!(
-                "Inline suggestion shown: {} (source: {:?})",
-                self.inline_suggestion.as_ref().map(|s| &s.suggestion).unwrap_or(&"".to_string()),
-                self.inline_suggestion.as_ref().map(|s| s.source)
-            );
+            return;
         }
+
+        // AI path — kick off a background task to avoid blocking the UI thread.
+        let needs_ai = matches!(
+            provider_setting,
+            InlineSuggestionProvider::AiOnly | InlineSuggestionProvider::Both
+        );
+        if !needs_ai {
+            return;
+        }
+
+        let settings = ZqlzSettings::global(cx);
+        let ai_provider = AiProviderFactory::create_provider(
+            settings.editor.ai_provider,
+            settings.editor.ai_api_key.clone(),
+            settings.editor.ai_model.clone(),
+            settings.editor.ai_temperature,
+        );
+        let Some(ai_provider) = ai_provider else {
+            return;
+        };
+        if !ai_provider.is_available() {
+            return;
+        }
+
+        let request = CompletionRequest {
+            prefix: prefix.into(),
+            suffix: suffix.into(),
+            cursor_offset,
+            schema_context: None,
+            dialect: None,
+        };
+
+        // Spawn on the background executor so the network call doesn't block the
+        // GPUI foreground thread, then update state on the foreground via WeakEntity.
+        self._inline_suggestion_debounce = Some(cx.spawn(async move |this, cx| {
+            let result = cx.background_spawn(async move {
+                ai_provider.suggest(request).await
+            }).await;
+
+            let Ok(response) = result else { return; };
+            let suggestion = response.suggestion;
+            if suggestion.is_empty() { return; }
+
+            this.update(&mut cx.clone(), |this, cx| {
+                this.inline_suggestion = Some(InlineSuggestionState {
+                    suggestion: suggestion.to_string(),
+                    start_offset: cursor_offset,
+                    end_offset: cursor_offset + suggestion.len(),
+                    source: InlineSuggestionSource::Ai,
+                });
+                this.editor.update(cx, |editor, cx| {
+                    editor.set_inline_suggestion(suggestion.to_string(), cursor_offset, cx);
+                });
+                cx.notify();
+            }).ok();
+        }));
     }
 
-    /// Get inline suggestion from LSP completions
+    /// Get inline suggestion from LSP completions (synchronous — uses cached state).
     fn get_lsp_inline_suggestion(
         &self,
-        prefix: String,
-        suffix: String,
+        _prefix: String,
+        _suffix: String,
         cursor_offset: usize,
         cx: &App,
     ) -> Option<(String, usize, usize, &'static str)> {
@@ -1396,64 +1842,6 @@ impl QueryEditor {
         None
     }
 
-    /// Get inline suggestion from AI provider
-    fn get_ai_inline_suggestion(
-        &self,
-        prefix: String,
-        suffix: String,
-        cursor_offset: usize,
-        cx: &App,
-    ) -> Option<(String, usize, usize, &'static str)> {
-        let settings = ZqlzSettings::global(cx);
-
-        // Create AI provider based on settings
-        let provider = AiProviderFactory::create_provider(
-            settings.editor.ai_provider,
-            settings.editor.ai_api_key.clone(),
-            settings.editor.ai_model.clone(),
-            settings.editor.ai_temperature,
-        )?;
-
-        // Check if provider is available
-        if !provider.is_available() {
-            return None;
-        }
-
-        // Build completion request
-        let request = CompletionRequest {
-            prefix: prefix.into(),
-            suffix: suffix.into(),
-            cursor_offset,
-            schema_context: None,
-            dialect: None,
-        };
-
-        // Get suggestion - this is synchronous for now
-        // In a real implementation, this would be async
-        let runtime = match tokio::runtime::Runtime::new() {
-            Ok(r) => r,
-            Err(_) => return None,
-        };
-        
-        let result: Result<CompletionResponse, _> = runtime.block_on(async {
-            provider.suggest(request).await
-        });
-        
-        if let Ok(response) = result {
-            let suggestion = response.suggestion;
-            if !suggestion.is_empty() {
-                return Some((
-                    suggestion.to_string(),
-                    cursor_offset,
-                    cursor_offset + suggestion.len(),
-                    "AI",
-                ));
-            }
-        }
-
-        None
-    }
-
     /// Accept the current inline suggestion
     pub fn accept_inline_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(inline_suggestion) = self.inline_suggestion.take() {
@@ -1467,14 +1855,11 @@ impl QueryEditor {
             new_text.push_str(&inline_suggestion.suggestion);
             new_text.push_str(&current_text[cursor_offset..]);
 
-            // Set the new text
+            // Set the new text and clear the ghost-text preview from the editor
             self.editor.update(cx, |editor, cx| {
+                editor.clear_inline_suggestion(cx);
                 editor.set_text(new_text, window, cx);
             });
-
-            // Note: Cursor positioning after accepting inline suggestion
-            // could be improved in a future iteration
-            // For now, the cursor remains at the insertion point
 
             tracing::debug!(
                 "Inline suggestion accepted: {}",
@@ -1488,6 +1873,9 @@ impl QueryEditor {
     pub fn dismiss_inline_suggestion(&mut self, cx: &mut Context<Self>) {
         if self.inline_suggestion.is_some() {
             self.inline_suggestion = None;
+            self.editor.update(cx, |editor, cx| {
+                editor.clear_inline_suggestion(cx);
+            });
             tracing::debug!("Inline suggestion dismissed");
             cx.notify();
         }
@@ -1504,6 +1892,7 @@ impl QueryEditor {
     }
 
     /// Handle ShowHover action - show hover documentation for symbol under cursor
+    /// First checks for schema symbols (tables, columns), then falls back to LSP hover
     fn handle_show_hover(
         &mut self,
         _action: &ShowHover,
@@ -1512,37 +1901,120 @@ impl QueryEditor {
     ) {
         tracing::debug!("ShowHover action triggered");
         
-        let hover = self.editor.read(cx).get_hover(cx);
+        // First, try to find a schema symbol at the cursor position
+        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
+        let text = self.editor.read(cx).get_text(cx);
         
-        if let Some(hover) = hover {
-            let content = match &hover.contents {
-                lsp_types::HoverContents::Scalar(scalar) => match scalar {
-                    lsp_types::MarkedString::String(s) => s.clone(),
-                    lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
-                },
-                lsp_types::HoverContents::Array(arr) => arr
-                    .iter()
-                    .map(|item| match item {
+        // Try schema metadata lookup first
+        let schema_symbol = self.find_schema_symbol_at_cursor(&text, cursor_offset, cx);
+        
+        if let Some(symbol_info) = schema_symbol {
+            // Found a schema symbol - show schema metadata overlay
+            tracing::info!("Schema symbol found: {} ({})", symbol_info.name, symbol_info.symbol_type_name());
+            self.schema_symbol_info = Some(symbol_info.clone());
+            self.hover_content = Some(Self::format_schema_symbol(&symbol_info));
+        } else {
+            // No schema symbol found - fall back to LSP hover
+            self.schema_symbol_info = None;
+            let hover = self.editor.read(cx).get_hover(cx);
+            
+            if let Some(hover) = hover {
+                let content = match &hover.contents {
+                    lsp_types::HoverContents::Scalar(scalar) => match scalar {
                         lsp_types::MarkedString::String(s) => s.clone(),
                         lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n"),
-                lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
-            };
-            
-            tracing::info!("Hover content: {}", content);
-            self.hover_content = Some(content);
-        } else {
-            self.hover_content = None;
+                    },
+                    lsp_types::HoverContents::Array(arr) => arr
+                        .iter()
+                        .map(|item| match item {
+                            lsp_types::MarkedString::String(s) => s.clone(),
+                            lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n\n"),
+                    lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
+                };
+                
+                tracing::info!("LSP Hover content: {}", content);
+                self.hover_content = Some(content);
+            } else {
+                self.hover_content = None;
+            }
         }
         
         cx.notify();
     }
 
+    /// Find a schema symbol at the cursor position
+    fn find_schema_symbol_at_cursor(&mut self, text: &str, offset: usize, _cx: &mut Context<Self>) -> Option<SchemaSymbolInfo> {
+        // Ensure schema metadata is initialized
+        if self.schema_metadata.is_none() {
+            // Try to get schema from LSP
+            let lsp = self.sql_lsp.read();
+            let db_schema = lsp.get_schema_for_metadata();
+            drop(lsp);
+            
+            // Only create if we have tables (schema is loaded)
+            if !db_schema.tables.is_empty() {
+                self.schema_metadata = Some(SchemaMetadata::new(db_schema));
+            } else {
+                return None;
+            }
+        }
+        
+        // Find symbol at offset
+        self.schema_metadata.as_ref()?.find_symbol_at_offset(text, offset)
+    }
+
+    /// Format schema symbol info for display in hover popover
+    fn format_schema_symbol(symbol_info: &SchemaSymbolInfo) -> String {
+        let mut content = String::new();
+        
+        // Header with symbol type
+        content.push_str(&format!("**{}**: `{}`\n\n", symbol_info.symbol_type_name(), symbol_info.name));
+        
+        // Add details if available
+        if let Some(details) = &symbol_info.details {
+            // Table/view details
+            if let Some(columns) = &details.columns {
+                content.push_str("**Columns**:\n");
+                for col in columns.iter().take(10) {
+                    let pk_marker = if col.is_primary_key { " PK" } else { "" };
+                    let _nullable = if col.nullable { "?" } else { "" };
+                    content.push_str(&format!("- `{}`: {}{}\n", col.name, col.data_type, pk_marker));
+                }
+                if columns.len() > 10 {
+                    content.push_str(&format!("... and {} more\n", columns.len() - 10));
+                }
+            }
+            
+            // Column details
+            if let Some(table_name) = &details.table_name {
+                content.push_str(&format!("**Table**: `{}`\n", table_name));
+            }
+            if let Some(data_type) = &details.data_type {
+                content.push_str(&format!("**Type**: {}\n", data_type));
+            }
+            if let Some(nullable) = details.nullable {
+                content.push_str(&format!("**Nullable**: {}\n", if nullable { "Yes" } else { "No" }));
+            }
+            if let Some(is_pk) = details.is_primary_key {
+                if is_pk {
+                    content.push_str("**Primary Key**: Yes\n");
+                }
+            }
+            if let Some(row_count) = details.row_count {
+                content.push_str(&format!("**Rows**: ~{}\n", row_count));
+            }
+        }
+        
+        content
+    }
+
     /// Clear the hover popover
     pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
         self.hover_content = None;
+        self.schema_symbol_info = None;
         cx.notify();
     }
 
@@ -1773,14 +2245,13 @@ impl QueryEditor {
                     edit.changes.as_ref().map(|c| c.len()).unwrap_or(0));
                 
                 // Apply the edits to the editor (need mutable access)
-                let success = self.editor.update(cx, |editor, cx| {
+                let result = self.editor.update(cx, |editor, cx| {
                     editor.apply_workspace_edit(&edit, window, cx)
                 });
                 
-                if success {
-                    tracing::info!("Rename applied successfully");
-                } else {
-                    tracing::warn!("Failed to apply rename edits");
+                match result {
+                    Ok(_) => tracing::info!("Rename applied successfully"),
+                    Err(err) => tracing::warn!("Failed to apply rename edits: {}", err),
                 }
                 
                 // Clear the rename UI
@@ -1825,10 +2296,17 @@ impl QueryEditor {
             let action_items: Vec<CodeActionItem> = code_actions
                 .iter()
                 .enumerate()
-                .map(|(idx, action)| CodeActionItem {
-                    title: action.title.clone(),
-                    kind: action.kind.as_ref().map(|k| format!("{:?}", k)),
-                    index: idx,
+                .filter_map(|(idx, action)| match action {
+                    lsp_types::CodeActionOrCommand::CodeAction(ca) => Some(CodeActionItem {
+                        title: ca.title.clone(),
+                        kind: ca.kind.as_ref().map(|k| format!("{:?}", k)),
+                        index: idx,
+                    }),
+                    lsp_types::CodeActionOrCommand::Command(cmd) => Some(CodeActionItem {
+                        title: cmd.title.clone(),
+                        kind: None,
+                        index: idx,
+                    }),
                 })
                 .collect();
             tracing::info!("Found {} code actions", action_items.len());
@@ -1845,21 +2323,27 @@ impl QueryEditor {
         
         // Find the action at the given index
         if let Some(action) = code_actions.get(index) {
-            if let Some(edit) = &action.edit {
-                tracing::info!("Applying code action: {}", action.title);
-                
-                // Apply the edits to the editor
-                let success = self.editor.update(cx, |editor, cx| {
-                    editor.apply_workspace_edit(edit, window, cx)
-                });
-                
-                if success {
-                    tracing::info!("Code action applied successfully");
-                } else {
-                    tracing::warn!("Failed to apply code action edits");
+            match action {
+                lsp_types::CodeActionOrCommand::CodeAction(ca) => {
+                    if let Some(edit) = &ca.edit {
+                        tracing::info!("Applying code action: {}", ca.title);
+                        
+                        // Apply the edits to the editor
+                        let result = self.editor.update(cx, |editor, cx| {
+                            editor.apply_workspace_edit(edit, window, cx)
+                        });
+                        
+                        match result {
+                            Ok(_) => tracing::info!("Code action applied successfully"),
+                            Err(err) => tracing::warn!("Failed to apply code action edits: {}", err),
+                        }
+                    } else {
+                        tracing::debug!("Code action has no edits to apply: {}", ca.title);
+                    }
                 }
-            } else {
-                tracing::debug!("Code action has no edits to apply: {}", action.title);
+                lsp_types::CodeActionOrCommand::Command(cmd) => {
+                    tracing::debug!("Command-based code actions not yet supported: {}", cmd.title);
+                }
             }
         } else {
             tracing::warn!("Code action index out of bounds: {}", index);
@@ -2328,11 +2812,9 @@ impl QueryEditor {
             )
     }
 
-    /// Render the SQL editor area
-    fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .h_full()
-            .child(self.editor.read(cx).editor())
+    /// Render the SQL editor area using the custom TextEditor
+    fn render_editor(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+        self.editor.clone().into_any_element()
     }
 
     /// Parse and format hover content with markdown-like styling
@@ -2629,9 +3111,9 @@ impl QueryEditor {
         let mut elements: Vec<gpui::AnyElement> = Vec::new();
         
         let mut in_parameters = false;
-        let mut active_param_index = 0;
+        let mut _active_param_index = 0;
         
-        for (line_idx, line) in lines.iter().enumerate() {
+        for (_line_idx, line) in lines.iter().enumerate() {
             if line.starts_with("**") && line.ends_with("**") && !line.contains("Parameters") {
                 // Function name header
                 let func_name = line.trim_start_matches("**").trim_end_matches("**");
@@ -2663,7 +3145,7 @@ impl QueryEditor {
                 let param_text = line.trim_start_matches("◀").trim_start_matches(' ');
                 
                 if is_active {
-                    active_param_index += 1;
+                    _active_param_index += 1;
                     // Active parameter - highlight with background
                     elements.push(
                         div()
@@ -2810,7 +3292,7 @@ impl QueryEditor {
                     this.child(
                         v_flex()
                             .gap_1()
-                            .children(references.iter().enumerate().map(|(idx, r)| {
+                            .children(references.iter().enumerate().map(|(_idx, r)| {
                                 div()
                                     .p_1()
                                     .rounded_sm()
@@ -2837,7 +3319,7 @@ impl QueryEditor {
     }
 
     /// Render the rename popover if rename is active
-    fn render_rename_popover(&self, window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
+    fn render_rename_popover(&self, _window: &mut Window, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let rename_state = self.rename_content.as_ref()?;
         let theme = cx.theme();
 
@@ -3001,7 +3483,7 @@ impl QueryEditor {
             .child(
                 div().flex_1().w_full().overflow_hidden().child(
                     div().h_full().w_full().child(
-                        ZedInput::new(&self.template_params)
+                        self.template_params.clone()
                     ),
                 ),
             )
@@ -3057,11 +3539,14 @@ impl Render for QueryEditor {
         
         let inline_suggestion_text = self.inline_suggestion.as_ref().map(|s| s.suggestion.clone());
         
-        let completion_menu = self.editor.read(cx).completion_menu().cloned();
+        // TODO: Implement completion menu rendering in Phase 3
+        let completion_menu: Option<gpui::AnyElement> = None;
 
         v_flex()
             .id("query-editor")
-            .track_focus(&self.focus_handle(cx))
+            // Track the QueryEditor's own handle, not the TextEditor's. Focus is
+            // forwarded to the inner editor on click (see on_click below).
+            .track_focus(&self.focus_handle)
             .key_context("Editor")
             .size_full()
             .bg(bg_color)
@@ -3081,10 +3566,21 @@ impl Render for QueryEditor {
                 if key.len() == 1 {
                     if let Some(ch) = key.chars().next() {
                         if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
+                            // Any new character invalidates the current ghost-text suggestion.
+                            this.dismiss_inline_suggestion(cx);
                             this.trigger_auto_completion(window, cx);
                         }
                     }
                 }
+
+                // Trigger diagnostics debounced when any key is pressed
+                // This updates diagnostics as the user types
+                let current_text = this.editor.read(cx).get_text(cx);
+                this.trigger_diagnostics_debounced(current_text.to_string(), window, cx);
+
+                // Allow the event to continue propagating so the inner TextEditor
+                // also receives it and can insert the typed character.
+                cx.propagate();
             }))
             .child(self.render_toolbar(cx))
             .child(
@@ -3147,8 +3643,8 @@ impl Render for QueryEditor {
 }
 
 impl Focusable for QueryEditor {
-    fn focus_handle(&self, cx: &App) -> FocusHandle {
-        self.editor.read(cx).focus_handle(cx)
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -3178,5 +3674,50 @@ impl Panel for QueryEditor {
 
     fn has_unsaved_changes(&self, _cx: &App) -> bool {
         self.is_dirty
+    }
+}
+
+/// Returns the path where the schema cache for a given connection is persisted on disk.
+///
+/// Layout: `{data_local_dir}/zqlz/schema_cache/{connection_id}.json`
+/// This is intentionally per-connection so different databases never share cached schemas.
+fn schema_cache_path(connection_id: Uuid) -> Option<std::path::PathBuf> {
+    dirs::data_local_dir().map(|base| {
+        base.join("zqlz")
+            .join("schema_cache")
+            .join(format!("{connection_id}.json"))
+    })
+}
+
+/// Attempts to read and deserialize a previously saved schema cache from disk.
+/// Returns `None` on any failure (missing file, corrupt JSON, etc.) without logging noise —
+/// a missing or invalid cache is a normal condition on first run or after a schema update.
+fn load_schema_cache_from_disk(connection_id: Uuid) -> Option<zqlz_lsp::SchemaCache> {
+    let path = schema_cache_path(connection_id)?;
+    let json = std::fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Serializes the schema cache to disk, creating parent directories as needed.
+/// Errors are logged but not propagated — a failed disk write is non-fatal.
+fn save_schema_cache_to_disk(connection_id: Uuid, cache: &zqlz_lsp::SchemaCache) {
+    let Some(path) = schema_cache_path(connection_id) else {
+        return;
+    };
+    if let Some(parent) = path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            tracing::warn!(error = %e, "Failed to create schema cache directory");
+            return;
+        }
+    }
+    match serde_json::to_string(cache) {
+        Ok(json) => {
+            if let Err(e) = std::fs::write(&path, json) {
+                tracing::warn!(error = %e, "Failed to write schema cache to disk");
+            }
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to serialize schema cache");
+        }
     }
 }

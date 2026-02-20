@@ -16,7 +16,6 @@ use crate::components::{
 use crate::main_view::MainView;
 use crate::main_view::table_handlers_utils::{
     conversion::{convert_to_schema_details, driver_name_to_category, resolve_schema_qualifier},
-    generate_ddl_for_table,
 };
 
 use super::super::standalone_events::{
@@ -692,31 +691,48 @@ impl MainView {
         let database_name_for_spawn = database_name;
         let schema_qualifier = resolve_schema_qualifier(conn.driver_name(), &database_name_for_spawn);
 
-        cx.spawn_in(window, async move |_this, cx| {
+        // Only show a loading spinner in the schema panel when the details are not
+        // already warm in the cache — avoids a flicker for repeat opens.
+        let details_already_cached = schema_service
+            .peek_table_details_cache(connection_id, &table_name)
+            .is_some();
+        if !details_already_cached {
+            self.schema_details_panel.update(cx, |panel, cx| {
+                panel.set_loading_for_table(connection_id, &table_name, cx);
+            });
+        }
+
+        let task = cx.spawn_in(window, async move |this, cx| {
             tracing::info!("Loading table data: {}", table_name_for_spawn);
 
-            // Establish identity early so concurrent BecameActive events see this
-            // table is already being loaded and skip their redundant fetch.
-            {
-                let table_name = table_name_for_spawn.clone();
-                _ = schema_details_panel.update(cx, |panel, cx| {
-                    panel.set_loading_for_table(connection_id, &table_name, cx);
-                });
-            }
-
-            // Load table data - use different method for Redis
             let is_redis = conn.driver_name() == "redis";
             let driver_category = driver_name_to_category(conn.driver_name());
-            let browse_result = if is_redis {
-                table_service
-                    .browse_redis_key(conn.clone(), &table_name_for_spawn, Some(1000))
-                    .await
-            } else {
-                table_service
-                    .browse_table(conn.clone(), &table_name_for_spawn, schema_qualifier.as_deref(), Some(1000), None)
-                    .await
-            };
 
+            // Browse and schema+DDL are independent — run them in parallel.
+            let (browse_result, schema_result) = futures::join!(
+                async {
+                    if is_redis {
+                        table_service
+                            .browse_redis_key(conn.clone(), &table_name_for_spawn, Some(1000))
+                            .await
+                    } else {
+                        table_service
+                            .browse_table(conn.clone(), &table_name_for_spawn, schema_qualifier.as_deref(), Some(1000), None)
+                            .await
+                    }
+                },
+                async {
+                    let details = schema_service
+                        .get_table_details(conn.clone(), connection_id, &table_name_for_spawn, schema_qualifier.as_deref())
+                        .await;
+                    let ddl = schema_service
+                        .get_or_generate_ddl(&conn, connection_id, &table_name_for_spawn)
+                        .await;
+                    details.map(|d| (d, ddl))
+                },
+            );
+
+            // Deliver browse result first so rows appear immediately.
             match browse_result {
                 Ok(query_result) => {
                     let conn_name = connection_name.clone();
@@ -742,18 +758,9 @@ impl MainView {
                 }
             }
 
-            // Load schema details
-            tracing::info!(
-                "Fetching schema details for table: {}",
-                table_name_for_spawn
-            );
-
-            match schema_service
-                .get_table_details(conn.clone(), connection_id, &table_name_for_spawn, schema_qualifier.as_deref())
-                .await
-            {
-                Ok(table_details) => {
-                    // Pass foreign key info to the table viewer for FK dropdown editing
+            // Deliver schema + DDL.
+            match schema_result {
+                Ok((table_details, create_statement)) => {
                     let fk_info_for_viewer: Vec<zqlz_core::ForeignKeyInfo> = table_details
                         .foreign_keys
                         .iter()
@@ -765,6 +772,8 @@ impl MainView {
                             referenced_columns: fk.referenced_columns.clone(),
                             on_update: fk.on_update,
                             on_delete: fk.on_delete,
+                            is_deferrable: false,
+                            initially_deferred: false,
                         })
                         .collect();
 
@@ -779,8 +788,6 @@ impl MainView {
                         });
                     }
 
-                    // Update column types from schema info
-                    // This fixes SQLite columns that report TEXT instead of their declared types (e.g., DATE)
                     let schema_columns = table_details.columns.clone();
                     let pk_columns = table_details.primary_key_columns.clone();
                     _ = viewer_weak.update(cx, |viewer, cx| {
@@ -788,8 +795,6 @@ impl MainView {
                         viewer.set_primary_key_columns(pk_columns);
                     });
 
-                    let create_statement =
-                        generate_ddl_for_table(&conn, &table_name_for_spawn).await;
                     let details = convert_to_schema_details(
                         connection_id,
                         &table_name_for_spawn,
@@ -811,8 +816,16 @@ impl MainView {
                 }
             }
 
+            // Clear the stored task reference now that work is done so the
+            // Task is dropped and its memory is freed.
+            _ = this.update(cx, |main_view, _cx| {
+                main_view.active_table_load_task = None;
+            });
+
             anyhow::Ok(())
-        })
-        .detach();
+        });
+
+        // Store the task — this automatically cancels any previous stale load.
+        self.active_table_load_task = Some(task);
     }
 }

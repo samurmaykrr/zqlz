@@ -1,7 +1,7 @@
 //! Tests for MS SQL Server connection module
 
 use crate::connection::{
-    MssqlConnectionError, TiberiusParam, column_data_to_value, values_to_tiberius_params,
+    column_data_to_value, values_to_tiberius_params, MssqlConnectionError, TiberiusParam,
 };
 use tiberius::ColumnData;
 use zqlz_core::{Value, ZqlzError};
@@ -34,8 +34,11 @@ fn test_value_to_tiberius_integers() {
 
 #[test]
 fn test_value_to_tiberius_floats() {
-    let params =
-        values_to_tiberius_params(&[Value::Float32(3.14), Value::Float64(2.71828)]).unwrap();
+    let params = values_to_tiberius_params(&[
+        Value::Float32(std::f32::consts::PI),
+        Value::Float64(std::f64::consts::E),
+    ])
+    .unwrap();
     assert_eq!(params.len(), 2);
 }
 
@@ -115,7 +118,7 @@ fn test_value_to_tiberius_mixed_params() {
         Value::Null,
         Value::Bool(true),
         Value::Int32(42),
-        Value::Float64(3.14),
+        Value::Float64(std::f64::consts::PI),
         Value::String("test".to_string()),
     ])
     .unwrap();
@@ -233,14 +236,14 @@ fn test_tiberius_param_i64_to_sql() {
 #[test]
 fn test_tiberius_param_f32_to_sql() {
     use tiberius::ToSql;
-    let param = TiberiusParam::F32(3.14);
+    let param = TiberiusParam::F32(std::f32::consts::PI);
     let _data = param.to_sql();
 }
 
 #[test]
 fn test_tiberius_param_f64_to_sql() {
     use tiberius::ToSql;
-    let param = TiberiusParam::F64(2.71828);
+    let param = TiberiusParam::F64(std::f64::consts::E);
     let _data = param.to_sql();
 }
 

@@ -8,7 +8,7 @@ use gpui::*;
 use uuid::Uuid;
 
 use crate::widgets::sidebar::{ConnectionSidebar, SavedQueryInfo, SidebarDatabaseInfo};
-use zqlz_ui::widgets::{caption, h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable, ZqlzIcon};
+use zqlz_ui::widgets::{caption, h_flex, v_flex, ActiveTheme, Icon, IconName, ZqlzIcon};
 
 impl ConnectionSidebar {
     /// Render the schema tree for SQL database connections.
@@ -64,6 +64,12 @@ impl ConnectionSidebar {
         functions_expanded: bool,
         procedures_expanded: bool,
         queries_expanded: bool,
+        tables_loading: bool,
+        views_loading: bool,
+        materialized_views_loading: bool,
+        triggers_loading: bool,
+        functions_loading: bool,
+        procedures_loading: bool,
         databases: &[SidebarDatabaseInfo],
         schema_name: Option<&str>,
         schema_expanded: bool,
@@ -90,7 +96,13 @@ impl ConnectionSidebar {
                 functions_expanded,
                 procedures_expanded,
                 queries_expanded,
-                move |this, section, cx| match section {
+                tables_loading,
+                views_loading,
+                materialized_views_loading,
+                triggers_loading,
+                functions_loading,
+                procedures_loading,
+                move |this: &mut ConnectionSidebar, section, cx| match section {
                     "tables" => this.toggle_tables_expand(conn_id, cx),
                     "views" => this.toggle_views_expand(conn_id, cx),
                     "materialized_views" => this.toggle_materialized_views_expand(conn_id, cx),
@@ -142,7 +154,13 @@ impl ConnectionSidebar {
                 functions_expanded,
                 procedures_expanded,
                 queries_expanded,
-                move |this, section, cx| match section {
+                tables_loading,
+                views_loading,
+                materialized_views_loading,
+                triggers_loading,
+                functions_loading,
+                procedures_loading,
+                move |this: &mut ConnectionSidebar, section, cx| match section {
                     "tables" => this.toggle_tables_expand(conn_id, cx),
                     "views" => this.toggle_views_expand(conn_id, cx),
                     "materialized_views" => this.toggle_materialized_views_expand(conn_id, cx),
@@ -239,7 +257,13 @@ impl ConnectionSidebar {
                                 schema.functions_expanded,
                                 schema.procedures_expanded,
                                 queries_expanded,
-                                move |this, section, cx| {
+                                schema.tables_loading,
+                                schema.views_loading,
+                                schema.materialized_views_loading,
+                                schema.triggers_loading,
+                                schema.functions_loading,
+                                schema.procedures_loading,
+                                move |this: &mut ConnectionSidebar, section, cx| {
                                     this.toggle_db_section(
                                         conn_id,
                                         &db_name_for_closure,

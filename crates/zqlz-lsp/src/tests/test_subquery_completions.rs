@@ -135,7 +135,8 @@ fn test_subquery_with_exists() {
     let text = Rope::from(
         "SELECT * FROM users WHERE EXISTS (SELECT 1 FROM  WHERE user_id = users.user_id)",
     );
-    let offset = text.to_string().find("FROM ").unwrap() + 5;
+    // Use rfind to target the second FROM (inside the EXISTS subquery), not the outer FROM
+    let offset = text.to_string().rfind("FROM ").unwrap() + 5;
 
     let completions = lsp.get_completions(&text, offset);
 

@@ -39,6 +39,7 @@ fn make_column(name: &str, data_type: &str, nullable: bool) -> ColumnInfo {
         is_unique: false,
         foreign_key: None,
         comment: None,
+        ..Default::default()
     }
 }
 

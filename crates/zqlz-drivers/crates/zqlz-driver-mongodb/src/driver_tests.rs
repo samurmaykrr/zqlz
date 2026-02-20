@@ -43,7 +43,7 @@ mod driver_metadata_tests {
 
     #[test]
     fn test_mongodb_default_driver() {
-        let driver = MongoDbDriver::default();
+        let driver = MongoDbDriver;
         assert_eq!(driver.id(), "mongodb");
     }
 }

@@ -4,4 +4,3 @@
 
 mod multi_sort;
 
-pub use multi_sort::{MultiColumnSort, NullPosition, SortColumn};

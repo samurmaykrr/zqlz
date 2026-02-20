@@ -3,7 +3,7 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_ui::widgets::{WindowExt, notification::Notification};
+use zqlz_ui::widgets::WindowExt;
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -39,7 +39,7 @@ impl MainView {
         let table_name_clone = table_name.clone();
         let dock_area = self.dock_area.downgrade();
 
-        cx.spawn_in(window, async move |this, mut cx| {
+        cx.spawn_in(window, async move |this, cx| {
             // Load table structure
             match zqlz_table_designer::TableLoader::load_table(
                 connection,
@@ -146,7 +146,7 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.clone();
+        let _connection_sidebar = self.connection_sidebar.clone();
         let table_name = design.table_name.clone();
         let dock_area = self.dock_area.clone();
 

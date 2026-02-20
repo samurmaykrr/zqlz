@@ -3,7 +3,7 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_table_designer::{DatabaseDialect, TableDesignerPanel, TableLoader};
+use zqlz_table_designer::{TableDesignerPanel, TableLoader};
 
 use crate::app::AppState;
 use crate::main_view::MainView;

@@ -9,8 +9,6 @@
 //! Unlike regex-based parsing, this maintains position information and
 //! handles edge cases correctly.
 
-use std::fmt;
-
 /// A token in a command
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -122,6 +120,7 @@ impl CommandTokenizer {
         self.input[self.position..].chars().next().unwrap_or('\0')
     }
 
+    #[allow(dead_code)]
     fn peek_char(&self, offset: usize) -> char {
         self.input[self.position + offset..]
             .chars()

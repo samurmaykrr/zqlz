@@ -6,14 +6,13 @@
 //!
 //! This follows the industry standard approach used by redis-cli and RedisInsight.
 
-use crate::command_tokenizer::{CommandTokenizer, ParsedCommand, parse_commands};
+use crate::command_tokenizer::{parse_commands, CommandTokenizer, ParsedCommand};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use std::collections::HashMap;
-use zqlz_core::{
-    DiagnosticSeverity as CoreSeverity, DiagnosticsConfig, ValidationRule, ValidationType,
-};
+use zqlz_core::DiagnosticSeverity as CoreSeverity;
 
 /// Redis command specification
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub struct RedisCommandSpec {
     /// Command name (uppercase)
@@ -83,6 +82,18 @@ impl Default for RedisValidator {
 }
 
 impl RedisValidator {
+    #[allow(dead_code)]
+    /// Get command specification by name
+    pub fn get_command(&self, name: &str) -> Option<&RedisCommandSpec> {
+        self.commands.get(&name.to_uppercase())
+    }
+
+    #[allow(dead_code)]
+    /// Check if a command exists
+    pub fn command_exists(&self, name: &str) -> bool {
+        self.commands.contains_key(&name.to_uppercase())
+    }
+
     /// Create a new validator with built-in command specs
     pub fn new() -> Self {
         let mut commands = HashMap::new();
@@ -706,16 +717,6 @@ impl RedisValidator {
             .into_iter()
             .map(|e| e.to_diagnostic())
             .collect()
-    }
-
-    /// Get command specification by name
-    pub fn get_command(&self, name: &str) -> Option<&RedisCommandSpec> {
-        self.commands.get(&name.to_uppercase())
-    }
-
-    /// Check if a command exists
-    pub fn command_exists(&self, name: &str) -> bool {
-        self.commands.contains_key(&name.to_uppercase())
     }
 }
 

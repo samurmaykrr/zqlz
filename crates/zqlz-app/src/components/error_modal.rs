@@ -6,13 +6,13 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, IconName, Sizable, StyledExt,
     button::{Button, ButtonVariants},
-    h_flex, v_flex,
+    h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable, StyledExt,
 };
 
 /// Data for displaying in the error modal
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct ErrorData {
     pub title: String,
     pub message: String,
@@ -24,6 +24,7 @@ pub struct ErrorData {
 }
 
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct SystemInfoDisplay {
     pub os: String,
     pub arch: String,
@@ -32,6 +33,7 @@ pub struct SystemInfoDisplay {
 
 impl ErrorData {
     /// Create a generic error
+    #[allow(dead_code)]
     pub fn new(title: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
             title: title.into(),
@@ -45,30 +47,35 @@ impl ErrorData {
     }
 
     /// Add optional details
+    #[allow(dead_code)]
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
     }
 
     /// Add timestamp
+    #[allow(dead_code)]
     pub fn with_timestamp(mut self, timestamp: impl Into<String>) -> Self {
         self.timestamp = Some(timestamp.into());
         self
     }
 
     /// Add location information
+    #[allow(dead_code)]
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
         self
     }
 
     /// Add backtrace
+    #[allow(dead_code)]
     pub fn with_backtrace(mut self, backtrace: impl Into<String>) -> Self {
         self.backtrace = Some(backtrace.into());
         self
     }
 
     /// Add system information
+    #[allow(dead_code)]
     pub fn with_system_info(mut self, info: SystemInfoDisplay) -> Self {
         self.system_info = Some(info);
         self
@@ -77,6 +84,7 @@ impl ErrorData {
 
 /// Events emitted by the error modal
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub enum ErrorModalEvent {
     /// User closed the modal
     Close,
@@ -87,6 +95,7 @@ pub enum ErrorModalEvent {
 }
 
 /// Large error modal for displaying critical errors
+#[allow(dead_code)]
 pub struct ErrorModal {
     focus_handle: FocusHandle,
     error_data: ErrorData,
@@ -94,6 +103,7 @@ pub struct ErrorModal {
 }
 
 impl ErrorModal {
+    #[allow(dead_code)]
     pub fn new(error_data: ErrorData, cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
@@ -295,7 +305,7 @@ impl ErrorModal {
 
     fn render_backtrace_section(
         &self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();

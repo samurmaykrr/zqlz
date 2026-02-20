@@ -196,7 +196,9 @@ pub struct ExportWizard {
     decimal_input_state: Entity<InputState>,
 
     // Scroll state for table list and log
+    #[allow(dead_code)]
     scroll_handle: ScrollHandle,
+    #[allow(dead_code)]
     log_scroll_handle: ScrollHandle,
 
     /// Export start time for elapsed calculation
@@ -717,7 +719,31 @@ impl ExportWizard {
         cx.notify();
     }
 
-    fn start_export(&mut self, cx: &mut Context<Self>) {
+    /// Toggle schema-only export (excludes all data rows, exports DDL only)
+    fn toggle_include_data(&mut self, cx: &mut Context<Self>) {
+        self.state.include_data = !self.state.include_data;
+        cx.notify();
+    }
+
+    /// Returns paths of any output files that already exist on disk, so the
+    /// caller can prompt before overwriting them.
+    fn existing_output_paths(&self) -> Vec<PathBuf> {
+        match self.state.export_format {
+            ExportFormat::Udif | ExportFormat::UdifCompressed => {
+                let path = self.state.output_path();
+                if path.exists() { vec![path] } else { vec![] }
+            }
+            ExportFormat::Csv => self
+                .state
+                .selected_tables()
+                .into_iter()
+                .map(|t| self.state.output_folder.join(&t.output_filename))
+                .filter(|p| p.exists())
+                .collect(),
+        }
+    }
+
+    fn start_export(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some(connection) = self.connection.clone() else {
             self.state
                 .add_log(LogLevel::Error, "No database connection available");
@@ -739,6 +765,54 @@ impl ExportWizard {
             return;
         }
 
+        let existing = self.existing_output_paths();
+
+        if existing.is_empty() {
+            self.run_export(connection, cx);
+        } else {
+            // Ask for confirmation before overwriting existing files.
+            let message = if existing.len() == 1 {
+                format!(
+                    "The file \"{}\" already exists. Overwrite it?",
+                    existing[0].display()
+                )
+            } else {
+                format!(
+                    "{} output file(s) already exist. Overwrite them all?",
+                    existing.len()
+                )
+            };
+
+            let receiver = window.prompt(
+                PromptLevel::Warning,
+                &message,
+                None,
+                &["Overwrite", "Cancel"],
+                cx,
+            );
+
+            let window_handle = window.window_handle();
+            cx.spawn(async move |this, cx| {
+                if let Ok(answer) = receiver.await {
+                    // Index 0 → "Overwrite" was clicked; anything else means Cancel.
+                    if answer == 0 {
+                        _ = window_handle.update(cx, |_, _window, cx| {
+                            _ = this.update(cx, |this, cx| {
+                                this.run_export(connection, cx);
+                            });
+                        });
+                    }
+                }
+                anyhow::Ok(())
+            })
+            .detach();
+        }
+    }
+
+    /// Initiates the actual export after any overwrite confirmation has been
+    /// obtained.  Separated from `start_export` so the prompt callback can
+    /// call it without needing a `Window` reference.
+    fn run_export(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         self.state.is_exporting = true;
         self.state.is_complete = false;
         self.state.progress = 0.0;
@@ -769,6 +843,7 @@ impl ExportWizard {
         // Build ExportOptions from wizard state
         let mut options = ExportOptions::default();
         options.include_schema = export_state.include_schema;
+        options.include_data = export_state.include_data;
         options.include_indexes = export_state.include_indexes;
         options.include_foreign_keys = export_state.include_foreign_keys;
 
@@ -867,6 +942,27 @@ impl ExportWizard {
                                     format!("Export complete. {} rows exported.", total_rows),
                                 );
 
+                                let selected_tables: Vec<String> = this
+                                    .state
+                                    .tables
+                                    .iter()
+                                    .filter(|t| t.selected)
+                                    .map(|t| t.table_name.clone())
+                                    .collect();
+                                let source_label = if selected_tables.is_empty() {
+                                    "all_tables".to_string()
+                                } else {
+                                    selected_tables.join("_")
+                                };
+                                let target_label = this.state.output_filename.clone();
+                                if let Ok(path) = this.state.write_log_file(
+                                    &driver_name,
+                                    &source_label,
+                                    &target_label,
+                                ) {
+                                    this.state.log_file_path = Some(path);
+                                }
+
                                 cx.emit(ExportWizardEvent::ExportComplete);
                                 cx.notify();
                             });
@@ -902,6 +998,7 @@ impl ExportWizard {
 
     fn start_csv_export(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         let export_state = self.state.clone();
+        let driver_name = connection.driver_name().to_string();
 
         // Use shared atomic counters for progress tracking from the callback
         let rows_exported = Arc::new(AtomicU64::new(0));
@@ -942,6 +1039,27 @@ impl ExportWizard {
                             format!("Export complete. {} file(s) created.", files.len()),
                         );
 
+                        let selected_tables: Vec<String> = this
+                            .state
+                            .tables
+                            .iter()
+                            .filter(|t| t.selected)
+                            .map(|t| t.table_name.clone())
+                            .collect();
+                        let source_label = if selected_tables.is_empty() {
+                            "all_tables".to_string()
+                        } else {
+                            selected_tables.join("_")
+                        };
+                        let target_label = this.state.output_filename.clone();
+                        if let Ok(path) = this.state.write_log_file(
+                            &driver_name,
+                            &source_label,
+                            &target_label,
+                        ) {
+                            this.state.log_file_path = Some(path);
+                        }
+
                         cx.emit(ExportWizardEvent::ExportComplete);
                         cx.notify();
                     });
@@ -970,6 +1088,42 @@ impl ExportWizard {
     // =========================================================================
     // Step Renderers
     // =========================================================================
+
+    fn render_step_indicator(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let current = self.state.current_step;
+
+        h_flex()
+            .w_full()
+            .gap_0()
+            .pl_4()
+            .border_b_1()
+            .border_color(theme.border)
+            .children(ExportWizardStep::all().iter().enumerate().map(|(visual_idx, step)| {
+                let is_current = *step == current;
+                let is_done = visual_idx < current.index();
+
+                div()
+                    .text_sm()
+                    .px_3()
+                    .py_2()
+                    .border_b_2()
+                    .when(is_current, |s| {
+                        s.border_color(theme.accent)
+                            .text_color(theme.accent)
+                            .font_weight(FontWeight::SEMIBOLD)
+                    })
+                    .when(is_done, |s| {
+                        s.border_color(transparent_black())
+                            .text_color(theme.foreground)
+                    })
+                    .when(!is_current && !is_done, |s| {
+                        s.border_color(transparent_black())
+                            .text_color(theme.muted_foreground)
+                    })
+                    .child(step.display_name())
+            }))
+    }
 
     fn render_step_1_table_selection(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
@@ -1375,95 +1529,118 @@ impl ExportWizard {
                     .text_color(theme.foreground)
                     .child("You can define some additional options."),
             )
-            // Append & Continue on error
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
+            // UDIF-only options: shown when the format is not CSV
+            .when(self.state.export_format != ExportFormat::Csv, |this| {
+                this.child(self.render_section_header("UDIF Options", cx))
                     .child(
-                        Checkbox::new("append")
-                            .checked(format_opts.append)
-                            .label("Append")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_append(cx);
-                            })),
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Checkbox::new("schema-only")
+                                    // Checkbox is checked when data is *excluded* (schema-only)
+                                    .checked(!self.state.include_data)
+                                    .label("Schema only (no data)")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_include_data(cx);
+                                    })),
+                            ),
                     )
-                    .child(
-                        Checkbox::new("continue-on-error")
-                            .checked(format_opts.continue_on_error)
-                            .label("Continue on error")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_continue_on_error(cx);
-                            })),
-                    ),
-            )
+            })
+            // Append & Continue on error (CSV only)
+            .when(self.state.export_format == ExportFormat::Csv, |this| {
+                this.child(
+                    v_flex()
+                        .w_full()
+                        .gap_2()
+                        .child(
+                            Checkbox::new("append")
+                                .checked(format_opts.append)
+                                .label("Append")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_append(cx);
+                                })),
+                        )
+                        .child(
+                            Checkbox::new("continue-on-error")
+                                .checked(format_opts.continue_on_error)
+                                .label("Continue on error")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_continue_on_error(cx);
+                                })),
+                        ),
+                )
+            })
             // File Formats section
-            .child(self.render_section_header("File Formats", cx))
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
+            // File Formats section (CSV only)
+            .when(self.state.export_format == ExportFormat::Csv, |this| {
+                this.child(self.render_section_header("File Formats", cx))
                     .child(
-                        Checkbox::new("include-headers")
-                            .checked(format_opts.include_headers)
-                            .label("Include column titles")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_include_headers(cx);
-                            })),
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Checkbox::new("include-headers")
+                                    .checked(format_opts.include_headers)
+                                    .label("Include column titles")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_include_headers(cx);
+                                    })),
+                            )
+                            .child(self.render_format_row(
+                                "Record Delimiter:",
+                                Select::new(&self.record_delimiter_state)
+                                    .small()
+                                    .w(px(180.0))
+                                    .menu_width(px(180.0)),
+                                cx,
+                            ))
+                            .child(self.render_format_row(
+                                "Field Delimiter:",
+                                Select::new(&self.field_delimiter_state)
+                                    .small()
+                                    .w(px(180.0))
+                                    .menu_width(px(180.0)),
+                                cx,
+                            ))
+                            .child(self.render_format_row(
+                                "Text Qualifier:",
+                                Select::new(&self.text_qualifier_state)
+                                    .small()
+                                    .w(px(180.0))
+                                    .menu_width(px(180.0)),
+                                cx,
+                            )),
                     )
-                    .child(self.render_format_row(
-                        "Record Delimiter:",
-                        Select::new(&self.record_delimiter_state)
-                            .small()
-                            .w(px(180.0))
-                            .menu_width(px(180.0)),
-                        cx,
-                    ))
-                    .child(self.render_format_row(
-                        "Field Delimiter:",
-                        Select::new(&self.field_delimiter_state)
-                            .small()
-                            .w(px(180.0))
-                            .menu_width(px(180.0)),
-                        cx,
-                    ))
-                    .child(self.render_format_row(
-                        "Text Qualifier:",
-                        Select::new(&self.text_qualifier_state)
-                            .small()
-                            .w(px(180.0))
-                            .menu_width(px(180.0)),
-                        cx,
-                    )),
-            )
-            // Data Formats section
-            .child(self.render_section_header("Data Formats", cx))
-            .child(
-                v_flex()
-                    .w_full()
-                    .gap_2()
+                    // Data Formats section
+                    .child(self.render_section_header("Data Formats", cx))
                     .child(
-                        Checkbox::new("blank-if-zero")
-                            .checked(format_opts.blank_if_zero)
-                            .label("Blank if zero")
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.toggle_blank_if_zero(cx);
-                            })),
+                        v_flex()
+                            .w_full()
+                            .gap_2()
+                            .child(
+                                Checkbox::new("blank-if-zero")
+                                    .checked(format_opts.blank_if_zero)
+                                    .label("Blank if zero")
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        this.toggle_blank_if_zero(cx);
+                                    })),
+                            )
+                            .child(self.render_format_row(
+                                "Decimal Symbol:",
+                                Input::new(&self.decimal_input_state).small().w(px(80.0)),
+                                cx,
+                            ))
+                            .child(self.render_format_row(
+                                "Binary Data Encoding:",
+                                Select::new(&self.binary_encoding_state)
+                                    .small()
+                                     .w(px(180.0))
+                                     .menu_width(px(180.0)),
+                                 cx,
+                             )),
                     )
-                    .child(self.render_format_row(
-                        "Decimal Symbol:",
-                        Input::new(&self.decimal_input_state).small().w(px(80.0)),
-                        cx,
-                    ))
-                    .child(self.render_format_row(
-                        "Binary Data Encoding:",
-                        Select::new(&self.binary_encoding_state)
-                            .small()
-                            .w(px(180.0))
-                            .menu_width(px(180.0)),
-                        cx,
-                    )),
-            )
+            })
     }
 
     fn render_section_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
@@ -1646,8 +1823,8 @@ impl Render for ExportWizard {
             this.go_next(cx);
         });
 
-        let start_handler = cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.start_export(cx);
+        let start_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.start_export(window, cx);
         });
 
         // Separate handlers needed for conditional buttons (can't clone listeners)
@@ -1670,6 +1847,10 @@ impl Render for ExportWizard {
             .on_action(cx.listener(|this, _: &menu::Cancel, window, cx| {
                 this.close(window, cx);
             }))
+            // Title bar reserves space for the macOS traffic light buttons and provides a drag region
+            .child(TitleBar::new())
+            // Step indicator at the top
+            .child(self.render_step_indicator(cx))
             // Main content area
             .child(
                 div()
@@ -1689,13 +1870,12 @@ impl Render for ExportWizard {
                     .justify_between()
                     .border_t_1()
                     .border_color(theme.border)
-                    .bg(theme.title_bar)
                     // Left side: Help and Save Profile
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Button::new("help").child("?").small())
-                            .child(Button::new("save-profile").child("Save Profile").small()),
+                            .child(Button::new("help").child("?").ghost().small())
+                            .child(Button::new("save-profile").child("Save Profile").ghost().small()),
                     )
                     // Right side: Navigation buttons
                     .child(
@@ -1705,13 +1885,34 @@ impl Render for ExportWizard {
                                 this.child(
                                     Button::new("open-folder")
                                         .child("Open")
+                                        .ghost()
                                         .small()
                                         .on_click(open_folder_handler),
+                                )
+                            })
+                            .when(step == ExportWizardStep::Progress && is_complete, |this| {
+                                let log_path = self.state.log_file_path.clone();
+                                this.child(
+                                    Button::new("view-log")
+                                        .child("View Log")
+                                        .ghost()
+                                        .small()
+                                        .when_some(log_path, |button, path| {
+                                            button.on_click(cx.listener(
+                                                move |_this, _: &ClickEvent, _, cx| {
+                                                    cx.open_url(&format!(
+                                                        "file://{}",
+                                                        path.display()
+                                                    ));
+                                                },
+                                            ))
+                                        }),
                                 )
                             })
                             .child(
                                 Button::new("back")
                                     .child("Back")
+                                    .ghost()
                                     .small()
                                     .disabled(!step.can_go_back() || is_exporting)
                                     .on_click(back_handler),
@@ -1719,6 +1920,7 @@ impl Render for ExportWizard {
                             .child(
                                 Button::new("next")
                                     .child("Next")
+                                    .ghost()
                                     .small()
                                     .disabled(!step.can_go_next() || is_exporting)
                                     .on_click(next_handler),
@@ -1748,6 +1950,7 @@ impl Render for ExportWizard {
                                     Button::new("start-disabled")
                                         .child("Start")
                                         .small()
+                                        .primary()
                                         .disabled(true),
                                 )
                             }),

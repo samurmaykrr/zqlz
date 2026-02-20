@@ -18,6 +18,7 @@ use crate::storage::LocalStorage;
 ///
 /// This struct holds application-wide state that needs to be shared
 /// across multiple windows and components.
+#[allow(dead_code)]
 pub struct AppState {
     /// Unique identifier for this application instance
     pub instance_id: Uuid,
@@ -60,9 +61,12 @@ pub struct AppState {
     pub query_history: Arc<RwLock<QueryHistory>>,
 }
 
+#[allow(dead_code)]
 impl AppState {
     /// Create a new application state
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        // Initialize storage first
         let storage = Arc::new(LocalStorage::new().expect("Failed to initialize local storage"));
 
         // Load connections from storage
@@ -232,6 +236,7 @@ impl Global for AppState {}
 
 /// Application settings
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct AppSettings {
     /// Theme name
     pub theme: String,
@@ -283,6 +288,7 @@ impl Default for AppSettings {
 
 /// A recent connection entry
 #[derive(Clone, Debug)]
+#[allow(dead_code)]
 pub struct RecentConnection {
     /// Unique identifier
     pub id: Uuid,

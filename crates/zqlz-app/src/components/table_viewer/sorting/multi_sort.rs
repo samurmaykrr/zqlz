@@ -10,6 +10,7 @@ use crate::components::table_viewer::{SortCriterion, SortDirection};
 
 /// A column to sort by with its index and direction
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct SortColumn {
     /// Column index in the row
     pub column_index: usize,
@@ -19,6 +20,7 @@ pub struct SortColumn {
 
 impl SortColumn {
     /// Create a new sort column
+    #[allow(dead_code)]
     pub fn new(column_index: usize, direction: SortDirection) -> Self {
         Self {
             column_index,
@@ -27,11 +29,13 @@ impl SortColumn {
     }
 
     /// Create ascending sort column
+    #[allow(dead_code)]
     pub fn ascending(column_index: usize) -> Self {
         Self::new(column_index, SortDirection::Ascending)
     }
 
     /// Create descending sort column
+    #[allow(dead_code)]
     pub fn descending(column_index: usize) -> Self {
         Self::new(column_index, SortDirection::Descending)
     }
@@ -39,6 +43,7 @@ impl SortColumn {
 
 /// Configuration for null value handling in sorting
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[allow(dead_code)]
 pub enum NullPosition {
     /// NULL values appear first
     First,
@@ -49,6 +54,7 @@ pub enum NullPosition {
 
 impl NullPosition {
     /// Get display label
+    #[allow(dead_code)]
     pub fn label(&self) -> &'static str {
         match self {
             Self::First => "NULLS FIRST",
@@ -59,6 +65,7 @@ impl NullPosition {
 
 /// Multi-column sort configuration
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct MultiColumnSort {
     /// Columns to sort by, in priority order (first = highest priority)
     columns: Vec<SortColumn>,
@@ -68,11 +75,13 @@ pub struct MultiColumnSort {
 
 impl MultiColumnSort {
     /// Create a new empty multi-column sort
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Create with null position configuration
+    #[allow(dead_code)]
     pub fn with_null_position(null_position: NullPosition) -> Self {
         Self {
             columns: Vec::new(),
@@ -81,51 +90,61 @@ impl MultiColumnSort {
     }
 
     /// Add a sort column
+    #[allow(dead_code)]
     pub fn add_column(&mut self, column: SortColumn) {
         self.columns.push(column);
     }
 
     /// Add an ascending sort column by index
+    #[allow(dead_code)]
     pub fn add_ascending(&mut self, column_index: usize) {
         self.columns.push(SortColumn::ascending(column_index));
     }
 
     /// Add a descending sort column by index
+    #[allow(dead_code)]
     pub fn add_descending(&mut self, column_index: usize) {
         self.columns.push(SortColumn::descending(column_index));
     }
 
     /// Clear all sort columns
+    #[allow(dead_code)]
     pub fn clear(&mut self) {
         self.columns.clear();
     }
 
     /// Check if any sort columns are configured
+    #[allow(dead_code)]
     pub fn is_empty(&self) -> bool {
         self.columns.is_empty()
     }
 
     /// Get the number of sort columns
+    #[allow(dead_code)]
     pub fn column_count(&self) -> usize {
         self.columns.len()
     }
 
     /// Get the sort columns
+    #[allow(dead_code)]
     pub fn columns(&self) -> &[SortColumn] {
         &self.columns
     }
 
     /// Get null position configuration
+    #[allow(dead_code)]
     pub fn null_position(&self) -> NullPosition {
         self.null_position
     }
 
     /// Set null position configuration
+    #[allow(dead_code)]
     pub fn set_null_position(&mut self, position: NullPosition) {
         self.null_position = position;
     }
 
     /// Compare two values with null handling
+    #[allow(dead_code)]
     fn compare_values(&self, a: &Value, b: &Value) -> Ordering {
         let a_is_null = a.is_null();
         let b_is_null = b.is_null();
@@ -146,6 +165,7 @@ impl MultiColumnSort {
     }
 
     /// Compare two rows using all configured sort columns
+    #[allow(dead_code)]
     pub fn compare_rows(&self, row_a: &[Value], row_b: &[Value]) -> Ordering {
         for sort_col in &self.columns {
             let a = row_a.get(sort_col.column_index);
@@ -169,6 +189,7 @@ impl MultiColumnSort {
     }
 
     /// Sort a vector of rows in place
+    #[allow(dead_code)]
     pub fn sort_rows(&self, rows: &mut [Vec<Value>]) {
         if self.is_empty() {
             return;
@@ -177,6 +198,7 @@ impl MultiColumnSort {
     }
 
     /// Create from a list of SortCriterion and column names
+    #[allow(dead_code)]
     pub fn from_criteria(criteria: &[SortCriterion], column_names: &[String]) -> Self {
         let mut sort = Self::new();
         for criterion in criteria {
@@ -188,6 +210,7 @@ impl MultiColumnSort {
     }
 
     /// Generate SQL ORDER BY clause fragment (without the "ORDER BY" keyword)
+    #[allow(dead_code)]
     pub fn to_sql(&self, column_names: &[String]) -> Option<String> {
         if self.is_empty() {
             return None;
@@ -217,6 +240,7 @@ impl MultiColumnSort {
 }
 
 /// Compare two non-null values
+#[allow(dead_code)]
 fn compare_non_null_values(a: &Value, b: &Value) -> Ordering {
     match (a, b) {
         // Boolean comparison

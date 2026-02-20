@@ -7,6 +7,7 @@ use zqlz_core::{ColumnMeta, Value};
 
 /// Options for row duplication
 #[derive(Debug, Clone, Default)]
+#[allow(dead_code)]
 pub struct DuplicateOptions {
     /// Whether to clear auto-increment columns (set to NULL)
     pub clear_auto_increment: bool,
@@ -18,6 +19,7 @@ pub struct DuplicateOptions {
 
 impl DuplicateOptions {
     /// Create new options with default settings (clear auto-increment only)
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self {
             clear_auto_increment: true,
@@ -27,18 +29,21 @@ impl DuplicateOptions {
     }
 
     /// Set whether to clear auto-increment columns
+    #[allow(dead_code)]
     pub fn with_clear_auto_increment(mut self, clear: bool) -> Self {
         self.clear_auto_increment = clear;
         self
     }
 
     /// Set whether to clear primary key columns
+    #[allow(dead_code)]
     pub fn with_clear_primary_key(mut self, clear: bool) -> Self {
         self.clear_primary_key = clear;
         self
     }
 
     /// Set specific columns to clear by index
+    #[allow(dead_code)]
     pub fn with_columns_to_clear(mut self, columns: Vec<usize>) -> Self {
         self.columns_to_clear = columns;
         self
@@ -47,6 +52,7 @@ impl DuplicateOptions {
 
 /// A row that was duplicated, containing the new values
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub struct DuplicatedRow {
     /// The new row values (with appropriate columns cleared)
     pub values: Vec<Value>,
@@ -65,6 +71,7 @@ impl DuplicatedRow {
 }
 
 /// Duplicate a single row, optionally clearing auto-increment and other columns
+#[allow(dead_code)]
 pub fn duplicate_row(
     row: &[Value],
     columns: &[ColumnMeta],
@@ -91,6 +98,7 @@ pub fn duplicate_row(
 }
 
 /// Duplicate multiple rows, optionally clearing auto-increment and other columns
+#[allow(dead_code)]
 pub fn duplicate_rows(
     rows: &[Vec<Value>],
     columns: &[ColumnMeta],
@@ -117,7 +125,7 @@ mod tests {
             auto_increment,
             default_value: None,
             comment: None,
-                enum_values: None,
+            enum_values: None,
         }
     }
 

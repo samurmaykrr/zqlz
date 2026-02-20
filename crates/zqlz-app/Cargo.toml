@@ -34,10 +34,7 @@ zqlz-interchange.workspace = true
 zqlz-versioning.workspace = true
 zqlz-templates.workspace = true
 zqlz-drivers.workspace = true
-
-# Zed Editor Integration
-editor.workspace = true
-zqlz-zed-adapter.workspace = true
+zqlz-text-editor.workspace = true
 
 # LSP
 lsp-types.workspace = true
@@ -61,6 +58,7 @@ sqlformat = "0.5.0"
 regex.workspace = true
 sqlparser.workspace = true
 smol.workspace = true
+futures.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa.workspace = true

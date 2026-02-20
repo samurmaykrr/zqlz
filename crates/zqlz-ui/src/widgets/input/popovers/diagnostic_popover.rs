@@ -102,8 +102,8 @@ impl RenderOnce for DiagnosticPopover {
 
 /// Calculate the origin position for a diagnostic popover.
 pub fn diagnostic_popover_origin(
-    range_start: usize,
-    range_end: usize,
+    _range_start: usize,
+    _range_end: usize,
     line_height: Pixels,
     last_bounds_origin: Point<Pixels>,
     start_pos: Point<Pixels>,

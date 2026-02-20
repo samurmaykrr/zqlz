@@ -147,11 +147,17 @@ impl InputState {
         window: &mut Window,
         cx: &mut Context<InputState>,
     ) {
+        // Check if hover is enabled (respects user settings)
+        let hover_enabled = self.hover_enabled;
+
         if event.modifiers.secondary() {
             self.handle_hover_definition(offset, window, cx);
         } else {
             self.hover_definition.clear();
-            self.handle_hover_popover(offset, window, cx);
+            // Only show hover popover if enabled
+            if hover_enabled {
+                self.handle_hover_popover(offset, window, cx);
+            }
         }
     }
 }

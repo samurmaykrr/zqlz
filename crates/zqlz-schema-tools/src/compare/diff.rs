@@ -271,10 +271,10 @@ impl ColumnDiff {
 
     /// Returns true if all changes are safe (no data loss risk)
     pub fn is_safe(&self) -> bool {
-        if let Some((old_nullable, new_nullable)) = self.nullable_change {
-            if old_nullable && !new_nullable {
-                return false;
-            }
+        if let Some((old_nullable, new_nullable)) = self.nullable_change
+            && old_nullable && !new_nullable
+        {
+            return false;
         }
         true
     }
@@ -534,6 +534,7 @@ pub struct TypeDiff {
     /// Schema of the type
     pub schema: Option<String>,
     /// Values change (for enums)
+    #[allow(clippy::type_complexity)]
     pub values_change: Option<(Option<Vec<String>>, Option<Vec<String>>)>,
     /// Definition change
     pub definition_change: Option<(Option<String>, Option<String>)>,

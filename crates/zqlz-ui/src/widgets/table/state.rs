@@ -150,6 +150,7 @@ pub struct TableState<D: TableDelegate> {
     _load_more_task: Task<()>,
 }
 
+#[allow(dead_code)]
 impl<D> TableState<D>
 where
     D: TableDelegate,
@@ -1605,7 +1606,7 @@ where
                                 }
                             };
 
-                            let any = !self.cell_selection.is_empty();
+                            let _any = !self.cell_selection.is_empty();
 
                             // Create checkbox element. Use Checkbox::new with id derived from table entity and header
                             let checkbox_id = SharedString::from(format!("table-{}-select-all", cx.entity_id()));

@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 /// let cmd = PolicyCommand::Select;
 /// assert_eq!(cmd.as_sql(), "SELECT");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PolicyCommand {
     /// SELECT queries
     Select,
@@ -33,6 +33,7 @@ pub enum PolicyCommand {
     /// DELETE statements
     Delete,
     /// All commands (default)
+    #[default]
     All,
 }
 
@@ -59,12 +60,6 @@ impl PolicyCommand {
             self,
             PolicyCommand::Insert | PolicyCommand::Update | PolicyCommand::Delete
         )
-    }
-}
-
-impl Default for PolicyCommand {
-    fn default() -> Self {
-        PolicyCommand::All
     }
 }
 

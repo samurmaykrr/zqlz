@@ -9,7 +9,7 @@ use std::time::Duration;
 use zqlz_core::{Connection, Result, ZqlzError};
 
 /// Server health state
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerHealth {
     /// Server is healthy and responding normally
@@ -19,6 +19,7 @@ pub enum ServerHealth {
     /// Server is not responding or has critical issues
     Unhealthy,
     /// Server health is unknown (not yet checked)
+    #[default]
     Unknown,
 }
 
@@ -31,12 +32,6 @@ impl ServerHealth {
     /// Check if the server is operational (healthy or degraded)
     pub fn is_operational(&self) -> bool {
         matches!(self, ServerHealth::Healthy | ServerHealth::Degraded)
-    }
-}
-
-impl Default for ServerHealth {
-    fn default() -> Self {
-        ServerHealth::Unknown
     }
 }
 

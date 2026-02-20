@@ -5,16 +5,18 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, body, body_small, caption,
+    body_small, caption,
     dock::{Panel, PanelEvent, TitleStyle},
-    h_flex, h2, label, muted_small, v_flex,
+    h2, h_flex, label, muted_small, v_flex, ActiveTheme,
 };
 
 /// Welcome panel shown on startup
+#[allow(dead_code)]
 pub struct WelcomePanel {
     focus_handle: FocusHandle,
 }
 
+#[allow(dead_code)]
 impl WelcomePanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {

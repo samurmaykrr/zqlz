@@ -103,6 +103,42 @@ impl QueryEngine {
             || trimmed.starts_with("EXPLAIN")
     }
 
+    /// Returns `true` if the SQL contains any DDL statement that modifies the
+    /// database schema (CREATE, ALTER, DROP, RENAME, TRUNCATE).
+    ///
+    /// Callers should invalidate their schema cache after executing SQL for
+    /// which this returns `true`.
+    pub fn is_schema_modifying(&self, sql: &str) -> bool {
+        let dialect = GenericDialect {};
+        let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
+            // Fallback: keyword scan for the common DDL prefixes
+            let upper = sql.trim().to_uppercase();
+            return upper.starts_with("CREATE ")
+                || upper.starts_with("ALTER ")
+                || upper.starts_with("DROP ")
+                || upper.starts_with("RENAME ")
+                || upper.starts_with("TRUNCATE ");
+        };
+
+        statements.iter().any(|stmt| {
+            matches!(
+                stmt,
+                Statement::CreateTable { .. }
+                    | Statement::CreateView { .. }
+                    | Statement::CreateIndex { .. }
+                    | Statement::CreateFunction { .. }
+                    | Statement::CreateProcedure { .. }
+                    | Statement::CreateTrigger { .. }
+                    | Statement::AlterTable { .. }
+                    | Statement::AlterView { .. }
+                    | Statement::AlterIndex { .. }
+                    | Statement::Drop { .. }
+                    | Statement::DropFunction { .. }
+                    | Statement::Truncate { .. }
+            )
+        })
+    }
+
     /// Analyze SQL statement for destructive operations that require confirmation
     pub fn analyze_for_destructive_operations(&self, sql: &str) -> Option<DestructiveOperationWarning> {
         tracing::trace!(sql_preview = %sql.chars().take(100).collect::<String>(), "analyzing SQL for destructive operations");

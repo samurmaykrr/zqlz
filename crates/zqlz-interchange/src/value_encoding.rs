@@ -6,7 +6,7 @@
 //! The encoding preserves type information so that values can be correctly
 //! interpreted during import, even when the target database has different types.
 
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
+use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zqlz_core::Value;
@@ -78,7 +78,7 @@ pub struct TaggedValue {
 
 /// Type tags for special values
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[serde(rename_all = "snake_case")]
 pub enum TypeTag {
     /// 8-bit integer
     Int8,
@@ -110,6 +110,12 @@ pub enum TypeTag {
     Json,
     /// Array of values
     Array,
+    /// IEEE 754 special float: NaN, Infinity, or -Infinity.
+    ///
+    /// JSON cannot represent these natively; silently mapping them to 0 would
+    /// corrupt the data on round-trip. We preserve them as tagged strings so the
+    /// decoder can reconstruct the exact IEEE 754 value.
+    FloatSpecial,
 }
 
 impl EncodedValue {
@@ -160,6 +166,20 @@ impl EncodedValue {
     }
 }
 
+/// Map a non-finite float to the canonical label stored in the tagged encoding.
+///
+/// Using a fixed set of labels ("NaN", "Infinity", "-Infinity") keeps the
+/// format stable and unambiguous across platforms and locale settings.
+fn float_special_label(value: f64) -> &'static str {
+    if value.is_nan() {
+        "NaN"
+    } else if value.is_infinite() && value.is_sign_positive() {
+        "Infinity"
+    } else {
+        "-Infinity"
+    }
+}
+
 /// Encode a `Value` into an `EncodedValue`
 pub fn encode_value(value: &Value) -> EncodedValue {
     match value {
@@ -184,20 +204,29 @@ pub fn encode_value(value: &Value) -> EncodedValue {
         }),
 
         Value::Float32(v) => {
-            let n = serde_json::Number::from_f64(*v as f64)
-                .unwrap_or_else(|| serde_json::Number::from(0));
-            EncodedValue::Tagged(TaggedValue {
-                type_tag: TypeTag::Float32,
-                value: serde_json::Value::Number(n),
-            })
+            match serde_json::Number::from_f64(*v as f64) {
+                Some(n) => EncodedValue::Tagged(TaggedValue {
+                    type_tag: TypeTag::Float32,
+                    value: serde_json::Value::Number(n),
+                }),
+                // JSON cannot represent NaN or infinities, so we encode them
+                // as tagged strings to avoid silent data corruption on round-trip.
+                None => EncodedValue::Tagged(TaggedValue {
+                    type_tag: TypeTag::FloatSpecial,
+                    value: serde_json::Value::String(float_special_label(*v as f64).to_string()),
+                }),
+            }
         }
-        Value::Float64(v) => {
-            let n = serde_json::Number::from_f64(*v).unwrap_or_else(|| serde_json::Number::from(0));
-            EncodedValue::Tagged(TaggedValue {
+        Value::Float64(v) => match serde_json::Number::from_f64(*v) {
+            Some(n) => EncodedValue::Tagged(TaggedValue {
                 type_tag: TypeTag::Float64,
                 value: serde_json::Value::Number(n),
-            })
-        }
+            }),
+            None => EncodedValue::Tagged(TaggedValue {
+                type_tag: TypeTag::FloatSpecial,
+                value: serde_json::Value::String(float_special_label(*v).to_string()),
+            }),
+        },
 
         Value::Decimal(s) => EncodedValue::Tagged(TaggedValue {
             type_tag: TypeTag::Decimal,
@@ -403,6 +432,22 @@ fn decode_tagged_value(tagged: &TaggedValue) -> Result<Value, EncodingError> {
                 .collect();
             Ok(Value::Array(values?))
         }
+
+        TypeTag::FloatSpecial => {
+            let label = tagged.value.as_str().ok_or_else(|| {
+                EncodingError::DecodeError("Expected string for float_special".into())
+            })?;
+            // The label is intentionally limited to these three values to keep
+            // the format stable and parseable without locale-dependent formatting.
+            match label {
+                "NaN" => Ok(Value::Float64(f64::NAN)),
+                "Infinity" => Ok(Value::Float64(f64::INFINITY)),
+                "-Infinity" => Ok(Value::Float64(f64::NEG_INFINITY)),
+                other => Err(EncodingError::DecodeError(format!(
+                    "Unknown float_special value: {other}"
+                ))),
+            }
+        }
     }
 }
 
@@ -528,5 +573,66 @@ mod tests {
                 _ => assert_eq!(value, decoded),
             }
         }
+    }
+
+    #[test]
+    fn test_nan_is_not_silently_mapped_to_zero() {
+        let encoded = encode_value(&Value::Float64(f64::NAN));
+        // Must never produce a numeric 0 — that would silently corrupt the data.
+        match &encoded {
+            EncodedValue::Tagged(t) => {
+                assert_eq!(t.type_tag, TypeTag::FloatSpecial);
+                assert_eq!(t.value.as_str(), Some("NaN"));
+            }
+            other => panic!("Expected Tagged(FloatSpecial), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_infinity_round_trips() {
+        for original in [f64::INFINITY, f64::NEG_INFINITY] {
+            let encoded = encode_value(&Value::Float64(original));
+            let json = serde_json::to_string(&encoded).expect("serialize");
+            let parsed: EncodedValue = serde_json::from_str(&json).expect("deserialize");
+            let decoded = decode_value(&parsed).expect("decode");
+            match decoded {
+                Value::Float64(v) => assert_eq!(v, original),
+                other => panic!("Expected Float64, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_nan_round_trips() {
+        let encoded = encode_value(&Value::Float64(f64::NAN));
+        let json = serde_json::to_string(&encoded).expect("serialize");
+        let parsed: EncodedValue = serde_json::from_str(&json).expect("deserialize");
+        let decoded = decode_value(&parsed).expect("decode");
+        match decoded {
+            Value::Float64(v) => assert!(v.is_nan()),
+            other => panic!("Expected Float64(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_float32_nan_round_trips() {
+        let encoded = encode_value(&Value::Float32(f32::NAN));
+        let json = serde_json::to_string(&encoded).expect("serialize");
+        let parsed: EncodedValue = serde_json::from_str(&json).expect("deserialize");
+        let decoded = decode_value(&parsed).expect("decode");
+        // FloatSpecial always decodes to Float64 since the original width is lost
+        // after the special-value path; the NaN-ness is what matters.
+        match decoded {
+            Value::Float64(v) => assert!(v.is_nan()),
+            other => panic!("Expected Float64(NaN), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_normal_finite_float_unchanged() {
+        let value = Value::Float64(3.14);
+        let encoded = encode_value(&value);
+        let decoded = decode_value(&encoded).expect("decode");
+        assert_eq!(value, decoded);
     }
 }

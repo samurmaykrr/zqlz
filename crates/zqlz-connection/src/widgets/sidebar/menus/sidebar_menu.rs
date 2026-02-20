@@ -6,7 +6,6 @@
 //! - Creating new connection groups
 //! - Refreshing the connections list
 
-use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 

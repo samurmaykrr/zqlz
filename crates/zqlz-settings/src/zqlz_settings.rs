@@ -140,11 +140,11 @@ impl Default for AppearanceSettings {
 }
 
 impl AppearanceSettings {
-    /// Apply appearance settings (mode, scrollbar visibility).
+    /// Apply appearance settings (mode, theme selection, scrollbar visibility).
     ///
-    /// Note: This does NOT apply theme colors. Colors are synced from Zed's
-    /// ThemeRegistry via ThemeBridge::sync_zed_theme_to_zqlz(), which is the
-    /// single source of truth for theme colors.
+    /// Looks up the configured light/dark theme names in `ThemeRegistry`, assigns
+    /// the found configs to `Theme`, then calls `Theme::change()` which applies
+    /// the active config and triggers a repaint.
     pub fn apply(&self, cx: &mut App) {
         let mode = match self.theme_mode {
             ThemeModePreference::Light => ThemeMode::Light,
@@ -158,8 +158,32 @@ impl AppearanceSettings {
             }
         };
 
-        Theme::global_mut(cx).mode = mode;
+        // Resolve theme names and update the Theme global before calling change(),
+        // so the correct configs are active when apply_config() runs inside it.
+        if let Some(light) = ThemeRegistry::global(cx)
+            .themes()
+            .get(&self.light_theme)
+            .cloned()
+        {
+            Theme::global_mut(cx).light_theme = light;
+        }
+        if let Some(dark) = ThemeRegistry::global(cx)
+            .themes()
+            .get(&self.dark_theme)
+            .cloned()
+        {
+            Theme::global_mut(cx).dark_theme = dark;
+        }
+
+        Theme::change(mode, None, cx);
+
+        // Re-apply scrollbar preference after Theme::change() in case apply_config reset it.
         Theme::global_mut(cx).scrollbar_show = self.show_scrollbars.into();
+
+        // Theme::change() only calls window.refresh() when a Window is provided.
+        // When called without one (as here, from the settings panel), we must
+        // explicitly ask every open window to redraw so the new theme is visible.
+        cx.refresh_windows();
     }
 
     /// Apply appearance settings and then reapply font settings.
@@ -386,9 +410,66 @@ impl FontSettings {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorBlink {
+    On,
+    Off,
+    System,
+}
+
+impl Default for CursorBlink {
+    fn default() -> Self {
+        Self::On
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CursorShape {
+    Block,
+    Line,
+    Underline,
+}
+
+impl Default for CursorShape {
+    fn default() -> Self {
+        Self::Line
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScrollBeyondLastLine {
+    Disabled,
+    Enabled,
+    HorizontalScrollbar,
+}
+
+impl Default for ScrollBeyondLastLine {
+    fn default() -> Self {
+        Self::Disabled
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SearchWrap {
+    Disabled,
+    Enabled,
+    NoWrap,
+}
+
+impl Default for SearchWrap {
+    fn default() -> Self {
+        Self::Enabled
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct EditorSettings {
+    // Basic editing
     pub tab_size: u32,
     pub insert_spaces: bool,
     pub show_line_numbers: bool,
@@ -400,6 +481,22 @@ pub struct EditorSettings {
     pub vim_mode_enabled: bool,
     pub highlight_enabled: bool,
     pub sql_dialect: SqlDialect,
+    // Cursor and selection
+    pub cursor_blink: CursorBlink,
+    pub cursor_shape: CursorShape,
+    pub selection_highlight: bool,
+    pub rounded_selection: bool,
+    // Line numbers
+    pub relative_line_numbers: bool,
+    // Scroll behavior
+    pub scroll_beyond_last_line: ScrollBeyondLastLine,
+    pub vertical_scroll_margin: u32,
+    pub horizontal_scroll_margin: u32,
+    pub scroll_sensitivity: f32,
+    pub autoscroll_on_clicks: bool,
+    // Search behavior
+    pub search_wrap: SearchWrap,
+    pub use_smartcase_search: bool,
     // LSP capability settings
     pub lsp_enabled: bool,
     pub lsp_completions_enabled: bool,
@@ -435,6 +532,22 @@ impl Default for EditorSettings {
             vim_mode_enabled: false,
             highlight_enabled: true,
             sql_dialect: SqlDialect::Standard,
+            // Cursor and selection
+            cursor_blink: CursorBlink::On,
+            cursor_shape: CursorShape::Line,
+            selection_highlight: true,
+            rounded_selection: true,
+            // Line numbers
+            relative_line_numbers: false,
+            // Scroll behavior
+            scroll_beyond_last_line: ScrollBeyondLastLine::Disabled,
+            vertical_scroll_margin: 3,
+            horizontal_scroll_margin: 3,
+            scroll_sensitivity: 1.0,
+            autoscroll_on_clicks: true,
+            // Search behavior
+            search_wrap: SearchWrap::Enabled,
+            use_smartcase_search: true,
             // LSP settings - all enabled by default for full IDE experience
             lsp_enabled: true,
             lsp_completions_enabled: true,
@@ -521,5 +634,206 @@ impl WindowAppearanceExt for gpui::WindowAppearance {
             self,
             gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark
         )
+    }
+}
+
+/// EditorConfig provides a direct configuration interface for Zed editors.
+///
+/// This struct allows Zed editors to query settings directly without going through
+/// Zed's SettingsStore. ZQLZ settings remain the source of truth, and this struct
+/// provides a simplified API for editor consumption.
+///
+/// # Usage
+///
+/// ```ignore
+/// use zqlz_settings::EditorConfig;
+///
+/// fn configure_editor(cx: &App) -> EditorConfig {
+///     EditorConfig::new(cx)
+/// }
+/// ```
+#[derive(Clone)]
+pub struct EditorConfig {
+    editor: EditorSettings,
+}
+
+impl EditorConfig {
+    /// Creates a new EditorConfig from the global ZQLZ settings.
+    pub fn new(cx: &App) -> Self {
+        let editor = ZqlzSettings::global(cx).editor.clone();
+        Self { editor }
+    }
+
+    /// Creates a new EditorConfig with the given EditorSettings.
+    pub fn from_settings(editor: EditorSettings) -> Self {
+        Self { editor }
+    }
+
+    /// Returns the tab size for indentation.
+    pub fn tab_size(&self) -> u32 {
+        self.editor.tab_size
+    }
+
+    /// Returns whether to insert spaces instead of tabs.
+    pub fn insert_spaces(&self) -> bool {
+        self.editor.insert_spaces
+    }
+
+    /// Returns whether to show line numbers in the gutter.
+    pub fn show_line_numbers(&self) -> bool {
+        self.editor.show_line_numbers
+    }
+
+    /// Returns whether to wrap lines at the viewport edge.
+    pub fn word_wrap(&self) -> bool {
+        self.editor.word_wrap
+    }
+
+    /// Returns whether to highlight the current line.
+    pub fn highlight_current_line(&self) -> bool {
+        self.editor.highlight_current_line
+    }
+
+    /// Returns whether to show inline diagnostics.
+    pub fn show_inline_diagnostics(&self) -> bool {
+        self.editor.show_inline_diagnostics
+    }
+
+    /// Returns whether to automatically indent new lines.
+    pub fn auto_indent(&self) -> bool {
+        self.editor.auto_indent
+    }
+
+    /// Returns whether to highlight matching brackets.
+    pub fn bracket_matching(&self) -> bool {
+        self.editor.bracket_matching
+    }
+
+    /// Returns whether vim mode is enabled.
+    pub fn vim_mode_enabled(&self) -> bool {
+        self.editor.vim_mode_enabled
+    }
+
+    /// Returns whether syntax highlighting is enabled.
+    pub fn highlight_enabled(&self) -> bool {
+        self.editor.highlight_enabled
+    }
+
+    /// Returns the cursor blink setting.
+    pub fn cursor_blink(&self) -> CursorBlink {
+        self.editor.cursor_blink
+    }
+
+    /// Returns the cursor shape setting.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.editor.cursor_shape
+    }
+
+    /// Returns whether to highlight selections in other parts of the document.
+    pub fn selection_highlight(&self) -> bool {
+        self.editor.selection_highlight
+    }
+
+    /// Returns whether selections should be rounded.
+    pub fn rounded_selection(&self) -> bool {
+        self.editor.rounded_selection
+    }
+
+    /// Returns whether to show relative line numbers.
+    pub fn relative_line_numbers(&self) -> bool {
+        self.editor.relative_line_numbers
+    }
+
+    /// Returns the scroll behavior past the last line.
+    pub fn scroll_beyond_last_line(&self) -> ScrollBeyondLastLine {
+        self.editor.scroll_beyond_last_line
+    }
+
+    /// Returns the vertical scroll margin (number of lines to keep above/below cursor).
+    pub fn vertical_scroll_margin(&self) -> u32 {
+        self.editor.vertical_scroll_margin
+    }
+
+    /// Returns the horizontal scroll margin.
+    pub fn horizontal_scroll_margin(&self) -> u32 {
+        self.editor.horizontal_scroll_margin
+    }
+
+    /// Returns the scroll sensitivity factor.
+    pub fn scroll_sensitivity(&self) -> f32 {
+        self.editor.scroll_sensitivity
+    }
+
+    /// Returns whether to automatically scroll when clicking.
+    pub fn autoscroll_on_clicks(&self) -> bool {
+        self.editor.autoscroll_on_clicks
+    }
+
+    /// Returns the search wrap setting.
+    pub fn search_wrap(&self) -> SearchWrap {
+        self.editor.search_wrap
+    }
+
+    /// Returns whether to use smartcase in search.
+    pub fn use_smartcase_search(&self) -> bool {
+        self.editor.use_smartcase_search
+    }
+
+    /// Returns whether LSP is enabled.
+    pub fn lsp_enabled(&self) -> bool {
+        self.editor.lsp_enabled
+    }
+
+    /// Returns whether LSP completions are enabled.
+    pub fn lsp_completions_enabled(&self) -> bool {
+        self.editor.lsp_completions_enabled
+    }
+
+    /// Returns whether LSP hover is enabled.
+    pub fn lsp_hover_enabled(&self) -> bool {
+        self.editor.lsp_hover_enabled
+    }
+
+    /// Returns whether LSP diagnostics are enabled.
+    pub fn lsp_diagnostics_enabled(&self) -> bool {
+        self.editor.lsp_diagnostics_enabled
+    }
+
+    /// Returns whether LSP code actions are enabled.
+    pub fn lsp_code_actions_enabled(&self) -> bool {
+        self.editor.lsp_code_actions_enabled
+    }
+
+    /// Returns whether LSP rename is enabled.
+    pub fn lsp_rename_enabled(&self) -> bool {
+        self.editor.lsp_rename_enabled
+    }
+
+    /// Returns whether inline suggestions are enabled.
+    pub fn inline_suggestions_enabled(&self) -> bool {
+        self.editor.inline_suggestions_enabled
+    }
+
+    /// Returns whether to show gutter diagnostics.
+    pub fn show_gutter_diagnostics(&self) -> bool {
+        self.editor.show_gutter_diagnostics
+    }
+
+    /// Returns whether to show code folding controls.
+    pub fn show_folding(&self) -> bool {
+        self.editor.show_folding
+    }
+
+    /// Returns a reference to the underlying EditorSettings.
+    pub fn as_settings(&self) -> &EditorSettings {
+        &self.editor
+    }
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            editor: EditorSettings::default(),
+        }
     }
 }

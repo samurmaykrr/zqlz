@@ -1,24 +1,24 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, ClickEvent, DefiniteLength, DismissEvent, Edges,
-    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Pixels, RenderOnce, StyleRefinement, Styled, Window, anchored, div, point,
-    prelude::FluentBuilder as _, px,
+    anchored, div, point, prelude::FluentBuilder as _, px, Animation, AnimationExt as _,
+    AnyElement, App, ClickEvent, DefiniteLength, DismissEvent, Edges, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels,
+    RenderOnce, StyleRefinement, Styled, Window,
 };
 
 use crate::widgets::{
-    ActiveTheme, IconName, Placement, Sizable, StyledExt as _, WindowExt as _,
     actions::Cancel,
     button::{Button, ButtonVariants as _},
     dialog::overlay_color,
     h_flex,
     scroll::ScrollableElement as _,
     title_bar::TITLE_BAR_HEIGHT,
-    v_flex,
+    v_flex, ActiveTheme, IconName, Placement, Sizable, StyledExt as _, WindowExt as _,
 };
 
 const CONTEXT: &str = "Sheet";
+#[allow(dead_code)]
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))])
 }

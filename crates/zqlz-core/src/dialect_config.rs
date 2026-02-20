@@ -453,7 +453,7 @@ pub struct DiagnosticsConfig {
 // ============================================================================
 
 /// Complete dialect definition loaded from all files in dialect/ folder
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct DialectBundle {
     /// Main configuration from config.toml
     pub config: DialectConfig,
@@ -463,17 +463,6 @@ pub struct DialectBundle {
     pub highlights: Option<String>,
     /// Custom validation rules from diagnostics.toml
     pub diagnostics: Option<DiagnosticsConfig>,
-}
-
-impl Default for DialectBundle {
-    fn default() -> Self {
-        Self {
-            config: DialectConfig::default(),
-            completions: CompletionsConfig::default(),
-            highlights: None,
-            diagnostics: None,
-        }
-    }
 }
 
 impl DialectBundle {

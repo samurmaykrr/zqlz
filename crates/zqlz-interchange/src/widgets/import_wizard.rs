@@ -9,20 +9,21 @@ use std::sync::Arc;
 use std::time::Instant;
 use zqlz_core::Connection;
 use zqlz_ui::widgets::{
-    ActiveTheme, IndexPath, Sizable,
+    ActiveTheme, IndexPath, Root, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
+    title_bar::TitleBar,
     v_flex,
 };
 
 use super::types::*;
 use crate::{
     CsvImporter,
-    importer::{GenericImporter, Importer, helpers as udif_helpers},
+    importer::{DegradationSeverity, GenericImporter, Importer, helpers as udif_helpers},
 };
 
 /// Events emitted by the import wizard
@@ -40,8 +41,6 @@ pub enum ImportWizardEvent {
     AddFiles,
     /// User wants to add URL
     AddUrl(String),
-    /// User wants to view the log file
-    ViewLog(PathBuf),
     /// User wants to save a profile
     SaveProfile(ImportProfile),
 }
@@ -178,18 +177,23 @@ pub struct ImportWizard {
     field_name_row_input: Entity<InputState>,
     data_row_start_input: Entity<InputState>,
     data_row_end_input: Entity<InputState>,
+    field_delimiter_input: Entity<InputState>,
     date_delimiter_input: Entity<InputState>,
     time_delimiter_input: Entity<InputState>,
     decimal_input_state: Entity<InputState>,
 
     // Step 3: Target Table
     source_select_state: Entity<SelectState<SearchableVec<SourceItem>>>,
+    target_table_inputs: Vec<Entity<InputState>>,
 
     // Step 5: Import Mode
+    #[allow(dead_code)]
     import_mode_state: Entity<SelectState<SearchableVec<ImportModeItem>>>,
 
     // Scroll handles
+    #[allow(dead_code)]
     scroll_handle: ScrollHandle,
+    #[allow(dead_code)]
     log_scroll_handle: ScrollHandle,
 
     /// Import start time for elapsed calculation
@@ -307,6 +311,17 @@ impl ImportWizard {
         let source_select_state =
             cx.new(|cx| SelectState::new(SearchableVec::new(source_items), source_idx, window, cx));
 
+        // One InputState per target config so each row in Step 3 has its own editable text field.
+        let target_table_inputs: Vec<Entity<InputState>> = initial_state
+            .target_configs
+            .iter()
+            .map(|config| {
+                cx.new(|cx| {
+                    InputState::new(window, cx).default_value(config.target_table.clone())
+                })
+            })
+            .collect();
+
         // Build import mode items
         let mode_items: Vec<ImportModeItem> = ImportMode::all()
             .iter()
@@ -358,6 +373,10 @@ impl ImportWizard {
         let decimal_input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(initial_state.source_format.decimal_symbol.clone())
+        });
+        let field_delimiter_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_state.source_format.field_delimiter.to_string())
         });
 
         // Subscribe to select events
@@ -486,6 +505,37 @@ impl ImportWizard {
             },
         ));
 
+        subscriptions.push(cx.subscribe(
+            &field_delimiter_input,
+            |this, state, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = state.read(cx).value();
+                    // Accept a single character or an escape sequence (\t) for tab.
+                    // Accepting only the first character prevents accidental multi-char values.
+                    if value == "\\t" {
+                        this.state.source_format.field_delimiter = '\t';
+                    } else if let Some(ch) = value.chars().next() {
+                        this.state.source_format.field_delimiter = ch;
+                    }
+                }
+            },
+        ));
+
+        // Subscribe to target table name inputs; each input maps to the config at its index.
+        // The validation error is cleared on any edit so the user gets immediate feedback.
+        for (idx, input) in target_table_inputs.iter().enumerate() {
+            subscriptions.push(cx.subscribe(input, move |this, state, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = state.read(cx).value().to_string();
+                    if let Some(config) = this.state.target_configs.get_mut(idx) {
+                        config.target_table = value;
+                        this.state.target_table_validation_error = None;
+                    }
+                    cx.notify();
+                }
+            }));
+        }
+
         Self {
             focus_handle: cx.focus_handle(),
             state: initial_state,
@@ -497,16 +547,51 @@ impl ImportWizard {
             field_name_row_input,
             data_row_start_input,
             data_row_end_input,
+            field_delimiter_input,
             date_delimiter_input,
             time_delimiter_input,
             decimal_input_state,
             source_select_state,
+            target_table_inputs,
             import_mode_state,
             scroll_handle: ScrollHandle::new(),
             log_scroll_handle: ScrollHandle::new(),
             import_start_time: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Open the import wizard in a new OS window.
+    ///
+    /// Mirrors `ExportWizard::open()` so the import wizard can be launched by
+    /// menu actions and toolbar buttons without requiring a parent view to embed it.
+    pub fn open(
+        initial_state: ImportWizardState,
+        connection: Option<Arc<dyn Connection>>,
+        cx: &mut App,
+    ) {
+        let window_options = WindowOptions {
+            titlebar: Some(TitleBar::title_bar_options()),
+            window_bounds: Some(WindowBounds::centered(size(px(800.0), px(600.0)), cx)),
+            window_min_size: Some(size(px(600.0), px(450.0))),
+            kind: WindowKind::Normal,
+            focus: true,
+            ..Default::default()
+        };
+
+        cx.spawn(async move |cx| {
+            cx.open_window(window_options, |window, cx| {
+                window.activate_window();
+                window.set_window_title("Import Wizard");
+
+                let wizard = cx.new(|cx| ImportWizard::new(initial_state, connection, window, cx));
+
+                cx.new(|cx| Root::new(wizard, window, cx))
+            })?;
+
+            Ok::<_, anyhow::Error>(())
+        })
+        .detach();
     }
 
     pub fn state(&self) -> &ImportWizardState {
@@ -536,17 +621,31 @@ impl ImportWizard {
         }
     }
 
-    /// Add a single file to the import sources
-    pub fn add_file(&mut self, path: PathBuf, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.add_file(path);
-        self.update_source_select(window, cx);
-
-        // If this is a UDIF file, load preview
-        if self.state.is_udif_import() {
-            self.load_udif_preview(cx);
-        }
-
-        cx.notify();
+    /// Add a single file to the import sources.
+    ///
+    /// Format detection (including content-sniffing of `.json` files) is async, so
+    /// the operation is spawned on the foreground executor.  State — including any
+    /// format-conflict error — is updated once detection completes and then a
+    /// `cx.notify()` triggers a re-render.
+    pub fn add_file(&mut self, path: PathBuf, _window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            let detected = ImportFormat::detect(&path).await;
+            _ = this.update(cx, |this, cx| {
+                match this.state.add_file_with_format(path, detected) {
+                    Ok(()) => {
+                        this.state.add_file_error = None;
+                        if this.state.is_udif_import() {
+                            this.load_udif_preview(cx);
+                        }
+                    }
+                    Err(error) => {
+                        this.state.add_file_error = Some(error.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     fn update_source_select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -564,6 +663,14 @@ impl ImportWizard {
         self.source_select_state.update(cx, |state, cx| {
             state.set_items(SearchableVec::new(source_items), window, cx);
         });
+    }
+
+    /// Remove a source file by index, re-derive the detected format from the remaining
+    /// sources, and clear any outstanding add-file error so the user can try again.
+    pub fn remove_file(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.remove_source(index);
+        self.update_source_select(window, cx);
+        cx.notify();
     }
 
     pub fn add_log(&mut self, level: LogLevel, message: impl Into<String>, cx: &mut Context<Self>) {
@@ -630,6 +737,24 @@ impl ImportWizard {
     }
 
     fn go_next(&mut self, cx: &mut Context<Self>) {
+        // Block navigation from the TargetTable step when any table name is blank so the
+        // importer always has a valid destination rather than silently using an empty string.
+        if self.state.current_step == ImportWizardStep::TargetTable
+            && !self.state.validate_target_tables()
+        {
+            cx.notify();
+            return;
+        }
+
+        // Block navigation from the FieldMapping step when every column is skipped;
+        // importing with zero active columns is always an error.
+        if self.state.current_step == ImportWizardStep::FieldMapping
+            && !self.state.validate_field_mappings()
+        {
+            cx.notify();
+            return;
+        }
+
         let is_udif = self.state.is_udif_import();
         if let Some(next) = self.state.current_step.next_for_format(is_udif) {
             self.state.current_step = next;
@@ -694,6 +819,7 @@ impl ImportWizard {
 
     fn start_udif_import(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         let import_state = self.state.clone();
+        let driver_name = connection.driver_name().to_string();
 
         cx.spawn(async move |this, cx| {
             // Get the first source file path
@@ -753,8 +879,20 @@ impl ImportWizard {
                 }
             };
 
-            // Build import options from wizard state (uses to_import_options which includes UDIF settings)
-            let options = import_state.to_import_options();
+            // Build import options — fails if the selected mode is not yet implemented.
+            let options = match import_state.to_import_options() {
+                Ok(options) => options,
+                Err(e) => {
+                    _ = this.update(cx, |this, cx| {
+                        this.state.is_importing = false;
+                        this.state
+                            .add_log(LogLevel::Error, format!("Invalid import mode: {}", e));
+                        cx.emit(ImportWizardEvent::ImportFailed(e.to_string()));
+                        cx.notify();
+                    });
+                    return anyhow::Ok(());
+                }
+            };
 
             // Perform the import
             let importer = GenericImporter::new(connection);
@@ -810,6 +948,23 @@ impl ImportWizard {
                                 .add_log(LogLevel::Warning, warning.message.clone());
                         }
 
+                        // Store the consolidated degradation report for the Summary step
+                        // and navigate there so the user sees what was preserved vs. lost.
+                        this.state.degradation_warnings = result.degradation_warnings;
+                        this.state.current_step = ImportWizardStep::Summary;
+
+                        let source_label = this
+                            .state
+                            .sources
+                            .first()
+                            .map(|s| s.source_name.as_str())
+                            .unwrap_or("unknown");
+                        if let Ok(path) =
+                            this.state.write_log_file(source_label, &driver_name, source_label)
+                        {
+                            this.state.log_file_path = Some(path);
+                        }
+
                         cx.emit(ImportWizardEvent::ImportComplete);
                         cx.notify();
                     });
@@ -832,6 +987,7 @@ impl ImportWizard {
 
     fn start_csv_import(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         let import_state = self.state.clone();
+        let driver_name = connection.driver_name().to_string();
 
         cx.spawn(async move |this, cx| {
             let importer = CsvImporter::new(connection, import_state);
@@ -880,6 +1036,28 @@ impl ImportWizard {
                             );
                         }
 
+                        // CSV imports carry no schema, so the degradation report is always empty.
+                        this.state.degradation_warnings = Vec::new();
+                        this.state.current_step = ImportWizardStep::Summary;
+
+                        let source_label = this
+                            .state
+                            .sources
+                            .first()
+                            .map(|s| s.source_name.as_str())
+                            .unwrap_or("unknown");
+                        let target_label = this
+                            .state
+                            .target_configs
+                            .first()
+                            .map(|c| c.target_table.as_str())
+                            .unwrap_or("unknown");
+                        if let Ok(path) =
+                            this.state.write_log_file(source_label, &driver_name, target_label)
+                        {
+                            this.state.log_file_path = Some(path);
+                        }
+
                         cx.emit(ImportWizardEvent::ImportComplete);
                         cx.notify();
                     });
@@ -900,8 +1078,10 @@ impl ImportWizard {
         .detach();
     }
 
-    fn close(&mut self, cx: &mut Context<Self>) {
+    fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Emit the event first so any observers can react before the window is gone
         cx.emit(ImportWizardEvent::Close);
+        window.remove_window();
     }
 
     fn render_step_indicator(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -912,9 +1092,8 @@ impl ImportWizard {
 
         h_flex()
             .w_full()
-            .px_4()
-            .py_2()
-            .gap_2()
+            .gap_0()
+            .pl_4()
             .border_b_1()
             .border_color(theme.border)
             .children(steps.iter().enumerate().map(|(visual_idx, step)| {
@@ -924,16 +1103,22 @@ impl ImportWizard {
                 let is_done = visual_idx < current_pos;
 
                 div()
-                    .text_xs()
-                    .px_2()
-                    .py_1()
-                    .rounded_sm()
+                    .text_sm()
+                    .px_3()
+                    .py_2()
+                    .border_b_2()
                     .when(is_current, |s| {
-                        s.bg(theme.primary).text_color(theme.primary_foreground)
+                        s.border_color(theme.accent)
+                            .text_color(theme.accent)
+                            .font_weight(FontWeight::SEMIBOLD)
                     })
-                    .when(is_done, |s| s.text_color(theme.success))
+                    .when(is_done, |s| {
+                        s.border_color(transparent_black())
+                            .text_color(theme.foreground)
+                    })
                     .when(!is_current && !is_done, |s| {
-                        s.text_color(theme.muted_foreground)
+                        s.border_color(transparent_black())
+                            .text_color(theme.muted_foreground)
                     })
                     .child(step.display_name())
             }))
@@ -1260,6 +1445,7 @@ impl ImportWizard {
         let sources = self.state.sources.clone();
         let detected_format = self.state.detected_format;
         let is_udif = self.state.is_udif_import();
+        let add_file_error = self.state.add_file_error.clone();
 
         v_flex()
             .w_full()
@@ -1276,8 +1462,29 @@ impl ImportWizard {
                         Button::new("add-file")
                             .child("Add File...")
                             .small()
-                            .on_click(cx.listener(|_this, _: &ClickEvent, _, cx| {
-                                cx.emit(ImportWizardEvent::AddFiles);
+                            .on_click(cx.listener(|_this, _: &ClickEvent, window, cx| {
+                                let view = cx.entity().clone();
+                                let window_handle = window.window_handle();
+                                let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+                                    files: true,
+                                    directories: false,
+                                    multiple: true,
+                                    prompt: Some("Select Files to Import".into()),
+                                });
+
+                                cx.spawn(async move |_handle, cx| {
+                                    if let Ok(Ok(Some(paths))) = receiver.await {
+                                        window_handle.update(cx, |_, window, cx| {
+                                            view.update(cx, |this, cx| {
+                                                for path in paths {
+                                                    this.add_file(path, window, cx);
+                                                }
+                                            });
+                                        })?;
+                                    }
+                                    anyhow::Ok(())
+                                })
+                                .detach();
                             })),
                     )
                     .child(Button::new("add-url").child("Add URL...").small()),
@@ -1357,15 +1564,33 @@ impl ImportWizard {
                                                 .child(source_display),
                                         ),
                                 )
-                                .child(
+                                 .child(
                                     Button::new(format!("remove-{}", idx))
                                         .child("Remove")
                                         .small()
-                                        .ghost(),
-                                )
+                                        .ghost()
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                            this.remove_file(idx, window, cx);
+                                        })),
+                                 )
                         },
                     ))),
             )
+            // Inline format-conflict error shown immediately below the file list so the
+            // user knows why their file was not added without having to read logs.
+            .when_some(add_file_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(theme.danger)
+                                .child(error),
+                        ),
+                )
+            })
     }
 
     fn render_step_2_source_format(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1407,6 +1632,13 @@ impl ImportWizard {
                     .child(self.render_format_row(
                         "Data Row End:",
                         Input::new(&self.data_row_end_input).small().w(px(80.0)),
+                        cx,
+                    ))
+                    .child(self.render_format_row(
+                        "Field Delimiter:",
+                        Input::new(&self.field_delimiter_input)
+                            .small()
+                            .w(px(60.0)),
                         cx,
                     )),
             )
@@ -1466,6 +1698,7 @@ impl ImportWizard {
     fn render_step_3_target_table(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let configs = self.state.target_configs.clone();
+        let target_table_validation_error = self.state.target_table_validation_error.clone();
 
         v_flex()
             .w_full()
@@ -1521,6 +1754,7 @@ impl ImportWizard {
                                     ),
                             )
                             .children(configs.iter().enumerate().map(|(idx, config)| {
+                                let input = self.target_table_inputs.get(idx).cloned();
                                 h_flex()
                                     .w_full()
                                     .px_2()
@@ -1538,21 +1772,38 @@ impl ImportWizard {
                                     .child(
                                         div()
                                             .flex_1()
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .child(config.target_table.clone()),
+                                            .when_some(input, |this, input_state| {
+                                                this.child(Input::new(&input_state).small())
+                                            }),
                                     )
                                     .child(
                                         div()
                                             .w(px(100.0))
                                             .child(
                                                 Checkbox::new(format!("create-{}", idx))
-                                                    .checked(config.create_new_table),
+                                                    .checked(config.create_new_table)
+                                                    .on_click(cx.listener(
+                                                        move |this, _new_checked: &bool, _, cx| {
+                                                            if let Some(cfg) = this.state.target_configs.get_mut(idx) {
+                                                                cfg.create_new_table = !cfg.create_new_table;
+                                                            }
+                                                            cx.notify();
+                                                        },
+                                                    )),
                                             ),
                                     )
                             })),
                     ),
             )
+            // Inline error shown below the table when any target table name is blank.
+            .when_some(target_table_validation_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
+                )
+            })
     }
 
     fn render_step_4_field_mapping(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1563,6 +1814,7 @@ impl ImportWizard {
             .get(&self.state.selected_mapping_index)
             .cloned()
             .unwrap_or_default();
+        let field_mapping_validation_error = self.state.field_mapping_validation_error.clone();
 
         v_flex()
             .w_full()
@@ -1666,18 +1918,55 @@ impl ImportWizard {
                                     .child(
                                         div().w(px(60.0)).child(
                                             Checkbox::new(format!("pk-{}", idx))
-                                                .checked(mapping.is_primary_key),
+                                                .checked(mapping.is_primary_key)
+                                                .on_click(cx.listener(
+                                                    move |this, _new_checked: &bool, _, cx| {
+                                                        let source_idx =
+                                                            this.state.selected_mapping_index;
+                                                        if let Some(mappings) =
+                                                            this.state.field_mappings.get_mut(&source_idx)
+                                                        {
+                                                            if let Some(m) = mappings.get_mut(idx) {
+                                                                m.is_primary_key = !m.is_primary_key;
+                                                            }
+                                                        }
+                                                        cx.notify();
+                                                    },
+                                                )),
                                         ),
                                     )
                                     .child(
                                         div().w(px(60.0)).child(
                                             Checkbox::new(format!("skip-{}", idx))
-                                                .checked(mapping.skip),
+                                                .checked(mapping.skip)
+                                                .on_click(cx.listener(
+                                                    move |this, _new_checked: &bool, _, cx| {
+                                                        let source_idx =
+                                                            this.state.selected_mapping_index;
+                                                        if let Some(mappings) =
+                                                            this.state.field_mappings.get_mut(&source_idx)
+                                                        {
+                                                            if let Some(m) = mappings.get_mut(idx) {
+                                                                m.skip = !m.skip;
+                                                            }
+                                                        }
+                                                        cx.notify();
+                                                    },
+                                                )),
                                         ),
                                     )
                             })),
                     ),
             )
+            // Inline error shown below the mapping table when all columns are skipped.
+            .when_some(field_mapping_validation_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
+                )
+            })
     }
 
     fn render_step_5_import_mode(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1782,25 +2071,41 @@ impl ImportWizard {
                 .child(v_flex().w_full().gap_1().children(
                     ImportMode::all().iter().map(|mode| {
                         let is_selected = self.state.import_mode == *mode;
-                        h_flex()
+                        let is_supported = mode.is_supported();
+                        let mode = *mode;
+                        // Each row needs an id to receive click events.
+                        div()
+                            .id(SharedString::from(format!("import-mode-{}", mode.short_name())))
                             .w_full()
                             .px_2()
                             .py_1()
                             .gap_2()
+                            .flex()
+                            .flex_row()
                             .items_center()
                             .rounded_sm()
-                            .when(is_selected, |s| s.bg(theme.list_active))
+                            // Only highlight selected state for supported modes; unsupported modes
+                            // can never become selected via the UI.
+                            .when(is_selected && is_supported, |s| s.bg(theme.list_active))
+                            .when(is_supported, |s| {
+                                s.cursor_pointer().on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        this.state.import_mode = mode;
+                                        cx.notify();
+                                    },
+                                ))
+                            })
                             .child(
                                 div()
                                     .size_4()
                                     .rounded_full()
                                     .border_1()
-                                    .border_color(if is_selected {
+                                    .border_color(if is_selected && is_supported {
                                         theme.primary
                                     } else {
                                         theme.border
                                     })
-                                    .when(is_selected, |s| {
+                                    .when(is_selected && is_supported, |s| {
                                         s.child(
                                             div()
                                                 .size_2()
@@ -1811,11 +2116,34 @@ impl ImportWizard {
                                     }),
                             )
                             .child(
-                                div()
+                                h_flex()
                                     .flex_1()
-                                    .text_sm()
-                                    .text_color(theme.foreground)
-                                    .child(mode.display_name()),
+                                    .gap_2()
+                                    .items_center()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            // Mute unsupported modes so users understand they
+                                            // cannot be chosen without implementation work.
+                                            .text_color(if is_supported {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(mode.display_name()),
+                                    )
+                                    .when(!is_supported, |s| {
+                                        s.child(
+                                            div()
+                                                .text_xs()
+                                                .px_1p5()
+                                                .py_0p5()
+                                                .rounded_sm()
+                                                .bg(theme.secondary)
+                                                .text_color(theme.muted_foreground)
+                                                .child("Not yet supported"),
+                                        )
+                                    }),
                             )
                     }),
                 ))
@@ -2078,6 +2406,135 @@ impl ImportWizard {
             )
     }
 
+    /// Render the Summary step, which surfaces any schema features that were
+    /// degraded or dropped during a UDIF import.
+    ///
+    /// Showing this as a dedicated step gives users a chance to review fidelity
+    /// losses before they close the wizard — important for cross-DB migrations
+    /// where silent degradation (e.g. a GIN index silently created as BTREE)
+    /// would otherwise go unnoticed.
+    fn render_step_7_summary(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let warnings = &self.state.degradation_warnings;
+
+        v_flex()
+            .w_full()
+            .h_full()
+            .gap_3()
+            .p_4()
+            // Header
+            .child(
+                h_flex()
+                    .w_full()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(theme.foreground)
+                            .child("Schema Degradation Report"),
+                    ),
+            )
+            .child(if warnings.is_empty() {
+                div()
+                    .w_full()
+                    .p_3()
+                    .rounded_md()
+                    .bg(theme.secondary)
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child("Schema imported with full fidelity — no features were degraded or dropped.")
+                    .into_any_element()
+            } else {
+                let warnings = warnings.clone();
+                v_flex()
+                    .w_full()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!(
+                                "{} schema feature(s) could not be fully preserved on the target database:",
+                                warnings.len()
+                            )),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .border_1()
+                            .border_color(theme.border)
+                            .rounded_md()
+                            .overflow_y_scrollbar()
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .gap_px()
+                                    .children(warnings.iter().map(|w| {
+                                        let severity_color = match w.severity {
+                                            DegradationSeverity::Warning => theme.warning,
+                                            DegradationSeverity::Dropped => theme.danger,
+                                        };
+                                        let category_label = w.category.display_name().to_string();
+                                        let table = w.table_name.clone();
+                                        let object = w.object_name.clone().unwrap_or_default();
+                                        let source = w.source_feature.clone();
+                                        let action = w.target_action.clone();
+                                        let severity_label = w.severity.display_name().to_string();
+
+                                        h_flex()
+                                            .w_full()
+                                            .gap_2()
+                                            .px_2()
+                                            .py_1()
+                                            .border_b_1()
+                                            .border_color(theme.border)
+                                            // Severity badge
+                                            .child(
+                                                div()
+                                                    .w(px(60.0))
+                                                    .text_xs()
+                                                    .text_color(severity_color)
+                                                    .font_weight(FontWeight::SEMIBOLD)
+                                                    .child(severity_label),
+                                            )
+                                            // Category
+                                            .child(
+                                                div()
+                                                    .w(px(100.0))
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(category_label),
+                                            )
+                                            // Table + object
+                                            .child(
+                                                div()
+                                                    .w(px(140.0))
+                                                    .text_xs()
+                                                    .text_color(theme.foreground)
+                                                    .child(if object.is_empty() {
+                                                        table
+                                                    } else {
+                                                        format!("{}.{}", table, object)
+                                                    }),
+                                            )
+                                            // Source feature → target action
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_xs()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child(format!("{} → {}", source, action)),
+                                            )
+                                    })),
+                            ),
+                    )
+                    .into_any_element()
+            })
+    }
+
     fn render_footer(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let step = self.state.current_step;
@@ -2100,15 +2557,17 @@ impl ImportWizard {
             .child(
                 Button::new("close")
                     .child("Close")
+                    .ghost()
                     .small()
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.close(cx);
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        this.close(window, cx);
                     })),
             )
             .when(can_go_back && !is_importing, |s| {
                 s.child(
                     Button::new("back")
                         .child("Back")
+                        .ghost()
                         .small()
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             this.go_back(cx);
@@ -2145,7 +2604,7 @@ impl ImportWizard {
                     self.state.log_file_path.clone(),
                     |button, path| {
                         button.on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
-                            cx.emit(ImportWizardEvent::ViewLog(path.clone()));
+                            cx.open_url(&format!("file://{}", path.display()));
                         }))
                     },
                 ))
@@ -2167,6 +2626,8 @@ impl Render for ImportWizard {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
+            // Title bar reserves space for the macOS traffic light buttons and provides a drag region
+            .child(TitleBar::new())
             .child(self.render_step_indicator(cx))
             .child(
                 div()
@@ -2191,6 +2652,9 @@ impl Render for ImportWizard {
                         }
                         ImportWizardStep::Progress => {
                             self.render_step_6_progress(cx).into_any_element()
+                        }
+                        ImportWizardStep::Summary => {
+                            self.render_step_7_summary(cx).into_any_element()
                         }
                     }),
             )

@@ -3,10 +3,9 @@
 //! Loads keyboard shortcuts from JSON files based on the current OS.
 //! The keymap files are stored in `assets/keymaps/` directory.
 
-use gpui::{App, DummyKeyboardMapper, KeyBinding, KeyBindingContextPredicate};
+use gpui::{App, KeyBinding};
 use serde::Deserialize;
 use std::collections::HashMap;
-use zqlz_zed_adapter::actions as zed_actions;
 
 // Embed keymap files at compile time
 #[cfg(target_os = "macos")]
@@ -96,6 +95,7 @@ pub fn load_keymaps(cx: &mut App) {
 /// Returns true if the action was found and bound, false otherwise.
 fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option<&str>) -> bool {
     use crate::actions::*;
+    use zqlz_text_editor::actions as editor;
 
     // Macro to reduce boilerplate - creates the binding for a given action type
     macro_rules! bind {
@@ -169,112 +169,90 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "query_editor::FindPrevious" => bind!(FindPrevious),
         "query_editor::ToggleProblemsPanel" => bind!(ToggleProblemsPanel),
 
-        // === editor namespace (Zed editor actions) ===
-        // These actions are re-exported from zqlz-zed-adapter and bound here.
-        // Actions defined via the actions!() macro in Zed are automatically registered
-        // in GPUI's action system when the editor crate is imported.
-        // We bind the commonly-used editor actions that have public struct definitions.
-        "editor::SelectNext" => bind!(zed_actions::SelectNext::default()),
-        "editor::SelectPrevious" => bind!(zed_actions::SelectPrevious::default()),
-        "editor::MoveToBeginningOfLine" => {
-            bind!(zed_actions::MoveToBeginningOfLine::default())
-        }
-        "editor::MoveToEndOfLine" => bind!(zed_actions::MoveToEndOfLine::default()),
-        "editor::SelectToBeginningOfLine" => {
-            bind!(zed_actions::SelectToBeginningOfLine::default())
-        }
-        "editor::SelectToEndOfLine" => {
-            bind!(zed_actions::SelectToEndOfLine::default())
-        }
-        "editor::DeleteToBeginningOfLine" => {
-            bind!(zed_actions::DeleteToBeginningOfLine::default())
-        }
-        "editor::DeleteToEndOfLine" => {
-            bind!(zed_actions::DeleteToEndOfLine::default())
-        }
-        "editor::DeleteToPreviousWordStart" => {
-            bind!(zed_actions::DeleteToPreviousWordStart::default())
-        }
-        "editor::DeleteToNextWordEnd" => {
-            bind!(zed_actions::DeleteToNextWordEnd::default())
-        }
-        "editor::MoveUpByLines" => bind!(zed_actions::MoveUpByLines::default()),
-        "editor::MoveDownByLines" => bind!(zed_actions::MoveDownByLines::default()),
-        "editor::MovePageUp" => bind!(zed_actions::MovePageUp::default()),
-        "editor::MovePageDown" => bind!(zed_actions::MovePageDown::default()),
-        "editor::SelectUpByLines" => bind!(zed_actions::SelectUpByLines::default()),
-        "editor::SelectDownByLines" => {
-            bind!(zed_actions::SelectDownByLines::default())
-        }
-        "editor::ToggleComments" => bind!(zed_actions::ToggleComments::default()),
-        "editor::ConfirmCompletion" => {
-            bind!(zed_actions::ConfirmCompletion::default())
-        }
-        "editor::ConfirmCodeAction" => {
-            bind!(zed_actions::ConfirmCodeAction::default())
-        }
-        "editor::CutToEndOfLine" => bind!(zed_actions::CutToEndOfLine {
-            stop_at_newlines: false
-        }),
+        // === editor namespace — mapped to zqlz_text_editor::actions ===
+        "editor::MoveLeft" => bind!(editor::MoveLeft),
+        "editor::MoveRight" => bind!(editor::MoveRight),
+        "editor::MoveUp" => bind!(editor::MoveUp),
+        "editor::MoveDown" => bind!(editor::MoveDown),
+        "editor::MoveToBeginningOfLine" => bind!(editor::MoveToBeginningOfLine),
+        "editor::MoveToEndOfLine" => bind!(editor::MoveToEndOfLine),
+        "editor::MoveToBeginning" => bind!(editor::MoveToBeginning),
+        "editor::MoveToEnd" => bind!(editor::MoveToEnd),
+        "editor::MoveToPreviousWordStart" => bind!(editor::MoveToPreviousWordStart),
+        "editor::MoveToNextWordEnd" => bind!(editor::MoveToNextWordEnd),
+        "editor::PageUp" => bind!(editor::PageUp),
+        "editor::PageDown" => bind!(editor::PageDown),
+        "editor::SelectLeft" => bind!(editor::SelectLeft),
+        "editor::SelectRight" => bind!(editor::SelectRight),
+        "editor::SelectUp" => bind!(editor::SelectUp),
+        "editor::SelectDown" => bind!(editor::SelectDown),
+        "editor::SelectToBeginningOfLine" => bind!(editor::SelectToBeginningOfLine),
+        "editor::SelectToEndOfLine" => bind!(editor::SelectToEndOfLine),
+        "editor::SelectToBeginning" => bind!(editor::SelectToBeginning),
+        "editor::SelectToEnd" => bind!(editor::SelectToEnd),
+        "editor::SelectToPreviousWordStart" => bind!(editor::SelectToPreviousWordStart),
+        "editor::SelectToNextWordEnd" => bind!(editor::SelectToNextWordEnd),
+        "editor::SelectAll" => bind!(editor::SelectAll),
+        "editor::Backspace" => bind!(editor::Backspace),
+        "editor::Delete" => bind!(editor::Delete),
+        "editor::Newline" => bind!(editor::Newline),
+        "editor::Tab" => bind!(editor::Tab),
+        "editor::Copy" => bind!(editor::Copy),
+        "editor::Cut" => bind!(editor::Cut),
+        "editor::Paste" => bind!(editor::Paste),
+        "editor::Undo" => bind!(editor::Undo),
+        "editor::Redo" => bind!(editor::Redo),
+        "editor::OpenFind" => bind!(editor::OpenFind),
+        "editor::OpenFindReplace" => bind!(editor::OpenFindReplace),
+        "editor::FindNext" => bind!(editor::FindNext),
+        "editor::FindPrevious" => bind!(editor::FindPrevious),
+        "editor::TriggerCompletion" => bind!(editor::TriggerCompletion),
+        "editor::AcceptCompletion" => bind!(editor::AcceptCompletion),
+        "editor::DismissCompletion" => bind!(editor::DismissCompletion),
+        "editor::Escape" => bind!(editor::Escape),
+        // Actions that exist in the JSON but have no equivalent yet — silently ignored.
+        "editor::SelectNext"
+        | "editor::SelectPrevious"
+        | "editor::SelectNextMatch"
+        | "editor::SelectPreviousMatch"
+        | "editor::SelectAllMatches"
+        | "editor::SelectLine"
+        | "editor::AddSelectionAbove"
+        | "editor::AddSelectionBelow"
+        | "editor::UndoSelection"
+        | "editor::DeleteToBeginningOfLine"
+        | "editor::DeleteToEndOfLine"
+        | "editor::DeleteToPreviousWordStart"
+        | "editor::DeleteToNextWordEnd"
+        | "editor::DeleteLine"
+        | "editor::DuplicateLineDown"
+        | "editor::MoveLineUp"
+        | "editor::MoveLineDown"
+        | "editor::JoinLines"
+        | "editor::Transpose"
+        | "editor::Indent"
+        | "editor::Outdent"
+        | "editor::Fold"
+        | "editor::UnfoldLines"
+        | "editor::FoldAll"
+        | "editor::UnfoldAll"
+        | "editor::FoldAtLevel1"
+        | "editor::FoldAtLevel2"
+        | "editor::FoldAtLevel3"
+        | "editor::FoldAtLevel4"
+        | "editor::FoldAtLevel5"
+        | "editor::FoldAtLevel6"
+        | "editor::FoldAtLevel7"
+        | "editor::FoldAtLevel8"
+        | "editor::FoldAtLevel9"
+        | "editor::ToggleComments"
+        | "editor::FindNextMatch"
+        | "editor::FindPreviousMatch"
+        | "editor::SelectPageUp"
+        | "editor::SelectPageDown" => false,
 
-        // For editor:: actions defined via actions!() macro, use build_action
-        // to create them dynamically from their string names.
-        action_name if action_name.starts_with("editor::") => {
-            match cx.build_action(action_name, None) {
-                Ok(action) => {
-                    let context_predicate =
-                        context.map(|c| gpui::KeyBindingContextPredicate::parse(c).unwrap().into());
-                    cx.bind_keys([KeyBinding::load(
-                        keystroke,
-                        action,
-                        context_predicate,
-                        false,
-                        None,
-                        &DummyKeyboardMapper,
-                    )
-                    .unwrap()]);
-                    tracing::debug!("Bound {} -> {} via build_action", keystroke, action_name);
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Cannot bind '{}' - build_action failed: {:?}",
-                        action_name,
-                        e
-                    );
-                    false
-                }
-            }
-        }
-
-        // For buffer_search:: actions, also use build_action
-        action_name if action_name.starts_with("buffer_search::") => {
-            match cx.build_action(action_name, None) {
-                Ok(action) => {
-                    let context_predicate =
-                        context.map(|c| KeyBindingContextPredicate::parse(c).unwrap().into());
-                    cx.bind_keys([KeyBinding::load(
-                        keystroke,
-                        action,
-                        context_predicate,
-                        false,
-                        None,
-                        &DummyKeyboardMapper,
-                    )
-                    .unwrap()]);
-                    tracing::debug!("Bound {} -> {} via build_action", keystroke, action_name);
-                    true
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "Cannot bind '{}' - build_action failed: {:?}",
-                        action_name,
-                        e
-                    );
-                    false
-                }
-            }
-        }
+        // For buffer_search:: actions, silently ignored (find/replace is built into the editor).
+        action_name if action_name.starts_with("buffer_search::") => false,
 
         // === table_viewer namespace ===
         "table_viewer::CancelCellEditing" => bind!(CancelCellEditing),

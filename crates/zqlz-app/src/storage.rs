@@ -10,7 +10,7 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -58,6 +58,8 @@ pub struct LocalStorage {
     secure_storage: SecureStorage,
 }
 
+#[allow(dead_code)]
+#[allow(dead_code)]
 impl LocalStorage {
     /// Create a new local storage instance
     pub fn new() -> Result<Self> {
@@ -643,6 +645,7 @@ impl Default for LocalStorage {
 /// Type of SQL template
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
 pub enum TemplateType {
     /// Plain SQL with simple variable substitution
     #[default]
@@ -651,6 +654,7 @@ pub enum TemplateType {
     DbtModel,
 }
 
+#[allow(dead_code)]
 impl TemplateType {
     /// Convert to string for storage
     pub fn as_str(&self) -> &'static str {
@@ -677,6 +681,7 @@ impl std::fmt::Display for TemplateType {
 
 /// A saved SQL template with parameters
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct SavedTemplate {
     /// Unique identifier
     pub id: Uuid,
@@ -750,6 +755,7 @@ impl SavedTemplate {
     }
 
     /// Auto-detect template type from SQL content
+    #[allow(dead_code)]
     pub fn detect_template_type(sql: &str) -> TemplateType {
         // Check for DBT-specific functions
         let dbt_patterns = [
@@ -763,6 +769,7 @@ impl SavedTemplate {
     }
 }
 
+#[allow(dead_code)]
 impl LocalStorage {
     /// Initialize the templates table (call in initialize_schema)
     pub fn initialize_templates_schema(&self) -> Result<()> {
@@ -783,7 +790,9 @@ impl LocalStorage {
             [],
         )?;
 
-        // Migration: Add template_type column if it doesn't exist (for existing databases)
+        // Migration: Add template_type column if it doesn't exist (for existing databases).
+        // Error is intentionally ignored — the column already exists in up-to-date databases and
+        // SQLite returns an error for duplicate ADD COLUMN rather than a no-op.
         let _ = conn.execute(
             "ALTER TABLE templates ADD COLUMN template_type TEXT NOT NULL DEFAULT 'plain_sql'",
             [],

@@ -17,6 +17,7 @@ use super::super::filter_types::{
 
 /// Serializable filter condition for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct StoredFilterCondition {
     id: usize,
     enabled: bool,
@@ -45,6 +46,7 @@ impl From<&FilterCondition> for StoredFilterCondition {
 }
 
 impl StoredFilterCondition {
+    #[allow(dead_code)]
     fn to_filter_condition(&self) -> FilterCondition {
         FilterCondition {
             id: self.id,
@@ -61,6 +63,7 @@ impl StoredFilterCondition {
 
 /// Serializable sort criterion for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct StoredSortCriterion {
     id: usize,
     column: String,
@@ -78,6 +81,7 @@ impl From<&SortCriterion> for StoredSortCriterion {
 }
 
 impl StoredSortCriterion {
+    #[allow(dead_code)]
     fn to_sort_criterion(&self) -> SortCriterion {
         SortCriterion {
             id: self.id,
@@ -93,6 +97,7 @@ impl StoredSortCriterion {
 
 /// Serializable column visibility for storage
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 struct StoredColumnVisibility {
     name: String,
     data_type: String,
@@ -110,6 +115,7 @@ impl From<&ColumnVisibility> for StoredColumnVisibility {
 }
 
 impl StoredColumnVisibility {
+    #[allow(dead_code)]
     fn to_column_visibility(&self) -> ColumnVisibility {
         ColumnVisibility {
             name: self.name.clone(),
@@ -119,6 +125,7 @@ impl StoredColumnVisibility {
     }
 }
 
+#[allow(dead_code)]
 fn parse_filter_operator(s: &str) -> FilterOperator {
     match s {
         "Equal" => FilterOperator::Equal,
@@ -146,6 +153,7 @@ fn parse_filter_operator(s: &str) -> FilterOperator {
     }
 }
 
+#[allow(dead_code)]
 fn parse_logical_operator(s: &str) -> LogicalOperator {
     match s {
         "Or" => LogicalOperator::Or,
@@ -154,6 +162,7 @@ fn parse_logical_operator(s: &str) -> LogicalOperator {
 }
 
 /// Handle for database connections - either owned or shared
+#[allow(dead_code)]
 enum ConnectionHandle {
     Owned(Connection),
     Shared(Arc<Mutex<Connection>>),
@@ -174,6 +183,7 @@ impl ConnectionHandle {
 }
 
 /// Storage for filter presets using SQLite
+#[allow(dead_code)]
 pub struct FilterPresetStorage {
     db_path: PathBuf,
     /// Holds the connection for in-memory databases (where each open creates a new db)
@@ -508,8 +518,8 @@ mod tests {
     fn test_list_for_table() {
         let storage = FilterPresetStorage::in_memory().unwrap();
 
-        let mut preset1 = FilterProfile::new("Preset A".to_string(), "users".to_string());
-        let mut preset2 = FilterProfile::new("Preset B".to_string(), "users".to_string());
+        let preset1 = FilterProfile::new("Preset A".to_string(), "users".to_string());
+        let preset2 = FilterProfile::new("Preset B".to_string(), "users".to_string());
         let preset3 = FilterProfile::new("Preset C".to_string(), "orders".to_string());
 
         let id1 = Uuid::new_v4();

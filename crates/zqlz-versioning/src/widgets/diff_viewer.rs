@@ -4,14 +4,13 @@
 
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, Sizable,
     button::{Button, ButtonVariant, ButtonVariants},
     dock::{Panel, PanelEvent, PanelState},
-    h_flex, v_flex,
+    h_flex, v_flex, ActiveTheme, Sizable,
 };
 
-use crate::VersionDiff;
 use crate::diff::{Change, ChangeType};
+use crate::VersionDiff;
 
 /// Display mode for the diff viewer
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -83,7 +82,10 @@ impl DiffViewer {
 
     fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let diff = self.diff.as_ref().unwrap();
+        let diff = self
+            .diff
+            .as_ref()
+            .expect("render_header is only called when self.diff is Some");
         let from_short = diff.from_version.short_id();
         let to_short = diff.to_version.short_id();
         let from_msg = diff.from_version.message.clone();
@@ -149,7 +151,10 @@ impl DiffViewer {
 
     fn render_unified_diff(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let diff = self.diff.as_ref().unwrap();
+        let diff = self
+            .diff
+            .as_ref()
+            .expect("render_unified_diff is only called when self.diff is Some");
 
         v_flex()
             .id("unified-diff-content")
@@ -196,7 +201,10 @@ impl DiffViewer {
 
     fn render_side_by_side(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let diff = self.diff.as_ref().unwrap();
+        let diff = self
+            .diff
+            .as_ref()
+            .expect("render_side_by_side is only called when self.diff is Some");
 
         let (left_lines, right_lines) = self.split_changes(&diff.changes);
 

@@ -1,5 +1,6 @@
 use super::*;
 
+#[allow(dead_code)]
 impl TableViewerDelegate {
     pub fn is_boolean_column(&self, data_col_ix: usize) -> bool {
         self.column_meta

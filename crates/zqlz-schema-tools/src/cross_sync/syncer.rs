@@ -452,11 +452,12 @@ impl CrossDatabaseSync {
 
     /// Calculates statistics from the diff
     fn calculate_stats(&self, diff: &SchemaDiff) -> SyncStats {
-        let mut stats = SyncStats::default();
-
-        stats.tables_added = diff.added_tables.len();
-        stats.tables_removed = diff.removed_tables.len();
-        stats.tables_modified = diff.modified_tables.len();
+        let mut stats = SyncStats {
+            tables_added: diff.added_tables.len(),
+            tables_removed: diff.removed_tables.len(),
+            tables_modified: diff.modified_tables.len(),
+            ..Default::default()
+        };
 
         for table_diff in &diff.modified_tables {
             stats.columns_added += table_diff.added_columns.len();

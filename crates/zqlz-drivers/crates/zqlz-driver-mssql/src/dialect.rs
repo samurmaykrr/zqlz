@@ -200,7 +200,7 @@ impl MssqlDialect {
         }
 
         // Starts with a digit
-        if ident.chars().next().map_or(false, |c| c.is_ascii_digit()) {
+        if ident.chars().next().is_some_and(|c| c.is_ascii_digit()) {
             return true;
         }
 

@@ -4,7 +4,6 @@ use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     button::ButtonVariant,
-    checkbox::Checkbox,
     dialog::DialogButtonProps,
     v_flex,
 };
@@ -14,6 +13,7 @@ use crate::components::ObjectsPanelEvent;
 use crate::MainView;
 
 impl MainView {
+    #[allow(dead_code)]
     pub(in crate::main_view) fn delete_table(
         &mut self,
         connection_id: Uuid,
@@ -77,7 +77,7 @@ impl MainView {
                     let objects_panel = objects_panel.clone();
                     let table_name = table_name.clone();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let sql = format!("DROP TABLE \"{}\"", table_name);
                         match connection.execute(&sql, &[]).await {
                             Ok(_) => {
@@ -217,7 +217,7 @@ impl MainView {
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
-                    cx.spawn(async move |mut cx| {
+                    cx.spawn(async move |cx| {
                         let mut errors: Vec<String> = Vec::new();
                         let mut deleted_tables: Vec<String> = Vec::new();
 
