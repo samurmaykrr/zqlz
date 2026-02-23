@@ -217,9 +217,16 @@ impl ConnectionSidebar {
                         .size_3()
                         .when(!has_schema, |el| el.text_color(muted_fg_half)),
                 )
-                .child(db_name.clone())
+                .child(
+                    div()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(db_name.clone()),
+                )
                 .when_some(size_label, |el, size| {
-                    el.child(caption(size).color(muted_fg_dim))
+                    el.child(caption(size).color(muted_fg_dim).flex_shrink_0())
                 });
 
             node = node.child(db_row);

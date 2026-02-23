@@ -7,7 +7,7 @@
 //!
 //! ZQLZ uses a consistent typography system:
 //! - **UI Font**: Inter - Used for all UI text (labels, buttons, menus)
-//! - **Mono Font**: JetBrains Mono - Used for SQL, code, and data display
+//! - **Mono Font**: Geist Mono - Used for SQL, code, and data display
 //!
 //! ## Usage
 //!
@@ -24,7 +24,7 @@
 //!
 //! // ❌ WRONG: Hard-coded fonts
 //! .font_family("monospace")
-//! .font_family("JetBrains Mono")
+//! .font_family("Geist Mono")
 //! ```
 
 use gpui::*;
@@ -33,7 +33,7 @@ use gpui::*;
 pub const BRAND_UI_FONT: &str = "Inter";
 
 /// ZQLZ brand font for code/SQL/data display
-pub const BRAND_MONO_FONT: &str = "JetBrains Mono";
+pub const BRAND_MONO_FONT: &str = "Geist Mono";
 
 /// System font identifier (fallback for UI)
 pub const SYSTEM_UI_FONT: &str = ".SystemUIFont";
@@ -48,7 +48,7 @@ pub const SYSTEM_MONO_FONT_LINUX: &str = "DejaVu Sans Mono";
 /// Use these functions for consistent sizing across the UI.
 /// These correspond to the TextVariant sizes in typography.rs.
 pub mod sizes {
-    use gpui::{Pixels, px};
+    use gpui::{px, Pixels};
 
     /// Extra small text (12px) - captions, badges
     pub fn xs() -> Pixels {
@@ -83,8 +83,8 @@ const INTER_SEMIBOLD: &[u8] = include_bytes!("../assets/fonts/Inter-SemiBold.ttf
 const INTER_BOLD: &[u8] = include_bytes!("../assets/fonts/Inter-Bold.ttf");
 
 // Monospace
-const JETBRAINS_MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Regular.ttf");
-const JETBRAINS_MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf");
+const GEIST_MONO_REGULAR: &[u8] = include_bytes!("../assets/fonts/GeistMono-Regular.ttf");
+const GEIST_MONO_BOLD: &[u8] = include_bytes!("../assets/fonts/GeistMono-Bold.ttf");
 
 /// Register all embedded fonts with GPUI
 ///
@@ -109,15 +109,15 @@ pub fn register_fonts(cx: &mut App) {
         }
     }
 
-    // Register JetBrains Mono family (monospace font)
-    tracing::info!("Registering JetBrains Mono fonts (2 variants)...");
-    match cx.text_system().add_fonts(vec![
-        JETBRAINS_MONO_REGULAR.into(),
-        JETBRAINS_MONO_BOLD.into(),
-    ]) {
-        Ok(_) => tracing::info!("✓ JetBrains Mono fonts registered successfully"),
+    // Register Geist Mono family (monospace font)
+    tracing::info!("Registering Geist Mono fonts (2 variants)...");
+    match cx
+        .text_system()
+        .add_fonts(vec![GEIST_MONO_REGULAR.into(), GEIST_MONO_BOLD.into()])
+    {
+        Ok(_) => tracing::info!("✓ Geist Mono fonts registered successfully"),
         Err(e) => {
-            tracing::error!("✗ Failed to load JetBrains Mono fonts: {}", e);
+            tracing::error!("✗ Failed to load Geist Mono fonts: {}", e);
             tracing::warn!("Continuing with system fonts...");
         }
     }
@@ -132,7 +132,7 @@ pub fn brand_ui_font() -> SharedString {
     BRAND_UI_FONT.into()
 }
 
-/// Get the brand monospace font family (JetBrains Mono)
+/// Get the brand monospace font family (Geist Mono)
 ///
 /// This is the recommended font for code, SQL, and data display.
 pub fn brand_mono_font() -> SharedString {

@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Corner, Div, Edges, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, App, Corner, Div, Edges, ElementId,
+    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::{Tab, TabVariant};
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{DropdownMenu as _, PopupMenuItem};
-use crate::widgets::{ActiveTheme, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, IconName, Selectable, Sizable, Size, StyledExt};
 
 /// A TabBar element that contains multiple [`Tab`] items.
 #[derive(IntoElement)]
@@ -271,6 +271,7 @@ impl RenderOnce for TabBar {
                         .xsmall()
                         .ghost()
                         .icon(IconName::ChevronDown)
+                        .tooltip("More tabs")
                         .dropdown_menu(move |mut this, _, _| {
                             this = this.scrollable(true);
                             for (ix, (label, disabled)) in item_labels.iter().enumerate() {

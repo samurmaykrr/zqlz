@@ -1,8 +1,8 @@
-use crate::widgets::{ActiveTheme, Disableable, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, Disableable, StyledExt};
 use gpui::{
-    AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, prelude::FluentBuilder as _,
+    prelude::FluentBuilder as _, AnyElement, App, ClickEvent, ElementId, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, RenderOnce, SharedString,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
 };
 use smallvec::SmallVec;
 
@@ -101,12 +101,13 @@ impl RenderOnce for MenuItemElement {
             })
             .when(!self.disabled, |this| {
                 this.group_hover(self.group_name, |this| {
-                    this.bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground)
+                    // Use list_hover (ghost_element.hover in Zed themes) rather than accent,
+                    // which can be a vivid branded color incompatible with neutral hover states.
+                    this.bg(cx.theme().list_hover)
                 })
                 .when(self.selected, |this| {
-                    this.bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground)
+                    // Keyboard-selected item uses the list active state for clear focus indication.
+                    this.bg(cx.theme().list_active)
                 })
                 .when_some(self.on_click, |this, on_click| {
                     this.on_mouse_down(MouseButton::Left, move |_, _, cx| {

@@ -7,7 +7,8 @@ use gpui::*;
 
 use crate::widgets::sidebar::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent};
 use zqlz_ui::widgets::{
-    caption, h_flex, typography::body_small, v_flex, ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
+    caption, h_flex, tooltip::Tooltip, typography::body_small, v_flex, ActiveTheme, Colorize as _,
+    Icon, IconName, Sizable, ZqlzIcon,
 };
 
 impl ConnectionSidebar {
@@ -170,13 +171,19 @@ impl ConnectionSidebar {
                                                 "new-query-{}",
                                                 conn_id
                                             )))
-                                            .size_5()
+                                            .size_6()
                                             .rounded_sm()
                                             .flex()
                                             .items_center()
                                             .justify_center()
                                             .cursor_pointer()
-                                            .hover(|el| el.bg(theme.muted))
+                                            // Use accent tint so button hover is distinguishable
+                                            // from the row-level hover background (which uses muted,
+                                            // the same color as theme.muted in dark mode).
+                                            .hover(|el| el.bg(theme.accent.opacity(0.15)))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("New Query").build(window, cx)
+                                            })
                                             .on_click(cx.listener(
                                                 move |_this, _event: &ClickEvent, _, cx| {
                                                     cx.stop_propagation();
@@ -197,13 +204,16 @@ impl ConnectionSidebar {
                                                 "disconnect-{}",
                                                 conn_id
                                             )))
-                                            .size_5()
+                                            .size_6()
                                             .rounded_sm()
                                             .flex()
                                             .items_center()
                                             .justify_center()
                                             .cursor_pointer()
                                             .hover(|el| el.bg(theme.danger.opacity(0.15)))
+                                            .tooltip(|window, cx| {
+                                                Tooltip::new("Disconnect").build(window, cx)
+                                            })
                                             .on_click(cx.listener(
                                                 move |_this, _event: &ClickEvent, _, cx| {
                                                     cx.stop_propagation();
@@ -238,7 +248,9 @@ impl ConnectionSidebar {
                                         .rounded_sm()
                                         .bg(theme.accent)
                                         .cursor_pointer()
-                                        .hover(|el| el.bg(theme.accent.opacity(0.8)))
+                                        // Lighten on hover rather than darken — darkening feels
+                                        // like a press state, while lightening signals interactivity.
+                                        .hover(|el| el.bg(theme.accent.lighten(0.05)))
                                         .on_click(cx.listener(
                                             move |_this, _event: &ClickEvent, _, cx| {
                                                 cx.stop_propagation();

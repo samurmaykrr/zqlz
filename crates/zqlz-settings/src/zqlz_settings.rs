@@ -88,6 +88,10 @@ impl ZqlzSettings {
         cx.global_mut::<Self>()
     }
 
+    pub fn default_from_json() -> Self {
+        Self::default()
+    }
+
     pub fn load() -> Result<Self> {
         let path = Self::settings_path()?;
         if !path.exists() {
@@ -132,8 +136,8 @@ impl Default for AppearanceSettings {
     fn default() -> Self {
         Self {
             theme_mode: ThemeModePreference::System,
-            light_theme: "Catppuccin Latte".into(),
-            dark_theme: "Catppuccin Mocha".into(),
+            light_theme: "Cyberpunk Scarlet Protocol Light".into(),
+            dark_theme: "Cyberpunk Scarlet Protocol".into(),
             show_scrollbars: ScrollbarVisibility::Auto,
         }
     }
@@ -389,10 +393,10 @@ impl Default for FontSettings {
             ui_font_family: "Inter".into(),
             ui_font_size: 16.0,
             ui_font_weight: 400,
-            editor_font_family: "JetBrains Mono".into(),
+            editor_font_family: "Geist Mono".into(),
             editor_font_size: 15.0,
             editor_font_weight: 400,
-            mono_font_family: "JetBrains Mono".into(),
+            mono_font_family: "Geist Mono".into(),
             mono_font_size: 15.0,
         }
     }

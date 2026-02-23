@@ -1142,7 +1142,7 @@ impl SettingsPanel {
         let theme = cx.theme();
         h_flex()
             .w_full()
-            .py_2()
+            .min_h(px(44.0))
             .px_3()
             .gap_4()
             .items_center()
@@ -1179,13 +1179,23 @@ impl SettingsPanel {
         cx: &Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        // Wrap on_change in Rc so it can be shared between the row-level click
+        // handler (label/description area) and the Switch widget itself.
+        let on_change = std::rc::Rc::new(on_change);
+        let on_change_row = on_change.clone();
         h_flex()
             .w_full()
-            .py_2()
+            .min_h(px(44.0))
             .px_3()
             .gap_4()
             .items_center()
             .justify_between()
+            // Make the entire row clickable so there are no dead zones between
+            // the label text and the switch control.
+            .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
+                cx.stop_propagation();
+                on_change_row(!checked, window, cx);
+            })
             .child(
                 v_flex()
                     .flex_1()
@@ -1208,8 +1218,8 @@ impl SettingsPanel {
             .child(
                 Switch::new(id)
                     .checked(checked)
-                    .on_click(move |checked, window, cx| {
-                        on_change(*checked, window, cx);
+                    .on_click(move |new_checked, window, cx| {
+                        on_change(*new_checked, window, cx);
                     }),
             )
     }
@@ -1324,7 +1334,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.insert_spaces = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1336,7 +1345,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_line_numbers = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1348,7 +1356,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.word_wrap = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1360,7 +1367,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.highlight_current_line = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1372,7 +1378,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_inline_diagnostics = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1384,7 +1389,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.auto_indent = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1396,7 +1400,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.bracket_matching = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1408,7 +1411,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.vim_mode_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1420,7 +1422,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.highlight_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1446,7 +1447,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.selection_highlight = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1458,7 +1458,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.rounded_selection = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1470,7 +1469,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.relative_line_numbers = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1511,7 +1509,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.autoscroll_on_clicks = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1531,7 +1528,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.use_smartcase_search = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1545,7 +1541,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1557,7 +1552,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_completions_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1569,7 +1563,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_hover_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1581,7 +1574,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_diagnostics_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1593,7 +1585,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_code_actions_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1605,7 +1596,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.lsp_rename_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1619,7 +1609,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.inline_suggestions_enabled = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1662,7 +1651,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_gutter_diagnostics = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
@@ -1674,7 +1662,6 @@ impl SettingsPanel {
                 |checked, _window, cx| {
                     let settings = ZqlzSettings::global_mut(cx);
                     settings.editor.show_folding = checked;
-                    let _ = _window;
                 },
                 cx,
             ))
