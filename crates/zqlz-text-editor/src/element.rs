@@ -1432,7 +1432,7 @@ impl Element for EditorElement {
                 + GUTTER_PADDING
                 + (gutter_text_area_width - gutter_line.shaped.width).max(px(0.0));
 
-            let _ = gutter_line.shaped.paint(
+            _ = gutter_line.shaped.paint(
                 point(text_x, line_y),
                 prepaint.line_height,
                 TextAlign::Left,
@@ -1553,7 +1553,7 @@ impl Element for EditorElement {
         for shaped_line in prepaint.shaped_lines.iter() {
             let line_origin = point(text_origin_x, origin_y + offset_y);
 
-            let _ = shaped_line.paint(
+            _ = shaped_line.paint(
                 line_origin,
                 prepaint.line_height,
                 TextAlign::Left,
@@ -1745,7 +1745,7 @@ impl EditorElement {
             strikethrough: None,
         };
         let shaped = text_system.shape_line(display_text.into(), font_size, &[text_run], None);
-        let _ = shaped.paint(
+        _ = shaped.paint(
             suggestion.origin,
             suggestion.line_height,
             TextAlign::Left,
@@ -1917,6 +1917,8 @@ impl EditorElement {
             border,
         ));
 
+        let mouse_pos = window.mouse_position();
+
         for (slot_idx, shaped) in shaped_items
             .iter()
             .skip(visible_start)
@@ -1927,19 +1929,21 @@ impl EditorElement {
             let absolute_idx = visible_start + slot_idx;
             let item_y = menu_y + item_height * slot_idx as f32;
             let is_selected = absolute_idx == menu.selected_index;
+            let item_rect = Bounds::new(point(menu_x, item_y), size(menu_width, item_height));
+            let is_hovered = !is_selected && item_rect.contains(&mouse_pos);
 
             // ── Selected-row highlight ───────────────────────────────────────
             if is_selected {
-                window.paint_quad(fill(
-                    Bounds::new(point(menu_x, item_y), size(menu_width, item_height)),
-                    selected_tint,
-                ));
+                window.paint_quad(fill(item_rect, selected_tint));
                 // 2-px left accent bar (replaces the old badge column separator)
                 window.paint_quad(fill(
                     Bounds::new(point(menu_x, item_y), size(px(2.0), item_height)),
                     selected_bar,
                 ));
             } else {
+                if is_hovered {
+                    window.paint_quad(fill(item_rect, selected_tint.opacity(0.5)));
+                }
                 // Unselected rows: 3-px colored pill for item kind
                 window.paint_quad(fill(
                     Bounds::new(
@@ -1955,7 +1959,7 @@ impl EditorElement {
 
             // ── Label ────────────────────────────────────────────────────────
             let label_x = menu_x + left_inset;
-            let _ = shaped.label.paint(
+            _ = shaped.label.paint(
                 point(label_x, text_y),
                 item_height,
                 TextAlign::Left,
@@ -1970,7 +1974,7 @@ impl EditorElement {
                 // Only paint if it fits inside the menu (leave room for scrollbar)
                 let right_clip = menu_x + menu_width - scrollbar_width - px(8.0);
                 if detail_x + detail.width < right_clip {
-                    let _ = detail.paint(
+                    _ = detail.paint(
                         point(detail_x, text_y + px(0.5)), // nudge down half-px to optically align
                         item_height,
                         TextAlign::Left,
@@ -2148,7 +2152,7 @@ impl EditorElement {
 
         for row in &rows {
             if let Some(ref shaped_line) = row.shaped {
-                let _ = shaped_line.paint(
+                _ = shaped_line.paint(
                     point(text_x, current_y),
                     row.height,
                     TextAlign::Left,
@@ -2360,7 +2364,7 @@ impl EditorElement {
             window
                 .text_system()
                 .shape_line(text.to_string().into(), font_size, &[text_run], None);
-        let _ = shaped.paint(origin, font_size * 1.4, TextAlign::Left, None, window, cx);
+        _ = shaped.paint(origin, font_size * 1.4, TextAlign::Left, None, window, cx);
     }
 
     /// Paint vertical indent-guide lines over the text area (feat-038).

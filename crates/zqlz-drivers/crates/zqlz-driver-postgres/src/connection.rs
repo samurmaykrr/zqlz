@@ -149,7 +149,7 @@ impl PostgresConnection {
         let runtime = get_postgres_runtime();
 
         // Determine whether to use TLS or NoTls based on ssl_mode
-        let use_tls = ssl_mode != "disable";
+        let use_tls = !ssl_mode.eq_ignore_ascii_case("disable");
         
         let (client, cancel_token) = if use_tls {
             // Build TLS connector

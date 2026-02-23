@@ -27,7 +27,7 @@ use zqlz_settings::{InlineSuggestionProvider, ZqlzSettings};
 use zqlz_templates::TemplateEngine;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, RopeExt, Sizable, StyledExt, Theme, ZqlzIcon,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     menu::DropdownMenu,
@@ -2530,6 +2530,13 @@ impl QueryEditor {
         let supports_save = self.object_type.supports_save();
         let has_connection = self.connection_id.is_some();
 
+        // Icon-only toolbar buttons use muted_foreground at rest and foreground on hover,
+        // matching standard IDE toolbar conventions (icons are "discoverable" but not dominant).
+        let toolbar_icon_style = ButtonCustomVariant::new(cx)
+            .foreground(theme.muted_foreground)
+            .hover(theme.list_hover)
+            .active(theme.list_active);
+
         h_flex()
             .id("query-editor-toolbar")
             .on_action(cx.listener(Self::handle_accept_inline_suggestion))
@@ -2567,7 +2574,7 @@ impl QueryEditor {
             .when(!supports_save && has_connection, |this| {
                 this.child(
                     Button::new("save-query")
-                        .ghost()
+                        .custom(toolbar_icon_style)
                         .small()
                         .icon(ZqlzIcon::FloppyDisk)
                         .disabled(is_empty)
@@ -2591,7 +2598,7 @@ impl QueryEditor {
             )
             .child(
                 Button::new("explain")
-                    .ghost()
+                    .custom(toolbar_icon_style)
                     .small()
                     .icon(ZqlzIcon::Lightbulb)
                     .tooltip("Explain Query")
@@ -2615,7 +2622,7 @@ impl QueryEditor {
             })
             .child(
                 Button::new("format")
-                    .ghost()
+                    .custom(toolbar_icon_style)
                     .small()
                     .icon(ZqlzIcon::TextIndent)
                     .tooltip_with_action("Format SQL", &FormatQuery, None)
@@ -2637,7 +2644,11 @@ impl QueryEditor {
                                 this.toggle_editor_mode(window, cx);
                             }
                         }));
-                    btn = if is_active { btn.primary() } else { btn.ghost() };
+                    btn = if is_active {
+                        btn.primary()
+                    } else {
+                        btn.custom(toolbar_icon_style)
+                    };
                     btn
                 })
                 .child({
@@ -2651,7 +2662,11 @@ impl QueryEditor {
                                 this.toggle_editor_mode(window, cx);
                             }
                         }));
-                    btn = if is_active { btn.primary() } else { btn.ghost() };
+                    btn = if is_active {
+                        btn.primary()
+                    } else {
+                        btn.custom(toolbar_icon_style)
+                    };
                     btn
                 })
             })
@@ -2856,7 +2871,7 @@ impl QueryEditor {
                             .rounded_sm()
                             .p_2()
                             .mb_2()
-                            .font_family("SF Mono, Menlo, Monaco, Consolas, monospace".to_string())
+                            .font_family(theme.mono_font_family.clone())
                             .text_xs()
                             .text_color(theme.foreground)
                             .overflow_x_scrollbar()
@@ -2885,7 +2900,7 @@ impl QueryEditor {
                     .rounded_sm()
                     .p_2()
                     .mb_2()
-                    .font_family("SF Mono, Menlo, Monaco, Consolas, monospace".to_string())
+                    .font_family(theme.mono_font_family.clone())
                     .text_xs()
                     .text_color(theme.foreground)
                     .overflow_x_scrollbar()
@@ -2975,7 +2990,7 @@ impl QueryEditor {
                     .bg(theme.muted)
                     .rounded_sm()
                     .px_1()
-                    .font_family("SF Mono, Menlo, Monaco, Consolas, monospace".to_string())
+                    .font_family(theme.mono_font_family.clone())
                     .text_xs()
                     .text_color(theme.accent)
                     .child(code.to_string())
@@ -3167,7 +3182,7 @@ impl QueryEditor {
                                     .text_xs()
                                     .font_weight(gpui::FontWeight::from(600.0))
                                     .text_color(theme.foreground)
-                                    .font_family("SF Mono, Menlo, Monaco, Consolas, monospace".to_string())
+                                    .font_family(theme.mono_font_family.clone())
                                     .child(param_text.to_string())
                                     .into_any_element(),
                             ])
@@ -3193,7 +3208,7 @@ impl QueryEditor {
                                 div()
                                     .text_xs()
                                     .text_color(theme.popover_foreground)
-                                    .font_family("SF Mono, Menlo, Monaco, Consolas, monospace".to_string())
+                                    .font_family(theme.mono_font_family.clone())
                                     .child(param_text.to_string())
                                     .into_any_element(),
                             ])

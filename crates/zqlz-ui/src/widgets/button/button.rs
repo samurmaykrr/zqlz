@@ -1,14 +1,14 @@
 use std::rc::Rc;
 
 use crate::widgets::{
-    ActiveTheme, Colorize as _, Disableable, FocusableExt as _, Icon, IconName, Selectable,
-    Sizable, Size, StyleSized, StyledExt, h_flex, spinner::Spinner, tooltip::Tooltip,
+    h_flex, spinner::Spinner, tooltip::Tooltip, ActiveTheme, Disableable, FocusableExt as _, Icon,
+    IconName, Selectable, Sizable, Size, StyleSized, StyledExt,
 };
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
-    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, relative,
+    div, prelude::FluentBuilder as _, px, relative, Action, AnyElement, App, ClickEvent, Corners,
+    Div, Edges, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement, MouseButton,
+    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window,
 };
 
 #[derive(Default, Clone, Copy)]
@@ -822,11 +822,10 @@ impl ButtonVariant {
                 }
             }
             Self::Ghost => {
-                if cx.theme().mode.is_dark() {
-                    cx.theme().secondary.lighten(0.1).opacity(0.8)
-                } else {
-                    cx.theme().secondary.darken(0.1).opacity(0.8)
-                }
+                // list_hover (ghost_element.hover in Zed themes) is the correct semantic token
+                // for ghost-style hover: it's designed to be subtle yet visible regardless of
+                // whether the theme's secondary color is close to the background.
+                cx.theme().list_hover
             }
             Self::Link => cx.theme().transparent,
             Self::Text => cx.theme().transparent,
@@ -861,11 +860,8 @@ impl ButtonVariant {
             }
             Self::Secondary => cx.theme().secondary_active,
             Self::Ghost => {
-                if cx.theme().mode.is_dark() {
-                    cx.theme().secondary.lighten(0.2).opacity(0.8)
-                } else {
-                    cx.theme().secondary.darken(0.2).opacity(0.8)
-                }
+                // Slightly stronger than hover to signal the press state.
+                cx.theme().list_active
             }
             Self::Danger => {
                 if outline {

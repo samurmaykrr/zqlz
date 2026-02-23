@@ -145,6 +145,7 @@ impl Input {
             .xsmall()
             .ghost()
             .tab_stop(false)
+            .tooltip("Reveal")
             .on_mouse_down(MouseButton::Left, {
                 let state = state.clone();
                 move |_, window, cx| {
@@ -273,7 +274,10 @@ impl RenderOnce for Input {
         let suffix = self.suffix;
         let show_clear_button =
             self.cleanable && !state.loading && state.text.len() > 0 && state.mode.is_single_line();
-        let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || show_clear_button;
+        // Include `self.cleanable` (not `show_clear_button`) so the suffix area is always
+        // reserved when a clear button could appear — prevents text content from shifting
+        // left the moment the user types the first character.
+        let has_suffix = suffix.is_some() || state.loading || self.mask_toggle || self.cleanable;
 
         div()
             .id(("input", self.state.entity_id()))
@@ -412,16 +416,28 @@ impl RenderOnce for Input {
                         .when(self.mask_toggle, |this| {
                             this.child(Self::render_toggle_mask_button(self.state.clone()))
                         })
-                        .when(show_clear_button, |this| {
-                            this.child(clear_button(cx).on_click({
-                                let state = self.state.clone();
-                                move |_, window, cx| {
-                                    state.update(cx, |state, cx| {
-                                        state.clean(window, cx);
-                                        state.focus(window, cx);
-                                    })
-                                }
-                            }))
+                        .when(self.cleanable, |this| {
+                            // Fixed-size slot: always reserves 20×20px so the text content
+                            // never shifts when the clear button appears/disappears.
+                            this.child(
+                                div()
+                                    .size_5()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_center()
+                                    .when(show_clear_button, |this| {
+                                        this.child(clear_button(cx).on_click({
+                                            let state = self.state.clone();
+                                            move |_, window, cx| {
+                                                state.update(cx, |state, cx| {
+                                                    state.clean(window, cx);
+                                                    state.focus(window, cx);
+                                                })
+                                            }
+                                        }))
+                                    }),
+                            )
                         })
                         .children(suffix),
                 )

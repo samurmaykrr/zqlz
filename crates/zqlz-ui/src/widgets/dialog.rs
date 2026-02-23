@@ -1,21 +1,21 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    Animation, AnimationExt as _, AnyElement, App, Bounds, BoxShadow, ClickEvent, Edges,
-    FocusHandle, Hsla, InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement,
-    Pixels, Point, RenderOnce, SharedString, StyleRefinement, Styled, Window, anchored, div, hsla,
-    point, prelude::FluentBuilder, px, relative,
+    anchored, div, hsla, point, prelude::FluentBuilder, px, relative, Animation, AnimationExt as _,
+    AnyElement, App, Bounds, BoxShadow, ClickEvent, Edges, FocusHandle, Hsla, InteractiveElement,
+    IntoElement, KeyBinding, MouseButton, ParentElement, Pixels, Point, RenderOnce, SharedString,
+    StyleRefinement, Styled, Window,
 };
 use rust_i18n::t;
 
 use crate::widgets::{
-    ActiveTheme as _, IconName, Root, Sizable as _, StyledExt, TITLE_BAR_HEIGHT, WindowExt as _,
     actions::{Cancel, Confirm},
     animation::cubic_bezier,
     button::{Button, ButtonVariant, ButtonVariants as _},
     h_flex,
     scroll::ScrollableElement as _,
-    v_flex,
+    v_flex, ActiveTheme as _, IconName, Root, Sizable as _, StyledExt, WindowExt as _,
+    TITLE_BAR_HEIGHT,
 };
 
 const CONTEXT: &str = "Dialog";
@@ -513,6 +513,7 @@ impl RenderOnce for Dialog {
                                     .small()
                                     .ghost()
                                     .icon(IconName::Close)
+                                    .tooltip("Close")
                                     .on_click({
                                         let on_cancel = self.on_cancel.clone();
                                         let on_close = self.on_close.clone();
