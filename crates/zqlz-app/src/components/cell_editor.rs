@@ -879,6 +879,7 @@ impl CellEditorPanel {
         let ascii_color = hsla(142.0 / 360.0, 0.69, 0.58, 1.0);
         let separator_color = theme.border;
         let muted_bg = theme.muted;
+        let mono_font = theme.mono_font_family.clone();
 
         let header = h_flex()
             .gap_0()
@@ -891,7 +892,7 @@ impl CellEditorPanel {
                     .w(px(72.))
                     .flex_shrink_0()
                     .text_xs()
-                    .font_family("Berkeley Mono")
+                    .font_family(mono_font.clone())
                     .text_color(offset_color)
                     .child("Offset"),
             )
@@ -901,7 +902,7 @@ impl CellEditorPanel {
                     .flex_1()
                     .flex_shrink_0()
                     .text_xs()
-                    .font_family("Berkeley Mono")
+                    .font_family(mono_font.clone())
                     .text_color(offset_color)
                     .child("00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"),
             )
@@ -911,7 +912,7 @@ impl CellEditorPanel {
                     .flex_shrink_0()
                     .pl_2()
                     .text_xs()
-                    .font_family("Berkeley Mono")
+                    .font_family(mono_font.clone())
                     .text_color(offset_color)
                     .child("ASCII"),
             );
@@ -937,7 +938,7 @@ impl CellEditorPanel {
                                     .w(px(72.))
                                     .flex_shrink_0()
                                     .text_xs()
-                                    .font_family("Berkeley Mono")
+                                    .font_family(mono_font.clone())
                                     .text_color(offset_color)
                                     .child(line.offset.clone()),
                             )
@@ -947,7 +948,7 @@ impl CellEditorPanel {
                                     .flex_1()
                                     .flex_shrink_0()
                                     .text_xs()
-                                    .font_family("Berkeley Mono")
+                                    .font_family(mono_font.clone())
                                     .text_color(hex_color)
                                     .child(line.hex.clone()),
                             )
@@ -959,7 +960,7 @@ impl CellEditorPanel {
                                     .border_color(separator_color.opacity(0.3))
                                     .pl_2()
                                     .text_xs()
-                                    .font_family("Berkeley Mono")
+                                    .font_family(mono_font.clone())
                                     .text_color(ascii_color)
                                     .child(line.ascii.clone()),
                             );

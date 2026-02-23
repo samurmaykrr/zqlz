@@ -834,7 +834,7 @@ impl Render for CommandPalette {
                                                 theme.muted.opacity(0.5)
                                             })
                                             .text_xs()
-                                            .font_family("monospace")
+                                            .font_family(theme.mono_font_family.clone())
                                             .text_color(if is_selected {
                                                 theme.accent_foreground
                                             } else {

@@ -161,7 +161,7 @@ impl DiffViewer {
             .size_full()
             .overflow_y_scroll()
             .p_2()
-            .font_family("monospace")
+            .font_family(theme.mono_font_family.clone())
             .text_sm()
             .children(diff.changes.iter().map(|change| {
                 let (bg_color, text_color, prefix) = match change.tag {
@@ -218,7 +218,7 @@ impl DiffViewer {
                     .border_r_1()
                     .border_color(theme.border)
                     .p_2()
-                    .font_family("monospace")
+                    .font_family(theme.mono_font_family.clone())
                     .text_sm()
                     .children(
                         left_lines
@@ -232,7 +232,7 @@ impl DiffViewer {
                     .flex_1()
                     .overflow_y_scroll()
                     .p_2()
-                    .font_family("monospace")
+                    .font_family(theme.mono_font_family.clone())
                     .text_sm()
                     .children(
                         right_lines

@@ -84,7 +84,7 @@ pub use status_dot::{ConnectionStatus, StatusDot};
 
 /// Initialize the widget system
 pub fn init(cx: &mut App) {
-    // Note: Custom fonts (Inter, JetBrains Mono) are registered in fonts::register_fonts()
+    // Note: Custom fonts (Inter, Geist Mono) are registered in fonts::register_fonts()
     // but the theme defaults to .SystemUIFont for maximum compatibility.
     // This ensures text always renders, even if custom fonts fail to load.
 

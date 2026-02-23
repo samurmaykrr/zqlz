@@ -1758,7 +1758,7 @@ impl ExportWizard {
                     div()
                         .w_full()
                         .text_xs()
-                        .font_family("monospace")
+                        .font_family(theme.mono_font_family.clone())
                         .text_color(match msg.level {
                             LogLevel::Error => theme.danger,
                             LogLevel::Warning => theme.warning,

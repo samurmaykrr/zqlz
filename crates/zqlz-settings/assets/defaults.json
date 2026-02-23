@@ -1,0 +1,18 @@
+{
+  "appearance": {
+    "theme_mode": "system",
+    "light_theme": "Cyberpunk Scarlet Protocol Light",
+    "dark_theme": "Cyberpunk Scarlet Protocol",
+    "show_scrollbars": "auto"
+  },
+  "fonts": {
+    "ui_font_family": "Inter",
+    "ui_font_size": 16.0,
+    "ui_font_weight": 400,
+    "editor_font_family": "Geist Mono",
+    "editor_font_size": 15.0,
+    "editor_font_weight": 400,
+    "mono_font_family": "Geist Mono",
+    "mono_font_size": 15.0
+  }
+}

@@ -273,7 +273,7 @@ impl Default for AppSettings {
     fn default() -> Self {
         Self {
             theme: "dark".to_string(),
-            editor_font_family: "JetBrains Mono".to_string(),
+            editor_font_family: "Geist Mono".to_string(),
             editor_font_size: 14.0,
             auto_complete: true,
             format_on_save: false,

@@ -127,7 +127,7 @@ impl QueryHistoryPanel {
                         div()
                             .text_sm()
                             .text_color(theme.foreground)
-                            .font_family("monospace")
+                            .font_family(theme.mono_font_family.clone())
                             .child(Self::truncate_sql(&entry_clone.sql, 80)),
                     )
                     .child(
@@ -177,7 +177,7 @@ impl QueryHistoryPanel {
                     .pb_1()
                     .text_xs()
                     .text_color(theme.red)
-                    .font_family("monospace")
+                    .font_family(theme.mono_font_family.clone())
                     .child(Self::truncate_sql(error_message, 100))
             }))
             .into_any_element()
