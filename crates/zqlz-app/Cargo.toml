@@ -35,6 +35,7 @@ zqlz-versioning.workspace = true
 zqlz-templates.workspace = true
 zqlz-drivers.workspace = true
 zqlz-text-editor.workspace = true
+zqlz-settings.workspace = true
 
 # LSP
 lsp-types.workspace = true
@@ -63,9 +64,6 @@ futures.workspace = true
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa.workspace = true
 objc.workspace = true
-
-# Settings
-zqlz-settings.workspace = true
 
 [target.'cfg(target_os = "windows")'.build-dependencies]
 winresource = "0.1"
