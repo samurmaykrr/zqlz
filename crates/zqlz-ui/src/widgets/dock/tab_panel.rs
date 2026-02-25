@@ -780,10 +780,6 @@ impl TabPanel {
         if visible_panels.len() == 1 && panel_style == PanelStyle::default() {
             let panel = visible_panels.get(0).unwrap();
 
-            if !panel.visible(cx) {
-                return div().into_any_element();
-            }
-
             let title_style = panel.title_style(cx);
 
             return h_flex()
@@ -844,6 +840,15 @@ impl TabPanel {
 
         let tabs_count = self.panels.len();
 
+        // Pre-collect per-tab props before entering the element builder so we avoid calling
+        // entity-read methods inside the iterator closure (which would register O(N) reactive
+        // dependencies per render).
+        let tab_props: Vec<(bool, Option<SharedString>, bool)> = self
+            .panels
+            .iter()
+            .map(|panel| (panel.visible(cx), panel.tab_name(cx), panel.closable(cx)))
+            .collect();
+
         TabBar::new("tab-bar")
             .tab_item_top_offset(-px(1.))
             .track_scroll(&self.tab_bar_scroll_handle)
@@ -865,10 +870,14 @@ impl TabPanel {
                 )
             })
             .children(self.panels.iter().enumerate().filter_map(|(ix, panel)| {
+                let (visible, tab_name, closable) = tab_props
+                    .get(ix)
+                    .cloned()
+                    .unwrap_or((false, None, false));
                 let mut active = state.active_panel.as_ref() == Some(panel);
                 let droppable = self.collapsed;
 
-                if !panel.visible(cx) {
+                if !visible {
                     return None;
                 }
 
@@ -882,15 +891,15 @@ impl TabPanel {
                         .ix(ix)
                         .tab_bar_prefix(has_extend_dock_button)
                         .map(|this| {
-                            if let Some(tab_name) = panel.tab_name(cx) {
-                                this.child(tab_name)
+                            if let Some(name) = tab_name {
+                                this.child(name)
                             } else {
                                 this.child(panel.title(window, cx))
                             }
                         })
                         .selected(active)
                         // Add close button as suffix if panel is closable
-                        .when(panel.closable(cx), |this| {
+                        .when(closable, |this| {
                             this.suffix(
                                 div()
                                     .id(SharedString::from(format!("close-tab-{}", ix)))

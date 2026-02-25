@@ -480,7 +480,6 @@ impl MainView {
     }
 
     /// Refresh the query history panel with latest entries from AppState
-    #[allow(dead_code)]
     fn refresh_query_history(&self, cx: &mut Context<Self>) {
         if let Some(app_state) = cx.try_global::<AppState>() {
             let entries = app_state.query_history_entries();

@@ -24,10 +24,8 @@ pub use zqlz_driver_mongodb as mongodb;
 pub use zqlz_driver_redis as redis;
 
 mod registry;
-mod runtime;
 
 pub use registry::{get_dialect_bundle, get_dialect_info, DriverRegistry};
-pub use runtime::{block_on_tokio, get_tokio_runtime};
 
 /// Re-export commonly used types from zqlz-core
 pub use zqlz_core::{

@@ -1014,7 +1014,7 @@ impl MainView {
             panel.set_loading(true, cx);
         });
 
-        cx.spawn_in(window, async move |_this, cx| {
+        cx.spawn_in(window, async move |this, cx| {
             let service_execution = query_service.execute_query(connection, conn_id, &sql).await;
 
             let execution = match service_execution {
@@ -1065,6 +1065,10 @@ impl MainView {
 
             _ = results_panel.update_in(cx, |panel, window, cx| {
                 panel.set_execution(execution, window, cx);
+            });
+
+            _ = this.update(cx, |view, cx| {
+                view.refresh_query_history(cx);
             });
 
             anyhow::Ok(())

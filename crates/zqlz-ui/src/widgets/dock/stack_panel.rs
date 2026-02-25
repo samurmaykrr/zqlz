@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use crate::widgets::{
-    ActiveTheme, AxisExt as _, Placement,
     dock::PanelInfo,
     h_flex,
     resizable::{
-        PANEL_MIN_SIZE, ResizablePanelEvent, ResizablePanelGroup, ResizablePanelState,
-        ResizableState, resizable_panel,
+        resizable_panel, ResizablePanelEvent, ResizablePanelGroup, ResizablePanelState,
+        ResizableState, PANEL_MIN_SIZE,
     },
+    ActiveTheme, AxisExt as _, Placement,
 };
 
 use super::{DockArea, Panel, PanelEvent, PanelState, PanelView, TabPanel};
@@ -424,11 +424,19 @@ impl Render for StackPanel {
                 ResizablePanelGroup::new("stack-panel-group")
                     .with_state(&self.state)
                     .axis(self.axis)
-                    .children(self.panels.clone().into_iter().map(|panel| {
-                        resizable_panel()
-                            .child(panel.view())
-                            .visible(panel.visible(cx))
-                    })),
+                    .children({
+                        // Pre-collect visibility before entering the element builder chain to
+                        // avoid registering N reactive dependencies inside the iterator closure.
+                        let visibility: Vec<bool> =
+                            self.panels.iter().map(|panel| panel.visible(cx)).collect();
+                        self.panels
+                            .clone()
+                            .into_iter()
+                            .zip(visibility)
+                            .map(|(panel, visible)| {
+                                resizable_panel().child(panel.view()).visible(visible)
+                            })
+                    }),
             )
     }
 }

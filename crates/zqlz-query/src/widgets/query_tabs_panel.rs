@@ -89,6 +89,8 @@ pub enum QueryTabsPanelEvent {
 pub struct QueryTabsPanel {
     focus_handle: FocusHandle,
     query_editors: Vec<Entity<QueryEditor>>,
+    /// Display names cached at push/remove time so render never calls `.read(cx)` in a loop.
+    tab_names: Vec<String>,
     active_editor_index: Option<usize>,
     show_welcome: bool,
     schema_service: Option<Arc<SchemaService>>,
@@ -101,6 +103,7 @@ impl QueryTabsPanel {
         Self {
             focus_handle: cx.focus_handle(),
             query_editors: Vec::new(),
+            tab_names: Vec::new(),
             active_editor_index: None,
             show_welcome: true,
             schema_service: None,
@@ -137,7 +140,8 @@ impl QueryTabsPanel {
             }
         };
 
-        let editor = cx.new(|cx| QueryEditor::new(name, connection_id, schema_service, window, cx));
+        let editor =
+            cx.new(|cx| QueryEditor::new(name.clone(), connection_id, schema_service, window, cx));
 
         let editor_index = self.query_editors.len();
         let subscription = cx.subscribe(&editor, {
@@ -230,6 +234,7 @@ impl QueryTabsPanel {
         self._subscriptions.push(subscription);
 
         self.query_editors.push(editor);
+        self.tab_names.push(name);
         self.active_editor_index = Some(self.query_editors.len() - 1);
         self.show_welcome = false;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -357,6 +362,7 @@ impl QueryTabsPanel {
         self._subscriptions.push(subscription);
 
         self.query_editors.push(editor);
+        self.tab_names.push(table_name);
         self.active_editor_index = Some(self.query_editors.len() - 1);
         self.show_welcome = false;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -370,6 +376,7 @@ impl QueryTabsPanel {
     pub fn close_query(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.query_editors.len() {
             self.query_editors.remove(index);
+            self.tab_names.remove(index);
             if self.query_editors.is_empty() {
                 self.active_editor_index = None;
                 self.show_welcome = true;
@@ -476,7 +483,9 @@ impl QueryTabsPanel {
             // Keep only the active editor
             let active_editor = self.query_editors.get(active_idx).cloned();
             if let Some(editor) = active_editor {
+                let active_name = self.tab_names.get(active_idx).cloned().unwrap_or_default();
                 self.query_editors = vec![editor];
+                self.tab_names = vec![active_name];
                 self.active_editor_index = Some(0);
                 cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
                     editor_index: self.active_editor_index,
@@ -492,6 +501,7 @@ impl QueryTabsPanel {
         if let Some(active_idx) = self.active_editor_index {
             // Remove all editors after the active index
             self.query_editors.truncate(active_idx + 1);
+            self.tab_names.truncate(active_idx + 1);
             cx.emit(PanelEvent::LayoutChanged);
             cx.notify();
         }
@@ -500,6 +510,7 @@ impl QueryTabsPanel {
     /// Close all tabs
     pub fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
         self.query_editors.clear();
+        self.tab_names.clear();
         self.active_editor_index = None;
         self.show_welcome = true;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -533,13 +544,13 @@ impl QueryTabsPanel {
             .border_b_1()
             .border_color(theme.border)
             .overflow_x_scroll()
-            .children(self.query_editors.iter().enumerate().map(|(idx, editor)| {
+            .children(self.query_editors.iter().enumerate().map(|(idx, _editor)| {
                 let is_active = self.active_editor_index == Some(idx);
-                let editor_name = editor.read(cx).name();
-                let display_name = if editor_name.is_empty() {
+                let cached_name = self.tab_names.get(idx).map(String::as_str).unwrap_or("");
+                let display_name = if cached_name.is_empty() {
                     format!("Query {}", idx + 1)
                 } else {
-                    editor_name
+                    cached_name.to_string()
                 };
 
                 h_flex()

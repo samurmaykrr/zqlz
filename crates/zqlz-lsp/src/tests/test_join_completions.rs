@@ -16,6 +16,8 @@ fn test_join_suggests_related_tables() {
         referenced_columns: vec!["user_id".to_string()],
         on_delete: zqlz_core::ForeignKeyAction::Cascade,
         on_update: zqlz_core::ForeignKeyAction::Cascade,
+        is_deferrable: false,
+        initially_deferred: false,
     };
 
     lsp.schema_cache

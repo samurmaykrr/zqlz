@@ -18,7 +18,7 @@ mod test_helpers;
 
 pub use engine::{DestructiveOperationType, DestructiveOperationWarning, QueryEngine};
 pub use error::{QueryServiceError, QueryServiceResult};
-pub use history::{QueryHistory, QueryHistoryEntry};
+pub use history::{HistoryPersistence, QueryHistory, QueryHistoryEntry};
 pub use service::QueryService;
 // Note: view_models types are superseded by widgets types for UI consumption
 pub use view_models::StatementExecution;

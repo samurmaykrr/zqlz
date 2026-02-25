@@ -89,3 +89,6 @@ mod test_where_clause_priority;
 
 #[cfg(test)]
 mod test_no_snippets;
+
+#[cfg(test)]
+mod test_create_table_completions;

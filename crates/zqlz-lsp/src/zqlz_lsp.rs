@@ -965,7 +965,8 @@ impl SqlLsp {
                 || lower.contains("where")
                 || lower.contains("insert")
                 || lower.contains("update")
-                || lower.contains("delete");
+                || lower.contains("delete")
+                || lower.contains("create");
 
             // Also use fallback if query is very short (might be incomplete keyword)
             let is_short = lines_before_cursor.trim().len() < 10;
@@ -1232,6 +1233,13 @@ impl SqlLsp {
                 // Inside subquery - can reference parent tables
                 self.add_columns_from_tables(&parent_tables, &current_word_lower, &mut completions);
             }
+            AstSqlContext::CreateTable => {
+                tracing::debug!("In CREATE TABLE context");
+                // Data types come first – they're the primary completion when naming a column type.
+                self.add_filtered_data_types(&current_word_lower, &mut completions);
+                // Then column/table constraints.
+                self.add_create_table_constraints(&current_word_lower, &mut completions);
+            }
             AstSqlContext::General => {
                 tracing::debug!("In general context");
                 // Show relevant keywords based on position (max 5)
@@ -1468,7 +1476,7 @@ impl SqlLsp {
             "select", "from", "into", "update", "table", "join", "left", "right", "inner",
             "outer", "cross", "full", "where", "and", "or", "not", "on", "having", "group",
             "order", "limit", "offset", "union", "except", "intersect", "set", "values",
-            "with", "as",
+            "with", "as", "create",
         ];
 
         // Scan backward to find the most recent SQL clause keyword, then decide context.
@@ -1478,7 +1486,32 @@ impl SqlLsp {
         // the user is now writing the next clause keyword, so we return General.
         for i in (0..words.len()).rev() {
             match words[i] {
-                kw @ ("from" | "into" | "update" | "table") => {
+                "table" => {
+                    // CREATE TABLE: when the preceding token is "create" (and possibly
+                    // "temporary"/"temp"), the cursor is inside DDL, not a FROM clause.
+                    let is_create_table = (i > 0 && words[i - 1] == "create")
+                        || (i > 1
+                            && (words[i - 1] == "temporary" || words[i - 1] == "temp")
+                            && words[i - 2] == "create");
+                    if is_create_table {
+                        // If anything follows the table-name token we're in column definitions.
+                        if words[i + 1..].iter().any(|w| !clause_keywords.contains(w)) {
+                            return AstSqlContext::CreateTable;
+                        }
+                        // Still at the table name itself – no column list yet.
+                        return AstSqlContext::General;
+                    }
+                    // Plain TABLE keyword (e.g. DROP TABLE, TRUNCATE TABLE …)
+                    let tokens_after = words[i + 1..]
+                        .iter()
+                        .filter(|&&w| !clause_keywords.contains(&w))
+                        .count();
+                    if tokens_after <= 1 {
+                        return AstSqlContext::FromClause;
+                    }
+                    return AstSqlContext::General;
+                }
+                kw @ ("from" | "into" | "update") => {
                     // Count non-keyword tokens after this clause keyword.
                     let tokens_after = words[i + 1..].iter().filter(|&&w| !clause_keywords.contains(&w)).count();
                     let _ = kw;
@@ -1703,8 +1736,63 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
-        // Add SQL data types from dialect - let fuzzy matching filter them
+    /// Add column and table-level DDL constraints for CREATE TABLE completions.
+    ///
+    /// Surfaces common constraint keywords with appropriate descriptions so that
+    /// the fuzzy matcher can rank them when the user has typed a partial token.
+    fn add_create_table_constraints(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
+        // (label, description, insert_text)
+        // insert_text may differ from label for multi-word constraints that need extra spacing.
+        let constraints: &[(&str, &str, &str)] = &[
+            // Most-frequently-needed column constraints first
+            ("NOT NULL", "Column cannot contain NULL values", "NOT NULL"),
+            ("PRIMARY KEY", "Designates this column as the primary key", "PRIMARY KEY"),
+            ("UNIQUE", "All values in this column must be distinct", "UNIQUE"),
+            ("DEFAULT", "Specifies a default value for the column", "DEFAULT "),
+            ("NULL", "Column can contain NULL values (default)", "NULL"),
+            ("CHECK", "Validates column data against an expression", "CHECK ("),
+            ("REFERENCES", "Inline foreign key to a referenced table", "REFERENCES "),
+            // Table-level constraints placed before dialect-specific modifiers so
+            // they remain reachable within the 20-item completion truncation window.
+            ("CONSTRAINT", "Names a constraint for clearer error messages", "CONSTRAINT "),
+            ("FOREIGN KEY", "Defines a multi-column foreign key relationship", "FOREIGN KEY ("),
+            ("INDEX", "Creates an index inside the table definition", "INDEX "),
+            // Auto-increment variants
+            ("AUTO_INCREMENT", "Value increments automatically on insert (MySQL)", "AUTO_INCREMENT"),
+            ("AUTOINCREMENT", "Value increments automatically on insert (SQLite)", "AUTOINCREMENT"),
+            ("GENERATED ALWAYS AS", "Computed column derived from an expression", "GENERATED ALWAYS AS ("),
+            ("COLLATE", "Specifies the collation for string comparison", "COLLATE "),
+            // MySQL-specific column modifiers
+            ("UNSIGNED", "Disallows negative values (MySQL)", "UNSIGNED"),
+            ("ZEROFILL", "Pads numeric display values with zeros (MySQL)", "ZEROFILL"),
+            // Actions used with ON DELETE / ON UPDATE inside REFERENCES clauses
+            ("ON DELETE", "Action taken when the referenced row is deleted", "ON DELETE "),
+            ("ON UPDATE", "Action taken when the referenced row is updated", "ON UPDATE "),
+            ("CASCADE", "Propagates changes to all dependent rows", "CASCADE"),
+            ("RESTRICT", "Prevents changes that would break referential integrity", "RESTRICT"),
+            ("SET NULL", "Sets the foreign key column to NULL on parent change", "SET NULL"),
+            ("SET DEFAULT", "Resets the foreign key column to its default on parent change", "SET DEFAULT"),
+            ("NO ACTION", "Defers constraint checking until end of transaction", "NO ACTION"),
+        ];
+
+        for (label, description, insert) in constraints {
+            if completions.iter().any(|c| c.label == *label) {
+                continue;
+            }
+            completions.push(CompletionItem {
+                label: label.to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some(description.to_string()),
+                insert_text: Some(insert.to_string()),
+                // Sort after data types (which use "2_" / "4_") so the type comes first
+                // when the user has not typed anything yet.
+                sort_text: Some(format!("5_{}", label)),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {        // Add SQL data types from dialect - let fuzzy matching filter them
         for data_type in self.dialect.data_types() {
             // Skip if already in completions
             if completions
