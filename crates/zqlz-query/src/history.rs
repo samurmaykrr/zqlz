@@ -2,6 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use std::collections::VecDeque;
+use std::sync::Arc;
 use uuid::Uuid;
 
 /// A single query history entry
@@ -72,6 +73,18 @@ impl QueryHistoryEntry {
     }
 }
 
+/// Persistence backend for query history.
+///
+/// Implementors are responsible for durably storing and clearing entries.
+/// This trait keeps `QueryHistory` decoupled from any specific storage format.
+pub trait HistoryPersistence: Send + Sync {
+    /// Write a newly added entry to durable storage.
+    fn persist_entry(&self, entry: &QueryHistoryEntry);
+
+    /// Remove all entries from durable storage.
+    fn clear_all(&self);
+}
+
 /// Query history manager
 pub struct QueryHistory {
     /// History entries (most recent first)
@@ -79,6 +92,9 @@ pub struct QueryHistory {
 
     /// Maximum entries to keep
     max_entries: usize,
+
+    /// Optional backend for durable storage of entries
+    persistence: Option<Arc<dyn HistoryPersistence>>,
 }
 
 impl QueryHistory {
@@ -87,17 +103,55 @@ impl QueryHistory {
         Self {
             entries: VecDeque::new(),
             max_entries,
+            persistence: None,
         }
     }
 
-    /// Add an entry to history
+    /// Attach a persistence backend.
+    ///
+    /// After this call every new entry added via [`add`] is forwarded to the
+    /// backend, and [`clear`] will also wipe it from persistent storage.
+    pub fn set_persistence(&mut self, store: Arc<dyn HistoryPersistence>) {
+        self.persistence = Some(store);
+    }
+
+    /// Load a previously persisted entry at startup.
+    ///
+    /// Unlike [`add`], this skips the consecutive-duplicate check and does not
+    /// forward the entry to the persistence backend (it is already on disk).
+    /// Entries must be supplied in **oldest-first** order so that the most
+    /// recent one ends up at the front of the deque after all inserts.
+    pub fn load_entry(&mut self, entry: QueryHistoryEntry) {
+        self.entries.push_front(entry);
+        // Trim in case the stored count somehow exceeds max_entries.
+        while self.entries.len() > self.max_entries {
+            self.entries.pop_back();
+        }
+    }
+
+    /// Add an entry to history, skipping consecutive duplicates (same SQL run back-to-back).
     pub fn add(&mut self, entry: QueryHistoryEntry) {
+        // Don't record the same SQL twice in a row — only consecutive deduplication,
+        // so the same query appearing later after other queries is still recorded.
+        if self
+            .entries
+            .front()
+            .is_some_and(|last| last.sql.trim() == entry.sql.trim())
+        {
+            return;
+        }
+
         tracing::debug!(
             query_id = %entry.id,
             success = entry.success,
             duration_ms = entry.duration_ms,
             "adding query to history"
         );
+
+        if let Some(store) = &self.persistence {
+            store.persist_entry(&entry);
+        }
+
         self.entries.push_front(entry);
         while self.entries.len() > self.max_entries {
             self.entries.pop_back();
@@ -128,6 +182,9 @@ impl QueryHistory {
     pub fn clear(&mut self) {
         let count = self.entries.len();
         tracing::info!(entries_cleared = count, "clearing query history");
+        if let Some(store) = &self.persistence {
+            store.clear_all();
+        }
         self.entries.clear();
     }
 

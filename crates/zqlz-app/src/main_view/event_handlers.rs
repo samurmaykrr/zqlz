@@ -9,7 +9,12 @@ use crate::components::{
     ObjectsPanelEvent, ProjectManagerEvent, ResultsPanelEvent, SettingsPanel, SettingsPanelEvent, TableViewerPanel,
     TemplateLibraryEvent,
 };
-use zqlz_ui::widgets::{WindowExt, dialog::DialogButtonProps, dock::Panel};
+use zqlz_ui::widgets::{
+    WindowExt,
+    button::{Button, ButtonVariants as _},
+    dialog::DialogButtonProps,
+    dock::Panel,
+};
 use zqlz_versioning::DatabaseObjectType;
 
 use super::MainView;
@@ -1510,75 +1515,90 @@ impl MainView {
                 // View changed - nothing to do here
             }
             crate::components::InspectorPanelEvent::OpenQuery { sql } => {
-                // Load query from history into the active query editor
                 tracing::info!("Opening query from history");
-                
-                // Try to find an active query editor
-                // First, try to find the most recently focused query editor
-                let active_editor = self.query_editors
+
+                let active_editor = self
+                    .query_editors
                     .iter()
-                    .rev() // Start from most recent
+                    .rev()
                     .find_map(|weak| weak.upgrade());
-                
-                if let Some(editor) = active_editor {
-                    // Check if editor has unsaved changes
-                    let has_unsaved = editor.read(cx).has_unsaved_changes(cx);
-                    
-                    if has_unsaved {
-                        // Show confirmation dialog
-                        let editor = editor.clone();
-                        let sql = sql.clone();
-                        
-                        window.open_dialog(cx, move |dialog, _window, _cx| {
-                            let editor = editor.clone();
-                            let sql = sql.clone();
-                            
-                            dialog
-                                .title("Unsaved Changes")
-                                .child("The active query has unsaved changes. Loading this query will discard those changes. Continue?")
-                                .confirm()
-                                .button_props(
-                                    zqlz_ui::widgets::dialog::DialogButtonProps::default()
-                                        .ok_text("Load Query")
-                                        .cancel_text("Cancel"),
-                                )
-                                .on_ok(move |_, window, cx| {
-                                    // User confirmed - load the query
-                                    editor.update(cx, |editor, cx| {
-                                        editor.set_text(&sql, window, cx);
-                                    });
-                                    // Focus the editor
-                                    let focus_handle = editor.read(cx).focus_handle(cx);
-                                    window.focus(&focus_handle, cx);
-                                    true // Close the dialog
-                                })
-                        });
-                    } else {
-                        // No unsaved changes - load directly
-                        editor.update(cx, |editor, cx| {
-                            editor.set_text(&sql, window, cx);
-                        });
-                        // Focus the editor
-                        let focus_handle = editor.read(cx).focus_handle(cx);
-                        window.focus(&focus_handle, cx);
-                    }
-                } else {
-                    // No query editor exists - create a new one
+
+                // When no editor exists at all, open a new tab immediately without a dialog.
+                let Some(editor) = active_editor else {
                     tracing::info!("No active query editor found, creating new one");
                     self.handle_new_query(&NewQuery, window, cx);
-                    
-                    // Get the newly created query editor and set its content
                     if let Some(editor_weak) = self.query_editors.last() {
                         if let Some(editor) = editor_weak.upgrade() {
                             editor.update(cx, |editor, cx| {
                                 editor.set_text(&sql, window, cx);
                             });
-                            // Focus the editor
                             let focus_handle = editor.read(cx).focus_handle(cx);
                             window.focus(&focus_handle, cx);
                         }
                     }
-                }
+                    return;
+                };
+
+                // Always ask the user whether to open the history entry in the current tab
+                // or in a new tab, so that the choice is always explicit.
+                let this_weak = cx.weak_entity();
+                let editor = editor.clone();
+                let sql = sql.clone();
+
+                window.open_dialog(cx, move |dialog, _window, _cx| {
+                    let editor_for_current = editor.clone();
+                    let sql_for_current = sql.clone();
+
+                    let this_weak_for_new = this_weak.clone();
+                    let sql_for_new = sql.clone();
+
+                    dialog
+                        .title("Open Query")
+                        .child("Open this query in the current tab or in a new tab?")
+                        .overlay_closable(false)
+                        .close_button(false)
+                        // "Current Tab" is the primary (ok) action.
+                        .button_props(
+                            DialogButtonProps::default()
+                                .ok_text("Current Tab")
+                                .cancel_text("Cancel"),
+                        )
+                        .on_ok(move |_, window, cx| {
+                            editor_for_current.update(cx, |editor, cx| {
+                                editor.set_text(&sql_for_current, window, cx);
+                            });
+                            let focus_handle = editor_for_current.read(cx).focus_handle(cx);
+                            window.focus(&focus_handle, cx);
+                            true
+                        })
+                        // Custom footer to insert a "New Tab" button between Cancel and Current Tab.
+                        .footer(move |ok, cancel, window, cx| {
+                            let this_weak = this_weak_for_new.clone();
+                            let sql = sql_for_new.clone();
+
+                            let new_tab_button = Button::new("new-tab")
+                                .label("New Tab")
+                                .on_click(move |_, window, cx| {
+                                    window.close_dialog(cx);
+                                    _ = this_weak.update(cx, |this, cx| {
+                                        this.handle_new_query(&NewQuery, window, cx);
+                                        if let Some(editor_weak) = this.query_editors.last() {
+                                            if let Some(editor) = editor_weak.upgrade() {
+                                                editor.update(cx, |editor, cx| {
+                                                    editor.set_text(&sql, window, cx);
+                                                });
+                                                let focus_handle =
+                                                    editor.read(cx).focus_handle(cx);
+                                                window.focus(&focus_handle, cx);
+                                            }
+                                        }
+                                    });
+                                })
+                                .into_any_element();
+
+                            vec![cancel(window, cx), new_tab_button, ok(window, cx)]
+                        })
+                });
             }
             crate::components::InspectorPanelEvent::ClearHistory => {
                 // Clear query history in AppState

@@ -109,6 +109,10 @@ pub struct TableDesignerPanel {
     /// Whether the design has been modified
     is_dirty: bool,
 
+    /// Cached result of checking all column name inputs are non-empty and all data types are set.
+    /// Updated eagerly inside `mark_dirty` so render never needs to loop over entities.
+    all_columns_valid: bool,
+
     /// Subscriptions to input events
     _subscriptions: Vec<gpui::Subscription>,
 }
@@ -154,6 +158,8 @@ impl TableDesignerPanel {
             data_types,
             ddl_preview: None,
             is_dirty: false,
+            // No columns yet for a new table, so the footer Save button starts disabled.
+            all_columns_valid: false,
             _subscriptions: subscriptions,
         }
     }
@@ -299,6 +305,8 @@ impl TableDesignerPanel {
             data_types,
             ddl_preview: None,
             is_dirty: false,
+            // Existing columns were pre-populated from the loaded design so they start valid.
+            all_columns_valid: true,
             _subscriptions: subscriptions,
         }
     }
@@ -317,7 +325,24 @@ impl TableDesignerPanel {
     fn mark_dirty(&mut self, cx: &mut Context<Self>) {
         self.is_dirty = true;
         self.ddl_preview = None;
+        self.recompute_columns_valid(cx);
         cx.notify();
+    }
+
+    /// Recompute and cache whether every column has a non-empty name input and a data type set.
+    ///
+    /// Called from `mark_dirty` so the cached value stays current without needing entity reads
+    /// inside the render hot-path.
+    fn recompute_columns_valid(&mut self, cx: &Context<Self>) {
+        self.all_columns_valid = !self.design.columns.is_empty()
+            && self.design.columns.iter().enumerate().all(|(i, col)| {
+                let name_valid = self
+                    .column_name_inputs
+                    .get(i)
+                    .map(|input| !input.read(cx).value().is_empty())
+                    .unwrap_or(false);
+                name_valid && !col.data_type.is_empty()
+            });
     }
 
     /// Sync the table name from the input to the design
@@ -1262,22 +1287,10 @@ impl TableDesignerPanel {
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        // Validate by checking actual input values, not self.design
         let table_name = self.table_name_input.read(cx).value();
         let table_name_valid = !table_name.is_empty();
 
-        let columns_valid = !self.design.columns.is_empty()
-            && self.design.columns.iter().enumerate().all(|(i, col)| {
-                let name_valid = self
-                    .column_name_inputs
-                    .get(i)
-                    .map(|input| !input.read(cx).value().is_empty())
-                    .unwrap_or(false);
-                let type_valid = !col.data_type.is_empty();
-                name_valid && type_valid
-            });
-
-        let is_valid = table_name_valid && columns_valid;
+        let is_valid = table_name_valid && self.all_columns_valid;
 
         h_flex()
             .w_full()

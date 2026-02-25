@@ -16,6 +16,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_connection::{SavedConnection, SecureStorage};
+use zqlz_query::{HistoryPersistence, QueryHistoryEntry};
 use zqlz_templates::dbt::{ModelConfig, QuotingConfig};
 use zqlz_templates::project::{Model, ModelDependency, Project, SourceDefinition, SourceTable};
 
@@ -136,10 +137,16 @@ impl LocalStorage {
                 executed_at TEXT NOT NULL,
                 duration_ms INTEGER,
                 row_count INTEGER,
-                success INTEGER NOT NULL
+                success INTEGER NOT NULL,
+                error TEXT
             )",
             [],
         )?;
+
+        // Migration: add error column to databases created before it was introduced.
+        // SQLite returns an error when the column already exists, which we ignore here
+        // because that is the expected outcome for up-to-date databases.
+        let _ = conn.execute("ALTER TABLE query_history ADD COLUMN error TEXT", []);
 
         // Saved queries table
         conn.execute(
@@ -403,33 +410,93 @@ impl LocalStorage {
         }
     }
 
-    /// Add query to history
-    pub fn add_query_history(
-        &self,
-        connection_id: Option<Uuid>,
-        query: &str,
-        duration_ms: u64,
-        row_count: Option<usize>,
-        success: bool,
-    ) -> Result<()> {
+    /// Persist a query history entry to the database.
+    pub fn add_query_history(&self, entry: &QueryHistoryEntry) -> Result<()> {
         let conn = self.connect()?;
-        let id = Uuid::new_v4();
-        let now = chrono::Utc::now().to_rfc3339();
 
         conn.execute(
-            "INSERT INTO query_history (id, connection_id, query_text, executed_at, duration_ms, row_count, success)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            "INSERT OR IGNORE INTO query_history
+                (id, connection_id, query_text, executed_at, duration_ms, row_count, success, error)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                id.to_string(),
-                connection_id.map(|id| id.to_string()),
-                query,
-                now,
-                duration_ms as i64,
-                row_count.map(|c| c as i64),
-                if success { 1 } else { 0 },
+                entry.id.to_string(),
+                entry.connection_id.map(|id| id.to_string()),
+                entry.sql,
+                entry.executed_at.to_rfc3339(),
+                entry.duration_ms as i64,
+                entry.row_count.map(|c| c as i64),
+                if entry.success { 1_i64 } else { 0_i64 },
+                entry.error,
             ],
         )?;
 
+        Ok(())
+    }
+
+    /// Load the most recent `limit` history entries, ordered oldest-first so
+    /// callers can feed them into [`QueryHistory::load_entry`] in sequence.
+    pub fn load_query_history(&self, limit: usize) -> Result<Vec<QueryHistoryEntry>> {
+        let conn = self.connect()?;
+
+        // Select the newest `limit` rows, then reverse to oldest-first ordering so
+        // callers can restore them in chronological sequence.
+        let mut stmt = conn.prepare(
+            "SELECT id, connection_id, query_text, executed_at, duration_ms, row_count, success, error
+             FROM (
+                 SELECT id, connection_id, query_text, executed_at, duration_ms, row_count, success, error
+                 FROM query_history
+                 ORDER BY executed_at DESC
+                 LIMIT ?1
+             )
+             ORDER BY executed_at ASC",
+        )?;
+
+        let entries = stmt
+            .query_map(params![limit as i64], |row| {
+                let id_str: String = row.get(0)?;
+                let id = Uuid::parse_str(&id_str).map_err(|e| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        0,
+                        rusqlite::types::Type::Text,
+                        Box::new(e),
+                    )
+                })?;
+
+                let connection_id: Option<String> = row.get(1)?;
+                let connection_id = connection_id.and_then(|s| Uuid::parse_str(&s).ok());
+
+                let sql: String = row.get(2)?;
+
+                let executed_at_str: String = row.get(3)?;
+                let executed_at = DateTime::parse_from_rfc3339(&executed_at_str)
+                    .map(|dt| dt.with_timezone(&Utc))
+                    .unwrap_or_else(|_| Utc::now());
+
+                let duration_ms: i64 = row.get(4)?;
+                let row_count: Option<i64> = row.get(5)?;
+                let success: i64 = row.get(6)?;
+                let error: Option<String> = row.get(7)?;
+
+                Ok(QueryHistoryEntry {
+                    id,
+                    sql,
+                    connection_id,
+                    executed_at,
+                    duration_ms: duration_ms as u64,
+                    row_count: row_count.map(|c| c as u64),
+                    error,
+                    success: success != 0,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entries)
+    }
+
+    /// Delete all rows from the query history table.
+    pub fn clear_query_history(&self) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM query_history", [])?;
         Ok(())
     }
 
@@ -639,6 +706,20 @@ impl LocalStorage {
 impl Default for LocalStorage {
     fn default() -> Self {
         Self::new().expect("Failed to initialize local storage")
+    }
+}
+
+impl HistoryPersistence for LocalStorage {
+    fn persist_entry(&self, entry: &QueryHistoryEntry) {
+        if let Err(error) = self.add_query_history(entry) {
+            tracing::error!(%error, query_id = %entry.id, "Failed to persist query history entry");
+        }
+    }
+
+    fn clear_all(&self) {
+        if let Err(error) = self.clear_query_history() {
+            tracing::error!(%error, "Failed to clear persisted query history");
+        }
     }
 }
 

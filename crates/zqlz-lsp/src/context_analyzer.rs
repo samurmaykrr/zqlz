@@ -46,6 +46,11 @@ pub enum SqlContext {
         /// Parent context
         parent_tables: Vec<TableRef>,
     },
+    /// Inside a CREATE TABLE column-definition block
+    ///
+    /// Detected when the cursor is between the opening `(` and the unmatched
+    /// closing `)` of a `CREATE [TEMPORARY] TABLE name (...)` statement.
+    CreateTable,
 }
 
 /// Table reference with optional alias
@@ -206,6 +211,13 @@ impl ContextAnalyzer {
         if offset > 0 {
             let text_before = &source[..offset];
 
+            // CREATE TABLE must be checked before the generic FROM/TABLE keyword lookback
+            // because TABLE also appears in the lookback set and would otherwise produce
+            // a spurious FromClause result while the cursor is inside the column-definition body.
+            if let Some(create_table_ctx) = Self::detect_create_table_context(text_before) {
+                return create_table_ctx;
+            }
+
             // Text-based token lookback is the only reliable way to detect table-name position
             // when tree-sitter produces an ERROR or identifier node for incomplete SQL like
             // `SELECT * FROM cus` — the AST walks up to `select_statement` and returns
@@ -272,6 +284,9 @@ impl ContextAnalyzer {
                     let available_tables = self.extract_table_refs(current, source);
                     return SqlContext::SelectList { available_tables };
                 }
+                "create_table_statement" | "create_table" => {
+                    return SqlContext::CreateTable;
+                }
                 "from_clause" | "table_reference" | "from" => {
                     return SqlContext::FromClause;
                 }
@@ -314,6 +329,54 @@ impl ContextAnalyzer {
 
         tracing::trace!("No specific context found, returning General");
         SqlContext::General
+    }
+
+    /// Detects whether the cursor sits inside a `CREATE [TEMPORARY] TABLE name (…)` column list.
+    ///
+    /// Operates entirely on the raw text before the cursor so it works reliably
+    /// even when tree-sitter produces an ERROR node for incomplete DDL statements.
+    /// Returns `Some(SqlContext::CreateTable)` when the cursor is inside the
+    /// outermost paren pair of a CREATE TABLE declaration, `None` otherwise.
+    fn detect_create_table_context(text_before: &str) -> Option<SqlContext> {
+        let upper = text_before.to_uppercase();
+
+        // Find the last CREATE keyword to handle multiple statements in one editor buffer.
+        let create_pos = upper.rfind("CREATE")?;
+        let after_create = &upper[create_pos..];
+
+        // Allow CREATE TABLE or CREATE TEMPORARY / TEMP TABLE.
+        let rest = if let Some(stripped) = after_create
+            .strip_prefix("CREATE TEMPORARY TABLE")
+            .or_else(|| after_create.strip_prefix("CREATE TEMP TABLE"))
+        {
+            stripped
+        } else if let Some(stripped) = after_create.strip_prefix("CREATE TABLE") {
+            stripped
+        } else {
+            return None;
+        };
+
+        // Skip optional IF NOT EXISTS and the table name to reach the opening paren.
+        let paren_pos = rest.find('(')?;
+        let inside = &rest[paren_pos + 1..];
+
+        // Walk the text from the opening paren to the cursor counting depth.
+        // If depth returns to 0 we have passed the closing paren – cursor is outside.
+        let mut depth: i32 = 1;
+        for ch in inside.chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return None;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Some(SqlContext::CreateTable)
     }
 
     fn analyze_condition_clause(&self, node: tree_sitter::Node, source: &str) -> SqlContext {

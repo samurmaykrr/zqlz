@@ -181,9 +181,10 @@ impl MainView {
                     });
 
                     // Remove this task and cancel handle from the running maps when done
-                    _ = this.update(cx, |main_view, _cx| {
+                    _ = this.update(cx, |main_view, cx| {
                         main_view.running_query_tasks.remove(&editor_index);
                         main_view.query_cancel_handles.remove(&editor_index);
+                        main_view.refresh_query_history(cx);
                     });
 
                     anyhow::Ok(())
@@ -749,7 +750,7 @@ impl MainView {
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
                         
-                        cx.spawn_in(window, async move |_this, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
                             tracing::debug!(sql = %sql, "Executing query");
                             
                             // ✅ Use QueryService - all logic encapsulated
@@ -831,6 +832,10 @@ impl MainView {
                                 });
                             }
 
+                            _ = this.update(cx, |view, cx| {
+                                view.refresh_query_history(cx);
+                            });
+
                             anyhow::Ok(())
                         }).detach();
                     }
@@ -901,7 +906,7 @@ impl MainView {
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
                         
-                        cx.spawn_in(window, async move |_this, cx| {
+                        cx.spawn_in(window, async move |this, cx| {
                             tracing::debug!(sql = %sql, "Executing selection");
 
                             let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
@@ -980,6 +985,10 @@ impl MainView {
                                     editor.notify_query_executed(&sql_for_ddl, cx);
                                 });
                             }
+
+                            _ = this.update(cx, |view, cx| {
+                                view.refresh_query_history(cx);
+                            });
 
                             anyhow::Ok(())
                         }).detach();

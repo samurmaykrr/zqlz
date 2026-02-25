@@ -32,7 +32,6 @@ zqlz-driver-clickhouse = { workspace = true, optional = true }
 
 # Async
 async-trait.workspace = true
-tokio = { workspace = true, features = ["rt-multi-thread"] }
 
 # Utilities
 anyhow.workspace = true

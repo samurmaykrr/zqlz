@@ -8,7 +8,7 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SavedConnection};
-use zqlz_query::{QueryHistory, QueryService};
+use zqlz_query::{HistoryPersistence, QueryHistory, QueryService};
 use zqlz_services::{ConnectionService, SchemaService, TableService};
 use zqlz_versioning::VersionRepository;
 
@@ -81,8 +81,26 @@ impl AppState {
         let settings = Arc::new(RwLock::new(AppSettings::default()));
         let default_query_limit = settings.read().default_query_limit;
 
-        // Initialize query history first so it can be shared with QueryService
+        // Initialize query history, restore persisted entries, then wire up storage.
         let query_history = Arc::new(RwLock::new(QueryHistory::default()));
+        {
+            let mut history = query_history.write();
+            // Load the most recent 1000 entries from disk (oldest-first so load_entry
+            // ends up with newest at front of the deque).
+            match storage.load_query_history(1000) {
+                Ok(entries) => {
+                    tracing::info!(count = entries.len(), "Restored query history from disk");
+                    for entry in entries {
+                        history.load_entry(entry);
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "Failed to load query history from storage");
+                }
+            }
+            // Wire persistence so future entries are written to disk automatically.
+            history.set_persistence(Arc::clone(&storage) as Arc<dyn HistoryPersistence>);
+        }
 
         // Create QueryService with the shared query history instance
         let query_service = Arc::new(QueryService::with_shared_history(query_history.clone()));

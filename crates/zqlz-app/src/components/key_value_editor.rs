@@ -174,29 +174,28 @@ impl SelectItem for TtlOption {
 }
 
 /// A single item in a List or Set
-#[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct ListItem {
-    pub value: String,
     pub input: Entity<InputState>,
+    /// Deregistered automatically when this item is dropped (e.g. on removal).
+    _subscription: Subscription,
 }
 
 /// A field in a Hash
-#[derive(Clone, Debug)]
 pub struct HashField {
-    pub field: String,
-    pub value: String,
     pub field_input: Entity<InputState>,
     pub value_input: Entity<InputState>,
+    /// Deregistered automatically when this field is dropped.
+    _field_subscription: Subscription,
+    _value_subscription: Subscription,
 }
 
 /// A member in a Sorted Set (ZSet)
-#[derive(Clone, Debug)]
 pub struct ZSetMember {
-    pub member: String,
-    pub score: f64,
     pub member_input: Entity<InputState>,
     pub score_input: Entity<InputState>,
+    /// Deregistered automatically when this member is dropped.
+    _member_subscription: Subscription,
+    _score_subscription: Subscription,
 }
 
 /// Data for a key-value entry being edited
@@ -564,7 +563,17 @@ impl KeyValueEditorPanel {
                 state.set_value(&item, window, cx);
                 state
             });
-            self.list_items.push(ListItem { value: item, input });
+            let _subscription = cx.subscribe(&input, |this, _, event, cx| {
+                use zqlz_ui::widgets::input::InputEvent;
+                if matches!(event, InputEvent::Change) {
+                    this.is_modified = true;
+                    cx.notify();
+                }
+            });
+            self.list_items.push(ListItem {
+                input,
+                _subscription,
+            });
         }
     }
 
@@ -588,12 +597,25 @@ impl KeyValueEditorPanel {
                         state.set_value(&val_str, window, cx);
                         state
                     });
-
+                    let _field_subscription = cx.subscribe(&field_input, |this, _, event, cx| {
+                        use zqlz_ui::widgets::input::InputEvent;
+                        if matches!(event, InputEvent::Change) {
+                            this.is_modified = true;
+                            cx.notify();
+                        }
+                    });
+                    let _value_subscription = cx.subscribe(&value_input, |this, _, event, cx| {
+                        use zqlz_ui::widgets::input::InputEvent;
+                        if matches!(event, InputEvent::Change) {
+                            this.is_modified = true;
+                            cx.notify();
+                        }
+                    });
                     self.hash_fields.push(HashField {
-                        field: field.clone(),
-                        value: val_str,
                         field_input,
                         value_input,
+                        _field_subscription,
+                        _value_subscription,
                     });
                 }
             }
@@ -618,12 +640,25 @@ impl KeyValueEditorPanel {
                         state.set_value(&score.to_string(), window, cx);
                         state
                     });
-
+                    let _member_subscription = cx.subscribe(&member_input, |this, _, event, cx| {
+                        use zqlz_ui::widgets::input::InputEvent;
+                        if matches!(event, InputEvent::Change) {
+                            this.is_modified = true;
+                            cx.notify();
+                        }
+                    });
+                    let _score_subscription = cx.subscribe(&score_input, |this, _, event, cx| {
+                        use zqlz_ui::widgets::input::InputEvent;
+                        if matches!(event, InputEvent::Change) {
+                            this.is_modified = true;
+                            cx.notify();
+                        }
+                    });
                     self.zset_members.push(ZSetMember {
-                        member: member.clone(),
-                        score,
                         member_input,
                         score_input,
+                        _member_subscription,
+                        _score_subscription,
                     });
                 }
             } else if let Some(arr) = obj.as_array() {
@@ -643,12 +678,27 @@ impl KeyValueEditorPanel {
                             state.set_value(&score.to_string(), window, cx);
                             state
                         });
-
+                        let _member_subscription =
+                            cx.subscribe(&member_input, |this, _, event, cx| {
+                                use zqlz_ui::widgets::input::InputEvent;
+                                if matches!(event, InputEvent::Change) {
+                                    this.is_modified = true;
+                                    cx.notify();
+                                }
+                            });
+                        let _score_subscription =
+                            cx.subscribe(&score_input, |this, _, event, cx| {
+                                use zqlz_ui::widgets::input::InputEvent;
+                                if matches!(event, InputEvent::Change) {
+                                    this.is_modified = true;
+                                    cx.notify();
+                                }
+                            });
                         self.zset_members.push(ZSetMember {
-                            member,
-                            score,
                             member_input,
                             score_input,
+                            _member_subscription,
+                            _score_subscription,
                         });
                     }
                 }
@@ -765,7 +815,18 @@ impl KeyValueEditorPanel {
         }
 
         self.row_data = Some(data);
-        self.is_modified = false;
+
+        // Determine the initial modification state without reading any input entities.
+        // For new rows: the Insert button should be enabled if any non-auto column already has
+        // a pre-filled default value, indicated by a non-empty entry in row_values.
+        // For existing rows: no field has been changed yet, so start as unmodified.
+        self.is_modified = self.row_data.as_ref().map_or(false, |d| {
+            d.is_new
+                && d.column_meta
+                    .iter()
+                    .zip(d.row_values.iter())
+                    .any(|(col, value)| !col.auto_increment && !value.is_empty())
+        });
         self.validation_error = None;
         cx.notify();
     }
@@ -892,51 +953,25 @@ impl KeyValueEditorPanel {
             return !key.trim().is_empty();
         }
 
-        // Check if key changed
+        // Key name change (single entity read).
         let current_key = self.key_input.read(cx).text().to_string();
         if current_key != data.key {
             return true;
         }
 
-        // Check if explicitly modified (type change, add/remove items, etc.)
+        // Covers: type changes, collection add/remove, and inline collection item edits
+        // (tracked reactively via per-item subscriptions rather than re-read on every frame).
         if self.is_modified {
             return true;
         }
 
-        // Check if any collection item values have been edited in place
-        // Compare current input values with stored values
-        for item in &self.list_items {
-            let current = item.input.read(cx).text().to_string();
-            if current != item.value {
-                return true;
-            }
-        }
-
-        for field in &self.hash_fields {
-            let current_field = field.field_input.read(cx).text().to_string();
-            let current_value = field.value_input.read(cx).text().to_string();
-            if current_field != field.field || current_value != field.value {
-                return true;
-            }
-        }
-
-        for member in &self.zset_members {
-            let current_member = member.member_input.read(cx).text().to_string();
-            let current_score = member.score_input.read(cx).text().to_string();
-            let original_score = member.score.to_string();
-            if current_member != member.member || current_score != original_score {
-                return true;
-            }
-        }
-
-        // Check if string/json value changed
+        // For string/JSON types, compare the textarea value (single entity read).
         let value_type = self
             .type_selector
             .read(cx)
             .selected_value()
             .copied()
             .unwrap_or(RedisValueType::String);
-
         if !value_type.is_collection() {
             let current_value = self.value_input.read(cx).text().to_string();
             let original_value = data.value.clone().unwrap_or_default();
@@ -945,7 +980,7 @@ impl KeyValueEditorPanel {
             }
         }
 
-        // Check if TTL changed
+        // TTL change (single entity read).
         let current_ttl = self
             .ttl_selector
             .read(cx)
@@ -1221,9 +1256,16 @@ impl KeyValueEditorPanel {
     // Collection item operations
     fn add_list_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let input = cx.new(|cx| InputState::new(window, cx).placeholder("Element..."));
+        let _subscription = cx.subscribe(&input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        });
         self.list_items.push(ListItem {
-            value: String::new(),
             input,
+            _subscription,
         });
         self.is_modified = true;
         cx.notify();
@@ -1258,11 +1300,25 @@ impl KeyValueEditorPanel {
     fn add_hash_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let field_input = cx.new(|cx| InputState::new(window, cx).placeholder("Field..."));
         let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value..."));
+        let _field_subscription = cx.subscribe(&field_input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        });
+        let _value_subscription = cx.subscribe(&value_input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        });
         self.hash_fields.push(HashField {
-            field: String::new(),
-            value: String::new(),
             field_input,
             value_input,
+            _field_subscription,
+            _value_subscription,
         });
         self.is_modified = true;
         cx.notify();
@@ -1283,11 +1339,25 @@ impl KeyValueEditorPanel {
             state.set_value("0", window, cx);
             state
         });
+        let _member_subscription = cx.subscribe(&member_input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        });
+        let _score_subscription = cx.subscribe(&score_input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        });
         self.zset_members.push(ZSetMember {
-            member: String::new(),
-            score: 0.0,
             member_input,
             score_input,
+            _member_subscription,
+            _score_subscription,
         });
         self.is_modified = true;
         cx.notify();
@@ -2016,45 +2086,13 @@ impl KeyValueEditorPanel {
     }
 
     /// Check if SQL row form has modifications
-    fn has_row_modifications(&self, cx: &App) -> bool {
-        let Some(data) = &self.row_data else {
-            return false;
-        };
-
-        if data.is_new {
-            // For new rows, check if any field has a value
-            return self.row_fields.iter().enumerate().any(|(index, field)| {
-                let col = &data.column_meta[index];
-                if col.auto_increment {
-                    return false;
-                }
-                if field.is_null {
-                    return true;
-                }
-                let value = field.input.read(cx).text().to_string();
-                !value.is_empty()
-            });
-        }
-
-        // For existing rows, compare with original values
-        for (index, field) in self.row_fields.iter().enumerate() {
-            if index >= data.row_values.len() {
-                break;
-            }
-            let original = &data.row_values[index];
-            if field.is_null {
-                if original != "NULL" {
-                    return true;
-                }
-            } else {
-                let current = field.input.read(cx).text().to_string();
-                if current != *original {
-                    return true;
-                }
-            }
-        }
-
-        false
+    /// Check if SQL row form has modifications.
+    ///
+    /// This is intentionally O(1) — modification state is maintained reactively via
+    /// subscriptions (`_field_subscriptions`) and NULL checkbox handlers, so we never
+    /// need to re-read field values during render.
+    fn has_row_modifications(&self, _cx: &App) -> bool {
+        self.is_modified
     }
 
     fn render_editor(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
