@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+#
+# Installs repository git hooks by symlinking script/hooks/* into .git/hooks/.
+# Run this once after cloning. Any future update to script/hooks/ is picked up
+# automatically because .git/hooks/ entries point back to the source files.
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+HOOKS_SRC="$ROOT/script/hooks"
+HOOKS_DST="$ROOT/.git/hooks"
+
+for hook in "$HOOKS_SRC"/*; do
+    name="$(basename "$hook")"
+    target="$HOOKS_DST/$name"
+
+    # Remove any pre-existing hook (file or broken symlink) cleanly.
+    if [[ -e "$target" || -L "$target" ]]; then
+        rm "$target"
+    fi
+
+    # Symlink relative to .git/hooks/ so the repo stays portable across machines.
+    ln -s "../../script/hooks/$name" "$target"
+    chmod +x "$hook"
+    echo "installed: $name → script/hooks/$name"
+done
+
+echo ""
+echo "done — $(ls "$HOOKS_SRC" | wc -l | tr -d ' ') hook(s) installed"
