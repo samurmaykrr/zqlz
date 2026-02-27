@@ -26,10 +26,11 @@ pub use view_models::StatementExecution;
 pub use widgets::{
     AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp,
     DeleteLine, DismissInlineSuggestion, DiagnosticInfo, DiagnosticInfoSeverity, DuplicateLine, EditorMode,
-    EditorObjectType, ExplainResult, FindNext, FindPrevious, FormatQuery, GoToDefinition, MoveLineDown,
-    MoveLineUp, ProblemEntry, ProblemsPanel, ProblemsPanelEvent, ProblemSeverity, QueryEditor, QueryEditorEvent,
-    QueryExecution, QueryHistoryPanel, QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent,
-    ResultsPanel, ResultsPanelEvent, SaveQuery, SaveQueryAs, ShowHover, StatementResult,
+    EditorObjectType, ExplainResult, FindNext, FindPrevious, FindReferences, FormatQuery, GoToDefinition,
+    MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, ProblemEntry, ProblemsPanel,
+    ProblemsPanelEvent, ProblemSeverity, QueryEditor, QueryEditorEvent, QueryExecution, QueryHistoryPanel,
+    QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, RenameSymbol, ResultsPanel,
+    ResultsPanelEvent, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult,
     ToggleLineComment, ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints, UncommentSelection,
 };
 

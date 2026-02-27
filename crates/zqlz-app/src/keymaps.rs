@@ -165,8 +165,13 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "query_editor::TriggerParameterHints" => bind!(TriggerParameterHints),
         "query_editor::ShowHover" => bind!(ShowHover),
         "query_editor::GoToDefinition" => bind!(GoToDefinition),
+        "query_editor::FindReferences" => bind!(FindReferences),
+        "query_editor::RenameSymbol" => bind!(RenameSymbol),
+        "query_editor::ShowCodeActions" => bind!(ShowCodeActions),
         "query_editor::FindNext" => bind!(FindNext),
         "query_editor::FindPrevious" => bind!(FindPrevious),
+        "query_editor::NextProblem" => bind!(NextProblem),
+        "query_editor::PreviousProblem" => bind!(PreviousProblem),
         "query_editor::ToggleProblemsPanel" => bind!(ToggleProblemsPanel),
 
         // === editor namespace — mapped to zqlz_text_editor::actions ===

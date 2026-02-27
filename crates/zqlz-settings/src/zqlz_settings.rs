@@ -520,6 +520,8 @@ pub struct EditorSettings {
     // Gutter settings
     pub show_gutter_diagnostics: bool,
     pub show_folding: bool,
+    pub large_file_line_threshold: u32,
+    pub large_file_byte_threshold: u32,
 }
 
 impl Default for EditorSettings {
@@ -571,6 +573,8 @@ impl Default for EditorSettings {
             // Gutter settings
             show_gutter_diagnostics: true,
             show_folding: true,
+            large_file_line_threshold: 20_000,
+            large_file_byte_threshold: 2 * 1024 * 1024,
         }
     }
 }
@@ -701,6 +705,16 @@ impl EditorConfig {
     /// Returns whether to show inline diagnostics.
     pub fn show_inline_diagnostics(&self) -> bool {
         self.editor.show_inline_diagnostics
+    }
+
+    /// Returns the line threshold after which large-file optimizations are enabled.
+    pub fn large_file_line_threshold(&self) -> u32 {
+        self.editor.large_file_line_threshold
+    }
+
+    /// Returns the byte threshold after which large-file optimizations are enabled.
+    pub fn large_file_byte_threshold(&self) -> u32 {
+        self.editor.large_file_byte_threshold
     }
 
     /// Returns whether to automatically indent new lines.

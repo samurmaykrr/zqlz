@@ -22,7 +22,7 @@
 //!
 //! The buffer provides efficient conversion between these representations.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use ropey::Rope;
 use std::time::SystemTime;
 
@@ -250,6 +250,15 @@ impl TextBuffer {
         self.rope.to_string()
     }
 
+    /// Returns a cheap clone of the underlying rope.
+    ///
+    /// Rope clones are shallow and share the same underlying chunks, making
+    /// this suitable for read-only consumers that need rope APIs without
+    /// materializing the entire buffer into a String.
+    pub fn rope(&self) -> Rope {
+        self.rope.clone()
+    }
+
     /// Returns the length of the buffer in bytes.
     ///
     /// # Performance
@@ -257,6 +266,47 @@ impl TextBuffer {
     /// O(1) - rope tracks this internally.
     pub fn len(&self) -> usize {
         self.rope.len_bytes()
+    }
+
+    /// Returns the previous UTF-8 character boundary strictly before `offset`.
+    ///
+    /// If `offset` is `0`, returns `0`.
+    pub fn previous_char_boundary(&self, offset: usize) -> Result<usize> {
+        if offset > self.rope.len_bytes() {
+            return Err(anyhow!(
+                "Offset {} is out of bounds (buffer length: {})",
+                offset,
+                self.rope.len_bytes()
+            ));
+        }
+
+        if offset == 0 {
+            return Ok(0);
+        }
+
+        let char_index = self.rope.byte_to_char(offset - 1);
+        Ok(self.rope.char_to_byte(char_index))
+    }
+
+    /// Returns the next UTF-8 character boundary strictly after `offset`.
+    ///
+    /// If `offset` is at or beyond the end of the buffer, returns the buffer
+    /// length.
+    pub fn next_char_boundary(&self, offset: usize) -> Result<usize> {
+        if offset > self.rope.len_bytes() {
+            return Err(anyhow!(
+                "Offset {} is out of bounds (buffer length: {})",
+                offset,
+                self.rope.len_bytes()
+            ));
+        }
+
+        if offset >= self.rope.len_bytes() {
+            return Ok(self.rope.len_bytes());
+        }
+
+        let char_index = self.rope.byte_to_char(offset);
+        Ok(self.rope.char_to_byte(char_index + 1))
     }
 
     /// Returns true if the buffer is empty.
@@ -369,7 +419,8 @@ impl TextBuffer {
         }
 
         let text_str = text.as_ref();
-        self.rope.insert(offset, text_str);
+        let char_idx = self.rope.byte_to_char(offset);
+        self.rope.insert(char_idx, text_str);
 
         // Track the change
         self.changes.push(Change::insert(offset, text_str));
@@ -421,9 +472,11 @@ impl TextBuffer {
         }
 
         // Get the text being deleted before we delete it
-        let deleted_text = self.rope.slice(range.clone()).to_string();
+        let char_start = self.rope.byte_to_char(range.start);
+        let char_end = self.rope.byte_to_char(range.end);
+        let deleted_text = self.rope.slice(char_start..char_end).to_string();
 
-        self.rope.remove(range.clone());
+        self.rope.remove(char_start..char_end);
 
         // Track the change
         self.changes.push(Change::delete(range.start, deleted_text));
@@ -599,7 +652,9 @@ impl TextBuffer {
             return Err(anyhow!("Slice range {:?} has start > end", range));
         }
 
-        Ok(self.rope.slice(range).to_string())
+        let char_start = self.rope.byte_to_char(range.start);
+        let char_end = self.rope.byte_to_char(range.end);
+        Ok(self.rope.slice(char_start..char_end).to_string())
     }
 
     /// Returns the list of changes made to the buffer.
@@ -710,7 +765,10 @@ impl TextBuffer {
                     self.rope.len_bytes()
                 ));
             }
-            self.rope.remove(delete_range);
+            self.rope.remove(
+                self.rope.byte_to_char(delete_range.start)
+                    ..self.rope.byte_to_char(delete_range.end),
+            );
         }
 
         if !change.new_text.is_empty() {
@@ -722,7 +780,8 @@ impl TextBuffer {
                     self.rope.len_bytes()
                 ));
             }
-            self.rope.insert(change.offset, &change.new_text);
+            self.rope
+                .insert(self.rope.byte_to_char(change.offset), &change.new_text);
         }
 
         Ok(())

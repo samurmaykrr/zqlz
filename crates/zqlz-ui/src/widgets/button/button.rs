@@ -655,7 +655,11 @@ impl ButtonVariant {
                     cx.theme().primary_foreground
                 }
             }
-            Self::Secondary | Self::Ghost => cx.theme().secondary_foreground,
+            Self::Secondary => cx.theme().secondary_foreground,
+            // Ghost renders on a transparent background (like plain text), so it reads from the
+            // base foreground token rather than secondary_foreground, which custom themes may
+            // assign to a brand/accent color that would look wrong on a transparent surface.
+            Self::Ghost => cx.theme().foreground,
             Self::Danger => {
                 if outline {
                     cx.theme().danger

@@ -17,6 +17,8 @@ use zqlz_ui::widgets::{
 
 use super::{DiagnosticInfo, DiagnosticInfoSeverity};
 
+const RESULTS_MAX_MATERIALIZED_ROWS: usize = 20_000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResultTab {
     Message,
@@ -109,13 +111,19 @@ impl QueryExecution {
 struct ResultsTableDelegate {
     columns: Vec<Column>,
     rows: Vec<Vec<String>>,
+    source_row_count: usize,
+    truncated: bool,
 }
 
 impl ResultsTableDelegate {
     fn new(result: &QueryResult) -> Self {
+        let source_row_count = result.rows.len();
+        let truncated = source_row_count > RESULTS_MAX_MATERIALIZED_ROWS;
+
         // Create row number column as first column (fixed left)
         // Width scales with digit count so large row numbers aren't truncated
-        let row_num_width = Self::row_number_column_width(result.rows.len());
+        let visible_row_count = source_row_count.min(RESULTS_MAX_MATERIALIZED_ROWS);
+        let row_num_width = Self::row_number_column_width(visible_row_count);
         let mut columns: Vec<Column> = vec![
             Column::new("row-num", "#")
                 .width(row_num_width)
@@ -133,10 +141,24 @@ impl ResultsTableDelegate {
         let rows: Vec<Vec<String>> = result
             .rows
             .iter()
+            .take(RESULTS_MAX_MATERIALIZED_ROWS)
             .map(|row| row.values.iter().map(|val| val.to_string()).collect())
             .collect();
 
-        Self { columns, rows }
+        Self {
+            columns,
+            rows,
+            source_row_count,
+            truncated,
+        }
+    }
+
+    fn is_truncated(&self) -> bool {
+        self.truncated
+    }
+
+    fn source_row_count(&self) -> usize {
+        self.source_row_count
     }
 
     /// Calculate the width needed for the row number column based on the maximum
@@ -276,17 +298,17 @@ pub struct ResultsPanel {
     /// Current query execution data
     execution: Option<QueryExecution>,
 
-    /// Table states for result grids (one per statement with results)
-    table_states: Vec<Entity<TableState<ResultsTableDelegate>>>,
+    /// Table states for result grids (one per statement with results, lazily created)
+    table_states: Vec<Option<Entity<TableState<ResultsTableDelegate>>>>,
 
     /// Explain results (one per EXPLAIN executed)
     explain_results: Vec<ExplainResult>,
 
-    /// Table states for explain Op view (raw EXPLAIN output)
-    explain_op_table_states: Vec<Entity<TableState<ResultsTableDelegate>>>,
+    /// Table states for explain Op view (raw EXPLAIN output, lazily created)
+    explain_op_table_states: Vec<Option<Entity<TableState<ResultsTableDelegate>>>>,
 
-    /// Table states for explain Plan view (EXPLAIN QUERY PLAN output)
-    explain_plan_table_states: Vec<Entity<TableState<ResultsTableDelegate>>>,
+    /// Table states for explain Plan view (EXPLAIN QUERY PLAN output, lazily created)
+    explain_plan_table_states: Vec<Option<Entity<TableState<ResultsTableDelegate>>>>,
 
     /// Active sub-tab for Explain view
     explain_sub_tab: ExplainSubTab,
@@ -343,10 +365,7 @@ impl ResultsPanel {
     pub fn set_active_editor_id(&mut self, editor_id: Option<usize>, cx: &mut Context<Self>) {
         if self.active_editor_id != editor_id {
             self.active_editor_id = editor_id;
-            tracing::debug!(
-                "ResultsPanel: active editor changed to {:?}",
-                editor_id
-            );
+            tracing::debug!("ResultsPanel: active editor changed to {:?}", editor_id);
             cx.notify();
         }
     }
@@ -431,25 +450,19 @@ impl ResultsPanel {
     pub fn set_execution(
         &mut self,
         execution: QueryExecution,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Create table states for all statements with results
+        // Reset lazy table state slots for statements with results
         self.table_states.clear();
-        
+
         // Reset closed tabs when new execution arrives
         self.closed_result_tabs.clear();
 
         for statement in &execution.statements {
             if let Some(result) = &statement.result {
-                let delegate = ResultsTableDelegate::new(result);
-                let table_state = cx.new(|cx| {
-                    TableState::new(delegate, window, cx)
-                        .col_resizable(true)
-                        .sortable(true)
-                        .row_selectable(true)
-                });
-                self.table_states.push(table_state);
+                let _ = result;
+                self.table_states.push(None);
             }
         }
 
@@ -466,47 +479,16 @@ impl ResultsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Create table state for Op view (raw EXPLAIN output)
-        if let Some(raw) = &result.raw_output {
-            let delegate = ResultsTableDelegate::new(raw);
-            let table_state = cx.new(|cx| {
-                TableState::new(delegate, window, cx)
-                    .col_resizable(true)
-                    .sortable(true)
-                    .row_selectable(true)
-            });
-            self.explain_op_table_states.push(table_state);
-        } else {
-            // Push a placeholder - we need to keep indices aligned
-            let empty_result = QueryResult::empty();
-            let delegate = ResultsTableDelegate::new(&empty_result);
-            let table_state = cx.new(|cx| TableState::new(delegate, window, cx));
-            self.explain_op_table_states.push(table_state);
-        }
-
-        // Create table state for Plan view (EXPLAIN QUERY PLAN output)
-        if let Some(plan) = &result.query_plan {
-            let delegate = ResultsTableDelegate::new(plan);
-            let table_state = cx.new(|cx| {
-                TableState::new(delegate, window, cx)
-                    .col_resizable(true)
-                    .sortable(true)
-                    .row_selectable(true)
-            });
-            self.explain_plan_table_states.push(table_state);
-        } else {
-            // Push a placeholder
-            let empty_result = QueryResult::empty();
-            let delegate = ResultsTableDelegate::new(&empty_result);
-            let table_state = cx.new(|cx| TableState::new(delegate, window, cx));
-            self.explain_plan_table_states.push(table_state);
-        }
+        // Reserve lazy slots for explain tables (keep indices aligned with explain_results)
+        self.explain_op_table_states.push(None);
+        self.explain_plan_table_states.push(None);
 
         let explain_idx = self.explain_results.len();
         self.explain_results.push(result);
         self.is_loading = false;
         self.active_tab = ResultTab::Explain(explain_idx);
         self.explain_sub_tab = ExplainSubTab::Plan;
+        self.ensure_explain_plan_table_state(explain_idx, window, cx);
         cx.notify();
     }
 
@@ -531,7 +513,7 @@ impl ResultsPanel {
     /// Close a result tab by statement index
     fn close_result_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
         self.closed_result_tabs.insert(idx);
-        
+
         // If we just closed the active tab, switch to another tab
         if self.active_tab == ResultTab::Result(idx) {
             // Try to switch to the next non-closed result tab
@@ -544,13 +526,123 @@ impl ResultsPanel {
                         *i != idx && s.result.is_some() && !self.closed_result_tabs.contains(i)
                     })
                     .map(|(i, _)| ResultTab::Result(i));
-                
+
                 // If no other result tabs, switch to Summary
                 self.active_tab = next_tab.unwrap_or(ResultTab::Summary);
             }
         }
-        
+
         cx.notify();
+    }
+
+    fn result_table_slot_for_statement(&self, statement_idx: usize) -> Option<usize> {
+        let mut table_state_idx = 0;
+        if let Some(exec) = &self.execution {
+            for (idx, statement) in exec.statements.iter().enumerate() {
+                if statement.result.is_some() {
+                    if idx == statement_idx {
+                        return Some(table_state_idx);
+                    }
+                    table_state_idx += 1;
+                }
+            }
+        }
+        None
+    }
+
+    fn ensure_result_table_state(
+        &mut self,
+        statement_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(table_state_idx) = self.result_table_slot_for_statement(statement_idx) else {
+            return;
+        };
+
+        if table_state_idx >= self.table_states.len()
+            || self.table_states[table_state_idx].is_some()
+        {
+            return;
+        }
+
+        let Some(result) = self
+            .execution
+            .as_ref()
+            .and_then(|exec| exec.statements.get(statement_idx))
+            .and_then(|statement| statement.result.as_ref())
+        else {
+            return;
+        };
+
+        let delegate = ResultsTableDelegate::new(result);
+        let table_state = cx.new(|cx| {
+            TableState::new(delegate, window, cx)
+                .col_resizable(true)
+                .sortable(true)
+                .row_selectable(true)
+        });
+        self.table_states[table_state_idx] = Some(table_state);
+    }
+
+    fn ensure_explain_plan_table_state(
+        &mut self,
+        explain_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if explain_idx >= self.explain_plan_table_states.len()
+            || self.explain_plan_table_states[explain_idx].is_some()
+        {
+            return;
+        }
+
+        let Some(query_plan) = self
+            .explain_results
+            .get(explain_idx)
+            .and_then(|result| result.query_plan.as_ref())
+        else {
+            return;
+        };
+
+        let delegate = ResultsTableDelegate::new(query_plan);
+        let table_state = cx.new(|cx| {
+            TableState::new(delegate, window, cx)
+                .col_resizable(true)
+                .sortable(true)
+                .row_selectable(true)
+        });
+        self.explain_plan_table_states[explain_idx] = Some(table_state);
+    }
+
+    fn ensure_explain_op_table_state(
+        &mut self,
+        explain_idx: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if explain_idx >= self.explain_op_table_states.len()
+            || self.explain_op_table_states[explain_idx].is_some()
+        {
+            return;
+        }
+
+        let Some(raw_output) = self
+            .explain_results
+            .get(explain_idx)
+            .and_then(|result| result.raw_output.as_ref())
+        else {
+            return;
+        };
+
+        let delegate = ResultsTableDelegate::new(raw_output);
+        let table_state = cx.new(|cx| {
+            TableState::new(delegate, window, cx)
+                .col_resizable(true)
+                .sortable(true)
+                .row_selectable(true)
+        });
+        self.explain_op_table_states[explain_idx] = Some(table_state);
     }
 
     /// Get the current result being displayed (if any)
@@ -570,7 +662,7 @@ impl ResultsPanel {
     /// Format statement metadata with number, duration, and row count/affected rows
     fn format_statement_metadata(idx: usize, statement: &StatementResult) -> String {
         let duration_str = format!("{:.3}s", statement.duration_ms as f64 / 1000.0);
-        
+
         if let Some(result) = &statement.result {
             // Query with results
             let row_count = result.rows.len();
@@ -588,7 +680,11 @@ impl ResultsPanel {
                 idx + 1,
                 duration_str,
                 statement.affected_rows,
-                if statement.affected_rows == 1 { "" } else { "s" }
+                if statement.affected_rows == 1 {
+                    ""
+                } else {
+                    "s"
+                }
             )
         } else {
             // DDL or other statement without row counts
@@ -768,7 +864,7 @@ impl ResultsPanel {
                 if self.closed_result_tabs.contains(&idx) {
                     continue;
                 }
-                
+
                 if statement.result.is_some() {
                     let result_idx = idx;
                     // Create a composite tab with label and close button
@@ -782,7 +878,8 @@ impl ResultsPanel {
                                     .xsmall()
                                     .label(format!("Result {}", idx + 1))
                                     .selected(self.active_tab == ResultTab::Result(result_idx))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
+                                        this.ensure_result_table_state(result_idx, window, cx);
                                         this.active_tab = ResultTab::Result(result_idx);
                                         cx.notify();
                                     })),
@@ -792,10 +889,18 @@ impl ResultsPanel {
                                     .ghost()
                                     .xsmall()
                                     .label("×")
-                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                    .on_click(cx.listener(move |this, _, window, cx| {
                                         this.close_result_tab(result_idx, cx);
+
+                                        if let ResultTab::Result(new_result_idx) = this.active_tab {
+                                            this.ensure_result_table_state(
+                                                new_result_idx,
+                                                window,
+                                                cx,
+                                            );
+                                        }
                                     })),
-                            )
+                            ),
                     );
                 }
             }
@@ -810,7 +915,8 @@ impl ResultsPanel {
                     .xsmall()
                     .label(format!("Explain {}", idx + 1))
                     .selected(self.active_tab == ResultTab::Explain(explain_idx))
-                    .on_click(cx.listener(move |this, _, _, cx| {
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.ensure_explain_plan_table_state(explain_idx, window, cx);
                         this.active_tab = ResultTab::Explain(explain_idx);
                         cx.notify();
                     })),
@@ -1261,13 +1367,15 @@ impl ResultsPanel {
                                             .child(
                                                 v_flex()
                                                     .gap_1()
-                                                     .child(
+                                                    .child(
                                                         div()
                                                             .text_xs()
                                                             .text_color(theme.muted_foreground)
-                                                            .child(Self::format_statement_metadata(
-                                                                idx, statement
-                                                            )),
+                                                            .child(
+                                                                Self::format_statement_metadata(
+                                                                    idx, statement,
+                                                                ),
+                                                            ),
                                                     )
                                                     .child(statement.sql.clone())
                                                     .when_some(
@@ -1312,9 +1420,45 @@ impl ResultsPanel {
         }
 
         if found && table_state_idx < self.table_states.len() {
+            let Some(table_state) = self.table_states[table_state_idx].as_ref() else {
+                return div()
+                    .size_full()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Preparing result table…")
+                    .into_any_element();
+            };
+
+            let (is_truncated, source_row_count, visible_row_count) = {
+                let state = table_state.read(cx);
+                let delegate = state.delegate();
+                (
+                    delegate.is_truncated(),
+                    delegate.source_row_count(),
+                    delegate.rows_count(cx),
+                )
+            };
+
             div()
                 .size_full()
-                .child(Table::new(&self.table_states[table_state_idx]).stripe(true))
+                .when(is_truncated, |this| {
+                    let theme = cx.theme();
+                    this.child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .bg(theme.warning.opacity(0.12))
+                            .text_color(theme.warning)
+                            .child(format!(
+                                "Showing first {} rows of {} to keep results responsive",
+                                visible_row_count, source_row_count
+                            )),
+                    )
+                })
+                .child(Table::new(table_state).stripe(true))
                 .into_any_element()
         } else {
             self.render_empty_state(cx).into_any_element()
@@ -1491,24 +1635,21 @@ impl ResultsPanel {
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.danger)
-                                    )
+                                    .child(div().size(px(8.0)).rounded_full().bg(theme.danger))
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(
-                                                if self.problems_show_errors {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                }
-                                            )
-                                            .child(format!("{} Error{}", error_count, if error_count == 1 { "" } else { "s" }))
-                                    )
+                                            .text_color(if self.problems_show_errors {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(format!(
+                                                "{} Error{}",
+                                                error_count,
+                                                if error_count == 1 { "" } else { "s" }
+                                            )),
+                                    ),
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_errors = !this.problems_show_errors;
@@ -1526,24 +1667,21 @@ impl ResultsPanel {
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.warning)
-                                    )
+                                    .child(div().size(px(8.0)).rounded_full().bg(theme.warning))
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(
-                                                if self.problems_show_warnings {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                }
-                                            )
-                                            .child(format!("{} Warning{}", warning_count, if warning_count == 1 { "" } else { "s" }))
-                                    )
+                                            .text_color(if self.problems_show_warnings {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(format!(
+                                                "{} Warning{}",
+                                                warning_count,
+                                                if warning_count == 1 { "" } else { "s" }
+                                            )),
+                                    ),
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_warnings = !this.problems_show_warnings;
@@ -1561,24 +1699,17 @@ impl ResultsPanel {
                                 h_flex()
                                     .gap_1()
                                     .items_center()
-                                    .child(
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.info)
-                                    )
+                                    .child(div().size(px(8.0)).rounded_full().bg(theme.info))
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(
-                                                if self.problems_show_info {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                }
-                                            )
-                                            .child(format!("{} Info", info_count))
-                                    )
+                                            .text_color(if self.problems_show_info {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(format!("{} Info", info_count)),
+                                    ),
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_info = !this.problems_show_info;
@@ -1600,106 +1731,99 @@ impl ResultsPanel {
                                         div()
                                             .size(px(8.0))
                                             .rounded_full()
-                                            .bg(theme.muted_foreground)
+                                            .bg(theme.muted_foreground),
                                     )
                                     .child(
                                         div()
                                             .text_xs()
-                                            .text_color(
-                                                if self.problems_show_hints {
-                                                    theme.foreground
-                                                } else {
-                                                    theme.muted_foreground
-                                                }
-                                            )
-                                            .child(format!("{} Hint{}", hint_count, if hint_count == 1 { "" } else { "s" }))
-                                    )
+                                            .text_color(if self.problems_show_hints {
+                                                theme.foreground
+                                            } else {
+                                                theme.muted_foreground
+                                            })
+                                            .child(format!(
+                                                "{} Hint{}",
+                                                hint_count,
+                                                if hint_count == 1 { "" } else { "s" }
+                                            )),
+                                    ),
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_hints = !this.problems_show_hints;
                                 cx.notify();
                             }))
-                    })
+                    }),
             )
             // Problems list (filtered)
-            .child(
-                if filtered_problems.is_empty() {
-                    v_flex()
-                        .flex_1()
-                        .items_center()
-                        .justify_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.muted_foreground)
-                                .child(
-                                    if self.problems.is_empty() {
-                                        "No problems detected"
-                                    } else {
-                                        "No problems match the current filter"
-                                    }
-                                ),
-                        )
-                        .into_any_element()
-                } else {
-                    v_flex()
-                        .id("problems-list")
-                        .flex_1()
-                        .overflow_y_scroll()
-                        .children(filtered_problems.iter().enumerate().map(|(idx, problem)| {
-                            let line = problem.line + 1; // Convert to 1-indexed for display
-                            let col = problem.column + 1;
-                            let severity = problem.severity;
-                            let message = problem.message.clone();
-                            let source = problem.source.clone();
+            .child(if filtered_problems.is_empty() {
+                v_flex()
+                    .flex_1()
+                    .items_center()
+                    .justify_center()
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(
+                        if self.problems.is_empty() {
+                            "No problems detected"
+                        } else {
+                            "No problems match the current filter"
+                        },
+                    ))
+                    .into_any_element()
+            } else {
+                v_flex()
+                    .id("problems-list")
+                    .flex_1()
+                    .overflow_y_scroll()
+                    .children(filtered_problems.iter().enumerate().map(|(idx, problem)| {
+                        let line = problem.line + 1; // Convert to 1-indexed for display
+                        let col = problem.column + 1;
+                        let severity = problem.severity;
+                        let message = problem.message.clone();
+                        let source = problem.source.clone();
 
-                            h_flex()
-                                .id(ElementId::Name(format!("problem-{}", idx).into()))
-                                .w_full()
-                                .px_3()
-                                .py_2()
-                                .gap_3()
-                                .items_start()
-                                .cursor_pointer()
-                                .hover(|s| s.bg(theme.muted))
-                                .on_click(cx.listener(move |_this, _, _, cx| {
-                                    // Emit event to jump to line
-                                    cx.emit(ResultsPanelEvent::GoToLine { line, column: col });
-                                }))
-                                // Severity indicator
-                                .child(
-                                    div()
-                                        .size(px(8.0))
-                                        .mt(px(5.0))
-                                        .rounded_full()
-                                        .bg(match severity {
-                                            DiagnosticInfoSeverity::Error => theme.danger,
-                                            DiagnosticInfoSeverity::Warning => theme.warning,
-                                            DiagnosticInfoSeverity::Info => theme.info,
-                                            DiagnosticInfoSeverity::Hint => theme.muted_foreground,
-                                        }),
-                                )
-                                // Message and details
-                                .child(
-                                    v_flex()
-                                        .flex_1()
-                                        .gap_1()
-                                        .child(div().text_sm().text_color(theme.foreground).child(message))
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .text_xs()
-                                                .text_color(theme.muted_foreground)
-                                                .child(format!("Ln {}, Col {}", line, col))
-                                                .when_some(source, |this, src| {
-                                                    this.child(div().child(format!("[{}]", src)))
-                                                }),
-                                        ),
-                                )
-                        }))
-                        .into_any_element()
-                }
-            )
+                        h_flex()
+                            .id(ElementId::Name(format!("problem-{}", idx).into()))
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .gap_3()
+                            .items_start()
+                            .cursor_pointer()
+                            .hover(|s| s.bg(theme.muted))
+                            .on_click(cx.listener(move |_this, _, _, cx| {
+                                // Emit event to jump to line
+                                cx.emit(ResultsPanelEvent::GoToLine { line, column: col });
+                            }))
+                            // Severity indicator
+                            .child(div().size(px(8.0)).mt(px(5.0)).rounded_full().bg(
+                                match severity {
+                                    DiagnosticInfoSeverity::Error => theme.danger,
+                                    DiagnosticInfoSeverity::Warning => theme.warning,
+                                    DiagnosticInfoSeverity::Info => theme.info,
+                                    DiagnosticInfoSeverity::Hint => theme.muted_foreground,
+                                },
+                            ))
+                            // Message and details
+                            .child(
+                                v_flex()
+                                    .flex_1()
+                                    .gap_1()
+                                    .child(
+                                        div().text_sm().text_color(theme.foreground).child(message),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(format!("Ln {}, Col {}", line, col))
+                                            .when_some(source, |this, src| {
+                                                this.child(div().child(format!("[{}]", src)))
+                                            }),
+                                    ),
+                            )
+                    }))
+                    .into_any_element()
+            })
             .into_any_element()
     }
 
@@ -1732,7 +1856,10 @@ impl ResultsPanel {
                     .xsmall()
                     .label("Plan")
                     .selected(self.explain_sub_tab == ExplainSubTab::Plan)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let ResultTab::Explain(explain_idx) = this.active_tab {
+                            this.ensure_explain_plan_table_state(explain_idx, window, cx);
+                        }
                         this.explain_sub_tab = ExplainSubTab::Plan;
                         cx.notify();
                     })),
@@ -1743,7 +1870,10 @@ impl ResultsPanel {
                     .xsmall()
                     .label("Op")
                     .selected(self.explain_sub_tab == ExplainSubTab::Op)
-                    .on_click(cx.listener(|this, _, _, cx| {
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if let ResultTab::Explain(explain_idx) = this.active_tab {
+                            this.ensure_explain_op_table_state(explain_idx, window, cx);
+                        }
                         this.explain_sub_tab = ExplainSubTab::Op;
                         cx.notify();
                     })),
@@ -1808,15 +1938,15 @@ impl ResultsPanel {
                                                 v_flex()
                                                     .flex_1()
                                                     .min_w(px(400.0))
-                                                    .child(self.render_plan_tree(analysis, cx))
+                                                    .child(self.render_plan_tree(analysis, cx)),
                                             )
                                             .child(
                                                 v_flex()
                                                     .w(px(350.0))
-                                                    .child(self.render_suggestions(analysis, cx))
-                                            )
-                                    )
-                            )
+                                                    .child(self.render_suggestions(analysis, cx)),
+                                            ),
+                                    ),
+                            ),
                     )
                     .into_any_element();
             } else {
@@ -1828,7 +1958,7 @@ impl ResultsPanel {
                         div()
                             .text_sm()
                             .text_color(theme.muted_foreground)
-                            .child("Query plan could not be analyzed")
+                            .child("Query plan could not be analyzed"),
                     )
                     .into_any_element();
             }
@@ -1842,7 +1972,7 @@ impl ResultsPanel {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("No explain result available")
+                    .child("No explain result available"),
             )
             .into_any_element()
     }
@@ -1855,11 +1985,14 @@ impl ResultsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
-        
+
         let total_cost = analysis.plan.total_cost.unwrap_or(0.0);
         let total_rows = analysis.plan.total_rows.unwrap_or(0);
-        let execution_time = analysis.plan.execution_time_ms.unwrap_or(result.duration_ms as f64);
-        
+        let execution_time = analysis
+            .plan
+            .execution_time_ms
+            .unwrap_or(result.duration_ms as f64);
+
         // Determine score color
         let score_color = if analysis.performance_score >= 80 {
             theme.success
@@ -1885,7 +2018,7 @@ impl ResultsPanel {
                             .text_lg()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child("Query Plan Analysis")
+                            .child("Query Plan Analysis"),
                     )
                     .child(
                         div()
@@ -1900,9 +2033,9 @@ impl ResultsPanel {
                                     .text_sm()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(score_color)
-                                    .child(format!("Score: {}/100", analysis.performance_score))
-                            )
-                    )
+                                    .child(format!("Score: {}/100", analysis.performance_score)),
+                            ),
+                    ),
             )
             .child(
                 h_flex()
@@ -1911,17 +2044,13 @@ impl ResultsPanel {
                     .child(
                         v_flex()
                             .gap_1()
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Total Cost")
-                            )
+                            .child(div().text_color(theme.muted_foreground).child("Total Cost"))
                             .child(
                                 div()
                                     .text_color(theme.foreground)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{:.2}", total_cost))
-                            )
+                                    .child(format!("{:.2}", total_cost)),
+                            ),
                     )
                     .child(
                         v_flex()
@@ -1929,14 +2058,14 @@ impl ResultsPanel {
                             .child(
                                 div()
                                     .text_color(theme.muted_foreground)
-                                    .child("Estimated Rows")
+                                    .child("Estimated Rows"),
                             )
                             .child(
                                 div()
                                     .text_color(theme.foreground)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{}", total_rows))
-                            )
+                                    .child(format!("{}", total_rows)),
+                            ),
                     )
                     .child(
                         v_flex()
@@ -1944,21 +2073,21 @@ impl ResultsPanel {
                             .child(
                                 div()
                                     .text_color(theme.muted_foreground)
-                                    .child("Execution Time")
+                                    .child("Execution Time"),
                             )
                             .child(
                                 div()
                                     .text_color(theme.foreground)
                                     .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{:.3}s", execution_time / 1000.0))
-                            )
-                    )
+                                    .child(format!("{:.3}s", execution_time / 1000.0)),
+                            ),
+                    ),
             )
             .child(
                 div()
                     .text_sm()
                     .text_color(theme.foreground)
-                    .child(analysis.summary.clone())
+                    .child(analysis.summary.clone()),
             )
     }
 
@@ -1978,7 +2107,7 @@ impl ResultsPanel {
                     .text_sm()
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(theme.foreground)
-                    .child("Execution Plan")
+                    .child("Execution Plan"),
             )
             .child(
                 div()
@@ -1990,11 +2119,11 @@ impl ResultsPanel {
                     .border_1()
                     .border_color(theme.border)
                     .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .child(self.render_plan_node(&analysis.plan.root, 0, cx))
-                    )
+                    .child(v_flex().w_full().child(self.render_plan_node(
+                        &analysis.plan.root,
+                        0,
+                        cx,
+                    ))),
             )
     }
 
@@ -2007,7 +2136,7 @@ impl ResultsPanel {
     ) -> AnyElement {
         let theme = cx.theme();
         let indent = depth * 20;
-        
+
         // Node type badge color
         let node_color = if node.is_scan() {
             if node.node_type == zqlz_analyzer::explain::NodeType::SeqScan {
@@ -2022,7 +2151,8 @@ impl ResultsPanel {
         };
 
         // Calculate cost as a heatmap gradient (0-1 scale)
-        let cost_intensity = node.cost
+        let cost_intensity = node
+            .cost
             .map(|c| (c.total / 1000.0).min(1.0))
             .unwrap_or(0.0);
 
@@ -2049,8 +2179,8 @@ impl ResultsPanel {
                                     .font_weight(FontWeight::MEDIUM)
                                     .font_family(theme.mono_font_family.clone())
                                     .text_color(node_color)
-                                    .child(format!("{:?}", node.node_type))
-                            )
+                                    .child(format!("{:?}", node.node_type)),
+                            ),
                     )
                     // Relation name
                     .when_some(node.relation.as_ref(), |this, relation| {
@@ -2059,7 +2189,7 @@ impl ResultsPanel {
                                 .text_sm()
                                 .font_weight(FontWeight::MEDIUM)
                                 .text_color(theme.foreground)
-                                .child(relation.clone())
+                                .child(relation.clone()),
                         )
                     })
                     // Cost indicator
@@ -2075,8 +2205,11 @@ impl ResultsPanel {
                                         .text_xs()
                                         .font_family(theme.mono_font_family.clone())
                                         .text_color(theme.muted_foreground)
-                                        .child(format!("cost: {:.2}..{:.2}", cost.startup, cost.total))
-                                )
+                                        .child(format!(
+                                            "cost: {:.2}..{:.2}",
+                                            cost.startup, cost.total
+                                        )),
+                                ),
                         )
                     })
                     // Row estimate
@@ -2086,9 +2219,9 @@ impl ResultsPanel {
                                 .text_xs()
                                 .font_family(theme.mono_font_family.clone())
                                 .text_color(theme.muted_foreground)
-                                .child(format!("rows: {}", rows))
+                                .child(format!("rows: {}", rows)),
                         )
-                    })
+                    }),
             )
             // Filter information
             .when_some(node.filter.as_ref(), |this, filter| {
@@ -2098,13 +2231,15 @@ impl ResultsPanel {
                         .text_xs()
                         .font_family(theme.mono_font_family.clone())
                         .text_color(theme.muted_foreground)
-                        .child(format!("Filter: {}", filter))
+                        .child(format!("Filter: {}", filter)),
                 )
             })
             // Child nodes
-            .children(node.children.iter().map(|child| {
-                self.render_plan_node(child, depth + 1, cx)
-            }))
+            .children(
+                node.children
+                    .iter()
+                    .map(|child| self.render_plan_node(child, depth + 1, cx)),
+            )
             .into_any_element()
     }
 
@@ -2128,7 +2263,7 @@ impl ResultsPanel {
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
-                            .child("Optimization Suggestions")
+                            .child("Optimization Suggestions"),
                     )
                     .child(
                         div()
@@ -2141,9 +2276,9 @@ impl ResultsPanel {
                                     .text_xs()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.muted_foreground)
-                                    .child(format!("{}", analysis.suggestions.len()))
-                            )
-                    )
+                                    .child(format!("{}", analysis.suggestions.len())),
+                            ),
+                    ),
             )
             .child(
                 div()
@@ -2165,16 +2300,13 @@ impl ResultsPanel {
                                         .rounded(px(6.0))
                                         .border_1()
                                         .border_color(theme.success)
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.success)
-                                                .child("✓ No issues detected - query plan looks optimal!")
-                                        )
+                                        .child(div().text_sm().text_color(theme.success).child(
+                                            "✓ No issues detected - query plan looks optimal!",
+                                        )),
                                 )
                             })
-                            .children(
-                                analysis.sorted_suggestions().iter().enumerate().map(|(_idx, suggestion)| {
+                            .children(analysis.sorted_suggestions().iter().enumerate().map(
+                                |(_idx, suggestion)| {
                                     let severity_color = match suggestion.severity {
                                         zqlz_analyzer::SeverityLevel::Critical => theme.danger,
                                         zqlz_analyzer::SeverityLevel::Warning => theme.warning,
@@ -2203,56 +2335,65 @@ impl ResultsPanel {
                                                                 .text_xs()
                                                                 .font_weight(FontWeight::BOLD)
                                                                 .text_color(severity_color)
-                                                                .child(suggestion.severity.as_str().to_uppercase())
-                                                        )
+                                                                .child(
+                                                                    suggestion
+                                                                        .severity
+                                                                        .as_str()
+                                                                        .to_uppercase(),
+                                                                ),
+                                                        ),
                                                 )
-                                                .when_some(suggestion.table.as_ref(), |this, table| {
-                                                    this.child(
-                                                        div()
-                                                            .text_xs()
-                                                            .font_family(theme.mono_font_family.clone())
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(table.clone())
-                                                    )
-                                                })
+                                                .when_some(
+                                                    suggestion.table.as_ref(),
+                                                    |this, table| {
+                                                        this.child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_family(
+                                                                    theme.mono_font_family.clone(),
+                                                                )
+                                                                .text_color(theme.muted_foreground)
+                                                                .child(table.clone()),
+                                                        )
+                                                    },
+                                                ),
                                         )
                                         .child(
                                             div()
                                                 .text_sm()
                                                 .font_weight(FontWeight::MEDIUM)
                                                 .text_color(theme.foreground)
-                                                .child(suggestion.message.clone())
+                                                .child(suggestion.message.clone()),
                                         )
                                         .child(
                                             div()
                                                 .text_sm()
                                                 .text_color(theme.muted_foreground)
-                                                .child(suggestion.recommendation.clone())
+                                                .child(suggestion.recommendation.clone()),
                                         )
                                         .when(!suggestion.columns.is_empty(), |this| {
-                                            this.child(
-                                                h_flex()
-                                                    .gap_1()
-                                                    .flex_wrap()
-                                                    .children(suggestion.columns.iter().map(|col| {
-                                                        div()
-                                                            .px_2()
-                                                            .py(px(2.0))
-                                                            .rounded(px(3.0))
-                                                            .bg(theme.muted.opacity(0.3))
-                                                            .child(
-                                                                div()
-                                                                    .text_xs()
-                                                                    .font_family(theme.mono_font_family.clone())
-                                                                    .text_color(theme.foreground)
-                                                                    .child(col.clone())
-                                                            )
-                                                    }))
-                                            )
+                                            this.child(h_flex().gap_1().flex_wrap().children(
+                                                suggestion.columns.iter().map(|col| {
+                                                    div()
+                                                        .px_2()
+                                                        .py(px(2.0))
+                                                        .rounded(px(3.0))
+                                                        .bg(theme.muted.opacity(0.3))
+                                                        .child(
+                                                            div()
+                                                                .text_xs()
+                                                                .font_family(
+                                                                    theme.mono_font_family.clone(),
+                                                                )
+                                                                .text_color(theme.foreground)
+                                                                .child(col.clone()),
+                                                        )
+                                                }),
+                                            ))
                                         })
-                                })
-                            )
-                    )
+                                },
+                            )),
+                    ),
             )
     }
 
@@ -2263,9 +2404,55 @@ impl ResultsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if explain_idx < self.explain_plan_table_states.len() {
-            let table_state = &self.explain_plan_table_states[explain_idx];
+            let Some(table_state) = self.explain_plan_table_states[explain_idx].as_ref() else {
+                if self
+                    .explain_results
+                    .get(explain_idx)
+                    .and_then(|result| result.query_plan.as_ref())
+                    .is_none()
+                {
+                    return self
+                        .render_explain_no_data("No query plan data available", cx)
+                        .into_any_element();
+                }
+
+                return div()
+                    .size_full()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Preparing plan table…")
+                    .into_any_element();
+            };
+
+            let (is_truncated, source_row_count, visible_row_count) = {
+                let state = table_state.read(cx);
+                let delegate = state.delegate();
+                (
+                    delegate.is_truncated(),
+                    delegate.source_row_count(),
+                    delegate.rows_count(cx),
+                )
+            };
+
             div()
                 .size_full()
+                .when(is_truncated, |this| {
+                    let theme = cx.theme();
+                    this.child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .bg(theme.warning.opacity(0.12))
+                            .text_color(theme.warning)
+                            .child(format!(
+                                "Showing first {} rows of {} to keep results responsive",
+                                visible_row_count, source_row_count
+                            )),
+                    )
+                })
                 .child(Table::new(table_state).stripe(true))
                 .into_any_element()
         } else {
@@ -2281,9 +2468,55 @@ impl ResultsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         if explain_idx < self.explain_op_table_states.len() {
-            let table_state = &self.explain_op_table_states[explain_idx];
+            let Some(table_state) = self.explain_op_table_states[explain_idx].as_ref() else {
+                if self
+                    .explain_results
+                    .get(explain_idx)
+                    .and_then(|result| result.raw_output.as_ref())
+                    .is_none()
+                {
+                    return self
+                        .render_explain_no_data("No opcode data available", cx)
+                        .into_any_element();
+                }
+
+                return div()
+                    .size_full()
+                    .p_4()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child("Preparing opcode table…")
+                    .into_any_element();
+            };
+
+            let (is_truncated, source_row_count, visible_row_count) = {
+                let state = table_state.read(cx);
+                let delegate = state.delegate();
+                (
+                    delegate.is_truncated(),
+                    delegate.source_row_count(),
+                    delegate.rows_count(cx),
+                )
+            };
+
             div()
                 .size_full()
+                .when(is_truncated, |this| {
+                    let theme = cx.theme();
+                    this.child(
+                        div()
+                            .w_full()
+                            .px_3()
+                            .py_2()
+                            .text_xs()
+                            .bg(theme.warning.opacity(0.12))
+                            .text_color(theme.warning)
+                            .child(format!(
+                                "Showing first {} rows of {} to keep results responsive",
+                                visible_row_count, source_row_count
+                            )),
+                    )
+                })
                 .child(Table::new(table_state).stripe(true))
                 .into_any_element()
         } else {

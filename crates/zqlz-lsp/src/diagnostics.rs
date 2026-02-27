@@ -2,7 +2,7 @@
 
 use crate::{SchemaCache, SchemaValidator, ValidationSeverity};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
-use sqlparser::dialect::GenericDialect;
+use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
 use sqlparser::parser::Parser;
 use tree_sitter::Parser as TreeSitterParser;
 use zqlz_core::DialectConfig;
@@ -57,9 +57,19 @@ impl SqlDiagnostics {
             .map(|c| c.skip_tree_sitter_errors())
             .unwrap_or(false);
 
+        // Pick the sqlparser dialect that matches the active DB connection.
+        // GenericDialect is the fallback; it does not understand PostgreSQL-specific
+        // syntax like `expr::type` casts, which causes false-positive errors on valid
+        // PG SQL.  `get_sql_dialect_config` maps the driver id ("postgres", "mysql",
+        // …) to the correct dialect object via the existing `sql_dialect` module.
+        let sqlparser_dialect: Box<dyn SqlParserDialect> = dialect_config
+            .and_then(|c| crate::sql_dialect::get_sql_dialect_config(&c.id))
+            .map(|sc| sc.sqlparser_dialect())
+            .unwrap_or_else(|| Box::new(GenericDialect {}));
+
         // Use sqlparser for syntax validation with error location (SQL dialects only)
         if !skip_sql {
-            diagnostics.extend(self.check_sqlparser_syntax(&sql, text));
+            diagnostics.extend(self.check_sqlparser_syntax(&sql, text, sqlparser_dialect.as_ref()));
         }
 
         // Use tree-sitter for more detailed error detection (if grammar exists)
@@ -114,11 +124,15 @@ impl SqlDiagnostics {
     }
 
     /// Check SQL syntax using sqlparser and extract error positions
-    fn check_sqlparser_syntax(&self, sql: &str, text: &Rope) -> Vec<Diagnostic> {
+    fn check_sqlparser_syntax(
+        &self,
+        sql: &str,
+        text: &Rope,
+        dialect: &dyn SqlParserDialect,
+    ) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
-        let dialect = GenericDialect {};
 
-        match Parser::parse_sql(&dialect, sql) {
+        match Parser::parse_sql(dialect, sql) {
             Ok(_statements) => {
                 // SQL is valid, no errors
             }

@@ -11,9 +11,8 @@ use crate::components::{
 };
 use zqlz_ui::widgets::{
     WindowExt,
-    button::{Button, ButtonVariants as _},
+    button::Button,
     dialog::DialogButtonProps,
-    dock::Panel,
 };
 use zqlz_versioning::DatabaseObjectType;
 

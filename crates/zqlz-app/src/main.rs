@@ -74,6 +74,7 @@ fn main() {
         tracing::info!("Initializing UI system...");
         zqlz_ui::init(cx);
         zqlz_text_editor::actions::init(cx);
+        zqlz_text_editor::find_replace_panel::init(cx);
 
         // Initialize settings system with bundled themes
         // The bundled themes loader is passed to settings init so it can reload

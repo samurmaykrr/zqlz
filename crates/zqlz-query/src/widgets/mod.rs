@@ -11,9 +11,10 @@ mod results_panel;
 
 pub use actions::{
     AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp,
-    DeleteLine, DismissInlineSuggestion, DuplicateLine, FindNext, FindPrevious, FormatQuery, GoToDefinition,
-    MoveLineDown, MoveLineUp, SaveQuery, SaveQueryAs, ShowHover, ToggleLineComment, ToggleProblemsPanel,
-    TriggerCompletion, TriggerParameterHints, UncommentSelection,
+    DeleteLine, DismissInlineSuggestion, DuplicateLine, FindNext, FindPrevious, FindReferences, FormatQuery,
+    GoToDefinition, MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, RenameSymbol, SaveQuery,
+    SaveQueryAs, ShowCodeActions, ShowHover, ToggleLineComment, ToggleProblemsPanel, TriggerCompletion,
+    TriggerParameterHints, UncommentSelection,
 };
 pub use history_panel::{QueryHistoryPanel, QueryHistoryPanelEvent};
 pub use problems_panel::{ProblemEntry, ProblemsPanel, ProblemsPanelEvent, ProblemSeverity};

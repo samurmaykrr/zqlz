@@ -191,7 +191,11 @@ impl TableService {
                     .first()
                     .and_then(|row| row.values.first())
                     .and_then(|v| v.as_i64())
-                    .map(|i| (i as u64).max(0)),
+                    // pg_class.reltuples returns -1 for unanalyzed tables; clamp
+                    // on i64 *before* the cast so the sign bit isn't reinterpreted
+                    // as u64::MAX via two's-complement wrap-around.
+                    .filter(|&i| i >= 0)
+                    .map(|i| i as u64),
                 Err(e) => {
                     tracing::warn!("Estimated row count query failed: {}", e);
                     None
@@ -580,7 +584,11 @@ impl TableService {
             .first()
             .and_then(|row| row.values.first())
             .and_then(|v| v.as_i64())
-            .map(|i| (i as u64).max(0))
+            // pg_class.reltuples returns -1 for unanalyzed tables; clamp
+            // on i64 *before* the cast so the sign bit isn't reinterpreted
+            // as u64::MAX via two's-complement wrap-around.
+            .filter(|&i| i >= 0)
+            .map(|i| i as u64)
             .ok_or_else(|| {
                 ServiceError::TableOperationFailed(
                     "Estimated row count query returned no result".to_string(),
@@ -736,7 +744,11 @@ impl TableService {
                     .first()
                     .and_then(|row| row.values.first())
                     .and_then(|v| v.as_i64())
-                    .map(|i| (i as u64).max(0)),
+                    // pg_class.reltuples returns -1 for unanalyzed tables; clamp
+                    // on i64 *before* the cast so the sign bit isn't reinterpreted
+                    // as u64::MAX via two's-complement wrap-around.
+                    .filter(|&i| i >= 0)
+                    .map(|i| i as u64),
                 Err(e) => {
                     tracing::warn!("Estimated row count query failed: {}", e);
                     None

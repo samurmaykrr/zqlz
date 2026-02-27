@@ -210,6 +210,15 @@ mod tests {
     }
 
     #[test]
+    fn test_replace_next_regex_capture_group() {
+        let text = "col_user col_order";
+        let options = FindOptions::new().regex(true);
+        let result = replace_next(text, r"col_(\w+)", "column_$1", &options, 0).unwrap();
+        assert_eq!(result.text, "column_user col_order");
+        assert_eq!(result.count, 1);
+    }
+
+    #[test]
     fn test_replace_empty_pattern() {
         let text = "some text";
         let options = FindOptions::default();
