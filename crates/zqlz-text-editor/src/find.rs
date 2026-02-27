@@ -145,30 +145,24 @@ impl FindState {
     }
 
     fn recompute_matches_plain(&mut self, source_text: &str, search_text: &str, offset: usize) {
-        let needle_bytes;
-        let haystack_bytes;
-
-        if self.options.case_sensitive {
-            needle_bytes = self.query.as_bytes().to_vec();
-            haystack_bytes = search_text.as_bytes().to_vec();
-        } else {
-            needle_bytes = self.query.to_lowercase().into_bytes();
-            haystack_bytes = search_text.to_lowercase().into_bytes();
+        let escaped_query = regex::escape(&self.query);
+        let regex = match regex::RegexBuilder::new(&escaped_query)
+            .case_insensitive(!self.options.case_sensitive)
+            .build()
+        {
+            Ok(regex) => regex,
+            Err(error) => {
+                self.regex_error = Some(error.to_string());
+                return;
+            }
         };
 
-        let mut pos = 0;
-        while pos + needle_bytes.len() <= haystack_bytes.len() {
-            if haystack_bytes[pos..].starts_with(&needle_bytes) {
-                let start = offset + pos;
-                let end = offset + pos + needle_bytes.len();
+        for mat in regex.find_iter(search_text) {
+            let start = offset + mat.start();
+            let end = offset + mat.end();
 
-                if !self.options.whole_word || is_whole_word(source_text, start, end) {
-                    self.matches.push(FindMatch { start, end });
-                }
-
-                pos += needle_bytes.len().max(1);
-            } else {
-                pos += 1;
+            if !self.options.whole_word || is_whole_word(source_text, start, end) {
+                self.matches.push(FindMatch { start, end });
             }
         }
     }
@@ -215,6 +209,16 @@ mod tests {
         state.recompute_matches("select SELect SELECT");
         // All three occurrences match when case_sensitive = false
         assert_eq!(state.matches.len(), 3);
+    }
+
+    #[test]
+    fn test_find_state_case_insensitive_unicode() {
+        let mut state = FindState::new(false);
+        state.query = "é".to_string();
+        state.recompute_matches("é É");
+        assert_eq!(state.matches.len(), 2);
+        assert_eq!(state.matches[0].start, 0);
+        assert_eq!(state.matches[1].start, 3);
     }
 
     #[test]

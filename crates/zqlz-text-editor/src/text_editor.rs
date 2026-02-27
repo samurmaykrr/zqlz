@@ -29,11 +29,16 @@ pub mod vim;
 // SQL editor feature modules (merged from zqlz-editor)
 pub mod bookmarks;
 pub mod find_replace;
+pub mod find_replace_panel;
 pub mod folding;
 pub mod formatter;
 
 use gpui::*;
+use gpui::prelude::FluentBuilder as _;
 use std::sync::Arc;
+
+const DEFAULT_LARGE_FILE_LINE_THRESHOLD: usize = 20_000;
+const DEFAULT_LARGE_FILE_BYTE_THRESHOLD: usize = 2 * 1024 * 1024;
 
 // Re-exports for convenience
 pub use bookmarks::{Bookmark, BookmarkFilter, BookmarkManager, BookmarkStorage};
@@ -42,14 +47,17 @@ pub use cursor::Cursor;
 pub use element::EditorElement;
 pub use find::{FindMatch, FindOptions, FindState};
 pub use find_replace::{
-    count_matches, find_all, find_first, find_next, replace_all, replace_first, replace_next,
-    FindError, FindOptions as TextFindOptions, Match as TextMatch, ReplaceResult,
+    FindError, FindOptions as TextFindOptions, Match as TextMatch, ReplaceResult, count_matches,
+    find_all, find_first, find_next, replace_all, replace_first, replace_next,
 };
-pub use folding::{detect_folds, FoldKind, FoldRegion, FoldingDetector};
+pub use folding::{FoldKind, FoldRegion, FoldingDetector, detect_folds};
 pub use formatter::{
-    format_sql, format_sql_with_config, FormatError, FormatterConfig, SqlFormatter,
+    FormatError, FormatterConfig, SqlFormatter, format_sql, format_sql_with_config,
 };
-pub use lsp::{CompletionProvider, DefinitionProvider, HoverProvider, Lsp, ReferencesProvider, SqlCompletionProvider};
+pub use lsp::{
+    CompletionProvider, DefinitionProvider, HoverProvider, Lsp, ReferencesProvider,
+    SqlCompletionProvider,
+};
 pub use lsp_types::{CompletionItem, Hover, SignatureHelp};
 pub use selection::Selection;
 pub use syntax::{Highlight, HighlightKind, SyntaxHighlighter};
@@ -79,12 +87,17 @@ pub struct TextEditor {
     /// Text selection state
     selection: Selection,
     focus_handle: FocusHandle,
+    /// One-shot autofocus flag.
+    ///
+    /// When true, the editor will request focus on its next render pass and
+    /// then automatically reset this flag to false.
+    autofocus_on_open: bool,
     /// LSP provider container for code intelligence features
     pub lsp: Lsp,
     /// SQL syntax highlighter for visual highlighting
     syntax_highlighter: Option<SyntaxHighlighter>,
     /// Cached syntax highlights for current buffer (updated on text change)
-    cached_highlights: Vec<Highlight>,
+    cached_highlights: std::sync::Arc<Vec<Highlight>>,
     /// Cached error diagnostics (syntax errors) for rendering squiggles
     cached_errors: Vec<Highlight>,
     /// Undo stack — each entry is a *group* of changes that are undone atomically.
@@ -124,6 +137,10 @@ pub struct TextEditor {
     /// so every mouse handler must subtract this origin before computing a buffer
     /// position from pixel coordinates.
     cached_bounds_origin: gpui::Point<gpui::Pixels>,
+    /// Cached viewport size from the last render pass. Used by `handle_hover` to
+    /// detect when the pointer has left the viewport during a drag so auto-scroll
+    /// can be triggered.
+    cached_bounds_size: gpui::Size<gpui::Pixels>,
     /// Cached completion menu layout from the last paint pass.
     ///
     /// Used by `handle_mouse_down` to hit-test whether a click lands inside the
@@ -186,12 +203,69 @@ pub struct TextEditor {
     folded_lines: std::collections::HashSet<usize>,
     /// Fold regions detected from the current buffer content (refreshed on every text change).
     fold_regions_cache: Vec<FoldRegion>,
+    /// Ordered list of visible buffer line indices, pre-built whenever folds or the
+    /// buffer line count changes. Stored behind an `Arc` so the render-thread clone
+    /// in `prepaint` is a single atomic increment rather than a full Vec copy.
+    cached_display_lines: std::sync::Arc<Vec<usize>>,
     /// Fold chevron hit-test rects cached from the last paint pass.
     ///
     /// Each entry is `(start_line, rect)` in window coordinates so that
     /// `handle_mouse_down` can determine which fold was clicked without
     /// needing access to element-layer data.
     pub(crate) cached_fold_chevrons: Vec<(usize, gpui::Bounds<gpui::Pixels>)>,
+    /// Scrollbar geometry cached from the last paint pass so that mouse
+    /// handlers can hit-test and drive scrollbar interaction without access
+    /// to element-layer data. `None` when the scrollbar is not rendered.
+    pub(crate) cached_scrollbar: Option<CachedScrollbarBounds>,
+    /// Active scrollbar thumb drag state. When `Some`, the user is dragging
+    /// the scrollbar thumb; the tuple holds the window-Y of the initial
+    /// mousedown inside the thumb and the `scroll_offset` at that moment so
+    /// we can compute the new offset as a delta rather than jumping.
+    scrollbar_drag_start: Option<(gpui::Pixels, f32)>,
+    /// Performance policy used to keep massive files interactive.
+    large_file_policy: LargeFilePolicy,
+    /// Monotonic generation used to discard stale async analysis results.
+    analysis_generation: u64,
+    /// Whether syntax/fold analysis should be (re)scheduled on the next render.
+    analysis_dirty: bool,
+    /// Current async syntax/fold analysis task.
+    analysis_task: Task<anyhow::Result<()>>,
+    /// Debounce timer task for coalescing rapid edit bursts before analysis.
+    analysis_debounce_task: Task<anyhow::Result<()>>,
+    /// True while a debounce timer is currently pending.
+    analysis_debounce_pending: bool,
+    /// The find/replace panel UI component. None when the panel is closed.
+    find_replace_panel: Option<Entity<find_replace_panel::FindReplacePanel>>,
+    /// Subscriptions for the find/replace panel events.
+    _find_panel_subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Copy)]
+struct LargeFilePolicy {
+    line_threshold: usize,
+    byte_threshold: usize,
+}
+
+impl Default for LargeFilePolicy {
+    fn default() -> Self {
+        Self {
+            line_threshold: DEFAULT_LARGE_FILE_LINE_THRESHOLD,
+            byte_threshold: DEFAULT_LARGE_FILE_BYTE_THRESHOLD,
+        }
+    }
+}
+
+/// Scrollbar geometry cached from the last paint pass.
+///
+/// Stored in window coordinates so that `handle_mouse_down` / `handle_hover`
+/// can hit-test without touching any element-layer state.
+pub(crate) struct CachedScrollbarBounds {
+    /// Full vertical track rectangle (window coordinates)
+    pub(crate) track: gpui::Bounds<gpui::Pixels>,
+    /// Current thumb rectangle (window coordinates)
+    pub(crate) thumb: gpui::Bounds<gpui::Pixels>,
+    /// Total number of display lines (= denominator for converting pixel ↔ line)
+    pub(crate) display_line_count: usize,
 }
 
 /// State for the completion menu
@@ -275,6 +349,16 @@ pub struct ContextMenuState {
     pub highlighted: Option<usize>,
 }
 
+/// Result of hit-testing a pointer position against the context menu.
+struct ContextMenuHit {
+    /// Whether the pointer is inside the menu bounds.
+    inside_menu: bool,
+    /// Item index under the pointer (if any non-separator row is under pointer).
+    item_index: Option<usize>,
+    /// Whether the pointed item is actionable (non-disabled).
+    actionable: bool,
+}
+
 /// State for the hover tooltip
 #[derive(Clone, Debug)]
 pub struct HoverState {
@@ -305,9 +389,10 @@ impl TextEditor {
             cursor: Cursor::new(),
             selection: Selection::new(),
             focus_handle: cx.focus_handle(),
+            autofocus_on_open: false,
             lsp: Lsp::new(),
             syntax_highlighter,
-            cached_highlights: Vec::new(),
+            cached_highlights: std::sync::Arc::new(Vec::new()),
             cached_errors: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -322,6 +407,7 @@ impl TextEditor {
             cached_gutter_width: 0.0,
             cached_char_width: gpui::px(0.0),
             cached_bounds_origin: gpui::Point::default(),
+            cached_bounds_size: gpui::Size::default(),
             cached_completion_menu_bounds: None,
             last_click: None,
             inline_suggestion: None,
@@ -337,7 +423,18 @@ impl TextEditor {
             context_menu: None,
             folded_lines: std::collections::HashSet::new(),
             fold_regions_cache: Vec::new(),
+            cached_display_lines: std::sync::Arc::new(Vec::new()),
             cached_fold_chevrons: Vec::new(),
+            cached_scrollbar: None,
+            scrollbar_drag_start: None,
+            large_file_policy: LargeFilePolicy::default(),
+            analysis_generation: 0,
+            analysis_dirty: true,
+            analysis_task: Task::ready(Ok(())),
+            analysis_debounce_task: Task::ready(Ok(())),
+            analysis_debounce_pending: false,
+            find_replace_panel: None,
+            _find_panel_subscriptions: Vec::new(),
         }
     }
 
@@ -354,9 +451,10 @@ impl TextEditor {
             cursor: Cursor::new(),
             selection: Selection::new(),
             focus_handle: cx.focus_handle(),
+            autofocus_on_open: false,
             lsp: Lsp::new(),
             syntax_highlighter,
-            cached_highlights: Vec::new(),
+            cached_highlights: std::sync::Arc::new(Vec::new()),
             cached_errors: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -367,12 +465,13 @@ impl TextEditor {
             hover_state: None,
             find_state: None,
             vim_state: None,
-             mouse_drag_anchor: None,
-             cached_gutter_width: 0.0,
-             cached_char_width: gpui::px(0.0),
-             cached_bounds_origin: gpui::Point::default(),
-             cached_completion_menu_bounds: None,
-             last_click: None,
+            mouse_drag_anchor: None,
+            cached_gutter_width: 0.0,
+            cached_char_width: gpui::px(0.0),
+            cached_bounds_origin: gpui::Point::default(),
+            cached_bounds_size: gpui::Size::default(),
+            cached_completion_menu_bounds: None,
+            last_click: None,
             inline_suggestion: None,
             ime_marked_range: None,
             extra_cursors: Vec::new(),
@@ -386,7 +485,18 @@ impl TextEditor {
             context_menu: None,
             folded_lines: std::collections::HashSet::new(),
             fold_regions_cache: Vec::new(),
+            cached_display_lines: std::sync::Arc::new(Vec::new()),
             cached_fold_chevrons: Vec::new(),
+            cached_scrollbar: None,
+            scrollbar_drag_start: None,
+            large_file_policy: LargeFilePolicy::default(),
+            analysis_generation: 0,
+            analysis_dirty: true,
+            analysis_task: Task::ready(Ok(())),
+            analysis_debounce_task: Task::ready(Ok(())),
+            analysis_debounce_pending: false,
+            find_replace_panel: None,
+            _find_panel_subscriptions: Vec::new(),
         };
         // Initial syntax highlighting and diagnostics
         editor.update_syntax_highlights();
@@ -400,17 +510,115 @@ impl TextEditor {
 
     /// Update cached syntax highlights for the current buffer content
     fn update_syntax_highlights(&mut self) {
-        if let Some(ref mut highlighter) = self.syntax_highlighter {
-            let text = self.buffer.text();
-            self.cached_highlights = highlighter.highlight(&text);
+        self.analysis_generation = self.analysis_generation.wrapping_add(1);
+
+        if self.is_large_file_mode() {
+            self.cached_highlights = std::sync::Arc::new(Vec::new());
+            self.update_fold_regions();
+            self.analysis_dirty = false;
+            self.analysis_debounce_pending = false;
+            self.analysis_task = Task::ready(Ok(()));
+            self.analysis_debounce_task = Task::ready(Ok(()));
+            return;
         }
-        // Keep fold regions consistent with the buffer on every text change.
-        self.update_fold_regions();
+
+        self.analysis_dirty = true;
+    }
+
+    fn analysis_debounce_delay(&self) -> std::time::Duration {
+        let line_count = self.buffer.line_count();
+        let byte_count = self.buffer.len();
+
+        let delay_ms = if line_count >= 200_000 || byte_count >= 16 * 1024 * 1024 {
+            220
+        } else if line_count >= 100_000 || byte_count >= 8 * 1024 * 1024 {
+            160
+        } else if line_count >= 50_000 || byte_count >= 4 * 1024 * 1024 {
+            120
+        } else if line_count >= 20_000 || byte_count >= 2 * 1024 * 1024 {
+            90
+        } else {
+            60
+        };
+
+        std::time::Duration::from_millis(delay_ms)
+    }
+
+    fn launch_syntax_and_folding_analysis(&mut self, cx: &mut Context<Self>) {
+        let generation = self.analysis_generation;
+        let text = self.buffer.text();
+        let syntax_enabled = self.syntax_highlighter.is_some();
+
+        let analysis_task = cx.background_spawn(async move {
+            let mut highlights = Vec::new();
+            if syntax_enabled {
+                if let Ok(mut highlighter) = SyntaxHighlighter::new() {
+                    highlights = highlighter.highlight(&text);
+                }
+            }
+
+            let fold_regions = detect_folds(&text);
+            Ok::<_, anyhow::Error>((generation, highlights, fold_regions))
+        });
+
+        self.analysis_task = cx.spawn(async move |this, cx| {
+            let (generation, highlights, fold_regions) = analysis_task.await?;
+            this.update(cx, |editor, cx| {
+                if generation != editor.analysis_generation {
+                    return;
+                }
+
+                editor.cached_highlights = std::sync::Arc::new(highlights);
+                editor.fold_regions_cache = fold_regions;
+                editor.rebuild_display_lines_cache();
+                cx.notify();
+            })?;
+            Ok(())
+        });
+    }
+
+    fn schedule_syntax_and_folding_analysis(&mut self, cx: &mut Context<Self>) {
+        if !self.analysis_dirty || self.is_large_file_mode() || self.analysis_debounce_pending {
+            return;
+        }
+
+        let generation = self.analysis_generation;
+        let debounce_delay = self.analysis_debounce_delay();
+        self.analysis_debounce_pending = true;
+
+        self.analysis_debounce_task = cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(debounce_delay).await;
+
+            this.update(cx, |editor, cx| {
+                editor.analysis_debounce_pending = false;
+
+                if generation != editor.analysis_generation
+                    || !editor.analysis_dirty
+                    || editor.is_large_file_mode()
+                {
+                    return;
+                }
+
+                editor.analysis_dirty = false;
+                editor.launch_syntax_and_folding_analysis(cx);
+            })?;
+
+            Ok(())
+        });
     }
 
     /// Get the current syntax highlights
     pub fn get_syntax_highlights(&self) -> &[Highlight] {
         &self.cached_highlights
+    }
+
+    /// Returns a cheap Arc clone of the syntax-highlight list.
+    ///
+    /// Cloning an `Arc` is an atomic increment — O(1) regardless of how many
+    /// highlights exist. Callers that need the list to outlive the borrow of
+    /// `&self` should use this rather than `get_syntax_highlights().to_vec()`.
+    pub fn get_syntax_highlights_arc(&self) -> std::sync::Arc<Vec<Highlight>> {
+        self.cached_highlights.clone()
     }
 
     /// Check if syntax highlighting is enabled
@@ -420,16 +628,16 @@ impl TextEditor {
 
     /// Get text and syntax highlights for rendering
     pub fn get_text_and_highlights(&self) -> (String, Vec<Highlight>) {
-        (self.buffer.text(), self.cached_highlights.clone())
+        (self.buffer.text(), (*self.cached_highlights).clone())
     }
 
     /// Update cached error diagnostics for the current buffer content
-    fn update_diagnostics(&mut self) {
-        if let Some(ref mut highlighter) = self.syntax_highlighter {
-            let text = self.buffer.text();
-            self.cached_errors = highlighter.get_errors(&text);
-        }
-    }
+    ///
+    /// Tree-sitter ERROR nodes are intentionally not used here because the
+    /// tree-sitter-sequel grammar produces false positives for valid PostgreSQL
+    /// (e.g. schema-qualified names, nested parentheses in ON conditions).
+    /// Squiggles are populated exclusively via `set_diagnostics` from the LSP.
+    fn update_diagnostics(&mut self) {}
 
     /// Get the current error diagnostics (for rendering squiggles)
     pub fn get_diagnostics(&self) -> &[Highlight] {
@@ -450,7 +658,93 @@ impl TextEditor {
     /// Called alongside `update_syntax_highlights` so the cache is always
     /// consistent with the current buffer state.
     fn update_fold_regions(&mut self) {
+        if self.is_large_file_mode() {
+            self.fold_regions_cache.clear();
+            self.folded_lines.clear();
+            self.ensure_large_file_display_lines_cache();
+            return;
+        }
+
         self.fold_regions_cache = detect_folds(&self.buffer.text());
+        self.rebuild_display_lines_cache();
+    }
+
+    fn ensure_large_file_display_lines_cache(&mut self) {
+        let total_lines = self.buffer.line_count();
+        if self.cached_display_lines.len() == total_lines {
+            return;
+        }
+
+        self.cached_display_lines = std::sync::Arc::new((0..total_lines).collect());
+    }
+
+    fn is_large_file_mode(&self) -> bool {
+        self.buffer.line_count() >= self.large_file_policy.line_threshold
+            || self.buffer.len() >= self.large_file_policy.byte_threshold
+    }
+
+    pub fn set_large_file_thresholds(&mut self, line_threshold: usize, byte_threshold: usize) {
+        self.large_file_policy = LargeFilePolicy {
+            line_threshold,
+            byte_threshold,
+        };
+        self.update_syntax_highlights();
+    }
+
+    /// Configure one-shot autofocus on the next render pass.
+    pub fn set_autofocus_on_open(&mut self, autofocus_on_open: bool) {
+        self.autofocus_on_open = autofocus_on_open;
+    }
+
+    pub fn is_large_file(&self) -> bool {
+        self.is_large_file_mode()
+    }
+
+    /// Rebuild the ordered display-line list after any fold or buffer-content change.
+    ///
+    /// This is the only place where the O(total_lines) walk happens. The result
+    /// is stored behind an `Arc` so every render frame can clone it in O(1).
+    fn rebuild_display_lines_cache(&mut self) {
+        let total = self.buffer.line_count();
+        if self.folded_lines.is_empty() {
+            // Fast path: no active folds — display slot equals buffer line index.
+            self.cached_display_lines = std::sync::Arc::new((0..total).collect());
+        } else {
+            let mut hidden = std::collections::HashSet::new();
+            for region in &self.fold_regions_cache {
+                if self.folded_lines.contains(&region.start_line) {
+                    for line in (region.start_line + 1)..=region.end_line {
+                        if line < total {
+                            hidden.insert(line);
+                        }
+                    }
+                }
+            }
+            self.cached_display_lines =
+                std::sync::Arc::new((0..total).filter(|l| !hidden.contains(l)).collect());
+        }
+    }
+
+    /// Returns a cheap `Arc` clone of the ordered display-line list.
+    ///
+    /// `result[display_slot]` gives the buffer line index for that slot. The list
+    /// is rebuilt by `rebuild_display_lines_cache` whenever folds or buffer content
+    /// change; cloning the Arc here costs only an atomic increment.
+    pub fn display_lines_cache(&self) -> std::sync::Arc<Vec<usize>> {
+        self.cached_display_lines.clone()
+    }
+
+    /// Returns the ordered list of buffer lines that are currently visible on screen.
+    ///
+    /// Prefer `display_lines_cache()` in hot paths — this clones the Vec.
+    pub fn visible_buffer_lines(&self) -> Vec<usize> {
+        (*self.cached_display_lines).clone()
+    }
+
+    /// Returns the number of lines that are currently displayed (buffer lines minus
+    /// lines hidden inside collapsed folds).
+    pub fn display_line_count(&self) -> usize {
+        self.cached_display_lines.len()
     }
 
     /// Returns the detected fold regions for the current buffer content.
@@ -461,38 +755,6 @@ impl TextEditor {
     /// Returns `true` when the fold region starting at `start_line` is collapsed.
     pub fn is_line_folded(&self, start_line: usize) -> bool {
         self.folded_lines.contains(&start_line)
-    }
-
-    /// Returns the ordered list of buffer lines that are currently visible on screen.
-    ///
-    /// Lines hidden inside a collapsed fold region are excluded. The index of each
-    /// entry is its "display slot" (the row it occupies on screen); the value is
-    /// the corresponding 0-based buffer line index.
-    pub fn visible_buffer_lines(&self) -> Vec<usize> {
-        let total = self.buffer.line_count();
-        let mut hidden = std::collections::HashSet::new();
-        for region in &self.fold_regions_cache {
-            if self.folded_lines.contains(&region.start_line) {
-                for line in (region.start_line + 1)..=region.end_line {
-                    if line < total {
-                        hidden.insert(line);
-                    }
-                }
-            }
-        }
-        (0..total).filter(|l| !hidden.contains(l)).collect()
-    }
-
-    /// Returns the number of lines that are currently displayed (buffer lines minus
-    /// lines hidden inside collapsed folds).
-    pub fn display_line_count(&self) -> usize {
-        let total = self.buffer.line_count();
-        let hidden: usize = self.fold_regions_cache
-            .iter()
-            .filter(|r| self.folded_lines.contains(&r.start_line))
-            .map(|r| r.end_line.saturating_sub(r.start_line).min(total.saturating_sub(r.start_line + 1)))
-            .sum();
-        total.saturating_sub(hidden)
     }
 
     /// Toggle the collapsed state of the fold whose start line is `start_line`.
@@ -506,7 +768,8 @@ impl TextEditor {
             self.folded_lines.insert(start_line);
             // Rescue cursor if it lands inside the now-hidden region.
             let cursor_line = self.cursor.position().line;
-            let end_line = self.fold_regions_cache
+            let end_line = self
+                .fold_regions_cache
                 .iter()
                 .find(|r| r.start_line == start_line)
                 .map(|r| r.end_line);
@@ -518,11 +781,10 @@ impl TextEditor {
                 }
             }
         }
+        self.rebuild_display_lines_cache();
         self.scroll_to_cursor();
         cx.notify();
     }
-
-    /// Collapse every detected fold region.
     ///
     /// Rescues the cursor to the start of its enclosing fold when it would
     /// otherwise be hidden.
@@ -532,7 +794,8 @@ impl TextEditor {
         }
         // Rescue cursor from any region it now falls inside.
         let cursor_line = self.cursor.position().line;
-        let rescue = self.fold_regions_cache
+        let rescue = self
+            .fold_regions_cache
             .iter()
             .find(|r| cursor_line > r.start_line && cursor_line <= r.end_line)
             .map(|r| r.start_line);
@@ -541,6 +804,7 @@ impl TextEditor {
             let rescued = self.buffer.clamp_position(Position::new(start, col));
             self.cursor.set_position(rescued);
         }
+        self.rebuild_display_lines_cache();
         self.scroll_to_cursor();
         cx.notify();
     }
@@ -548,6 +812,7 @@ impl TextEditor {
     /// Expand every collapsed fold region.
     pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
         self.folded_lines.clear();
+        self.rebuild_display_lines_cache();
         self.scroll_to_cursor();
         cx.notify();
     }
@@ -573,6 +838,12 @@ impl TextEditor {
         _cx: &mut Context<Self>,
     ) {
         self.buffer = TextBuffer::new(text.into().to_string());
+        // Discard the cached tree from any previous document so the highlighter
+        // does a clean parse rather than trying to apply incremental edits that
+        // don't correspond to the new content.
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.invalidate_tree();
+        }
         self.update_syntax_highlights();
         self.update_diagnostics();
     }
@@ -622,14 +893,9 @@ impl TextEditor {
             return;
         }
 
-        // Find the start of the previous character (handle multi-byte UTF-8)
-        let text = self.buffer.text();
-        let mut prev_offset = cursor_offset.saturating_sub(1);
-
-        // Walk back to find UTF-8 character boundary
-        while prev_offset > 0 && !text.is_char_boundary(prev_offset) {
-            prev_offset -= 1;
-        }
+        let Ok(prev_offset) = self.buffer.previous_char_boundary(cursor_offset) else {
+            return;
+        };
 
         // Delete the character
         if self.buffer.delete(prev_offset..cursor_offset).is_ok() {
@@ -659,20 +925,14 @@ impl TextEditor {
             .position_to_offset(self.cursor.position())
             .unwrap_or(0);
 
-        let text = self.buffer.text();
-
         // Can't delete if at end of buffer
-        if cursor_offset >= text.len() {
+        if cursor_offset >= self.buffer.len() {
             return;
         }
 
-        // Find the end of the current character (handle multi-byte UTF-8)
-        let mut next_offset = cursor_offset + 1;
-
-        // Walk forward to find UTF-8 character boundary
-        while next_offset < text.len() && !text.is_char_boundary(next_offset) {
-            next_offset += 1;
-        }
+        let Ok(next_offset) = self.buffer.next_char_boundary(cursor_offset) else {
+            return;
+        };
 
         // Delete the character (cursor stays in place)
         if self.buffer.delete(cursor_offset..next_offset).is_ok() {
@@ -1091,11 +1351,15 @@ impl TextEditor {
 
     /// Cache the element's top-left corner in window space so that mouse
     /// handlers can subtract it from raw window-coordinate event positions.
-    pub(crate) fn update_cached_bounds_origin(
-        &mut self,
-        origin: gpui::Point<gpui::Pixels>,
-    ) {
+    pub(crate) fn update_cached_bounds_origin(&mut self, origin: gpui::Point<gpui::Pixels>) {
         self.cached_bounds_origin = origin;
+    }
+
+    /// Cache the element's viewport size from the last render pass so that
+    /// `handle_hover` can detect when the pointer has left the viewport during
+    /// a drag and trigger auto-scroll.
+    pub(crate) fn update_cached_bounds_size(&mut self, size: gpui::Size<gpui::Pixels>) {
+        self.cached_bounds_size = size;
     }
 
     /// Cache the last-painted completion menu layout so that `handle_mouse_down`
@@ -1106,6 +1370,12 @@ impl TextEditor {
         bounds: Option<CachedCompletionMenuBounds>,
     ) {
         self.cached_completion_menu_bounds = bounds;
+    }
+
+    /// Cache the scrollbar geometry (in window coordinates) computed during the
+    /// last prepaint so that mouse handlers can drive scrollbar interaction.
+    pub(crate) fn update_cached_scrollbar(&mut self, scrollbar: Option<CachedScrollbarBounds>) {
+        self.cached_scrollbar = scrollbar;
     }
 
     /// Convert an absolute screen-space point into a `Position` (line, column)
@@ -1131,7 +1401,8 @@ impl TextEditor {
             .unwrap_or(0);
 
         let column = (relative_x / self.cached_char_width).max(0.0) as usize;
-        self.buffer.clamp_position(Position::new(buffer_line, column))
+        self.buffer
+            .clamp_position(Position::new(buffer_line, column))
     }
 
     /// Scroll to ensure the cursor is visible.
@@ -1279,7 +1550,10 @@ impl TextEditor {
         let text = self.buffer.text();
         match text[cursor_offset..].chars().next() {
             None => true, // end of buffer
-            Some(c) => matches!(c, ' ' | '\t' | '\n' | '\r' | ')' | ']' | '}' | '\'' | '"' | ',' | ';'),
+            Some(c) => matches!(
+                c,
+                ' ' | '\t' | '\n' | '\r' | ')' | ']' | '}' | '\'' | '"' | ',' | ';'
+            ),
         }
     }
 
@@ -1368,7 +1642,10 @@ impl TextEditor {
                 self.push_undo(change.clone());
             }
             // Position cursor between the two inserted characters.
-            if let Ok(between) = self.buffer.offset_to_position(cursor_offset + opener.len_utf8()) {
+            if let Ok(between) = self
+                .buffer
+                .offset_to_position(cursor_offset + opener.len_utf8())
+            {
                 self.cursor.set_position(between);
                 self.selection.set_position(between);
             }
@@ -1389,8 +1666,9 @@ impl TextEditor {
         let text = self.buffer.text();
         match text[cursor_offset..].chars().next() {
             Some(c) if c == closer => {
-                if let Ok(new_pos) =
-                    self.buffer.offset_to_position(cursor_offset + closer.len_utf8())
+                if let Ok(new_pos) = self
+                    .buffer
+                    .offset_to_position(cursor_offset + closer.len_utf8())
                 {
                     self.cursor.set_position(new_pos);
                     self.selection.set_position(new_pos);
@@ -1448,11 +1726,7 @@ impl TextEditor {
 
         // Primary cursor: spans from the selection-start column on the first
         // line to the end of that same line.
-        let first_line_len = self
-            .buffer
-            .line(first_line)
-            .map(|l| l.len())
-            .unwrap_or(0);
+        let first_line_len = self.buffer.line(first_line).map(|l| l.len()).unwrap_or(0);
         let first_head = Position::new(first_line, first_line_len);
         let first_anchor = Position::new(first_line, range.start.column);
         self.cursor.set_position(first_head);
@@ -1481,8 +1755,7 @@ impl TextEditor {
     /// (feat-020).  Each call pops one snapshot, restoring the cursor and
     /// selection to where they were before the most recent selection action.
     fn undo_selection(&mut self) {
-        let Some((saved_cursor, saved_selection, saved_extras)) =
-            self.selection_history.pop()
+        let Some((saved_cursor, saved_selection, saved_extras)) = self.selection_history.pop()
         else {
             return;
         };
@@ -1554,7 +1827,10 @@ impl TextEditor {
     /// ignored to avoid stacking invisible cursors on top of each other.
     fn add_extra_cursor(&mut self, position: Position, with_selection: Option<Selection>) {
         let already_exists = self.cursor.position() == position
-            || self.extra_cursors.iter().any(|(c, _)| c.position() == position);
+            || self
+                .extra_cursors
+                .iter()
+                .any(|(c, _)| c.position() == position);
         if already_exists {
             return;
         }
@@ -1865,11 +2141,7 @@ impl TextEditor {
         let first_nonws_col = self
             .buffer
             .line(line)
-            .map(|text| {
-                text.chars()
-                    .take_while(|c| c.is_whitespace())
-                    .count()
-            })
+            .map(|text| text.chars().take_while(|c| c.is_whitespace()).count())
             .unwrap_or(0);
 
         let target_col = if current_col != first_nonws_col {
@@ -1944,11 +2216,7 @@ impl TextEditor {
         // The block_text already ends with '\n'; we append the above line text.
         let replacement = format!("{}{}", block_text, above_line);
 
-        if self
-            .buffer
-            .delete(region_start..region_end)
-            .is_ok()
-        {
+        if self.buffer.delete(region_start..region_end).is_ok() {
             if let Some(change) = self.buffer.changes().last().cloned() {
                 self.push_undo(change);
             }
@@ -1962,7 +2230,10 @@ impl TextEditor {
         // Move cursor to match the block's new position (one line up).
         let new_cursor_line = self.cursor.position().line.saturating_sub(1);
         let new_cursor_col = self.cursor.position().column.min(
-            self.buffer.line(new_cursor_line).map(|l| l.len()).unwrap_or(0),
+            self.buffer
+                .line(new_cursor_line)
+                .map(|l| l.len())
+                .unwrap_or(0),
         );
         let new_pos = Position::new(new_cursor_line, new_cursor_col);
         self.cursor.set_position(new_pos);
@@ -2018,9 +2289,13 @@ impl TextEditor {
             }
         }
 
-        let new_cursor_line = (self.cursor.position().line + 1).min(self.buffer.line_count().saturating_sub(1));
+        let new_cursor_line =
+            (self.cursor.position().line + 1).min(self.buffer.line_count().saturating_sub(1));
         let new_cursor_col = self.cursor.position().column.min(
-            self.buffer.line(new_cursor_line).map(|l| l.len()).unwrap_or(0),
+            self.buffer
+                .line(new_cursor_line)
+                .map(|l| l.len())
+                .unwrap_or(0),
         );
         let new_pos = Position::new(new_cursor_line, new_cursor_col);
         self.cursor.set_position(new_pos);
@@ -2073,9 +2348,11 @@ impl TextEditor {
 
         let block_line_count = last - first + 1;
         let new_line = first + block_line_count;
-        let col = self.cursor.position().column.min(
-            self.buffer.line(new_line).map(|l| l.len()).unwrap_or(0),
-        );
+        let col = self
+            .cursor
+            .position()
+            .column
+            .min(self.buffer.line(new_line).map(|l| l.len()).unwrap_or(0));
         let new_pos = Position::new(new_line, col);
         self.cursor.set_position(new_pos);
         self.selection.set_position(new_pos);
@@ -2113,9 +2390,11 @@ impl TextEditor {
         // Cursor stays on the original line which is now shifted down by block_line_count.
         let block_line_count = last - first + 1;
         let new_line = first + block_line_count;
-        let col = self.cursor.position().column.min(
-            self.buffer.line(new_line).map(|l| l.len()).unwrap_or(0),
-        );
+        let col = self
+            .cursor
+            .position()
+            .column
+            .min(self.buffer.line(new_line).map(|l| l.len()).unwrap_or(0));
         let new_pos = Position::new(new_line, col);
         self.cursor.set_position(new_pos);
         self.selection.set_position(new_pos);
@@ -2360,11 +2639,7 @@ impl TextEditor {
                 .take_while(|&c| c == ' ')
                 .count();
             if spaces > 0 {
-                if self
-                    .buffer
-                    .delete(line_start..line_start + spaces)
-                    .is_ok()
-                {
+                if self.buffer.delete(line_start..line_start + spaces).is_ok() {
                     if let Some(change) = self.buffer.changes().last().cloned() {
                         self.push_undo(change);
                     }
@@ -2523,11 +2798,7 @@ impl TextEditor {
             // the currently selected block, so we select one more line.
             let current_end_line = self.selection.end().line;
             let next_line = (current_end_line + 1).min(line_count.saturating_sub(1));
-            let next_line_end = self
-                .buffer
-                .line(next_line)
-                .map(|t| t.len())
-                .unwrap_or(0);
+            let next_line_end = self.buffer.line(next_line).map(|t| t.len()).unwrap_or(0);
             let end_col = if next_line + 1 < line_count {
                 // End at the start of the following line (i.e. include the \n)
                 next_line_end + 1
@@ -2616,11 +2887,7 @@ impl TextEditor {
 
         // The search starts after the last claimed occurrence to preserve
         // document order as the user presses Cmd+D repeatedly.
-        let search_after = claimed
-            .iter()
-            .map(|r| r.end)
-            .max()
-            .unwrap_or(0);
+        let search_after = claimed.iter().map(|r| r.end).max().unwrap_or(0);
 
         // Find the first unclaimed occurrence after the current selection,
         // wrapping around the document if necessary.
@@ -2723,11 +2990,7 @@ impl TextEditor {
         let target_line = top_line - 1;
         // Use the primary cursor's column as the preferred column.
         let preferred_col = self.cursor.position().column;
-        let line_len = self
-            .buffer
-            .line(target_line)
-            .map(|t| t.len())
-            .unwrap_or(0);
+        let line_len = self.buffer.line(target_line).map(|t| t.len()).unwrap_or(0);
         let col = preferred_col.min(line_len);
         let position = Position::new(target_line, col);
         self.add_extra_cursor(position, None);
@@ -2754,11 +3017,7 @@ impl TextEditor {
 
         let target_line = bottom_line + 1;
         let preferred_col = self.cursor.position().column;
-        let line_len = self
-            .buffer
-            .line(target_line)
-            .map(|t| t.len())
-            .unwrap_or(0);
+        let line_len = self.buffer.line(target_line).map(|t| t.len()).unwrap_or(0);
         let col = preferred_col.min(line_len);
         let position = Position::new(target_line, col);
         self.add_extra_cursor(position, None);
@@ -2888,7 +3147,7 @@ impl TextEditor {
     }
 
     // ============================================================================
-    // LSP Integration (Stubs for Phase 0)
+    // LSP Integration
     // ============================================================================
 
     /// Set completion provider for schema-aware completions
@@ -2904,15 +3163,31 @@ impl TextEditor {
         self.lsp.hover_provider = Some(provider);
     }
 
-    /// Set SQL LSP instance (stub - no-op for now)
-    pub fn set_sql_lsp(&mut self, _lsp: Arc<dyn std::any::Any + Send + Sync>) {
-        // TODO: Implement in Phase 2
-        // This is kept for backward compatibility but is now superseded by set_completion_provider
+    /// Set definition provider for go-to-definition navigation.
+    pub fn set_definition_provider(&mut self, provider: std::rc::Rc<dyn DefinitionProvider>) {
+        self.lsp.definition_provider = Some(provider);
     }
 
-    /// Check if LSP is connected (stub - always returns false for now)
+    /// Set references provider for find-references highlighting.
+    pub fn set_references_provider(&mut self, provider: std::rc::Rc<dyn ReferencesProvider>) {
+        self.lsp.references_provider = Some(provider);
+    }
+
+    /// Set SQL LSP instance for legacy integrations.
+    ///
+    /// New integrations should prefer dedicated provider setters
+    /// (`set_completion_provider`, `set_hover_provider`, etc).
+    pub fn set_sql_lsp(&mut self, lsp: Arc<dyn std::any::Any + Send + Sync>) {
+        self.lsp.legacy_sql_lsp = Some(lsp);
+    }
+
+    /// Check if any LSP bridge/provider is connected.
     pub fn is_lsp_connected(&self) -> bool {
-        false
+        self.lsp.completion_provider.is_some()
+            || self.lsp.hover_provider.is_some()
+            || self.lsp.definition_provider.is_some()
+            || self.lsp.references_provider.is_some()
+            || self.lsp.legacy_sql_lsp.is_some()
     }
 
     /// Get completions at cursor
@@ -2923,13 +3198,17 @@ impl TextEditor {
     /// To enable schema-aware completions (table names, column names, etc.),
     /// the application layer should set a completion provider backed by zqlz-lsp's SqlLsp.
     pub fn get_completions(&self, _cx: &App) -> Vec<CompletionItem> {
+        if self.is_large_file_mode() {
+            return Vec::new();
+        }
+
         // Get the cursor offset
         let offset = self.cursor.offset(&self.buffer);
 
         // If a completion provider is injected, use it for schema-aware completions
         if let Some(ref provider) = self.lsp.completion_provider {
             // Create a rope from the buffer text
-            let rope = ropey::Rope::from(self.buffer.text());
+            let rope = self.buffer.rope();
             let prefix = lsp::get_word_at_cursor(&rope, offset);
 
             // Use the injected provider
@@ -2941,15 +3220,20 @@ impl TextEditor {
             let provider = SqlCompletionProvider::new();
 
             // Get the word at cursor for filtering
-            let rope = ropey::Rope::from(self.buffer.text());
+            let rope = self.buffer.rope();
             let prefix = lsp::get_word_at_cursor(&rope, offset);
             provider.get_word_completions(&prefix)
         }
     }
 
-    /// Get hover at cursor (stub - always returns None for now)
-    pub fn get_hover(&self, _cx: &App) -> Option<Hover> {
-        None
+    /// Get hover at cursor.
+    ///
+    /// This synchronous compatibility API uses the same keyword/function fallback
+    /// as `get_hover_at`. Async provider-driven hover is exposed via
+    /// `update_hover_at_position`.
+    pub fn get_hover(&self, cx: &App) -> Option<Hover> {
+        let offset = self.cursor.offset(&self.buffer);
+        self.get_hover_at(offset, cx)
     }
 
     /// Get hover at specific offset
@@ -3023,30 +3307,182 @@ impl TextEditor {
             }
         }
 
-        if start < end {
-            Some(start..end)
-        } else {
-            None
-        }
+        if start < end { Some(start..end) } else { None }
     }
 
-    /// Get signature help (stub - always returns None for now)
+    fn lsp_range_for_offsets(&self, start: usize, end: usize) -> Option<lsp_types::Range> {
+        let start_position = self.buffer.offset_to_position(start).ok()?;
+        let end_position = self.buffer.offset_to_position(end).ok()?;
+        Some(lsp_types::Range {
+            start: lsp_types::Position {
+                line: u32::try_from(start_position.line).ok()?,
+                character: u32::try_from(start_position.column).ok()?,
+            },
+            end: lsp_types::Position {
+                line: u32::try_from(end_position.line).ok()?,
+                character: u32::try_from(end_position.column).ok()?,
+            },
+        })
+    }
+
+    fn is_valid_identifier(name: &str) -> bool {
+        let mut characters = name.chars();
+        let Some(first) = characters.next() else {
+            return false;
+        };
+        if !(first.is_ascii_alphabetic() || first == '_') {
+            return false;
+        }
+        characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
+    }
+
+    fn find_identifier_occurrences(text: &str, identifier: &str) -> Vec<std::ops::Range<usize>> {
+        if identifier.is_empty() {
+            return Vec::new();
+        }
+
+        let mut ranges = Vec::new();
+        let mut search_start = 0usize;
+        while let Some(relative_index) = text[search_start..].find(identifier) {
+            let start = search_start + relative_index;
+            let end = start + identifier.len();
+
+            let left_boundary_ok = start == 0
+                || !text[..start]
+                    .chars()
+                    .next_back()
+                    .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+            let right_boundary_ok = end == text.len()
+                || !text[end..]
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character.is_ascii_alphanumeric() || character == '_');
+
+            if left_boundary_ok && right_boundary_ok {
+                ranges.push(start..end);
+            }
+
+            search_start = end;
+        }
+
+        ranges
+    }
+
+    /// Get signature help near the cursor.
+    ///
+    /// This infers the function-call context from the current text and returns a
+    /// lightweight signature payload, allowing higher layers to display parameter
+    /// hints even when no dedicated signature provider is wired.
     pub fn get_signature_help(&self, _cx: &App) -> Option<SignatureHelp> {
-        None
+        let text = self.buffer.text();
+        let cursor_offset = self.cursor.offset(&self.buffer).min(text.len());
+        let before_cursor = &text[..cursor_offset];
+
+        let mut depth = 0usize;
+        let mut call_open_paren = None;
+        for (index, ch) in before_cursor.char_indices().rev() {
+            match ch {
+                ')' => depth = depth.saturating_add(1),
+                '(' => {
+                    if depth == 0 {
+                        call_open_paren = Some(index);
+                        break;
+                    }
+                    depth = depth.saturating_sub(1);
+                }
+                _ => {}
+            }
+        }
+        let open_paren = call_open_paren?;
+
+        let before_paren = before_cursor[..open_paren].trim_end();
+        let name_end = before_paren.len();
+        let mut name_start = name_end;
+        for (index, ch) in before_paren.char_indices().rev() {
+            if ch.is_alphanumeric() || ch == '_' {
+                name_start = index;
+            } else {
+                break;
+            }
+        }
+        if name_start >= name_end {
+            return None;
+        }
+        let function_name = before_paren[name_start..name_end].to_string();
+
+        let mut nested = 0usize;
+        let mut active_parameter = 0u32;
+        for ch in before_cursor[open_paren + 1..].chars() {
+            match ch {
+                '(' => nested = nested.saturating_add(1),
+                ')' => nested = nested.saturating_sub(1),
+                ',' if nested == 0 => active_parameter = active_parameter.saturating_add(1),
+                _ => {}
+            }
+        }
+
+        Some(SignatureHelp {
+            signatures: vec![lsp_types::SignatureInformation {
+                label: format!("{function_name}(...)"),
+                documentation: None,
+                parameters: None,
+                active_parameter: None,
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(active_parameter),
+        })
     }
 
     // ============================================================================
     // Diagnostics (Stubs for Phase 0)
     // ============================================================================
 
-    /// Set diagnostics (stub - no-op for now)
-    pub fn set_diagnostics(
-        &mut self,
-        _diagnostics: Vec<Diagnostic>,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
-    ) {
-        // TODO: Implement in Phase 2
+    /// Replace the squiggle set with diagnostics from an external source (e.g. LSP).
+    ///
+    /// Each `Diagnostic` carries line/column positions which are converted to
+    /// byte-offset `Highlight` entries so the render layer can draw squiggles
+    /// without any further coordinate translation.  Invalid positions (out-of-
+    /// bounds line or column) are silently skipped rather than panicking.
+    pub fn set_diagnostics(&mut self, diagnostics: Vec<Diagnostic>, cx: &mut Context<Self>) {
+        if self.is_large_file_mode() {
+            self.cached_errors.clear();
+            cx.notify();
+            return;
+        }
+
+        self.cached_errors = diagnostics
+            .into_iter()
+            .filter_map(|diag| {
+                let start = self
+                    .buffer
+                    .position_to_offset(Position::new(diag.line, diag.column))
+                    .ok()?;
+
+                // If no explicit end position is given, highlight just the
+                // single character at the start so the squiggle is visible.
+                let end = diag
+                    .end_line
+                    .zip(diag.end_column)
+                    .and_then(|(end_line, end_col)| {
+                        self.buffer
+                            .position_to_offset(Position::new(end_line, end_col))
+                            .ok()
+                    })
+                    .unwrap_or(start + 1)
+                    .max(start + 1);
+
+                let kind = match diag.severity {
+                    DiagnosticLevel::Error => HighlightKind::Error,
+                    // Warnings and below reuse the Error squiggle style for now;
+                    // a dedicated HighlightKind::Warning can be added later.
+                    _ => HighlightKind::Error,
+                };
+
+                Some(Highlight { start, end, kind })
+            })
+            .collect();
+
+        cx.notify();
     }
 
     // ============================================================================
@@ -3055,6 +3491,11 @@ impl TextEditor {
 
     /// Trigger completion menu manually (Ctrl+Space)
     pub fn trigger_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_large_file_mode() {
+            self.completion_menu = None;
+            return;
+        }
+
         let cursor_offset = self.cursor.offset(&self.buffer);
         // The word start is where we'll delete back to on accept, so any text
         // the user has already typed (the prefix) gets replaced cleanly.
@@ -3066,10 +3507,7 @@ impl TextEditor {
         let Some(provider) = self.lsp.completion_provider.clone() else {
             // No real LSP provider — fall back to the built-in keyword list.
             let items = SqlCompletionProvider::new()
-                .get_word_completions(&lsp::get_word_at_cursor(
-                    &ropey::Rope::from(self.buffer.text()),
-                    cursor_offset,
-                ));
+                .get_word_completions(&lsp::get_word_at_cursor(&self.buffer.rope(), cursor_offset));
             if items.is_empty() {
                 self.completion_menu = None;
             } else {
@@ -3084,7 +3522,7 @@ impl TextEditor {
             return;
         };
 
-        let rope = ropey::Rope::from(self.buffer.text());
+        let rope = self.buffer.rope();
         let trigger = lsp_types::CompletionContext {
             trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
             trigger_character: None,
@@ -3126,9 +3564,9 @@ impl TextEditor {
         self.completion_menu = None;
     }
 
-    /// Update completion menu (stub - no-op for now)
-    pub fn update_completion_menu(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        // Could update with new completions based on cursor position
+    /// Update completion menu based on current cursor/prefix context.
+    pub fn update_completion_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.refresh_completions(window, cx);
     }
 
     /// Check if completion menu is open
@@ -3168,7 +3606,8 @@ impl TextEditor {
                 // Scroll viewport down if the selection is now below the visible window.
                 let visible_end = menu.scroll_offset + crate::element::MAX_COMPLETION_ITEMS;
                 if menu.selected_index >= visible_end {
-                    menu.scroll_offset = menu.selected_index + 1 - crate::element::MAX_COMPLETION_ITEMS;
+                    menu.scroll_offset =
+                        menu.selected_index + 1 - crate::element::MAX_COMPLETION_ITEMS;
                 }
             }
         }
@@ -3234,20 +3673,47 @@ impl TextEditor {
         cx.notify();
     }
 
-    /// Handle completion action (stub - always returns false for now)
+    /// Handle completion-related action dispatch for compatibility callers.
     pub fn handle_completion_action(
         &mut self,
-        _action: &dyn Action,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        action: &dyn Action,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> bool {
+        if action.partial_eq(&actions::TriggerCompletion) {
+            self.trigger_completions(window, cx);
+            cx.notify();
+            return true;
+        }
+        if action.partial_eq(&actions::AcceptCompletion) {
+            self.accept_completion(window, cx);
+            return true;
+        }
+        if action.partial_eq(&actions::DismissCompletion) {
+            self.completion_menu = None;
+            cx.notify();
+            return true;
+        }
+        if action.partial_eq(&actions::SelectPreviousCompletion) {
+            self.completion_menu_select_previous();
+            cx.notify();
+            return true;
+        }
+        if action.partial_eq(&actions::SelectNextCompletion) {
+            self.completion_menu_select_next();
+            cx.notify();
+            return true;
+        }
+
         false
     }
 
-    /// Refresh completions (stub - no-op for now)
-    /// Alias for update_completion_menu for backward compatibility
-    pub fn refresh_completions(&mut self, _window: &mut Window, _cx: &mut Context<Self>) {
-        // TODO: Implement in Phase 3
+    /// Refresh completions when the completion menu is already open.
+    pub fn refresh_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_menu.is_some() {
+            self.trigger_completions(window, cx);
+            cx.notify();
+        }
     }
 
     /// Show completions automatically (stub - no-op for now)
@@ -3280,6 +3746,11 @@ impl TextEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_large_file_mode() {
+            self.hover_state = None;
+            return;
+        }
+
         // Convert line/column to offset
         let position = Position::new(line, column);
         let Ok(offset) = self.buffer.position_to_offset(position) else {
@@ -3289,15 +3760,15 @@ impl TextEditor {
 
         // If a real hover provider is wired, use it asynchronously.
         if let Some(provider) = self.lsp.hover_provider.clone() {
-            let rope = ropey::Rope::from(self.buffer.text());
+            let rope = self.buffer.rope();
             let word_range = self.find_word_range_at_offset(offset);
             let task = provider.hover(&rope, offset, window, cx);
 
             self.lsp.hover_task = cx.spawn(async move |this, cx| {
                 let maybe_hover = task.await?;
 
-            this.update(cx, |editor, cx| {
-                match (maybe_hover, word_range) {
+                this.update(cx, |editor, cx| {
+                    match (maybe_hover, word_range) {
                         (Some(_hover), Some(range)) => {
                             // Extract the word to use as the hover label
                             let text = editor.buffer.text();
@@ -3308,13 +3779,10 @@ impl TextEditor {
                                 lsp_types::HoverContents::Scalar(markup) => {
                                     markup_to_string(markup)
                                 }
-                                lsp_types::HoverContents::Array(markups) => markups
-                                    .first()
-                                    .map(markup_to_string)
-                                    .unwrap_or_default(),
-                                lsp_types::HoverContents::Markup(markup) => {
-                                    markup.value.clone()
+                                lsp_types::HoverContents::Array(markups) => {
+                                    markups.first().map(markup_to_string).unwrap_or_default()
                                 }
+                                lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
                             };
 
                             if documentation.is_empty() {
@@ -3424,66 +3892,224 @@ impl TextEditor {
     }
 
     // ============================================================================
-    // Navigation & LSP Actions (Stubs for Phase 0)
+    // Navigation & LSP Actions
     // ============================================================================
 
-    /// Navigate to specific position (stub - no-op for now)
+    /// Navigate to a specific position and optional selection range.
     pub fn navigate_to(
         &mut self,
-        _line: usize,
-        _column: usize,
-        _end_line: Option<usize>,
-        _end_column: Option<usize>,
+        line: usize,
+        column: usize,
+        end_line: Option<usize>,
+        end_column: Option<usize>,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
-        // TODO: Implement in Phase 1 (cursor positioning)
+        let start = self.buffer.clamp_position(Position::new(line, column));
+        self.cursor.set_position(start);
+
+        if let (Some(end_line), Some(end_column)) = (end_line, end_column) {
+            let end = self
+                .buffer
+                .clamp_position(Position::new(end_line, end_column));
+            self.selection.start_selection(start);
+            self.selection.extend_to(end);
+            self.cursor.set_position(end);
+        } else {
+            self.selection.set_position(start);
+        }
+
+        self.scroll_to_cursor();
+        cx.notify();
     }
 
-    /// Get definition at cursor (stub - always returns None for now)
+    /// Get definition at cursor.
     pub fn get_definition(&self, _cx: &App) -> Option<lsp_types::GotoDefinitionResponse> {
-        // TODO: Implement in Phase 2 (LSP integration)
-        None
+        let provider = self.lsp.definition_provider.clone()?;
+        let target_offset = provider.definition(&self.buffer.rope(), self.cursor.offset(&self.buffer))?;
+        let range = self.lsp_range_for_offsets(target_offset, target_offset)?;
+        let uri = "file:///zqlz/current.sql".parse::<lsp_types::Uri>().ok()?;
+        Some(lsp_types::GotoDefinitionResponse::Scalar(lsp_types::Location { uri, range }))
     }
 
-    /// Get references at cursor (stub - always returns empty for now)
+    /// Get references at cursor.
     pub fn get_references(&self, _cx: &App) -> Vec<lsp_types::Location> {
-        // TODO: Implement in Phase 2 (LSP integration)
-        Vec::new()
+        let Some(provider) = self.lsp.references_provider.clone() else {
+            return Vec::new();
+        };
+        let Some(uri) = "file:///zqlz/current.sql".parse::<lsp_types::Uri>().ok() else {
+            return Vec::new();
+        };
+        provider
+            .references(&self.buffer.rope(), self.cursor.offset(&self.buffer))
+            .into_iter()
+            .filter_map(|range| {
+                let lsp_range = self.lsp_range_for_offsets(range.start, range.end)?;
+                Some(lsp_types::Location {
+                    uri: uri.clone(),
+                    range: lsp_range,
+                })
+            })
+            .collect()
     }
 
-    /// Get code actions at cursor (stub - always returns empty for now)
+    /// Get code actions at cursor.
+    ///
+    /// The text editor currently does not own a code-action provider; query-level
+    /// code actions are retrieved from `zqlz-lsp` by `QueryEditor`.
     pub fn get_code_actions(&self, _cx: &App) -> Vec<lsp_types::CodeActionOrCommand> {
-        // TODO: Implement in Phase 2 (LSP integration)
         Vec::new()
     }
 
-    /// Rename symbol at cursor (stub - always returns None for now)
-    pub fn rename(&self, _new_name: &str, _cx: &App) -> Option<lsp_types::WorkspaceEdit> {
-        // TODO: Implement in Phase 2 (LSP integration)
-        None
+    /// Build a workspace edit for renaming the current symbol.
+    pub fn rename(&self, new_name: &str, _cx: &App) -> Option<lsp_types::WorkspaceEdit> {
+        if !Self::is_valid_identifier(new_name) {
+            return None;
+        }
+
+        let cursor_offset = self.cursor.offset(&self.buffer);
+        let text = self.buffer.text();
+        let word_range = self.find_word_range_at_offset(cursor_offset)?;
+        let current_name = text[word_range.clone()].to_string();
+        if current_name == new_name {
+            return None;
+        }
+
+        let ranges = if let Some(provider) = self.lsp.references_provider.clone() {
+            provider.references(&self.buffer.rope(), cursor_offset)
+        } else {
+            Self::find_identifier_occurrences(&text, &current_name)
+        };
+
+        if ranges.is_empty() {
+            return None;
+        }
+
+        let uri = "file:///zqlz/current.sql".parse::<lsp_types::Uri>().ok()?;
+        let edits: Vec<lsp_types::TextEdit> = ranges
+            .into_iter()
+            .filter_map(|range| {
+                let lsp_range = self.lsp_range_for_offsets(range.start, range.end)?;
+                Some(lsp_types::TextEdit {
+                    range: lsp_range,
+                    new_text: new_name.to_string(),
+                })
+            })
+            .collect();
+        if edits.is_empty() {
+            return None;
+        }
+
+        let mut changes = std::collections::HashMap::new();
+        changes.insert(uri, edits);
+        Some(lsp_types::WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        })
     }
 
-    /// Apply workspace edit (stub - always returns Ok for now)
+    /// Apply a workspace edit to the current buffer.
     pub fn apply_workspace_edit(
         &mut self,
-        _edit: &lsp_types::WorkspaceEdit,
+        edit: &lsp_types::WorkspaceEdit,
         _window: &mut Window,
-        _cx: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        // TODO: Implement in Phase 2 (LSP integration)
+        let Some(changes) = &edit.changes else {
+            return Ok(());
+        };
+
+        let mut resolved_edits = Vec::new();
+        for text_edits in changes.values() {
+            for text_edit in text_edits {
+                let start_line = text_edit.range.start.line as usize;
+                let end_line = text_edit.range.end.line as usize;
+                let start_character = text_edit.range.start.character as usize;
+                let end_character = text_edit.range.end.character as usize;
+
+                let start_line_text = self
+                    .buffer
+                    .line(start_line)
+                    .ok_or_else(|| anyhow::anyhow!("invalid edit start line: {start_line}"))?;
+                let end_line_text = self
+                    .buffer
+                    .line(end_line)
+                    .ok_or_else(|| anyhow::anyhow!("invalid edit end line: {end_line}"))?;
+
+                let start_column = start_line_text
+                    .char_indices()
+                    .nth(start_character)
+                    .map(|(byte_offset, _)| byte_offset)
+                    .unwrap_or(start_line_text.len());
+                let end_column = end_line_text
+                    .char_indices()
+                    .nth(end_character)
+                    .map(|(byte_offset, _)| byte_offset)
+                    .unwrap_or(end_line_text.len());
+
+                let start = self
+                    .buffer
+                    .position_to_offset(Position::new(start_line, start_column))
+                    .map_err(|error| anyhow::anyhow!("invalid edit start position: {error}"))?;
+                let end = self
+                    .buffer
+                    .position_to_offset(Position::new(end_line, end_column))
+                    .map_err(|error| anyhow::anyhow!("invalid edit end position: {error}"))?;
+
+                resolved_edits.push((start.min(end), start.max(end), text_edit.new_text.clone()));
+            }
+        }
+
+        if resolved_edits.is_empty() {
+            return Ok(());
+        }
+
+        resolved_edits.sort_by(|left, right| right.0.cmp(&left.0));
+        self.break_undo_group();
+
+        for (start, end, new_text) in resolved_edits {
+            let old_text = self
+                .buffer
+                .text()
+                .get(start..end)
+                .ok_or_else(|| anyhow::anyhow!("invalid edit range {start}..{end}"))?
+                .to_string();
+            let change = buffer::Change::replace(start, old_text, new_text);
+            self.buffer.apply_change(&change)?;
+            self.push_undo(change);
+        }
+
+        self.break_undo_group();
+        let clamped_cursor = self.buffer.clamp_position(self.cursor.position());
+        self.cursor.set_position(clamped_cursor);
+        self.selection.set_position(clamped_cursor);
+        self.update_syntax_highlights();
+        self.update_diagnostics();
+        self.scroll_to_cursor();
+        cx.notify();
         Ok(())
     }
 
-    /// Apply code action (stub - always returns Ok for now)
+    /// Apply a code action by applying its workspace edit payload.
     pub fn apply_code_action(
         &mut self,
-        _action: &lsp_types::CodeActionOrCommand,
-        _window: &mut Window,
-        _cx: &mut Context<Self>,
+        action: &lsp_types::CodeActionOrCommand,
+        window: &mut Window,
+        cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        // TODO: Implement in Phase 2 (LSP integration)
-        Ok(())
+        match action {
+            lsp_types::CodeActionOrCommand::CodeAction(code_action) => {
+                if let Some(edit) = &code_action.edit {
+                    self.apply_workspace_edit(edit, window, cx)?;
+                }
+                Ok(())
+            }
+            lsp_types::CodeActionOrCommand::Command(command) => Err(anyhow::anyhow!(
+                "command-based code action not supported: {}",
+                command.title
+            )),
+        }
     }
 
     // ============================================================================
@@ -3492,33 +4118,145 @@ impl TextEditor {
 
     /// Open the find panel (Ctrl+F). Reuses any existing state so the last
     /// query is preserved when the panel is reopened.
-    pub fn open_find(&mut self, cx: &mut Context<Self>) {
-        if self.find_state.is_none() {
-            self.find_state = Some(FindState::new(false));
-        }
-        if let Some(ref mut state) = self.find_state {
-            state.show_replace = false;
-            state.search_field_focused = true;
-        }
-        cx.notify();
+    pub fn open_find(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find_panel(false, window, cx);
     }
 
     /// Open the find+replace panel (Ctrl+H).
-    pub fn open_find_replace(&mut self, cx: &mut Context<Self>) {
+    pub fn open_find_replace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_find_panel(true, window, cx);
+    }
+
+    fn open_find_panel(
+        &mut self,
+        show_replace: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let initial_query = self.get_selected_text(cx).map(|s| s.to_string());
+
         if self.find_state.is_none() {
-            self.find_state = Some(FindState::new(true));
+            self.find_state = Some(FindState::new(show_replace));
         }
-        if let Some(ref mut state) = self.find_state {
-            state.show_replace = true;
-            state.search_field_focused = true;
+
+        if let Some(ref panel) = self.find_replace_panel {
+            panel.update(cx, |panel, _cx| {
+                panel.set_replace_mode(show_replace);
+            });
+            let focus = panel.read(cx).focus_handle(cx);
+            focus.focus(window, cx);
+        } else {
+            let query_clone = initial_query.clone();
+            let panel = cx.new(|cx| {
+                find_replace_panel::FindReplacePanel::new(show_replace, query_clone, window, cx)
+            });
+
+            let mut subscriptions = Vec::new();
+            subscriptions.push(cx.subscribe(
+                &panel,
+                |editor: &mut Self, _, event: &find_replace_panel::FindReplacePanelEvent, cx| {
+                    match event.clone() {
+                        find_replace_panel::FindReplacePanelEvent::QueryChanged {
+                            query,
+                            options,
+                        } => {
+                            let text = editor.buffer.text();
+                            if let Some(ref mut state) = editor.find_state {
+                                state.query = query;
+                                state.options.case_sensitive = options.case_sensitive;
+                                state.options.whole_word = options.whole_word;
+                                state.options.use_regex = options.use_regex;
+                                state.recompute_matches(&text);
+                                state.regex_error = None;
+
+                                let total = state.matches.len();
+                                let current = if total > 0 {
+                                    state.current_match.min(total - 1) + 1
+                                } else {
+                                    0
+                                };
+                                if let Some(ref panel) = editor.find_replace_panel {
+                                    panel.update(cx, |p, cx| {
+                                        p.update_match_info(total, current, None, cx);
+                                    });
+                                }
+                            }
+                            cx.notify();
+                        }
+                        find_replace_panel::FindReplacePanelEvent::NextMatch => {
+                            editor.find_next(cx);
+                            editor.sync_match_info_to_panel(cx);
+                        }
+                        find_replace_panel::FindReplacePanelEvent::PrevMatch => {
+                            editor.find_previous(cx);
+                            editor.sync_match_info_to_panel(cx);
+                        }
+                        find_replace_panel::FindReplacePanelEvent::ReplaceCurrent {
+                            replacement,
+                        } => {
+                            if let Some(ref mut state) = editor.find_state {
+                                state.replace_query = replacement;
+                            }
+                            editor.replace_current_inner(cx);
+                            editor.sync_match_info_to_panel(cx);
+                        }
+                        find_replace_panel::FindReplacePanelEvent::ReplaceAll { replacement } => {
+                            if let Some(ref mut state) = editor.find_state {
+                                state.replace_query = replacement;
+                            }
+                            editor.replace_all_inner(cx);
+                            editor.sync_match_info_to_panel(cx);
+                        }
+                        find_replace_panel::FindReplacePanelEvent::SelectAllMatches => {
+                            editor.find_select_all_matches(cx);
+                        }
+                        find_replace_panel::FindReplacePanelEvent::Closed => {
+                            editor.close_find(cx);
+                        }
+                    }
+                },
+            ));
+
+            self.find_replace_panel = Some(panel);
+            self._find_panel_subscriptions = subscriptions;
         }
+
+        if let Some(ref query) = initial_query {
+            if !query.is_empty() {
+                if let Some(ref mut state) = self.find_state {
+                    state.query = query.clone();
+                    let text = self.buffer.text();
+                    state.recompute_matches(&text);
+                }
+                self.sync_match_info_to_panel(cx);
+            }
+        }
+
         cx.notify();
+    }
+
+    fn sync_match_info_to_panel(&mut self, cx: &mut Context<Self>) {
+        if let (Some(state), Some(panel)) =
+            (&self.find_state, &self.find_replace_panel)
+        {
+            let total = state.matches.len();
+            let current = if total > 0 {
+                state.current_match.min(total - 1) + 1
+            } else {
+                0
+            };
+            let regex_error = state.regex_error.clone();
+            panel.update(cx, |p, cx| {
+                p.update_match_info(total, current, regex_error, cx);
+            });
+        }
     }
 
     /// Close the find/replace panel (Escape).
     pub fn close_find(&mut self, cx: &mut Context<Self>) {
         self.find_state = None;
-        // Clear any find-related selection so the user ends up at the cursor
+        self.find_replace_panel = None;
+        self._find_panel_subscriptions.clear();
         self.selection.clear();
         cx.notify();
     }
@@ -3569,7 +4307,12 @@ impl TextEditor {
             if state.matches.is_empty() {
                 return;
             }
-            state.current_match = (state.current_match + 1) % state.matches.len();
+            let cursor_offset = self.cursor.offset(&self.buffer);
+            state.current_match = state
+                .matches
+                .iter()
+                .position(|m| m.start > cursor_offset)
+                .unwrap_or(0);
             let match_start = state.matches[state.current_match].start;
             let match_end = state.matches[state.current_match].end;
             self.select_match(match_start, match_end);
@@ -3585,11 +4328,12 @@ impl TextEditor {
             if state.matches.is_empty() {
                 return;
             }
-            if state.current_match == 0 {
-                state.current_match = state.matches.len() - 1;
-            } else {
-                state.current_match -= 1;
-            }
+            let cursor_offset = self.cursor.offset(&self.buffer);
+            state.current_match = state
+                .matches
+                .iter()
+                .rposition(|m| m.start < cursor_offset)
+                .unwrap_or(state.matches.len() - 1);
             let match_start = state.matches[state.current_match].start;
             let match_end = state.matches[state.current_match].end;
             self.select_match(match_start, match_end);
@@ -3648,10 +4392,7 @@ impl TextEditor {
                 // Turn on: capture the current selection range as the boundary
                 if self.selection.has_selection() {
                     let range = self.selection.range();
-                    let start = self
-                        .buffer
-                        .position_to_offset(range.start)
-                        .unwrap_or(0);
+                    let start = self.buffer.position_to_offset(range.start).unwrap_or(0);
                     let end = self
                         .buffer
                         .position_to_offset(range.end)
@@ -3728,8 +4469,12 @@ impl TextEditor {
     /// Replace the currently selected match with the replacement text.
     ///
     /// After replacement, moves to the next match automatically.
-    pub fn replace_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let (match_start, match_end, replacement) = {
+    pub fn replace_current(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.replace_current_inner(cx);
+    }
+
+    fn replace_current_inner(&mut self, cx: &mut Context<Self>) {
+        let (match_start, match_end, query, replacement, options) = {
             let Some(ref state) = self.find_state else {
                 return;
             };
@@ -3737,7 +4482,33 @@ impl TextEditor {
                 return;
             }
             let m = &state.matches[state.current_match];
-            (m.start, m.end, state.replace_query.clone())
+            (
+                m.start,
+                m.end,
+                state.query.clone(),
+                state.replace_query.clone(),
+                Self::text_find_options(state),
+            )
+        };
+
+        let text = self.buffer.text();
+        let Some(matched_text) = text.get(match_start..match_end) else {
+            return;
+        };
+        let replacement_text = match replace_first(matched_text, &query, &replacement, &options) {
+            Ok(result) => {
+                if result.count == 0 {
+                    return;
+                }
+                result.text
+            }
+            Err(FindError::InvalidRegex(error)) => {
+                if let Some(state) = self.find_state.as_mut() {
+                    state.regex_error = Some(error);
+                }
+                cx.notify();
+                return;
+            }
         };
 
         // Delete the matched range and insert the replacement
@@ -3746,7 +4517,7 @@ impl TextEditor {
                 self.push_undo(change);
             }
         }
-        if self.buffer.insert(match_start, &replacement).is_ok() {
+        if self.buffer.insert(match_start, &replacement_text).is_ok() {
             if let Some(change) = self.buffer.changes().last().cloned() {
                 self.push_undo(change);
             }
@@ -3760,7 +4531,12 @@ impl TextEditor {
         let next_match = if let Some(ref mut state) = self.find_state {
             state.recompute_matches(&text);
             if !state.matches.is_empty() {
-                let idx = state.current_match.min(state.matches.len() - 1);
+                let next_offset = match_start + replacement_text.len();
+                let idx = state
+                    .matches
+                    .iter()
+                    .position(|m| m.start >= next_offset)
+                    .unwrap_or(0);
                 state.current_match = idx;
                 let m = &state.matches[idx];
                 Some((m.start, m.end))
@@ -3777,12 +4553,11 @@ impl TextEditor {
         // Move cursor to end of replacement text
         if let Ok(pos) = self
             .buffer
-            .offset_to_position(match_start + replacement.len())
+            .offset_to_position(match_start + replacement_text.len())
         {
             self.cursor.set_position(pos);
         }
         self.scroll_to_cursor();
-        _ = window; // unused but kept for future use
         cx.notify();
     }
 
@@ -3790,27 +4565,52 @@ impl TextEditor {
     ///
     /// Replacements are applied back-to-front so that earlier offsets remain valid.
     pub fn replace_all(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        let (matches, replacement) = {
+        self.replace_all_inner(cx);
+    }
+
+    fn replace_all_inner(&mut self, cx: &mut Context<Self>) {
+        let (query, replacement, options) = {
             let Some(ref state) = self.find_state else {
                 return;
             };
             if state.matches.is_empty() {
                 return;
             }
-            (state.matches.clone(), state.replace_query.clone())
+            (
+                state.query.clone(),
+                state.replace_query.clone(),
+                Self::text_find_options(state),
+            )
         };
 
-        // Apply replacements from last to first so byte offsets stay valid
-        for m in matches.iter().rev() {
-            if self.buffer.delete(m.start..m.end).is_ok() {
-                if let Some(change) = self.buffer.changes().last().cloned() {
-                    self.push_undo(change);
+        let source_text = self.buffer.text();
+        let replaced = match crate::find_replace::replace_all(
+            &source_text,
+            &query,
+            &replacement,
+            &options,
+        ) {
+            Ok(result) => result,
+            Err(FindError::InvalidRegex(error)) => {
+                if let Some(state) = self.find_state.as_mut() {
+                    state.regex_error = Some(error);
                 }
+                cx.notify();
+                return;
             }
-            if self.buffer.insert(m.start, &replacement).is_ok() {
-                if let Some(change) = self.buffer.changes().last().cloned() {
-                    self.push_undo(change);
-                }
+        };
+        if replaced.count == 0 {
+            return;
+        }
+
+        if self.buffer.delete(0..source_text.len()).is_ok() {
+            if let Some(change) = self.buffer.changes().last().cloned() {
+                self.push_undo(change);
+            }
+        }
+        if self.buffer.insert(0, &replaced.text).is_ok() {
+            if let Some(change) = self.buffer.changes().last().cloned() {
+                self.push_undo(change);
             }
         }
 
@@ -3827,6 +4627,14 @@ impl TextEditor {
     }
 
     // ── Private helpers ──────────────────────────────────────────────────────
+
+    fn text_find_options(state: &FindState) -> TextFindOptions {
+        TextFindOptions {
+            case_sensitive: state.options.case_sensitive,
+            whole_word: state.options.whole_word,
+            regex: state.options.use_regex,
+        }
+    }
 
     /// Jump to the match whose start offset is nearest to the current cursor,
     /// or to the first match when there is no good candidate.
@@ -4250,8 +5058,8 @@ impl TextEditor {
 
     /// Execute a vim `:` command. Handles `:w`, `:q`, `:wq`, `nohl`, and `%s/pat/rep/g`.
     fn execute_vim_command(&mut self, cmd: &str, window: &mut Window, cx: &mut Context<Self>) {
-        use vim::execute_command;
         use vim::CommandResult;
+        use vim::execute_command;
         match execute_command(cmd) {
             CommandResult::Ok => {}
             CommandResult::FindReplace {
@@ -4292,7 +5100,14 @@ impl TextEditor {
 }
 
 impl Render for TextEditor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.autofocus_on_open {
+            self.focus_handle.focus(window, cx);
+            self.autofocus_on_open = false;
+        }
+
+        self.schedule_syntax_and_folding_analysis(cx);
+
         div()
             .size_full()
             // Required for keyboard events to be routed here.
@@ -4371,6 +5186,12 @@ impl Render for TextEditor {
             .on_action(cx.listener(Self::handle_find_next))
             .on_action(cx.listener(Self::handle_find_previous))
             .on_action(cx.listener(Self::handle_find_select_all_matches))
+            .on_action(cx.listener(Self::handle_find_toggle_case_sensitive))
+            .on_action(cx.listener(Self::handle_find_toggle_whole_word))
+            .on_action(cx.listener(Self::handle_find_toggle_regex))
+            .on_action(cx.listener(Self::handle_find_toggle_search_in_selection))
+            .on_action(cx.listener(Self::handle_replace_current_match))
+            .on_action(cx.listener(Self::handle_replace_all_matches))
             .on_action(cx.listener(Self::handle_trigger_completion))
             .on_action(cx.listener(Self::handle_accept_completion))
             .on_action(cx.listener(Self::handle_dismiss_completion))
@@ -4401,24 +5222,29 @@ impl Render for TextEditor {
             .on_action(cx.listener(Self::handle_go_to_line))
             // Toggle soft wrap (feat-041)
             .on_action(cx.listener(Self::handle_toggle_soft_wrap))
-             // Format SQL (feat-049)
-             .on_action(cx.listener(Self::handle_format_sql))
-             // LSP navigation (feat-046/047/048)
-             .on_action(cx.listener(Self::handle_go_to_definition))
-             .on_action(cx.listener(Self::handle_find_references))
-             .on_action(cx.listener(Self::handle_rename_symbol))
-             // Context menu (feat-045)
-             .on_action(cx.listener(Self::handle_open_context_menu_keyboard))
-             // Code folding
-             .on_action(cx.listener(|editor, _: &actions::FoldAll, _window, cx| editor.fold_all(cx)))
-             .on_action(cx.listener(|editor, _: &actions::UnfoldAll, _window, cx| editor.unfold_all(cx)))
-             // Raw key_down: vim routing + printable character insertion only
-             .on_key_down(cx.listener(Self::handle_key_down))
-             .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
-             .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
-             .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
-             .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_right_click))
-             .on_mouse_move(cx.listener(Self::handle_hover))
+            // Format SQL (feat-049)
+            .on_action(cx.listener(Self::handle_format_sql))
+            // LSP navigation (feat-046/047/048)
+            .on_action(cx.listener(Self::handle_go_to_definition))
+            .on_action(cx.listener(Self::handle_find_references))
+            .on_action(cx.listener(Self::handle_rename_symbol))
+            // Context menu (feat-045)
+            .on_action(cx.listener(Self::handle_open_context_menu_keyboard))
+            // Code folding
+            .on_action(cx.listener(|editor, _: &actions::FoldAll, _window, cx| editor.fold_all(cx)))
+            .on_action(
+                cx.listener(|editor, _: &actions::UnfoldAll, _window, cx| editor.unfold_all(cx)),
+            )
+            // Raw key_down: vim routing + printable character insertion only
+            .on_key_down(cx.listener(Self::handle_key_down))
+            .on_scroll_wheel(cx.listener(Self::handle_scroll_wheel))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::handle_mouse_down))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::handle_mouse_up))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::handle_right_click))
+            .on_mouse_move(cx.listener(Self::handle_hover))
+            .when(self.find_replace_panel.is_some(), |div| {
+                div.child(self.find_replace_panel.as_ref().unwrap().clone())
+            })
             .child(EditorElement::new(cx.entity().clone()))
     }
 }
@@ -4455,39 +5281,8 @@ impl TextEditor {
         }
 
         // ── Find-panel character input ────────────────────────────────────────
-        // When the find panel is open, printable characters feed the panel's
-        // search / replace input field.  Non-character keys (backspace, enter,
-        // escape, tab, f3) are handled by their dedicated on_action handlers
-        // which check `find_state.is_some()` first.
-        if self.find_state.is_some() && !ctrl_or_cmd {
-            let alt = event.keystroke.modifiers.alt;
-
-            // Alt+R toggles regex mode; Alt+L toggles search-in-selection.
-            // These must be intercepted before the printable-char path below so
-            // that the letters 'r' / 'l' are not fed into the search box.
-            if alt && key == "r" {
-                self.find_toggle_regex(cx);
-                return;
-            }
-            if alt && key == "l" {
-                self.find_toggle_search_in_selection(cx);
-                return;
-            }
-            // Alt+Enter converts all matches to multi-cursor selections (feat-032).
-            if alt && key == "enter" {
-                self.find_select_all_matches(cx);
-                return;
-            }
-
-            if let Some(text) = &event.keystroke.key_char {
-                if !text.is_empty() && !text.chars().any(|c| c.is_control()) {
-                    for ch in text.chars() {
-                        self.find_input_char(ch, cx);
-                    }
-                    return;
-                }
-            }
-        }
+        // With the new FindReplacePanel, input is handled by proper Input widgets.
+        // The old character-by-character routing is no longer needed.
 
         // ── Go-to-line dialog character input ─────────────────────────────────
         // Digit keys, Backspace, Enter, and Escape are the only inputs the dialog
@@ -5005,10 +5800,6 @@ impl TextEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.find_state.is_some() {
-            self.find_input_backspace(cx);
-            return;
-        }
         if self.has_selection() {
             self.delete_selection();
         } else {
@@ -5034,10 +5825,6 @@ impl TextEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.find_state.is_some() {
-            self.find_next(cx);
-            return;
-        }
         if let Some(ref menu) = self.completion_menu {
             if !menu.items.is_empty() {
                 self.accept_completion(window, cx);
@@ -5052,10 +5839,6 @@ impl TextEditor {
     }
 
     fn handle_tab(&mut self, _: &actions::Tab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.find_state.is_some() {
-            self.find_toggle_field_focus(cx);
-            return;
-        }
         if let Some(ref menu) = self.completion_menu {
             if !menu.items.is_empty() {
                 self.accept_completion(window, cx);
@@ -5396,19 +6179,19 @@ impl TextEditor {
     fn handle_open_find(
         &mut self,
         _: &actions::OpenFind,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_find(cx);
+        self.open_find(window, cx);
     }
 
     fn handle_open_find_replace(
         &mut self,
         _: &actions::OpenFindReplace,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.open_find_replace(cx);
+        self.open_find_replace(window, cx);
     }
 
     fn handle_find_next(
@@ -5436,6 +6219,60 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         self.find_select_all_matches(cx);
+    }
+
+    fn handle_find_toggle_case_sensitive(
+        &mut self,
+        _: &actions::FindToggleCaseSensitive,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.find_toggle_case_sensitive(cx);
+    }
+
+    fn handle_find_toggle_whole_word(
+        &mut self,
+        _: &actions::FindToggleWholeWord,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.find_toggle_whole_word(cx);
+    }
+
+    fn handle_find_toggle_regex(
+        &mut self,
+        _: &actions::FindToggleRegex,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.find_toggle_regex(cx);
+    }
+
+    fn handle_find_toggle_search_in_selection(
+        &mut self,
+        _: &actions::FindToggleSearchInSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.find_toggle_search_in_selection(cx);
+    }
+
+    fn handle_replace_current_match(
+        &mut self,
+        _: &actions::ReplaceCurrentMatch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_current(window, cx);
+    }
+
+    fn handle_replace_all_matches(
+        &mut self,
+        _: &actions::ReplaceAllMatches,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.replace_all(window, cx);
     }
 
     // ============================================================================
@@ -5583,6 +6420,38 @@ impl TextEditor {
             return;
         }
 
+        // Context menu click handling.
+        // - click inside enabled row: activate
+        // - click inside disabled row or separator/padding: keep menu open
+        // - click outside: dismiss menu and continue normal cursor placement
+        if self.context_menu.is_some() {
+            let line_height = window.line_height();
+            if let Some(hit) = self.context_menu_hit_test(event.position, line_height) {
+                if !hit.inside_menu {
+                    self.context_menu = None;
+                    cx.notify();
+                } else {
+                    let highlighted = hit.item_index.filter(|index| {
+                        self.context_menu
+                            .as_ref()
+                            .and_then(|state| state.items.get(*index))
+                            .is_some_and(|item| !item.disabled)
+                    });
+
+                    if let Some(state) = self.context_menu.as_mut() {
+                        state.highlighted = highlighted;
+                    }
+
+                    if hit.actionable {
+                        self.context_menu_activate(window, cx);
+                    } else {
+                        cx.notify();
+                    }
+                    return;
+                }
+            }
+        }
+
         // If the completion menu is visible and the click lands inside it, treat
         // the click as "select this item and accept" rather than moving the cursor.
         // We compare against window-coordinate bounds because GPUI delivers event
@@ -5590,7 +6459,8 @@ impl TextEditor {
         if let Some(ref menu_bounds) = self.cached_completion_menu_bounds {
             if menu_bounds.bounds.contains(&event.position) {
                 let relative_y = event.position.y - menu_bounds.bounds.origin.y;
-                let slot = (f32::from(relative_y) / f32::from(menu_bounds.item_height)).floor() as usize;
+                let slot =
+                    (f32::from(relative_y) / f32::from(menu_bounds.item_height)).floor() as usize;
                 let slot = slot.min(menu_bounds.item_count.saturating_sub(1));
                 if let Some(ref mut menu) = self.completion_menu {
                     // `slot` is relative to the visible window; add scroll_offset to get
@@ -5598,6 +6468,40 @@ impl TextEditor {
                     menu.selected_index = menu.scroll_offset + slot;
                 }
                 self.accept_completion(window, cx);
+                cx.notify();
+                return;
+            }
+        }
+
+        // Check if the click landed on the scrollbar track or thumb.
+        if let Some(ref scrollbar) = self.cached_scrollbar {
+            let (track, thumb, display_line_count) = (
+                scrollbar.track,
+                scrollbar.thumb,
+                scrollbar.display_line_count,
+            );
+            if track.contains(&event.position) {
+                if thumb.contains(&event.position) {
+                    // Begin a drag: record the Y offset of the click within the thumb
+                    // and the current scroll_offset so we can compute the delta on move.
+                    self.scrollbar_drag_start = Some((event.position.y, self.scroll_offset));
+                } else {
+                    // Click on the track outside the thumb → jump the view so the thumb
+                    // centers under the click point.
+                    let track_height = f32::from(track.size.height);
+                    let thumb_height = f32::from(thumb.size.height);
+                    let scrollable_track_height = (track_height - thumb_height).max(0.0);
+                    let max_offset =
+                        display_line_count.saturating_sub(self.last_viewport_lines) as f32;
+
+                    if scrollable_track_height > 0.0 && max_offset > 0.0 {
+                        let click_y = f32::from(event.position.y - track.origin.y) - thumb_height / 2.0;
+                        let click_fraction = (click_y / scrollable_track_height).clamp(0.0, 1.0);
+                        self.set_scroll_offset(click_fraction * max_offset);
+                    } else {
+                        self.set_scroll_offset(0.0);
+                    }
+                }
                 cx.notify();
                 return;
             }
@@ -5625,11 +6529,8 @@ impl TextEditor {
 
         // Mouse event positions are in window coordinates. Use the bounds origin
         // cached during the last prepaint to convert to element-relative coordinates.
-        let position = self.pixel_to_position(
-            event.position,
-            self.cached_bounds_origin,
-            line_height,
-        );
+        let position =
+            self.pixel_to_position(event.position, self.cached_bounds_origin, line_height);
 
         let now = std::time::Instant::now();
         let click_count = match &self.last_click {
@@ -5689,10 +6590,18 @@ impl TextEditor {
             }
             _ => {
                 // Single click.
-                if event.modifiers.shift && self.selection.has_selection() {
-                    // Shift-click: extend the existing selection from its anchor.
+                if event.modifiers.shift {
+                    // Shift-click: extend selection from current anchor (or cursor when
+                    // no selection exists yet).
+                    let anchor = if self.selection.has_selection() {
+                        self.selection.anchor()
+                    } else {
+                        self.cursor.position()
+                    };
                     self.cursor.set_position(position);
+                    self.selection.start_selection(anchor);
                     self.selection.extend_to(position);
+                    self.mouse_drag_anchor = Some(anchor);
                 } else {
                     self.cursor.set_position(position);
                     self.selection.set_position(position);
@@ -5716,6 +6625,7 @@ impl TextEditor {
             return;
         }
         self.mouse_drag_anchor = None;
+        self.scrollbar_drag_start = None;
         cx.notify();
     }
 
@@ -5727,6 +6637,9 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         let line_height = window.line_height();
+        if line_height <= gpui::px(0.0) {
+            return;
+        }
         let delta = event.delta.pixel_delta(line_height);
 
         // When the completion menu is open, always capture scroll for the menu
@@ -5745,8 +6658,8 @@ impl TextEditor {
                         .items
                         .len()
                         .saturating_sub(crate::element::MAX_COMPLETION_ITEMS);
-                    let new_offset = (menu.scroll_offset as i32 + steps)
-                        .clamp(0, max_offset as i32) as usize;
+                    let new_offset =
+                        (menu.scroll_offset as i32 + steps).clamp(0, max_offset as i32) as usize;
                     menu.scroll_offset = new_offset;
                     // Keep the selection inside the visible window.
                     if menu.selected_index < new_offset {
@@ -5754,8 +6667,7 @@ impl TextEditor {
                     } else if menu.selected_index
                         >= new_offset + crate::element::MAX_COMPLETION_ITEMS
                     {
-                        menu.selected_index =
-                            new_offset + crate::element::MAX_COMPLETION_ITEMS - 1;
+                        menu.selected_index = new_offset + crate::element::MAX_COMPLETION_ITEMS - 1;
                     }
                 }
             }
@@ -5784,13 +6696,39 @@ impl TextEditor {
     ) {
         let line_height = window.line_height();
 
+        // While the context menu is open, mouse movement updates row highlighting
+        // and suppresses normal hover-tooltip updates.
+        if self.context_menu.is_some() {
+            if let Some(hit) = self.context_menu_hit_test(event.position, line_height) {
+                let next_highlight = if hit.inside_menu {
+                    hit.item_index.filter(|index| {
+                        self.context_menu
+                            .as_ref()
+                            .and_then(|state| state.items.get(*index))
+                            .is_some_and(|item| !item.disabled)
+                    })
+                } else {
+                    None
+                };
+
+                let mut changed = false;
+                if let Some(state) = self.context_menu.as_mut() {
+                    if state.highlighted != next_highlight {
+                        state.highlighted = next_highlight;
+                        changed = true;
+                    }
+                }
+                if changed {
+                    cx.notify();
+                }
+                return;
+            }
+        }
+
         // Mouse event positions are in window coordinates. Use the bounds origin
         // cached during the last prepaint to convert to element-relative coordinates.
-        let position = self.pixel_to_position(
-            event.position,
-            self.cached_bounds_origin,
-            line_height,
-        );
+        let position =
+            self.pixel_to_position(event.position, self.cached_bounds_origin, line_height);
 
         // While the left button is held, extend the selection rather than updating
         // the hover tooltip.
@@ -5798,9 +6736,54 @@ impl TextEditor {
             self.cursor.set_position(position);
             self.selection.start_selection(anchor);
             self.selection.extend_to(position);
-            self.scroll_to_cursor();
+
+            // Auto-scroll when the pointer leaves the top or bottom of the viewport.
+            // Speed scales linearly with how far outside the viewport the pointer is,
+            // expressed in lines so that the rate is independent of font size.
+            let viewport_top = self.cached_bounds_origin.y;
+            let viewport_bottom = viewport_top + self.cached_bounds_size.height;
+            let pointer_y = event.position.y;
+            let line_height = line_height;
+
+            if pointer_y < viewport_top && line_height > gpui::px(0.0) {
+                // Pointer is above the viewport — scroll up.
+                let overflow_lines = f32::from(viewport_top - pointer_y) / f32::from(line_height);
+                self.scroll_by(-overflow_lines.max(1.0));
+            } else if pointer_y > viewport_bottom && line_height > gpui::px(0.0) {
+                // Pointer is below the viewport — scroll down.
+                let overflow_lines =
+                    f32::from(pointer_y - viewport_bottom) / f32::from(line_height);
+                self.scroll_by(overflow_lines.max(1.0));
+            } else {
+                // Pointer is inside the viewport — keep the cursor visible via
+                // the normal cursor-follow scroll so any text newly entered into
+                // the selection remains visible.
+                self.scroll_to_cursor();
+            }
+
             cx.notify();
             return;
+        }
+
+        // Scrollbar thumb drag: translate the mouse movement into a scroll delta.
+        if let Some((drag_start_y, offset_at_drag_start)) = self.scrollbar_drag_start {
+            if let Some(ref scrollbar) = self.cached_scrollbar {
+                let track_height = f32::from(scrollbar.track.size.height);
+                let thumb_height = f32::from(scrollbar.thumb.size.height);
+                let scrollable_track_height = (track_height - thumb_height).max(0.0);
+                let max_offset =
+                    scrollbar.display_line_count.saturating_sub(self.last_viewport_lines) as f32;
+
+                if scrollable_track_height > 0.0 && max_offset > 0.0 {
+                    let delta_y = f32::from(event.position.y - drag_start_y);
+                    let line_delta = delta_y / scrollable_track_height * max_offset;
+                    self.set_scroll_offset(offset_at_drag_start + line_delta);
+                } else {
+                    self.set_scroll_offset(0.0);
+                }
+                cx.notify();
+                return;
+            }
         }
 
         // No drag — update hover tooltip.
@@ -5890,10 +6873,7 @@ impl TextEditor {
 
         let primary_range = if self.selection.has_selection() {
             let sel_range = self.selection.range();
-            let start = self
-                .buffer
-                .position_to_offset(sel_range.start)
-                .unwrap_or(0);
+            let start = self.buffer.position_to_offset(sel_range.start).unwrap_or(0);
             let end = self
                 .buffer
                 .position_to_offset(sel_range.end)
@@ -5909,10 +6889,7 @@ impl TextEditor {
         for (extra_cursor, extra_selection) in &self.extra_cursors {
             let range = if extra_selection.has_selection() {
                 let sel_range = extra_selection.range();
-                let start = self
-                    .buffer
-                    .position_to_offset(sel_range.start)
-                    .unwrap_or(0);
+                let start = self.buffer.position_to_offset(sel_range.start).unwrap_or(0);
                 let end = self
                     .buffer
                     .position_to_offset(sel_range.end)
@@ -6157,10 +7134,7 @@ impl TextEditor {
 
         let primary_range = if self.selection.has_selection() {
             let sel_range = self.selection.range();
-            let start = self
-                .buffer
-                .position_to_offset(sel_range.start)
-                .unwrap_or(0);
+            let start = self.buffer.position_to_offset(sel_range.start).unwrap_or(0);
             let end = self
                 .buffer
                 .position_to_offset(sel_range.end)
@@ -6176,10 +7150,7 @@ impl TextEditor {
         for (extra_cursor, extra_selection) in &self.extra_cursors {
             let range = if extra_selection.has_selection() {
                 let sel_range = extra_selection.range();
-                let start = self
-                    .buffer
-                    .position_to_offset(sel_range.start)
-                    .unwrap_or(0);
+                let start = self.buffer.position_to_offset(sel_range.start).unwrap_or(0);
                 let end = self
                     .buffer
                     .position_to_offset(sel_range.end)
@@ -6213,10 +7184,8 @@ impl TextEditor {
             .collect();
 
         // Apply substitutions back-to-front so earlier offsets remain stable.
-        let mut indexed: Vec<(std::ops::Range<usize>, String)> = cursor_ranges
-            .into_iter()
-            .zip(rotated)
-            .collect();
+        let mut indexed: Vec<(std::ops::Range<usize>, String)> =
+            cursor_ranges.into_iter().zip(rotated).collect();
         indexed.sort_by(|(a, _), (b, _)| b.start.cmp(&a.start));
 
         for (range, new_text) in indexed {
@@ -6287,10 +7256,7 @@ impl TextEditor {
     fn copy_as_markdown(&mut self, cx: &mut Context<Self>) {
         let content = if self.selection.has_selection() {
             let sel_range = self.selection.range();
-            let start = self
-                .buffer
-                .position_to_offset(sel_range.start)
-                .unwrap_or(0);
+            let start = self.buffer.position_to_offset(sel_range.start).unwrap_or(0);
             let end = self
                 .buffer
                 .position_to_offset(sel_range.end)
@@ -6697,8 +7663,10 @@ impl TextEditor {
         let offset = self.cursor_byte_offset();
         let provider = self.lsp.definition_provider.clone();
         let Some(provider) = provider else { return };
-        let rope = ropey::Rope::from_str(&self.buffer.text());
-        let Some(target_offset) = provider.definition(&rope, offset) else { return };
+        let rope = self.buffer.rope();
+        let Some(target_offset) = provider.definition(&rope, offset) else {
+            return;
+        };
         if let Ok(pos) = self.buffer.offset_to_position(target_offset) {
             // Clear extra cursors — navigating to a definition is a single-point op.
             self.extra_cursors.clear();
@@ -6728,7 +7696,7 @@ impl TextEditor {
         let offset = self.cursor_byte_offset();
         let provider = self.lsp.references_provider.clone();
         let Some(provider) = provider else { return };
-        let rope = ropey::Rope::from_str(&self.buffer.text());
+        let rope = self.buffer.rope();
         self.reference_ranges = provider.references(&rope, offset);
         cx.notify();
     }
@@ -6749,7 +7717,9 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         let offset = self.cursor_byte_offset();
-        let Some(range) = self.find_word_range_at_offset(offset) else { return };
+        let Some(range) = self.find_word_range_at_offset(offset) else {
+            return;
+        };
         let word = self.buffer.text()[range.clone()].to_string();
         self.rename_state = Some(RenameState {
             new_name: word.clone(),
@@ -6764,7 +7734,9 @@ impl TextEditor {
     ///
     /// `'\x08'` (ASCII backspace) removes the last character.
     fn rename_input_char(&mut self, ch: char, cx: &mut Context<Self>) {
-        let Some(state) = self.rename_state.as_mut() else { return };
+        let Some(state) = self.rename_state.as_mut() else {
+            return;
+        };
         if ch == '\x08' {
             state.new_name.pop();
         } else {
@@ -6776,7 +7748,9 @@ impl TextEditor {
     /// Commit the rename: replace every occurrence of `original_word` (whole-word
     /// matches) in the buffer with `new_name` as a single atomic undo group.
     fn rename_confirm(&mut self, cx: &mut Context<Self>) {
-        let Some(state) = self.rename_state.take() else { return };
+        let Some(state) = self.rename_state.take() else {
+            return;
+        };
         if state.new_name.is_empty() || state.new_name == state.original_word {
             return;
         }
@@ -6825,12 +7799,36 @@ impl TextEditor {
     fn build_context_menu_items(&self) -> Vec<ContextMenuItem> {
         let has_selection = self.selection.has_selection();
         vec![
-            ContextMenuItem { label: "Cut".into(), disabled: !has_selection, is_separator: false },
-            ContextMenuItem { label: "Copy".into(), disabled: !has_selection, is_separator: false },
-            ContextMenuItem { label: "Paste".into(), disabled: false, is_separator: false },
-            ContextMenuItem { label: "".into(), disabled: false, is_separator: true },
-            ContextMenuItem { label: "Select All".into(), disabled: false, is_separator: false },
-            ContextMenuItem { label: "".into(), disabled: false, is_separator: true },
+            ContextMenuItem {
+                label: "Cut".into(),
+                disabled: !has_selection,
+                is_separator: false,
+            },
+            ContextMenuItem {
+                label: "Copy".into(),
+                disabled: !has_selection,
+                is_separator: false,
+            },
+            ContextMenuItem {
+                label: "Paste".into(),
+                disabled: false,
+                is_separator: false,
+            },
+            ContextMenuItem {
+                label: "".into(),
+                disabled: false,
+                is_separator: true,
+            },
+            ContextMenuItem {
+                label: "Select All".into(),
+                disabled: false,
+                is_separator: false,
+            },
+            ContextMenuItem {
+                label: "".into(),
+                disabled: false,
+                is_separator: true,
+            },
             ContextMenuItem {
                 label: "Go to Definition".into(),
                 disabled: self.lsp.definition_provider.is_none(),
@@ -6843,14 +7841,25 @@ impl TextEditor {
             },
             ContextMenuItem {
                 label: "Rename Symbol".into(),
-                disabled: self.find_word_range_at_offset(self.buffer
-                    .position_to_offset(self.cursor.position())
-                    .unwrap_or(0))
+                disabled: self
+                    .find_word_range_at_offset(
+                        self.buffer
+                            .position_to_offset(self.cursor.position())
+                            .unwrap_or(0),
+                    )
                     .is_none(),
                 is_separator: false,
             },
-            ContextMenuItem { label: "".into(), disabled: false, is_separator: true },
-            ContextMenuItem { label: "Format SQL".into(), disabled: false, is_separator: false },
+            ContextMenuItem {
+                label: "".into(),
+                disabled: false,
+                is_separator: true,
+            },
+            ContextMenuItem {
+                label: "Format SQL".into(),
+                disabled: false,
+                is_separator: false,
+            },
         ]
     }
 
@@ -6864,6 +7873,69 @@ impl TextEditor {
             highlighted: None,
         });
         cx.notify();
+    }
+
+    /// Hit-test a window-space pointer position against the open context menu.
+    fn context_menu_hit_test(
+        &self,
+        pointer: gpui::Point<gpui::Pixels>,
+        line_height: gpui::Pixels,
+    ) -> Option<ContextMenuHit> {
+        let state = self.context_menu.as_ref()?;
+        let item_height = line_height * 1.2;
+        let menu_width = gpui::px(180.0);
+
+        let menu_origin = gpui::point(
+            self.cached_bounds_origin.x + gpui::px(state.origin_x),
+            self.cached_bounds_origin.y + gpui::px(state.origin_y),
+        );
+
+        let total_height: gpui::Pixels =
+            state
+                .items
+                .iter()
+                .fold(gpui::px(0.0), |acc, item| {
+                    acc + if item.is_separator {
+                        gpui::px(8.0)
+                    } else {
+                        item_height
+                    }
+                });
+
+        let menu_bounds =
+            gpui::Bounds::new(menu_origin, gpui::size(menu_width, total_height + gpui::px(8.0)));
+        if !menu_bounds.contains(&pointer) {
+            return Some(ContextMenuHit {
+                inside_menu: false,
+                item_index: None,
+                actionable: false,
+            });
+        }
+
+        let mut row_y = menu_origin.y + gpui::px(4.0);
+        for (index, item) in state.items.iter().enumerate() {
+            if item.is_separator {
+                row_y += gpui::px(8.0);
+                continue;
+            }
+
+            let row_bounds = gpui::Bounds::new(gpui::point(menu_origin.x, row_y), gpui::size(menu_width, item_height));
+            if row_bounds.contains(&pointer) {
+                return Some(ContextMenuHit {
+                    inside_menu: true,
+                    item_index: Some(index),
+                    actionable: !item.disabled,
+                });
+            }
+
+            row_y += item_height;
+        }
+
+        Some(ContextMenuHit {
+            inside_menu: true,
+            item_index: None,
+            actionable: false,
+        })
     }
 
     /// Open the context menu at the current cursor position (keyboard shortcut).
@@ -6883,9 +7955,10 @@ impl TextEditor {
     fn handle_right_click(
         &mut self,
         event: &MouseDownEvent,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.focus_handle.focus(window, cx);
         // Subtract the cached bounds origin to convert from window coords to
         // element-relative coords (the renderer adds bounds.origin back when
         // positioning the menu overlay).
@@ -6896,7 +7969,9 @@ impl TextEditor {
 
     /// Move the keyboard highlight up/down within the open context menu.
     fn context_menu_move(&mut self, delta: i32, cx: &mut Context<Self>) {
-        let Some(state) = self.context_menu.as_mut() else { return };
+        let Some(state) = self.context_menu.as_mut() else {
+            return;
+        };
         let non_sep: Vec<usize> = state
             .items
             .iter()
@@ -6912,7 +7987,11 @@ impl TextEditor {
             .and_then(|h| non_sep.iter().position(|&i| i == h));
         let next_pos = match current_pos {
             None => {
-                if delta >= 0 { 0 } else { non_sep.len() - 1 }
+                if delta >= 0 {
+                    0
+                } else {
+                    non_sep.len() - 1
+                }
             }
             Some(p) => {
                 let len = non_sep.len() as i32;
@@ -6925,9 +8004,16 @@ impl TextEditor {
 
     /// Activate the currently highlighted context menu item.
     fn context_menu_activate(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(state) = self.context_menu.take() else { return };
-        let Some(highlighted) = state.highlighted else { return };
-        let Some(item) = state.items.get(highlighted) else { return };
+        let Some(state) = self.context_menu.take() else {
+            return;
+        };
+        self.focus_handle.focus(window, cx);
+        let Some(highlighted) = state.highlighted else {
+            return;
+        };
+        let Some(item) = state.items.get(highlighted) else {
+            return;
+        };
         if item.disabled || item.is_separator {
             return;
         }
@@ -6936,12 +8022,8 @@ impl TextEditor {
             "Copy" => window.dispatch_action(actions::Copy.boxed_clone(), cx),
             "Paste" => window.dispatch_action(actions::Paste.boxed_clone(), cx),
             "Select All" => window.dispatch_action(actions::SelectAll.boxed_clone(), cx),
-            "Go to Definition" => {
-                window.dispatch_action(actions::GoToDefinition.boxed_clone(), cx)
-            }
-            "Find References" => {
-                window.dispatch_action(actions::FindReferences.boxed_clone(), cx)
-            }
+            "Go to Definition" => window.dispatch_action(actions::GoToDefinition.boxed_clone(), cx),
+            "Find References" => window.dispatch_action(actions::FindReferences.boxed_clone(), cx),
             "Rename Symbol" => window.dispatch_action(actions::RenameSymbol.boxed_clone(), cx),
             "Format SQL" => window.dispatch_action(actions::FormatSQL.boxed_clone(), cx),
             _ => {}
@@ -7017,11 +8099,11 @@ impl EntityInputHandler for TextEditor {
         // skip-over (feat-029), and auto-close (feat-027).  We only do this for plain
         // character insertion (range_utf16 == None, no active IME composition) to avoid
         // interfering with IME preedit/commit flows.
-        if range_utf16.is_none()
-            && self.ime_marked_range.is_none()
-            && new_text.chars().count() == 1
+        if range_utf16.is_none() && self.ime_marked_range.is_none() && new_text.chars().count() == 1
         {
-            let Some(ch) = new_text.chars().next() else { return; };
+            let Some(ch) = new_text.chars().next() else {
+                return;
+            };
             let closer = Self::bracket_closer(ch);
 
             // feat-028: if a selection is active and user types an opener, surround it.

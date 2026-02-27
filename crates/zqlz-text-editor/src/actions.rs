@@ -81,6 +81,12 @@ actions!(
         FindNext,
         FindPrevious,
         FindSelectAllMatches,
+        FindToggleCaseSensitive,
+        FindToggleWholeWord,
+        FindToggleRegex,
+        FindToggleSearchInSelection,
+        ReplaceCurrentMatch,
+        ReplaceAllMatches,
         // Completions
         TriggerCompletion,
         AcceptCompletion,
@@ -264,13 +270,13 @@ pub fn init(cx: &mut App) {
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-shift-k", DeleteLine, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-shift-enter", NewlineAbove, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-enter", NewlineAbove, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-shift-enter", NewlineAbove, Some(CONTEXT)),
+        KeyBinding::new("alt-shift-enter", NewlineAbove, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
-        KeyBinding::new("cmd-enter", NewlineBelow, Some(CONTEXT)),
+        KeyBinding::new("alt-enter", NewlineBelow, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
-        KeyBinding::new("ctrl-enter", NewlineBelow, Some(CONTEXT)),
+        KeyBinding::new("alt-enter", NewlineBelow, Some(CONTEXT)),
         KeyBinding::new("ctrl-j", JoinLines, Some(CONTEXT)),
         KeyBinding::new("ctrl-t", TransposeChars, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
@@ -347,6 +353,10 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-h", OpenFindReplace, Some(CONTEXT)),
         KeyBinding::new("f3", FindNext, Some(CONTEXT)),
         KeyBinding::new("shift-f3", FindPrevious, Some(CONTEXT)),
+        KeyBinding::new("alt-c", FindToggleCaseSensitive, Some(CONTEXT)),
+        KeyBinding::new("alt-w", FindToggleWholeWord, Some(CONTEXT)),
+        KeyBinding::new("alt-r", FindToggleRegex, Some(CONTEXT)),
+        KeyBinding::new("alt-l", FindToggleSearchInSelection, Some(CONTEXT)),
         // Completions
         KeyBinding::new("ctrl-space", TriggerCompletion, Some(CONTEXT)),
         KeyBinding::new("escape", Escape, Some(CONTEXT)),

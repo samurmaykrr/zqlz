@@ -13,7 +13,7 @@ use gpui::*;
 use std::ops::Range;
 use zqlz_ui::widgets::ActiveTheme;
 
-use crate::{buffer::Position, syntax::HighlightKind, TextEditor};
+use crate::{CachedScrollbarBounds, TextEditor, buffer::Position, syntax::HighlightKind};
 
 /// The width of the cursor in pixels
 const CURSOR_WIDTH: Pixels = px(1.5);
@@ -291,25 +291,11 @@ struct HoverTooltipData {
     anchor_bounds: Bounds<Pixels>,
 }
 
-/// Data the renderer needs to paint the find/replace panel and match highlights.
+/// Data the renderer needs to paint find/replace match highlights.
 struct FindPanelData {
-    /// The search query text to display in the input field
-    query: String,
-    /// The replacement text (empty string when replace panel is hidden)
-    replace_query: String,
-    /// Whether the replace row is visible
-    show_replace: bool,
-    /// Whether the search field has focus (vs. replace field)
-    search_field_focused: bool,
     /// Pixel rectangles for every match in the visible viewport, paired with a flag
     /// indicating whether that match is the currently-selected (primary) match.
     match_rects: Vec<(Bounds<Pixels>, bool)>,
-    /// Match count / current index for the status label
-    total_matches: usize,
-    /// 1-based index of the current match for the status label (0 = no match)
-    current_match_display: usize,
-    /// Line height, used for sizing the panel
-    line_height: Pixels,
 }
 
 /// A pre-shaped line number label for one visible line in the gutter.
@@ -450,8 +436,13 @@ impl Element for EditorElement {
             let cursor_pos = editor.get_cursor_position(cx);
             let scroll_offset = editor.scroll_offset();
             let total_lines = buffer.line_count();
-            let syntax_highlights = editor.get_syntax_highlights().to_vec();
-            let diagnostics = editor.get_diagnostics().to_vec();
+            let is_large_file_mode = editor.is_large_file();
+            let syntax_highlights = editor.get_syntax_highlights_arc();
+            let diagnostics = if is_large_file_mode {
+                Vec::new()
+            } else {
+                editor.get_diagnostics().to_vec()
+            };
             let hover_state = editor.hover_state(cx);
             let bracket_pairs_snapshot = editor.bracket_highlight_pairs();
 
@@ -493,13 +484,9 @@ impl Element for EditorElement {
                 .inline_suggestion()
                 .map(|(text, offset)| (text.clone(), *offset));
 
-            // Snapshot the find state so we can build render data below
+            // Snapshot the find state so we can build match highlight rects below
             let find_info = editor.find_state.as_ref().map(|fs| {
                 (
-                    fs.query.clone(),
-                    fs.replace_query.clone(),
-                    fs.show_replace,
-                    fs.search_field_focused,
                     fs.matches.clone(),
                     fs.current_match,
                 )
@@ -514,7 +501,11 @@ impl Element for EditorElement {
             let soft_wrap = editor.soft_wrap;
 
             // Snapshot reference highlight ranges (feat-047)
-            let reference_ranges_snapshot = editor.reference_ranges.clone();
+            let reference_ranges_snapshot = if is_large_file_mode {
+                Vec::new()
+            } else {
+                editor.reference_ranges.clone()
+            };
 
             // Snapshot rename overlay state (feat-048)
             let rename_snapshot = editor
@@ -561,20 +552,10 @@ impl Element for EditorElement {
             editor.update_viewport_lines(viewport_lines);
         });
 
-        // Compute display-line mapping. Lines hidden inside collapsed fold regions
-        // are omitted so that the renderer sees a contiguous list of visible rows.
-        //   display_lines[slot] = buffer line index
-        //   buf_to_display[buffer_line] = display slot (absent when hidden)
-        let (display_lines, buf_to_display) = {
-            let editor = self.editor.read(cx);
-            let dl = editor.visible_buffer_lines();
-            let btd: std::collections::HashMap<usize, usize> = dl
-                .iter()
-                .enumerate()
-                .map(|(slot, &buf)| (buf, slot))
-                .collect();
-            (dl, btd)
-        };
+        // Obtain the display-line list via an Arc clone — O(1) regardless of
+        // file size. The Vec is rebuilt in TextEditor only when the buffer or
+        // fold state changes.
+        let display_lines = self.editor.read(cx).display_lines_cache();
         let display_line_count = display_lines.len();
 
         // Calculate visible range (in display-slot space, not buffer-line space)
@@ -584,6 +565,17 @@ impl Element for EditorElement {
             bounds.size.height,
             scroll_offset,
         );
+
+        // Build the reverse (buffer-line → display-slot) map only for the
+        // visible window. Everything rendered on this frame lives in
+        // `visible_range`, so limiting the map keeps this O(viewport_lines)
+        // instead of O(total_lines).
+        let buf_to_display: std::collections::HashMap<usize, usize> = display_lines
+            [visible_range.clone()]
+        .iter()
+        .enumerate()
+        .map(|(i, &buf)| (buf, visible_range.start + i))
+        .collect();
 
         // Fractional part of scroll_offset expressed as pixels. When
         // scroll_offset = 2.7 the top of the viewport is 0.7 lines into line
@@ -612,19 +604,21 @@ impl Element for EditorElement {
             let mut runs = Vec::new();
             let line_end_offset = line_start_offset + line_text.len();
 
-            // Find highlights that overlap with this line
-            for highlight in syntax_highlights {
-                let hl_start = highlight.start;
-                let hl_end = highlight.end;
+            // Highlights are sorted by `start`. Skip ahead to the first one
+            // that could possibly overlap this line (end > line_start_offset),
+            // then stop as soon as a highlight starts beyond the line. This
+            // reduces the per-line scan from O(all_highlights) to
+            // O(log(all_highlights) + overlapping_highlights).
+            let first_candidate = syntax_highlights.partition_point(|h| h.end <= line_start_offset);
 
-                // Skip highlights that don't overlap with this line
-                if hl_end <= line_start_offset || hl_start >= line_end_offset {
-                    continue;
+            for highlight in &syntax_highlights[first_candidate..] {
+                // All remaining highlights start at or after line_end — done.
+                if highlight.start >= line_end_offset {
+                    break;
                 }
 
-                // Calculate the overlap range within this line
-                let run_start = hl_start.saturating_sub(line_start_offset);
-                let run_end = (hl_end - line_start_offset).min(line_text.len());
+                let run_start = highlight.start.saturating_sub(line_start_offset);
+                let run_end = (highlight.end - line_start_offset).min(line_text.len());
 
                 if run_start < run_end {
                     runs.push((run_start, run_end, highlight.kind));
@@ -642,8 +636,8 @@ impl Element for EditorElement {
                 }];
             }
 
-            // Sort by start position
-            runs.sort_by_key(|(start, _, _)| *start);
+            // Highlights are already ordered by start (sorted at ingestion time),
+            // so no sort is required here.
 
             // Build runs, filling gaps with default color
             let mut result = Vec::new();
@@ -692,24 +686,6 @@ impl Element for EditorElement {
 
         let default_text_color = cx.theme().colors.foreground;
 
-        // Pre-compute the buffer byte offset at which each line starts.
-        // This ensures syntax-highlight ranges (which are buffer-absolute) align
-        // correctly with visible lines regardless of how far the user has scrolled.
-        let line_byte_offsets: Vec<usize> = {
-            let mut offsets = Vec::with_capacity(total_lines + 1);
-            let mut off = 0usize;
-            for i in 0..total_lines {
-                offsets.push(off);
-                let line_text = buffer.line(i).unwrap_or_default();
-                let line_len = line_text
-                    .trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .len();
-                off += line_len + 1;
-            }
-            offsets
-        };
-
         // Shape visible lines with syntax highlighting.
         // `visible_range` is in display-slot space; `display_lines[slot]` gives the
         // actual buffer line for each slot, skipping any lines hidden by folds.
@@ -724,7 +700,8 @@ impl Element for EditorElement {
                 .trim_end_matches('\r')
                 .to_string();
 
-            let line_start_offset = line_byte_offsets.get(buffer_line).copied().unwrap_or(0);
+            // O(log n) rope B-tree lookup — no per-frame walk over all lines.
+            let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
 
             // Get text runs with syntax highlighting
             let text_runs = get_line_text_runs(
@@ -772,6 +749,7 @@ impl Element for EditorElement {
             editor.update_cached_gutter_width(f32::from(gutter_width));
             editor.update_cached_char_width(char_width);
             editor.update_cached_bounds_origin(bounds.origin);
+            editor.update_cached_bounds_size(bounds.size);
         });
 
         // Shape a line-number label for every visible line.
@@ -869,23 +847,39 @@ impl Element for EditorElement {
             }
         }
 
-        // Calculate diagnostic (error) bounds for squiggles
+        // Calculate diagnostic (error) bounds for squiggles.
+        // Each diagnostic is broken into per-line segments so that start_col and end_col are
+        // always on the same buffer line, preventing unsigned underflow when a diagnostic spans
+        // multiple lines and the end column is smaller than the start column.
         let mut diagnostic_bounds = Vec::new();
         for highlight in &diagnostics {
             if let Ok(start_pos) = buffer.offset_to_position(highlight.start) {
                 if let Ok(end_pos) = buffer.offset_to_position(highlight.end) {
                     let start_line = start_pos.line as usize;
                     let end_line = end_pos.line as usize;
-                    // Only include when at least the start line is visible (not hidden by a fold).
-                    if buf_to_display.contains_key(&start_line)
-                        || buf_to_display.contains_key(&end_line)
-                    {
-                        diagnostic_bounds.push((
-                            highlight.clone(),
-                            start_line,
-                            start_pos.column,
-                            end_pos.column,
-                        ));
+                    for line_idx in start_line..=end_line {
+                        if !buf_to_display.contains_key(&line_idx) {
+                            continue;
+                        }
+                        let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
+                        let start_col = if line_idx == start_line {
+                            start_pos.column
+                        } else {
+                            0
+                        };
+                        let end_col = if line_idx == end_line {
+                            end_pos.column
+                        } else {
+                            line_len
+                        };
+                        if start_col < end_col {
+                            diagnostic_bounds.push((
+                                highlight.clone(),
+                                line_idx,
+                                start_col,
+                                end_col,
+                            ));
+                        }
                     }
                 }
             }
@@ -1101,16 +1095,12 @@ impl Element for EditorElement {
             None
         };
 
-        // Build find panel render data if the panel is open
+        // Build find match highlight render data if the panel is open
         let find_panel = find_info.map(
-            |(query, replace_query, show_replace, search_field_focused, matches, current_match)| {
-                let total_matches = matches.len();
-                let current_match_display = if total_matches == 0 {
-                    0
-                } else {
-                    current_match + 1
-                };
-
+            |(
+                matches,
+                current_match,
+            )| {
                 // Compute pixel rects for each match that is within the visible viewport,
                 // paired with a flag marking the currently-selected match.
                 let mut match_rects: Vec<(Bounds<Pixels>, bool)> = Vec::new();
@@ -1147,14 +1137,7 @@ impl Element for EditorElement {
                 }
 
                 FindPanelData {
-                    query,
-                    replace_query,
-                    show_replace,
-                    search_field_focused,
                     match_rects,
-                    total_matches,
-                    current_match_display,
-                    line_height,
                 }
             },
         );
@@ -1341,6 +1324,19 @@ impl Element for EditorElement {
                 line_height,
             }
         });
+
+        // Push scrollbar geometry into the editor so that mouse handlers can
+        // hit-test and drive scrollbar interaction without element-layer access.
+        {
+            let cached = scrollbar.as_ref().map(|s| CachedScrollbarBounds {
+                track: s.track,
+                thumb: s.thumb,
+                display_line_count,
+            });
+            self.editor.update(cx, |editor, _cx| {
+                editor.update_cached_scrollbar(cached);
+            });
+        }
 
         PrepaintState {
             bounds,
@@ -1575,6 +1571,20 @@ impl Element for EditorElement {
             for extra_bounds in &prepaint.extra_cursor_bounds {
                 window.paint_quad(fill(*extra_bounds, cx.theme().colors.caret));
             }
+        } else {
+            // When unfocused, render a hollow (outline) cursor so the insertion
+            // point remains visible without implying keyboard focus.
+            let caret_color = cx.theme().colors.caret.opacity(0.6);
+            if let Some(cursor_bounds) = prepaint.cursor_bounds {
+                window.paint_quad(quad(
+                    cursor_bounds,
+                    px(0.0),
+                    transparent_black(),
+                    px(1.0),
+                    caret_color,
+                    BorderStyle::Solid,
+                ));
+            }
         }
 
         // Paint ghost-text inline suggestion right after the cursor position.
@@ -1620,10 +1630,8 @@ impl Element for EditorElement {
             self.paint_hover_tooltip(hover, window, cx);
         }
 
-        // Paint find/replace panel (top-right overlay)
-        if let Some(ref panel) = prepaint.find_panel {
-            self.paint_find_panel(panel, prepaint.bounds, window, cx);
-        }
+        // Find/replace panel is now rendered as a GPUI component child of TextEditor's div,
+        // not painted here. Match highlights are still painted above.
 
         // Paint indent guides (feat-038) — thin vertical rules between text and gutter
         self.paint_indent_guides(&prepaint.indent_guides, window, cx);
@@ -1858,11 +1866,7 @@ impl EditorElement {
                 .map(|d| d.width + detail_gap)
                 .unwrap_or(px(0.0));
             let row_w = left_inset + s.label.width + detail_w + right_padding + scrollbar_width;
-            if row_w > acc {
-                row_w
-            } else {
-                acc
-            }
+            if row_w > acc { row_w } else { acc }
         });
         let menu_width = required_width.max(px(240.0)).min(px(600.0));
 
@@ -2165,182 +2169,8 @@ impl EditorElement {
         }
     }
 
-    /// Paint the find/replace panel as a floating overlay anchored to the top-right of the editor.
-    ///
-    /// Layout (from top):
-    ///   Row 0 – search field + match counter
-    ///   Row 1 – replace field (only when `show_replace` is true)
-    fn paint_find_panel(
-        &self,
-        panel: &FindPanelData,
-        editor_bounds: Bounds<Pixels>,
-        window: &mut Window,
-        cx: &mut App,
-    ) {
-        let panel_width = px(340.0);
-        let row_height = panel.line_height * 1.4;
-        let padding = px(8.0);
-        let rows = if panel.show_replace { 2 } else { 1 };
-        let panel_height = row_height * rows as f32 + padding * 2.0;
-        let font_size = panel.line_height * 0.82;
 
-        // Position in the top-right corner of the editor
-        let panel_x = editor_bounds.origin.x + editor_bounds.size.width - panel_width - px(4.0);
-        let panel_y = editor_bounds.origin.y + px(4.0);
-        let panel_origin = point(panel_x, panel_y);
-
-        // Panel background with a subtle border
-        let panel_bounds = Bounds::new(panel_origin, size(panel_width, panel_height));
-        window.paint_quad(fill(panel_bounds, cx.theme().colors.popover));
-
-        // Thin border around panel
-        let border_width = px(1.0);
-        let panel_border = cx.theme().colors.border;
-        // Top border
-        window.paint_quad(fill(
-            Bounds::new(panel_origin, size(panel_width, border_width)),
-            panel_border,
-        ));
-        // Bottom border
-        window.paint_quad(fill(
-            Bounds::new(
-                point(panel_x, panel_y + panel_height - border_width),
-                size(panel_width, border_width),
-            ),
-            panel_border,
-        ));
-        // Left border
-        window.paint_quad(fill(
-            Bounds::new(panel_origin, size(border_width, panel_height)),
-            panel_border,
-        ));
-        // Right border
-        window.paint_quad(fill(
-            Bounds::new(
-                point(panel_x + panel_width - border_width, panel_y),
-                size(border_width, panel_height),
-            ),
-            panel_border,
-        ));
-
-        // ── Row 0: Search field ─────────────────────────────────────────────
-        let row0_y = panel_y + padding;
-        let field_width = panel_width - padding * 2.0 - px(80.0); // reserve space for status label
-
-        // Search field background (slightly lighter to show focus)
-        let search_bg: Hsla = if panel.search_field_focused {
-            cx.theme().colors.input
-        } else {
-            cx.theme().colors.muted
-        };
-        let search_field_bounds = Bounds::new(
-            point(panel_x + padding, row0_y),
-            size(field_width, row_height),
-        );
-        window.paint_quad(fill(search_field_bounds, search_bg));
-
-        // Search text (query + blinking cursor indicator "|" when focused)
-        let display_query = if panel.search_field_focused {
-            format!("{}_", panel.query)
-        } else {
-            panel.query.clone()
-        };
-        let search_label = if display_query.is_empty() {
-            "Find...".to_string()
-        } else {
-            display_query
-        };
-        let search_color: Hsla = if panel.query.is_empty() && !panel.search_field_focused {
-            cx.theme().colors.muted_foreground
-        } else {
-            cx.theme().colors.popover_foreground
-        };
-        Self::paint_panel_text(
-            &search_label,
-            point(
-                panel_x + padding + px(4.0),
-                row0_y + (row_height - panel.line_height) / 2.0,
-            ),
-            font_size,
-            search_color,
-            window,
-            cx,
-        );
-
-        // Match count label (e.g. "3/12") anchored to the right side of the row
-        let status_text = if panel.total_matches == 0 {
-            if panel.query.is_empty() {
-                String::new()
-            } else {
-                "No results".to_string()
-            }
-        } else {
-            format!("{}/{}", panel.current_match_display, panel.total_matches)
-        };
-        if !status_text.is_empty() {
-            let status_color: Hsla = if panel.total_matches == 0 {
-                cx.theme().colors.danger
-            } else {
-                cx.theme().colors.muted_foreground
-            };
-            Self::paint_panel_text(
-                &status_text,
-                point(
-                    panel_x + panel_width - padding - px(70.0),
-                    row0_y + (row_height - panel.line_height) / 2.0,
-                ),
-                font_size,
-                status_color,
-                window,
-                cx,
-            );
-        }
-
-        // ── Row 1: Replace field (only when show_replace is true) ───────────
-        if panel.show_replace {
-            let row1_y = row0_y + row_height + px(2.0);
-            let replace_bg: Hsla = if !panel.search_field_focused {
-                cx.theme().colors.input
-            } else {
-                cx.theme().colors.muted
-            };
-            let replace_field_bounds = Bounds::new(
-                point(panel_x + padding, row1_y),
-                size(field_width, row_height),
-            );
-            window.paint_quad(fill(replace_field_bounds, replace_bg));
-
-            let display_replace = if !panel.search_field_focused {
-                format!("{}_", panel.replace_query)
-            } else {
-                panel.replace_query.clone()
-            };
-            let replace_label = if display_replace.is_empty() {
-                "Replace...".to_string()
-            } else {
-                display_replace
-            };
-            let replace_color: Hsla =
-                if panel.replace_query.is_empty() && panel.search_field_focused {
-                    cx.theme().colors.muted_foreground
-                } else {
-                    cx.theme().colors.popover_foreground
-                };
-            Self::paint_panel_text(
-                &replace_label,
-                point(
-                    panel_x + padding + px(4.0),
-                    row1_y + (row_height - panel.line_height) / 2.0,
-                ),
-                font_size,
-                replace_color,
-                window,
-                cx,
-            );
-        }
-    }
-
-    /// Helper: shape and paint a single-line text string inside the find panel.
+    /// Helper: shape and paint a single-line text string inside an overlay panel.
     fn paint_panel_text(
         text: &str,
         origin: Point<Pixels>,

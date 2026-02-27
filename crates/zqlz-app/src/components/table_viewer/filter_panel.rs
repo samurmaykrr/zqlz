@@ -7,13 +7,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_text_editor::TextEditor;
 use zqlz_ui::widgets::{
-    button::{Button, ButtonVariants},
+    ActiveTheme, Disableable, IndexPath, Sizable,
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{DropdownMenu, PopupMenuItem},
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
-    v_flex, ActiveTheme, IndexPath, Sizable,
+    v_flex,
 };
 
 use crate::icons::ZqlzIcon;
@@ -151,10 +152,10 @@ impl FilterPanelState {
             move |this,
                   _select,
                   event: &SelectEvent<SearchableVec<ColumnSelectItem>>,
-                  _window,
+                  window,
                   cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    this.on_column_selected(filter_id, value.clone(), cx);
+                    this.on_column_selected(filter_id, value.clone(), window, cx);
                 }
             },
         )
@@ -230,10 +231,10 @@ impl FilterPanelState {
             move |this,
                   _select,
                   event: &SelectEvent<SearchableVec<ColumnSelectItem>>,
-                  _window,
+                  window,
                   cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    this.on_column_selected(filter_id, value.clone(), cx);
+                    this.on_column_selected(filter_id, value.clone(), window, cx);
                 }
             },
         )
@@ -383,8 +384,11 @@ impl FilterPanelState {
         &mut self,
         filter_id: usize,
         value: SharedString,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let mut custom_sql_editor_to_focus: Option<Entity<TextEditor>> = None;
+
         if let Some(filter_row) = self
             .filters
             .iter_mut()
@@ -393,12 +397,18 @@ impl FilterPanelState {
             if value.as_ref() == "[Custom]" {
                 filter_row.condition.column = None;
                 filter_row.condition.operator = FilterOperator::Custom;
+                custom_sql_editor_to_focus = Some(filter_row.custom_sql_input.clone());
             } else {
                 filter_row.condition.column = Some(value.to_string());
             }
             self.is_dirty = true;
             cx.emit(FilterPanelEvent::Changed);
             cx.notify();
+        }
+
+        if let Some(custom_sql_editor) = custom_sql_editor_to_focus {
+            let focus_handle = custom_sql_editor.read(cx).focus_handle(cx);
+            focus_handle.focus(window, cx);
         }
     }
 
@@ -736,6 +746,12 @@ impl RenderOnce for FilterPanel {
             // Apply button row
             .child({
                 let has_criteria = has_filters || has_sorts;
+                let apply_button_style = ButtonCustomVariant::new(cx)
+                    .foreground(theme.primary)
+                    .color(theme.primary.opacity(0.12))
+                    .border(theme.primary.opacity(0.24))
+                    .hover(theme.primary.opacity(0.18))
+                    .active(theme.primary.opacity(0.24));
                 h_flex()
                     .items_center()
                     .gap_2()
@@ -743,7 +759,8 @@ impl RenderOnce for FilterPanel {
                     .child(
                         Button::new("apply-filter-sort")
                             .label("Apply Filter & Sort")
-                            .primary()
+                            .custom(apply_button_style)
+                            .disabled(!has_criteria)
                             .small()
                             .on_click({
                                 let state = panel_state.clone();

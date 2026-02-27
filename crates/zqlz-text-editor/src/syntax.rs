@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use tree_sitter::Node;
 use tree_sitter::Parser;
+use tree_sitter::Tree;
 
 /// SQL syntax highlighting colors
 ///
@@ -88,6 +89,10 @@ pub struct Highlight {
 /// highlight operation is expensive. Instead, create one `SyntaxHighlighter`
 /// and reuse it for multiple highlight operations.
 ///
+/// Incremental parsing is used: tree-sitter reuses unchanged regions of the
+/// previous parse tree when the text changes slightly (e.g. a single keystroke).
+/// This is dramatically faster than a full re-parse for large files.
+///
 /// # Example
 ///
 /// ```rust
@@ -102,6 +107,10 @@ pub struct Highlight {
 /// ```
 pub struct SyntaxHighlighter {
     parser: Parser,
+    /// Retained parse tree from the previous call to `highlight()`, used for
+    /// incremental re-parsing. Tree-sitter can reuse unchanged subtrees, which
+    /// makes repeated highlights on small edits much cheaper than a full parse.
+    last_tree: Option<Tree>,
     /// Cached mapping from tree-sitter node types to highlight kinds
     node_type_map: HashMap<&'static str, HighlightKind>,
 }
@@ -227,8 +236,19 @@ impl SyntaxHighlighter {
 
         Ok(Self {
             parser,
+            last_tree: None,
             node_type_map,
         })
+    }
+
+    /// Discards the cached parse tree, forcing a full re-parse on the next
+    /// call to `highlight()`.
+    ///
+    /// Call this whenever the buffer content is replaced wholesale (e.g.
+    /// `set_text`), so the stale tree from a previous document doesn't
+    /// mislead the incremental parser.
+    pub fn invalidate_tree(&mut self) {
+        self.last_tree = None;
     }
 
     /// Highlights the given SQL text.
@@ -261,13 +281,15 @@ impl SyntaxHighlighter {
     /// }
     /// ```
     pub fn highlight(&mut self, text: &str) -> Vec<Highlight> {
-        let tree = match self.parser.parse(text, None) {
+        let tree = match self.parser.parse(text, self.last_tree.as_ref()) {
             Some(t) => t,
             None => return Vec::new(),
         };
 
         let mut highlights = Vec::new();
         self.collect_highlights(tree.root_node(), text, &mut highlights);
+
+        self.last_tree = Some(tree);
 
         // Sort by start position
         highlights.sort_by_key(|h| h.start);
@@ -404,24 +426,6 @@ impl SyntaxHighlighter {
         }
 
         HighlightKind::Default
-    }
-
-    /// Get all error highlights from the text.
-    ///
-    /// This is useful for rendering diagnostic squiggles for syntax errors.
-    ///
-    /// # Arguments
-    ///
-    /// * `text` - The SQL text
-    ///
-    /// # Returns
-    ///
-    /// A vector of `Highlight` structs representing error ranges.
-    pub fn get_errors(&mut self, text: &str) -> Vec<Highlight> {
-        self.highlight(text)
-            .into_iter()
-            .filter(|h| h.kind == HighlightKind::Error)
-            .collect()
     }
 }
 

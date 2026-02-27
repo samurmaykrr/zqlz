@@ -11,6 +11,7 @@ use gpui::{App, Context, Task, Window};
 use lsp_types::{CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, Hover};
 use ropey::Rope;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::TextEditor;
 
@@ -451,6 +452,12 @@ pub struct Lsp {
     /// Optional references provider for find-references
     pub references_provider: Option<Rc<dyn ReferencesProvider>>,
 
+    /// Back-compat SQL LSP handle set through `TextEditor::set_sql_lsp`.
+    ///
+    /// The editor itself does not depend on a concrete `zqlz-lsp` type; this handle
+    /// is retained so legacy integrations can still indicate "connected" status.
+    pub legacy_sql_lsp: Option<Arc<dyn std::any::Any + Send + Sync>>,
+
     /// Held so it isn't dropped (dropping a Task cancels it).
     pub completion_task: Task<Result<()>>,
 
@@ -465,6 +472,7 @@ impl Default for Lsp {
             hover_provider: None,
             definition_provider: None,
             references_provider: None,
+            legacy_sql_lsp: None,
             completion_task: Task::ready(Ok(())),
             hover_task: Task::ready(Ok(())),
         }
