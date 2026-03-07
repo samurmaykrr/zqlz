@@ -18,6 +18,10 @@ pub struct ConnectionManager {
     /// Active connections
     active: RwLock<HashMap<Uuid, Arc<dyn Connection>>>,
 
+    /// Per-database connections for drivers like PostgreSQL where each connection
+    /// is scoped to a single database. Keyed by (connection_id, database_name).
+    database_connections: RwLock<HashMap<(Uuid, String), Arc<dyn Connection>>>,
+
     /// Saved connection configurations
     saved: RwLock<Vec<SavedConnection>>,
 
@@ -31,6 +35,7 @@ impl ConnectionManager {
         Self {
             drivers: DriverRegistry::with_defaults(),
             active: RwLock::new(HashMap::new()),
+            database_connections: RwLock::new(HashMap::new()),
             saved: RwLock::new(Vec::new()),
             storage_path: None,
         }
@@ -41,6 +46,7 @@ impl ConnectionManager {
         Self {
             drivers: DriverRegistry::with_defaults(),
             active: RwLock::new(HashMap::new()),
+            database_connections: RwLock::new(HashMap::new()),
             saved: RwLock::new(Vec::new()),
             storage_path: Some(path),
         }
@@ -87,7 +93,7 @@ impl ConnectionManager {
         Ok(conn_id)
     }
 
-    /// Disconnect a connection
+    /// Disconnect a connection and all its database-specific connections
     #[tracing::instrument(skip(self), fields(connection_id = %id))]
     pub async fn disconnect(&self, id: Uuid) -> Result<()> {
         tracing::info!("disconnecting connection");
@@ -95,6 +101,30 @@ impl ConnectionManager {
         if let Some(conn) = conn {
             conn.close().await?;
         }
+
+        // Close all database-specific connections for this connection_id
+        let db_conns: Vec<((Uuid, String), Arc<dyn Connection>)> = {
+            let mut guard = self.database_connections.write();
+            let keys: Vec<(Uuid, String)> = guard
+                .keys()
+                .filter(|(conn_id, _)| *conn_id == id)
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| guard.remove(&key).map(|conn| (key, conn)))
+                .collect()
+        };
+
+        for ((_, database_name), conn) in db_conns {
+            if let Err(e) = conn.close().await {
+                tracing::warn!(
+                    database = %database_name,
+                    error = %e,
+                    "failed to close database-specific connection"
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -105,6 +135,111 @@ impl ConnectionManager {
             tracing::debug!(connection_id = %id, "connection not found in active pool");
         }
         conn
+    }
+
+    /// Get a connection for a specific database, creating one if necessary.
+    ///
+    /// For drivers like PostgreSQL where each connection is scoped to a single
+    /// database, this method returns a cached connection to the target database,
+    /// or creates a new one from the saved connection config with the database
+    /// parameter overridden.
+    ///
+    /// For drivers that can query across databases (MySQL, ClickHouse), this
+    /// returns the main connection since no separate connection is needed.
+    pub async fn get_for_database(
+        &self,
+        id: Uuid,
+        database_name: &str,
+    ) -> Result<Arc<dyn Connection>> {
+        let main_conn = self
+            .get(id)
+            .ok_or_else(|| ZqlzError::NotFound("Connection not found".into()))?;
+
+        // Drivers that support cross-database queries don't need separate connections
+        if !Self::needs_per_database_connection(main_conn.driver_name()) {
+            return Ok(main_conn);
+        }
+
+        let key = (id, database_name.to_string());
+
+        // Check cache first
+        if let Some(cached) = self.database_connections.read().get(&key) {
+            if !cached.is_closed() {
+                return Ok(cached.clone());
+            }
+            // Connection is stale, will be replaced below
+        }
+
+        // Create a new connection to the target database
+        let saved = self
+            .get_saved(id)
+            .ok_or_else(|| ZqlzError::NotFound("Saved connection config not found".into()))?;
+
+        let driver = self
+            .drivers
+            .get(&saved.driver)
+            .ok_or_else(|| ZqlzError::Driver(format!("Unknown driver: {}", saved.driver)))?;
+
+        let mut config = ConnectionConfig::new(&saved.driver, &saved.name);
+        for (param_key, value) in &saved.params {
+            config = config.with_param(param_key, value.clone());
+        }
+        config = config.with_param("database", database_name);
+
+        tracing::info!(
+            connection_id = %id,
+            database = %database_name,
+            "creating database-specific connection"
+        );
+
+        let conn = driver.connect(&config).await?;
+        self.database_connections
+            .write()
+            .insert(key, conn.clone());
+
+        Ok(conn)
+    }
+
+    /// Returns true for drivers where each connection is scoped to a single database
+    /// and separate connections are needed to access different databases.
+    fn needs_per_database_connection(driver_name: &str) -> bool {
+        matches!(driver_name, "postgres" | "postgresql" | "mssql")
+    }
+
+    /// Get a connection appropriate for the given database, using the main
+    /// connection when no database-specific connection is needed.
+    ///
+    /// Unlike `get_for_database`, this method is synchronous and only returns
+    /// already-cached database connections. Returns `None` if a database-specific
+    /// connection is required but hasn't been created yet.
+    pub fn get_for_database_cached(
+        &self,
+        id: Uuid,
+        database_name: Option<&str>,
+    ) -> Option<Arc<dyn Connection>> {
+        let main_conn = self.get(id)?;
+
+        let Some(database_name) = database_name else {
+            return Some(main_conn);
+        };
+
+        if !Self::needs_per_database_connection(main_conn.driver_name()) {
+            return Some(main_conn);
+        }
+
+        let key = (id, database_name.to_string());
+        let cached = self.database_connections.read().get(&key).cloned();
+        match cached {
+            Some(conn) if !conn.is_closed() => Some(conn),
+            _ => {
+                tracing::warn!(
+                    connection_id = %id,
+                    database = %database_name,
+                    "database-specific connection not yet cached, falling back to main connection"
+                );
+                Some(main_conn)
+            }
+        }
     }
 
     /// Check if a connection is active

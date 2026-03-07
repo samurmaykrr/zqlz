@@ -563,7 +563,7 @@ impl TemplateLibraryPanel {
             .id("template-edit-modal-backdrop")
             .absolute()
             .inset_0()
-            .bg(rgba(0x00000080))
+            .bg(theme.overlay_backdrop)
             .flex()
             .items_center()
             .justify_center()
@@ -785,7 +785,7 @@ impl TemplateLibraryPanel {
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .when(self.selected_tag.is_none(), |this| {
-                        this.bg(theme.accent).text_color(gpui::white())
+                        this.bg(theme.primary).text_color(theme.primary_foreground)
                     })
                     .when(self.selected_tag.is_some(), |this| {
                         this.bg(theme.muted).hover(|this| this.bg(theme.list_hover))
@@ -808,7 +808,7 @@ impl TemplateLibraryPanel {
                     .rounded(px(4.0))
                     .cursor_pointer()
                     .when(is_selected, |this| {
-                        this.bg(theme.accent).text_color(gpui::white())
+                        this.bg(theme.primary).text_color(theme.primary_foreground)
                     })
                     .when(!is_selected, |this| {
                         this.bg(theme.muted).hover(|this| this.bg(theme.list_hover))

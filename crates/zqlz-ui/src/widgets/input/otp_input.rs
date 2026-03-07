@@ -228,7 +228,7 @@ impl RenderOnce for OtpInput {
             Size::Small => px(14.),
             Size::Medium => px(16.),
             Size::Large => px(18.),
-            Size::Size(v) => v * 0.5,
+            Size::Custom(v) => v * 0.5,
         };
 
         let cursor_ix = state
@@ -272,7 +272,7 @@ impl RenderOnce for OtpInput {
                         Size::Small => this.w_6().h_6(),
                         Size::Medium => this.w_8().h_8(),
                         Size::Large => this.w_11().h_11(),
-                        Size::Size(px) => this.w(px).h(px),
+                        Size::Custom(px) => this.w(px).h(px),
                     })
                     .on_mouse_down(
                         MouseButton::Left,

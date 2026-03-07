@@ -27,17 +27,18 @@ members = [
     "crates/zqlz-interchange",
     "crates/zqlz-text-editor",
     "crates/zqlz-ui",
+    "crates/zqlz-interchange",
     "crates/zqlz-admin",
-    "crates/zqlz-schema-tools",
     "crates/zqlz-monitor",
     "crates/zqlz-app",
+    "crates/zqlz-cli",
     # Testing
     "crates/zqlz-driver-tests",
 ]
 default-members = ["crates/zqlz-app"]
 
 [workspace.package]
-version = "0.0.3"
+version = "0.0.4"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourorg/zqlz"
@@ -144,7 +145,7 @@ lsp-types = { version = "0.97.0", features = ["proposed"] }
 # GUI - GPUI - Use git version to match gpui-component's expected API
 # IMPORTANT: Must enable default features for text rendering to work!
 # Must use same revision as Zed crates for compatibility
-gpui = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+gpui = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22", features = ["runtime_shaders"] }
 gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
 gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
 sum_tree = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
@@ -317,10 +318,20 @@ zqlz-ui = { path = "crates/zqlz-ui" }
 zqlz-interchange = { path = "crates/zqlz-interchange" }
 zqlz-admin = { path = "crates/zqlz-admin" }
 zqlz-monitor = { path = "crates/zqlz-monitor" }
+zqlz-fuzzy = { path = "crates/zqlz-fuzzy" }
+zqlz-command-palette = { path = "crates/zqlz-command-palette" }
 
 [profile.dev]
 opt-level = 0
 debug = true
+
+# Used by bundle-mac for dev-channel distribution builds.
+# Inherits from dev for fast compilation, but disables debug_assertions
+# so that rust-embed bakes assets into the binary instead of reading
+# from the build machine's filesystem paths at runtime.
+[profile.bundle-dev]
+inherits = "dev"
+debug-assertions = false
 
 [profile.release]
 opt-level = 3

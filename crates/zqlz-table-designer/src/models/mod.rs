@@ -3,6 +3,7 @@
 //! Core data structures for representing table structure, columns, indexes,
 //! foreign keys, and dialect-specific options.
 
+mod check_constraint_design;
 mod column_design;
 mod data_types;
 mod foreign_key_design;
@@ -11,6 +12,7 @@ mod table_design;
 mod table_options;
 mod validation;
 
+pub use check_constraint_design::CheckConstraintDesign;
 pub use column_design::ColumnDesign;
 pub use data_types::{get_data_types, DataTypeCategory, DataTypeInfo};
 pub use foreign_key_design::ForeignKeyDesign;

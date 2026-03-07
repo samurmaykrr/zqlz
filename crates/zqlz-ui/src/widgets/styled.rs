@@ -4,7 +4,7 @@ use gpui::{
     ParentElement, Pixels, Refineable, StyleRefinement, Styled, Window,
 };
 use serde::{Deserialize, Serialize};
-
+use std::str::FromStr;
 /// Returns a `Div` as horizontal flex layout.
 #[inline(always)]
 pub fn h_flex() -> Div {
@@ -193,7 +193,7 @@ impl<E: Styled> StyledExt for E {}
 /// A size for elements.
 #[derive(Clone, Default, Copy, PartialEq, Eq, Debug, Deserialize, Serialize)]
 pub enum Size {
-    Size(Pixels),
+    Custom(Pixels),
     XSmall,
     Small,
     #[default]
@@ -204,7 +204,7 @@ pub enum Size {
 impl Size {
     fn as_f32(&self) -> f32 {
         match self {
-            Size::Size(val) => val.as_f32(),
+            Size::Custom(val) => val.as_f32(),
             Size::XSmall => 0.,
             Size::Small => 1.,
             Size::Medium => 2.,
@@ -219,11 +219,15 @@ impl Size {
             Size::Small => "sm",
             Size::Medium => "md",
             Size::Large => "lg",
-            Size::Size(_) => "custom",
+            Size::Custom(_) => "custom",
         }
     }
+}
 
-    /// Create a Size from a static string.
+impl FromStr for Size {
+    type Err = std::convert::Infallible;
+
+    /// Parse a Size from a string.
     ///
     /// - "xs" or "xsmall"
     /// - "sm" or "small"
@@ -231,16 +235,18 @@ impl Size {
     /// - "lg" or "large"
     ///
     /// Any other value will return Size::Medium.
-    pub fn from_str(size: &str) -> Self {
-        match size.to_lowercase().as_str() {
+    fn from_str(size: &str) -> Result<Self, Self::Err> {
+        Ok(match size.to_lowercase().as_str() {
             "xs" | "xsmall" => Size::XSmall,
             "sm" | "small" => Size::Small,
             "md" | "medium" => Size::Medium,
             "lg" | "large" => Size::Large,
             _ => Size::Medium,
-        }
+        })
     }
+}
 
+impl Size {
     /// Returns the height for table row.
     #[inline]
     pub fn table_row_height(&self) -> Pixels {
@@ -290,7 +296,7 @@ impl Size {
             Size::Small => Size::XSmall,
             Size::Medium => Size::Small,
             Size::Large => Size::Medium,
-            Size::Size(val) => Size::Size(*val * 0.2),
+            Size::Custom(val) => Size::Custom(*val * 0.2),
         }
     }
 
@@ -301,7 +307,7 @@ impl Size {
             Size::Small => Size::Medium,
             Size::Medium => Size::Large,
             Size::Large => Size::Large,
-            Size::Size(val) => Size::Size(*val * 1.2),
+            Size::Custom(val) => Size::Custom(*val * 1.2),
         }
     }
 
@@ -310,9 +316,9 @@ impl Size {
     /// e.g. `Size::XSmall.max(Size::Small)` will return `Size::XSmall`.
     pub fn max(&self, other: Self) -> Self {
         match (self, other) {
-            (Size::Size(a), Size::Size(b)) => Size::Size(px(a.as_f32().min(b.as_f32()))),
-            (Size::Size(a), _) => Size::Size(*a),
-            (_, Size::Size(b)) => Size::Size(b),
+            (Size::Custom(a), Size::Custom(b)) => Size::Custom(px(a.as_f32().min(b.as_f32()))),
+            (Size::Custom(a), _) => Size::Custom(*a),
+            (_, Size::Custom(b)) => Size::Custom(b),
             (a, b) if a.as_f32() < b.as_f32() => *a,
             _ => other,
         }
@@ -323,9 +329,9 @@ impl Size {
     /// e.g. `Size::XSmall.min(Size::Small)` will return `Size::Small`.
     pub fn min(&self, other: Self) -> Self {
         match (self, other) {
-            (Size::Size(a), Size::Size(b)) => Size::Size(px(a.as_f32().max(b.as_f32()))),
-            (Size::Size(a), _) => Size::Size(*a),
-            (_, Size::Size(b)) => Size::Size(b),
+            (Size::Custom(a), Size::Custom(b)) => Size::Custom(px(a.as_f32().max(b.as_f32()))),
+            (Size::Custom(a), _) => Size::Custom(*a),
+            (_, Size::Custom(b)) => Size::Custom(b),
             (a, b) if a.as_f32() > b.as_f32() => *a,
             _ => other,
         }
@@ -356,7 +362,7 @@ impl Size {
 
 impl From<Pixels> for Size {
     fn from(size: Pixels) -> Self {
-        Size::Size(size)
+        Size::Custom(size)
     }
 }
 
@@ -435,7 +441,7 @@ impl<T: Styled> StyleSized<T> for T {
             Size::Small => self.text_sm(),
             Size::Medium => self.text_sm(),
             Size::Large => self.text_base(),
-            Size::Size(size) => self.text_size(size * 0.875),
+            Size::Custom(size) => self.text_size(size * 0.875),
         }
     }
 
@@ -505,7 +511,7 @@ impl<T: Styled> StyleSized<T> for T {
             Size::Medium => self.size_8(),
             Size::Small => self.size_5(),
             Size::XSmall => self.size_4(),
-            Size::Size(size) => self.size(size),
+            Size::Custom(size) => self.size(size),
         }
     }
 
@@ -639,8 +645,8 @@ mod tests {
         assert_eq!(Size::Large.min(Size::Small), Size::Large);
 
         assert_eq!(
-            Size::Size(px(10.)).min(Size::Size(px(20.))),
-            Size::Size(px(20.))
+            Size::Custom(px(10.)).min(Size::Custom(px(20.))),
+            Size::Custom(px(20.))
         );
 
         // Min
@@ -651,8 +657,8 @@ mod tests {
         assert_eq!(Size::Large.max(Size::Small), Size::Small);
 
         assert_eq!(
-            Size::Size(px(10.)).max(Size::Size(px(20.))),
-            Size::Size(px(10.))
+            Size::Custom(px(10.)).max(Size::Custom(px(20.))),
+            Size::Custom(px(10.))
         );
     }
 
@@ -662,24 +668,24 @@ mod tests {
         assert_eq!(Size::Small.as_str(), "sm");
         assert_eq!(Size::Medium.as_str(), "md");
         assert_eq!(Size::Large.as_str(), "lg");
-        assert_eq!(Size::Size(px(15.)).as_str(), "custom");
+        assert_eq!(Size::Custom(px(15.)).as_str(), "custom");
     }
 
     #[test]
     fn test_size_from_str() {
-        assert_eq!(Size::from_str("xs"), Size::XSmall);
-        assert_eq!(Size::from_str("xsmall"), Size::XSmall);
-        assert_eq!(Size::from_str("sm"), Size::Small);
-        assert_eq!(Size::from_str("small"), Size::Small);
-        assert_eq!(Size::from_str("md"), Size::Medium);
-        assert_eq!(Size::from_str("medium"), Size::Medium);
-        assert_eq!(Size::from_str("lg"), Size::Large);
-        assert_eq!(Size::from_str("large"), Size::Large);
-        assert_eq!(Size::from_str("unknown"), Size::Medium);
+        assert_eq!("xs".parse::<Size>().unwrap(), Size::XSmall);
+        assert_eq!("xsmall".parse::<Size>().unwrap(), Size::XSmall);
+        assert_eq!("sm".parse::<Size>().unwrap(), Size::Small);
+        assert_eq!("small".parse::<Size>().unwrap(), Size::Small);
+        assert_eq!("md".parse::<Size>().unwrap(), Size::Medium);
+        assert_eq!("medium".parse::<Size>().unwrap(), Size::Medium);
+        assert_eq!("lg".parse::<Size>().unwrap(), Size::Large);
+        assert_eq!("large".parse::<Size>().unwrap(), Size::Large);
+        assert_eq!("unknown".parse::<Size>().unwrap(), Size::Medium);
 
         // Case insensitive
-        assert_eq!(Size::from_str("XS"), Size::XSmall);
-        assert_eq!(Size::from_str("SMALL"), Size::Small);
-        assert_eq!(Size::from_str("Md"), Size::Medium);
+        assert_eq!("XS".parse::<Size>().unwrap(), Size::XSmall);
+        assert_eq!("SMALL".parse::<Size>().unwrap(), Size::Small);
+        assert_eq!("Md".parse::<Size>().unwrap(), Size::Medium);
     }
 }

@@ -113,6 +113,20 @@ pub enum VimAction {
         uppercase: bool,
         motion: CursorMotion,
     },
+    /// Open the find panel for forward search (`/`).
+    SearchForward,
+    /// Open the find panel for backward search (`?`).
+    SearchBackward,
+    /// Jump to the next find match (`n`).
+    FindNext,
+    /// Jump to the previous find match (`N`).
+    FindPrev,
+    /// Repeat the last edit (`.` command).
+    DotRepeat,
+    /// Set a mark at the current cursor position (`m{char}`).
+    SetMark(char),
+    /// Jump to a named mark (`'{char}` or `` `{char} ``).
+    GoToMark(char),
 }
 
 // ============================================================================
@@ -192,6 +206,24 @@ pub struct VimState {
 
     /// The `:` command line buffer (only used in Command mode).
     pub command_buffer: String,
+
+    /// Last repeatable action for the `.` command.
+    last_action: Option<RepeatableAction>,
+
+    /// Text typed during the last Insert-mode session (for `.` repeat).
+    insert_buffer: String,
+
+    /// Whether we are currently recording insert text for `.` repeat.
+    recording_insert: bool,
+
+    /// Named marks (a-z) storing buffer positions.
+    marks: std::collections::HashMap<char, crate::buffer::Position>,
+
+    /// Whether we are awaiting the mark name character after `m`.
+    awaiting_mark_set: bool,
+
+    /// Whether we are awaiting the mark name character after `'` or `` ` ``.
+    awaiting_mark_goto: bool,
 }
 
 /// Which text-object prefix is pending (`i` inner or `a` a/around).
@@ -199,6 +231,21 @@ pub struct VimState {
 enum TextObjectKind {
     Inner,
     Around,
+}
+
+/// A recorded edit action that can be replayed with `.`.
+#[derive(Debug, Clone)]
+pub enum RepeatableAction {
+    /// Insert text at cursor (from an `i`/`a`/`o` session).
+    InsertText(String),
+    /// Delete a motion range.
+    DeleteMotion(CursorMotion),
+    /// Change a motion range then insert text.
+    ChangeMotion(CursorMotion, String),
+    /// Replace character under cursor.
+    ReplaceChar(char),
+    /// Delete character at cursor (`x`).
+    DeleteCharAtCursor,
 }
 
 impl VimState {
@@ -212,6 +259,49 @@ impl VimState {
     /// gates by only creating the struct when vim is toggled on.
     pub fn is_enabled(&self) -> bool {
         true
+    }
+
+    /// Record that insert mode was entered. Call when transitioning to Insert.
+    pub fn begin_insert_recording(&mut self) {
+        self.insert_buffer.clear();
+        self.recording_insert = true;
+    }
+
+    /// Record a character typed during Insert mode.
+    pub fn record_insert_char(&mut self, text: &str) {
+        if self.recording_insert {
+            self.insert_buffer.push_str(text);
+        }
+    }
+
+    /// Finish insert recording and save as a repeatable action.
+    pub fn end_insert_recording(&mut self) {
+        if self.recording_insert {
+            self.recording_insert = false;
+            if !self.insert_buffer.is_empty() {
+                self.last_action = Some(RepeatableAction::InsertText(self.insert_buffer.clone()));
+            }
+        }
+    }
+
+    /// Record a repeatable action (for non-insert actions like `x`, `r`, `d`).
+    pub fn record_action(&mut self, action: RepeatableAction) {
+        self.last_action = Some(action);
+    }
+
+    /// Returns the last repeatable action, if any.
+    pub fn last_action(&self) -> Option<&RepeatableAction> {
+        self.last_action.as_ref()
+    }
+
+    /// Set a named mark at the given position.
+    pub fn set_mark(&mut self, name: char, position: crate::buffer::Position) {
+        self.marks.insert(name, position);
+    }
+
+    /// Get the position of a named mark.
+    pub fn get_mark(&self, name: char) -> Option<crate::buffer::Position> {
+        self.marks.get(&name).copied()
     }
 
     /// Returns the current mode label, suitable for a mode indicator in the UI.
@@ -256,6 +346,8 @@ impl VimState {
         self.awaiting_g = false;
         self.awaiting_replace = false;
         self.awaiting_text_object = None;
+        self.awaiting_mark_set = false;
+        self.awaiting_mark_goto = false;
     }
 
     /// Dispatch a completed (operator + motion) pair to a [`VimAction`].
@@ -346,6 +438,36 @@ impl VimState {
                 }
             }
             // Non-printable cancels replace
+            self.reset_pending();
+            return VimAction::None;
+        }
+
+        // ── m<char> – set mark ─────────────────────────────────────────────
+        if self.awaiting_mark_set {
+            self.awaiting_mark_set = false;
+            if let Some(text) = key_char {
+                if let Some(ch) = text.chars().next() {
+                    if ch.is_ascii_lowercase() {
+                        self.reset_pending();
+                        return VimAction::SetMark(ch);
+                    }
+                }
+            }
+            self.reset_pending();
+            return VimAction::None;
+        }
+
+        // ── '<char> or `<char> – goto mark ─────────────────────────────────
+        if self.awaiting_mark_goto {
+            self.awaiting_mark_goto = false;
+            if let Some(text) = key_char {
+                if let Some(ch) = text.chars().next() {
+                    if ch.is_ascii_lowercase() {
+                        self.reset_pending();
+                        return VimAction::GoToMark(ch);
+                    }
+                }
+            }
             self.reset_pending();
             return VimAction::None;
         }
@@ -675,6 +797,42 @@ impl VimState {
             "<" if shift => {
                 self.reset_pending();
                 return VimAction::Dedent;
+            }
+
+            // ── / ? n N – search motions ──────────────────────────────────
+            "/" => {
+                self.reset_pending();
+                return VimAction::SearchForward;
+            }
+            "?" => {
+                self.reset_pending();
+                return VimAction::SearchBackward;
+            }
+            "n" if !shift => {
+                self.reset_pending();
+                return VimAction::FindNext;
+            }
+            "N" | "n" if shift => {
+                self.reset_pending();
+                return VimAction::FindPrev;
+            }
+
+            // ── . – dot repeat ────────────────────────────────────────────
+            "." => {
+                self.reset_pending();
+                return VimAction::DotRepeat;
+            }
+
+            // ── m – set mark ──────────────────────────────────────────────
+            "m" if !shift => {
+                self.awaiting_mark_set = true;
+                return VimAction::None;
+            }
+
+            // ── ' or ` – goto mark ──────────────────────────────────────
+            "'" | "`" => {
+                self.awaiting_mark_goto = true;
+                return VimAction::None;
             }
 
             _ => {

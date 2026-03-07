@@ -327,10 +327,10 @@ impl UserManagementService {
             return Err(UserError::NotSupported("REPLICATION".to_string()));
         }
 
-        if let Some(limit) = spec.connection_limit {
-            if limit < -1 {
-                return Err(UserError::InvalidConnectionLimit);
-            }
+        if let Some(limit) = spec.connection_limit
+            && limit < -1
+        {
+            return Err(UserError::InvalidConnectionLimit);
         }
 
         Ok(())
@@ -641,10 +641,10 @@ impl UserManagementService {
 
         let mut options = Vec::new();
 
-        if let Some(limit) = spec.connection_limit {
-            if limit >= 0 {
-                options.push(format!("MAX_CONNECTIONS_PER_HOUR {}", limit));
-            }
+        if let Some(limit) = spec.connection_limit
+            && limit >= 0
+        {
+            options.push(format!("MAX_CONNECTIONS_PER_HOUR {}", limit));
         }
 
         if let Some(valid_until) = &spec.valid_until {

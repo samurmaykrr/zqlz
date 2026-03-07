@@ -141,7 +141,7 @@ impl MainView {
                             .child({
                                 let error = error_message.read(cx).clone();
                                 div().text_xs().h(px(16.0)).when_some(error, |this, err| {
-                                    this.text_color(gpui::red()).child(err)
+                                    this.text_color(cx.theme().danger_text).child(err)
                                 })
                             }),
                     )
@@ -532,7 +532,7 @@ impl MainView {
                             .child({
                                 let error = error_message.read(cx).clone();
                                 div().text_xs().h(px(16.0)).when_some(error, |this, err| {
-                                    this.text_color(gpui::red()).child(err)
+                                    this.text_color(cx.theme().danger_text).child(err)
                                 })
                             }),
                     )

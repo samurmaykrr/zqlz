@@ -1,10 +1,13 @@
 //! Column design model
 
+use uuid::Uuid;
 use zqlz_core::ColumnInfo;
 
 /// Column design model for table designer
 #[derive(Debug, Clone)]
 pub struct ColumnDesign {
+    /// Stable identifier for tracking renames
+    pub column_id: Uuid,
     /// Column name
     pub name: String,
     /// Data type (e.g., "INTEGER", "VARCHAR", "TEXT")
@@ -39,6 +42,7 @@ impl ColumnDesign {
     /// Create a new empty column design
     pub fn new(ordinal: usize) -> Self {
         Self {
+            column_id: Uuid::new_v4(),
             name: String::new(),
             data_type: "TEXT".to_string(),
             length: None,
@@ -67,6 +71,7 @@ impl ColumnDesign {
     /// Create from existing column info
     pub fn from_column_info(info: &ColumnInfo) -> Self {
         Self {
+            column_id: Uuid::new_v4(),
             name: info.name.clone(),
             data_type: info.data_type.clone(),
             length: info.max_length.map(|l| l as u32),

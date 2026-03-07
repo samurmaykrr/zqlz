@@ -1,5 +1,5 @@
 use crate::widgets::{
-    Placement, Root, dialog::Dialog, input::InputState, notification::Notification, sheet::Sheet,
+    dialog::Dialog, input::InputState, notification::Notification, sheet::Sheet, Placement, Root,
 };
 use gpui::{App, Entity, Window};
 use std::rc::Rc;
@@ -97,7 +97,7 @@ impl WindowExt for Window {
 
     #[inline]
     fn has_active_dialog(&mut self, cx: &mut App) -> bool {
-        Root::read(self, cx).active_dialogs.len() > 0
+        !Root::read(self, cx).active_dialogs.is_empty()
     }
 
     #[inline]

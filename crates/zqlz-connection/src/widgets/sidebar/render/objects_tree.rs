@@ -124,6 +124,20 @@ impl ConnectionSidebar {
                 filtered_tables.len(),
                 tables_expanded,
                 move |this, _, _, cx| toggle(this, "tables", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "tables",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -196,6 +210,20 @@ impl ConnectionSidebar {
                 filtered_views.len(),
                 views_expanded,
                 move |this, _, _, cx| toggle(this, "views", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "views",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -270,6 +298,20 @@ impl ConnectionSidebar {
                 filtered_mat_views.len(),
                 mat_views_expanded,
                 move |this, _, _, cx| toggle(this, "materialized_views", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "materialized_views",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -288,7 +330,9 @@ impl ConnectionSidebar {
                 } else {
                     for view_name in &filtered_mat_views {
                         let view = (*view_name).clone();
+                        let name_for_menu = (*view_name).clone();
                         let db_name_for_click = database_name.clone();
+                        let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
                             SharedString::from(format!("matview-{}-{}", id_suffix, view_name)),
                             Icon::new(ZqlzIcon::TreeStructure)
@@ -303,7 +347,21 @@ impl ConnectionSidebar {
                                     database_name: db_name_for_click.clone(),
                                 });
                             },
-                            None::<fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>)>,
+                            Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_materialized_view_context_menu(
+                                        conn_id,
+                                        name_for_menu.clone(),
+                                        db_name_for_menu.clone(),
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
                             list_hover,
                             leaf_depth,
                             cx,
@@ -328,6 +386,20 @@ impl ConnectionSidebar {
                 filtered_triggers.len(),
                 triggers_expanded,
                 move |this, _, _, cx| toggle(this, "triggers", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "triggers",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -396,6 +468,20 @@ impl ConnectionSidebar {
                 filtered_functions.len(),
                 functions_expanded,
                 move |this, _, _, cx| toggle(this, "functions", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "functions",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -464,6 +550,20 @@ impl ConnectionSidebar {
                 filtered_procedures.len(),
                 procedures_expanded,
                 move |this, _, _, cx| toggle(this, "procedures", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "procedures",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,
@@ -534,6 +634,20 @@ impl ConnectionSidebar {
                 filtered_queries.len(),
                 queries_expanded,
                 move |this, _, _, cx| toggle(this, "queries", cx),
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "queries",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 depth,

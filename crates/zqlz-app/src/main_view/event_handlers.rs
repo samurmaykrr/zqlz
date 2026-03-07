@@ -1,13 +1,15 @@
 // Event handlers for MainView
 
+use std::sync::Arc;
+
 use gpui::*;
 
 use crate::actions::*;
 use crate::app::AppState;
 use crate::components::{
-    CommandPalette, CommandPaletteEvent, ConnectionEntry, ConnectionSidebarEvent,
-    ObjectsPanelEvent, ProjectManagerEvent, ResultsPanelEvent, SettingsPanel, SettingsPanelEvent, TableViewerPanel,
-    TemplateLibraryEvent,
+    Command, CommandCategory, CommandPalette, CommandPaletteEvent, CommandUsagePersistence,
+    ConnectionEntry, ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent,
+    ResultsPanelEvent, SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
 };
 use zqlz_ui::widgets::{
     WindowExt,
@@ -482,72 +484,203 @@ impl MainView {
     ) {
         tracing::debug!("Opening command palette");
 
-        // Create the command palette if not already open
-        if self.command_palette.is_none() {
-            let palette = cx.new(|cx| CommandPalette::new(window, cx));
+        let commands = Self::build_static_commands();
 
-            // Load schema data for the active connection from the SchemaService cache.
-            // This avoids keeping a duplicate schema list in WorkspaceState.
-            let active_connection_id = self.workspace_state.read(cx).active_connection_id();
-            if let Some(connection_id) = active_connection_id {
-                if let Some(app_state) = cx.try_global::<AppState>() {
-                    let schema_service = app_state.schema_service.clone();
-                    let connection_name = app_state
-                        .saved_connections()
-                        .iter()
-                        .find(|c| c.id == connection_id)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_else(|| "Unknown".to_string());
-
-                    let tables: Vec<String> = schema_service
-                        .get_cached_tables(connection_id)
-                        .unwrap_or_default()
-                        .into_iter()
-                        .map(|t| t.name)
-                        .collect();
-                    let views: Vec<String> = schema_service
-                        .get_cached_view_names(connection_id)
-                        .unwrap_or_default();
-
-                    palette.update(cx, |palette, _cx| {
-                        palette.add_schema_commands(connection_id, &connection_name, &tables, &views);
-                    });
-                }
-            }
-
-            // Subscribe to dismiss events
-            let subscription = cx.subscribe(
-                &palette,
-                |this, _palette, event: &CommandPaletteEvent, cx| {
-                    match event {
-                        CommandPaletteEvent::Dismissed => {
-                            this.command_palette = None;
-                            cx.notify();
-                        }
-                        CommandPaletteEvent::CommandExecuted(cmd_id) => {
-                            tracing::debug!("Command executed: {}", cmd_id);
-                        }
-                        CommandPaletteEvent::ConnectToConnection(_) => {
-                            tracing::debug!("ConnectToConnection event received");
-                        }
-                        CommandPaletteEvent::OpenTable { .. } => {
-                            tracing::debug!("OpenTable event received");
-                        }
-                        CommandPaletteEvent::OpenView { .. } => {
-                            tracing::debug!("OpenView event received");
-                        }
-                    }
-                },
-            );
-            self._subscriptions.push(subscription);
-
-            // Focus the input field
-            let input_state = palette.read(cx).input_state().clone();
-            input_state.read(cx).focus_handle(cx).focus(window, cx);
-            
-            self.command_palette = Some(palette);
-            cx.notify();
+        // If the palette is already open, reset it and re-focus.
+        if let Some(palette) = &self.command_palette {
+            palette.update(cx, |palette, cx| {
+                palette.reset(commands, window, cx);
+            });
+            self.load_schema_commands_into_palette(cx);
+            palette.update(cx, |palette, cx| {
+                palette.focus(window, cx);
+            });
+            return;
         }
+
+        let persistence = cx
+            .try_global::<AppState>()
+            .map(|state| Arc::clone(&state.storage) as Arc<dyn CommandUsagePersistence>);
+
+        let palette = cx.new(|cx| CommandPalette::new(commands, persistence, window, cx));
+
+        self.load_schema_commands_into_palette_for(&palette, cx);
+
+        let subscription = cx.subscribe_in(
+            &palette,
+            window,
+            |this, _palette, event: &CommandPaletteEvent, window, cx| match event {
+                CommandPaletteEvent::Dismissed => {
+                    this.begin_dismiss_command_palette(cx);
+                }
+                CommandPaletteEvent::CommandExecuted(cmd_id) => {
+                    tracing::debug!(command_id = %cmd_id, "Command executed from palette");
+                }
+                CommandPaletteEvent::ConnectToConnection(connection_id) => {
+                    this.connect_to_database(*connection_id, window, cx);
+                }
+                CommandPaletteEvent::OpenTable {
+                    connection_id,
+                    table_name,
+                } => {
+                    this.open_table_viewer(
+                        *connection_id,
+                        table_name.clone(),
+                        None,
+                        false,
+                        window,
+                        cx,
+                    );
+                }
+                CommandPaletteEvent::OpenView {
+                    connection_id,
+                    view_name,
+                } => {
+                    this.open_table_viewer(
+                        *connection_id,
+                        view_name.clone(),
+                        None,
+                        true,
+                        window,
+                        cx,
+                    );
+                }
+            },
+        );
+        self._command_palette_subscription = Some(subscription);
+
+        palette.update(cx, |palette, cx| {
+            palette.focus(window, cx);
+        });
+
+        self.command_palette = Some(palette);
+        cx.notify();
+    }
+
+    fn build_static_commands() -> Vec<Command> {
+        vec![
+            // ── Application ─────────────────────────────────────────
+            Command::new_static("settings", "Open Settings", CommandCategory::Application, OpenSettings),
+            Command::new_static("command-palette", "Command Palette", CommandCategory::Application, OpenCommandPalette),
+            Command::new_static("refresh", "Refresh", CommandCategory::Application, Refresh),
+            Command::new_static("quit", "Quit", CommandCategory::Application, Quit),
+            // ── Connection ──────────────────────────────────────────
+            Command::new_static("new-connection", "New Connection", CommandCategory::Connection, NewConnection),
+            Command::new_static("refresh-connection", "Refresh Connection", CommandCategory::Connection, RefreshConnection),
+            Command::new_static("refresh-connections-list", "Refresh Connections List", CommandCategory::Connection, RefreshConnectionsList),
+            // ── Query ───────────────────────────────────────────────
+            Command::new_static("new-query", "New Query", CommandCategory::Query, NewQuery),
+            Command::new_static("execute-query", "Execute Query", CommandCategory::Query, ExecuteQuery),
+            Command::new_static("execute-selection", "Execute Selection", CommandCategory::Query, ExecuteSelection),
+            Command::new_static("execute-current-statement", "Execute Current Statement", CommandCategory::Query, ExecuteCurrentStatement),
+            Command::new_static("explain-query", "Explain Query", CommandCategory::Query, ExplainQuery),
+            Command::new_static("explain-selection", "Explain Selection", CommandCategory::Query, ExplainSelection),
+            Command::new_static("stop-query", "Stop Query", CommandCategory::Query, StopQuery),
+            Command::new_static("format-query", "Format Query", CommandCategory::Query, FormatQuery),
+            Command::new_static("save-query", "Save Query", CommandCategory::Query, SaveQuery),
+            Command::new_static("save-query-as", "Save Query As…", CommandCategory::Query, SaveQueryAs),
+            Command::new_static("toggle-problems-panel", "Toggle Problems Panel", CommandCategory::Query, ToggleProblemsPanel),
+            // ── Editor ──────────────────────────────────────────────
+            Command::new_static("toggle-line-comment", "Toggle Line Comment", CommandCategory::Editor, ToggleLineComment),
+            Command::new_static("duplicate-line", "Duplicate Line", CommandCategory::Editor, DuplicateLine),
+            Command::new_static("delete-line", "Delete Line", CommandCategory::Editor, DeleteLine),
+            Command::new_static("move-line-up", "Move Line Up", CommandCategory::Editor, MoveLineUp),
+            Command::new_static("move-line-down", "Move Line Down", CommandCategory::Editor, MoveLineDown),
+            Command::new_static("find-next", "Find Next", CommandCategory::Editor, FindNext),
+            Command::new_static("find-previous", "Find Previous", CommandCategory::Editor, FindPrevious),
+            // ── Layout ──────────────────────────────────────────────
+            Command::new_static("toggle-left-sidebar", "Toggle Left Sidebar", CommandCategory::Layout, ToggleLeftSidebar),
+            Command::new_static("toggle-right-sidebar", "Toggle Right Sidebar", CommandCategory::Layout, ToggleRightSidebar),
+            Command::new_static("toggle-bottom-panel", "Toggle Bottom Panel", CommandCategory::Layout, ToggleBottomPanel),
+            // ── Tab ─────────────────────────────────────────────────
+            Command::new_static("next-tab", "Next Tab", CommandCategory::Tab, ActivateNextTab),
+            Command::new_static("previous-tab", "Previous Tab", CommandCategory::Tab, ActivatePrevTab),
+            Command::new_static("close-tab", "Close Tab", CommandCategory::Tab, CloseActiveTab),
+            Command::new_static("close-other-tabs", "Close Other Tabs", CommandCategory::Tab, CloseOtherTabs),
+            Command::new_static("close-all-tabs", "Close All Tabs", CommandCategory::Tab, CloseAllTabs),
+            // ── Focus ───────────────────────────────────────────────
+            Command::new_static("focus-editor", "Focus Editor", CommandCategory::Focus, FocusEditor),
+            Command::new_static("focus-results", "Focus Results", CommandCategory::Focus, FocusResults),
+            Command::new_static("focus-sidebar", "Focus Sidebar", CommandCategory::Focus, FocusSidebar),
+        ]
+    }
+
+    /// Load schema commands (tables/views) from the active connection into an
+    /// already-stored palette entity.
+    fn load_schema_commands_into_palette(&self, cx: &mut Context<Self>) {
+        if let Some(palette) = &self.command_palette {
+            self.load_schema_commands_into_palette_for(palette, cx);
+        }
+    }
+
+    /// Load schema commands into a specific palette entity reference.
+    fn load_schema_commands_into_palette_for(
+        &self,
+        palette: &Entity<CommandPalette>,
+        cx: &mut Context<Self>,
+    ) {
+        let active_connection_id = self.workspace_state.read(cx).active_connection_id();
+        let Some(connection_id) = active_connection_id else {
+            return;
+        };
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+
+        let schema_service = app_state.schema_service.clone();
+        let connection_name = app_state
+            .saved_connections()
+            .iter()
+            .find(|c| c.id == connection_id)
+            .map(|c| c.name.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let tables: Vec<String> = schema_service
+            .get_cached_tables(connection_id)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|t| t.name)
+            .collect();
+        let views: Vec<String> = schema_service
+            .get_cached_view_names(connection_id)
+            .unwrap_or_default();
+
+        palette.update(cx, |palette, cx| {
+            palette.add_schema_commands(connection_id, &connection_name, &tables, &views, cx);
+        });
+    }
+
+    /// Begin the dismiss animation, then actually drop the palette after a delay.
+    pub(super) fn begin_dismiss_command_palette(&mut self, cx: &mut Context<Self>) {
+        if self.command_palette_closing || self.command_palette.is_none() {
+            return;
+        }
+        self.command_palette_closing = true;
+        cx.notify();
+
+        // Allow the exit animation to play before removing the palette.
+        const EXIT_ANIMATION_DURATION_MS: u64 = 150;
+        cx.spawn(async move |this, cx| {
+            cx.background_spawn(async {
+                smol::Timer::after(std::time::Duration::from_millis(EXIT_ANIMATION_DURATION_MS))
+                    .await;
+            })
+            .await;
+            cx.update(|cx| {
+                this.update(cx, |this, cx| {
+                    this.dismiss_command_palette(cx);
+                })
+            })
+        })
+        .detach();
+    }
+
+    /// Immediately drop the command palette and its event subscription.
+    pub(super) fn dismiss_command_palette(&mut self, cx: &mut Context<Self>) {
+        self.command_palette = None;
+        self.command_palette_closing = false;
+        self._command_palette_subscription = None;
+        cx.notify();
     }
 
     pub(super) fn handle_quit(

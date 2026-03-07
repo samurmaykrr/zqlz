@@ -894,7 +894,8 @@ where
                                     v_flex()
                                         .occlude()
                                         .mt_1p5()
-                                        .bg(cx.theme().background)
+                                        .bg(cx.theme().popover)
+                                        .text_color(cx.theme().popover_foreground)
                                         .border_1()
                                         .border_color(cx.theme().border)
                                         .rounded(popup_radius)
@@ -1151,10 +1152,10 @@ impl RenderOnce for SelectListItem {
             .refine_style(&self.style)
             .when(!self.disabled, |this| {
                 this.when(!self.selected, |this| {
-                    this.hover(|this| this.bg(cx.theme().accent.alpha(0.7)))
+                    this.hover(|this| this.bg(cx.theme().list_hover))
                 })
             })
-            .when(self.selected, |this| this.bg(cx.theme().accent))
+            .when(self.selected, |this| this.bg(cx.theme().list_active))
             .when(self.disabled, |this| {
                 this.text_color(cx.theme().muted_foreground)
             })

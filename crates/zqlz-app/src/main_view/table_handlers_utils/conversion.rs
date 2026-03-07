@@ -10,8 +10,8 @@ use zqlz_core::DriverCategory;
 /// Converts a driver name to its category for UI display.
 pub(in crate::main_view) fn driver_name_to_category(driver_name: &str) -> DriverCategory {
     match driver_name {
-        "mysql" | "postgres" | "mariadb" | "sqlite" | "sqlserver" | "mssql" | "cockroachdb"
-        | "clickhouse" => DriverCategory::Relational,
+        "mysql" | "postgres" | "postgresql" | "mariadb" | "sqlite" | "sqlserver" | "mssql"
+        | "cockroachdb" | "clickhouse" => DriverCategory::Relational,
         "mongodb" | "couchdb" | "dynamodb" | "cassandra" | "scylladb" => DriverCategory::Document,
         "redis" | "memcached" | "etcd" => DriverCategory::KeyValue,
         "neo4j" | "arangodb" | "janusgraph" => DriverCategory::Graph,

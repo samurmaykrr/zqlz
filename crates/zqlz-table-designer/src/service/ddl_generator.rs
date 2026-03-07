@@ -73,6 +73,14 @@ impl DdlGenerator {
             ddl.push_str(&Self::generate_foreign_key_constraint(fk, q));
         }
 
+        // Add check constraints
+        for cc in &design.check_constraints {
+            let name_part = cc.name.as_ref()
+                .map(|n| format!("CONSTRAINT {} ", Self::quote_ident(n, q)))
+                .unwrap_or_default();
+            ddl.push_str(&format!(",\n    {}CHECK ({})", name_part, cc.expression));
+        }
+
         ddl.push_str("\n)");
 
         if design.options.has_options() {
@@ -127,10 +135,42 @@ impl DdlGenerator {
         // After a potential rename, subsequent statements target the new name
         let table = Self::quote_ident(&modified.table_name, q);
 
+        // Match columns between original and modified. Use column_id when available,
+        // falling back to name matching for backward compatibility with tests/loaders
+        // that don't preserve column_id.
+        let find_original_col = |new_col: &ColumnDesign| -> Option<&ColumnDesign> {
+            original
+                .columns
+                .iter()
+                .find(|c| c.column_id == new_col.column_id)
+                .or_else(|| original.columns.iter().find(|c| c.name == new_col.name))
+        };
+        let find_modified_col = |old_col: &ColumnDesign| -> Option<&ColumnDesign> {
+            modified
+                .columns
+                .iter()
+                .find(|c| c.column_id == old_col.column_id)
+                .or_else(|| modified.columns.iter().find(|c| c.name == old_col.name))
+        };
+
+        // --- Column renames (only works when column_id matches) ---
+        for new_col in &modified.columns {
+            if let Some(old_col) = original.columns.iter().find(|c| c.column_id == new_col.column_id) {
+                if old_col.name != new_col.name {
+                    statements.push(format!(
+                        "ALTER TABLE {} RENAME COLUMN {} TO {};",
+                        table,
+                        Self::quote_ident(&old_col.name, q),
+                        Self::quote_ident(&new_col.name, q)
+                    ));
+                }
+            }
+        }
+
         // --- Dropped columns ---
         // Process drops before adds so we don't accidentally reference removed columns
         for col in &original.columns {
-            if !modified.columns.iter().any(|c| c.name == col.name) {
+            if find_modified_col(col).is_none() {
                 statements.push(format!(
                     "ALTER TABLE {} DROP COLUMN {};",
                     table,
@@ -141,7 +181,7 @@ impl DdlGenerator {
 
         // --- Added columns ---
         for col in &modified.columns {
-            if !original.columns.iter().any(|c| c.name == col.name) {
+            if find_original_col(col).is_none() {
                 statements.push(format!(
                     "ALTER TABLE {} ADD COLUMN {};",
                     table,
@@ -152,7 +192,7 @@ impl DdlGenerator {
 
         // --- Modified columns (type, nullable, default, unique changes) ---
         for new_col in &modified.columns {
-            if let Some(old_col) = original.columns.iter().find(|c| c.name == new_col.name) {
+            if let Some(old_col) = find_original_col(new_col) {
                 let alter_stmts =
                     Self::generate_column_alterations(&table, old_col, new_col, &info);
                 statements.extend(alter_stmts);
@@ -396,13 +436,32 @@ impl DdlGenerator {
             .collect::<Vec<_>>()
             .join(", ");
 
-        format!(
-            "CREATE {}INDEX {} ON {} ({});",
+        let mut sql = format!(
+            "CREATE {}INDEX {} ON {} ({})",
             unique,
             Self::quote_ident(&index.name, quote),
             Self::quote_ident(table_name, quote),
             columns
-        )
+        );
+
+        if !index.include_columns.is_empty() {
+            sql.push_str(&format!(
+                " INCLUDE ({})",
+                index
+                    .include_columns
+                    .iter()
+                    .map(|c| Self::quote_ident(c, quote))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+
+        if let Some(ref where_clause) = index.where_clause {
+            sql.push_str(&format!(" WHERE {}", where_clause));
+        }
+
+        sql.push(';');
+        sql
     }
 
     /// Generate column definition SQL (used in CREATE TABLE and ALTER TABLE ADD COLUMN)

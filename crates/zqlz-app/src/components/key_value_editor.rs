@@ -1893,11 +1893,11 @@ impl KeyValueEditorPanel {
             )
     }
 
-    fn render_validation_error(&self) -> Option<impl IntoElement> {
+    fn render_validation_error(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
         self.validation_error.as_ref().map(|error| {
             div()
                 .text_xs()
-                .text_color(rgb(0xff0000))
+                .text_color(cx.theme().danger)
                 .child(error.clone())
         })
     }
@@ -1961,13 +1961,13 @@ impl KeyValueEditorPanel {
                                 .px_1()
                                 .py_px()
                                 .rounded(px(3.))
-                                .bg(theme.accent)
-                                .text_color(theme.accent_foreground)
+                                .bg(theme.primary)
+                                .text_color(theme.primary_foreground)
                                 .child("auto"),
                         )
                     })
                     .when(!is_nullable && !is_auto, |this| {
-                        this.child(div().text_xs().text_color(rgb(0xef4444)).child("*"))
+                        this.child(div().text_xs().text_color(theme.danger).child("*"))
                     }),
             )
             .child(
@@ -2056,7 +2056,7 @@ impl KeyValueEditorPanel {
                         ),
                     ),
             )
-            .when_some(self.render_validation_error(), |this, error| {
+            .when_some(self.render_validation_error(cx), |this, error| {
                 this.child(div().px_2().child(error))
             })
             .child(
@@ -2112,7 +2112,7 @@ impl KeyValueEditorPanel {
                     .child(self.render_type_field(cx))
                     .child(self.render_value_field(cx))
                     .child(self.render_ttl_field(cx))
-                    .when_some(self.render_validation_error(), |this, error| {
+                    .when_some(self.render_validation_error(cx), |this, error| {
                         this.child(error)
                     })
                     .child(self.render_action_buttons(cx))

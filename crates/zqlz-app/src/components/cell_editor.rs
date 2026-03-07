@@ -618,7 +618,7 @@ impl CellEditorPanel {
             .bg(bg_color)
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xffffff))
+            .text_color(gpui::white())
             .child(label)
     }
 
@@ -647,7 +647,7 @@ impl CellEditorPanel {
                                 cell_data.table_name, cell_data.column_name
                             )),
                     )
-                    .when(is_binary, |this| this.child(Self::render_binary_badge()))
+                    .when(is_binary, |this| this.child(Self::render_binary_badge(cx)))
                     .when_some(detected_language, |this, lang| {
                         this.child(Self::render_language_badge(lang))
                     }),
@@ -661,15 +661,16 @@ impl CellEditorPanel {
     }
 
     /// Badge indicating binary/blob data
-    fn render_binary_badge() -> impl IntoElement {
+    fn render_binary_badge(cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
         div()
             .px_1p5()
             .py_0p5()
             .rounded_sm()
-            .bg(rgb(0x8b5cf6))
+            .bg(theme.magenta)
             .text_xs()
             .font_weight(FontWeight::MEDIUM)
-            .text_color(rgb(0xffffff))
+            .text_color(theme.primary_foreground)
             .child("BINARY")
     }
 
@@ -770,11 +771,11 @@ impl CellEditorPanel {
         }
     }
 
-    fn render_validation_error(&self) -> Option<impl IntoElement> {
+    fn render_validation_error(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
         self.validation_error.as_ref().map(|error| {
             div()
                 .text_xs()
-                .text_color(rgb(0xff0000))
+                .text_color(cx.theme().danger)
                 .child(error.clone())
         })
     }
@@ -876,7 +877,7 @@ impl CellEditorPanel {
 
         let offset_color = theme.muted_foreground;
         let hex_color = theme.foreground;
-        let ascii_color = hsla(142.0 / 360.0, 0.69, 0.58, 1.0);
+        let ascii_color = theme.green;
         let separator_color = theme.border;
         let muted_bg = theme.muted;
         let mono_font = theme.mono_font_family.clone();
@@ -1090,7 +1091,7 @@ impl CellEditorPanel {
                     }),
             )
             .child(self.render_input_area(cx))
-            .when_some(self.render_validation_error(), |this, error| {
+            .when_some(self.render_validation_error(cx), |this, error| {
                 this.child(error)
             })
             .child(self.render_action_buttons(cx))

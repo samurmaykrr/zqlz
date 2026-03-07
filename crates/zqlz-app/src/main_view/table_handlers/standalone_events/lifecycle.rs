@@ -67,7 +67,10 @@ pub(in crate::main_view) fn handle_became_active_event(
         .spawn(cx, async move |cx| {
             let (conn, schema_service) = match cx.update(|_window, cx| {
                 let app_state = cx.try_global::<AppState>()?;
-                let conn = app_state.connections.get(connection_id);
+                let conn = app_state.connections.get_for_database_cached(
+                    connection_id,
+                    database_name.as_deref(),
+                );
                 let schema_service = app_state.schema_service.clone();
                 Some((conn?, schema_service))
             }) {

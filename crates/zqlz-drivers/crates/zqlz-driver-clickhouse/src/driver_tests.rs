@@ -606,10 +606,10 @@ mod json_to_value_tests {
 
     #[test]
     fn test_json_float() {
-        let json = serde_json::json!(3.14);
+        let json = serde_json::json!(1.5);
         let value = json_to_value(&json);
         if let Value::Float64(f) = value {
-            assert!((f - 3.14).abs() < 0.001);
+            assert!((f - 1.5).abs() < 0.001);
         } else {
             panic!("Expected Float64");
         }

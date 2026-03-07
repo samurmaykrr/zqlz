@@ -80,7 +80,7 @@
         "deleted": "#e33400",
         "deleted.background": "#e3340011",
         "deleted.border": "#e33400",
-        "error": "#e33400",
+        "error": "#ff6b44",
         "error.background": "#e3340011",
         "error.border": "#e33400",
         "hidden": "#4b6479",

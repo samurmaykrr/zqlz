@@ -1,6 +1,6 @@
 use std::{rc::Rc, sync::Arc};
 
-use gpui::{px, SharedString};
+use gpui::{hsla, px, SharedString};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 
@@ -194,6 +194,7 @@ fn deserialize_zed_theme(
         scrollbar: style_str(style, "scrollbar.track.background"),
         scrollbar_thumb: style_str(style, "scrollbar.thumb.background"),
         scrollbar_thumb_hover: style_str(style, "scrollbar.thumb.hover_background"),
+        primary: style_str(style, "element.active"),
         danger: style_str(style, "error"),
         info: style_str(style, "info"),
         success: style_str(style, "success"),
@@ -279,6 +280,9 @@ pub struct ThemeConfigColors {
     /// Danger text color.
     #[serde(rename = "danger.foreground")]
     pub danger_foreground: Option<SharedString>,
+    /// Accessible text color for danger labels and outline buttons on neutral backgrounds.
+    #[serde(rename = "danger.text")]
+    pub danger_text: Option<SharedString>,
     /// Danger hover background color.
     #[serde(rename = "danger.hover.background")]
     pub danger_hover: Option<SharedString>,
@@ -306,6 +310,9 @@ pub struct ThemeConfigColors {
     /// Info text color.
     #[serde(rename = "info.foreground")]
     pub info_foreground: Option<SharedString>,
+    /// Accessible text color for info labels and outline buttons on neutral backgrounds.
+    #[serde(rename = "info.text")]
+    pub info_text: Option<SharedString>,
     /// Info hover background color.
     #[serde(rename = "info.hover.background")]
     pub info_hover: Option<SharedString>,
@@ -429,6 +436,9 @@ pub struct ThemeConfigColors {
     /// Success text color.
     #[serde(rename = "success.foreground")]
     pub success_foreground: Option<SharedString>,
+    /// Accessible text color for success labels and outline buttons on neutral backgrounds.
+    #[serde(rename = "success.text")]
+    pub success_text: Option<SharedString>,
     /// Success hover background color.
     #[serde(rename = "success.hover.background")]
     pub success_hover: Option<SharedString>,
@@ -510,9 +520,15 @@ pub struct ThemeConfigColors {
     /// Warning foreground color.
     #[serde(rename = "warning.foreground")]
     pub warning_foreground: Option<SharedString>,
+    /// Accessible text color for warning labels and outline buttons on neutral backgrounds.
+    #[serde(rename = "warning.text")]
+    pub warning_text: Option<SharedString>,
     /// Overlay background color.
     #[serde(rename = "overlay")]
     pub overlay: Option<SharedString>,
+    /// Full-screen modal backdrop/scrim color.
+    #[serde(rename = "overlay.backdrop")]
+    pub overlay_backdrop: Option<SharedString>,
     /// Window border color.
     ///
     /// # Platform specific:
@@ -633,7 +649,19 @@ impl ThemeColor {
         let active_darken = if config.mode.is_dark() { 0.2 } else { 0.1 };
         let hover_opacity = 0.9;
         apply_color!(primary);
-        apply_color!(primary_foreground, fallback = self.foreground);
+        // Choose text color based on primary button background luminance so that
+        // themes like cyberpunk-scarlet (vivid red primary) get dark text, while
+        // themes with a light primary (default dark theme uses near-white) get dark
+        // text too. Both cases avoid the broken hot-pink-on-white fallback that
+        // occurred when `foreground` was used as a brand-saturated text color.
+        apply_color!(
+            primary_foreground,
+            fallback = if self.primary.l > 0.5 {
+                self.background
+            } else {
+                hsla(0., 0., 0.98, 1.)
+            }
+        );
         apply_color!(
             primary_hover,
             fallback = self.background.blend(self.primary.opacity(hover_opacity))
@@ -643,7 +671,14 @@ impl ThemeColor {
             fallback = self.primary.darken(active_darken)
         );
         apply_color!(secondary);
-        apply_color!(secondary_foreground, fallback = self.foreground);
+        apply_color!(
+            secondary_foreground,
+            fallback = if self.secondary.l > 0.5 {
+                self.background
+            } else {
+                hsla(0., 0., 0.98, 1.)
+            }
+        );
         apply_color!(
             secondary_hover,
             fallback = self.background.blend(self.secondary.opacity(hover_opacity))
@@ -654,6 +689,14 @@ impl ThemeColor {
         );
         apply_color!(success, fallback = self.green);
         apply_color!(success_foreground, fallback = self.primary_foreground);
+        apply_color!(
+            success_text,
+            fallback = if config.mode.is_dark() {
+                self.success
+            } else {
+                self.success_active
+            }
+        );
         apply_color!(
             success_hover,
             fallback = self.background.blend(self.success.opacity(hover_opacity))
@@ -667,12 +710,28 @@ impl ThemeColor {
         apply_color!(info, fallback = self.cyan);
         apply_color!(info_foreground, fallback = self.primary_foreground);
         apply_color!(
+            info_text,
+            fallback = if config.mode.is_dark() {
+                self.info
+            } else {
+                self.info_active
+            }
+        );
+        apply_color!(
             info_hover,
             fallback = self.background.blend(self.info.opacity(hover_opacity))
         );
         apply_color!(info_active, fallback = self.info.darken(active_darken));
         apply_color!(warning, fallback = self.yellow);
         apply_color!(warning_foreground, fallback = self.primary_foreground);
+        apply_color!(
+            warning_text,
+            fallback = if config.mode.is_dark() {
+                self.warning
+            } else {
+                self.warning_active
+            }
+        );
         apply_color!(
             warning_hover,
             fallback = self.background.blend(self.warning.opacity(0.9))
@@ -710,6 +769,14 @@ impl ThemeColor {
         apply_color!(danger, fallback = self.red);
         apply_color!(danger_active, fallback = self.danger.darken(active_darken));
         apply_color!(danger_foreground, fallback = self.primary_foreground);
+        apply_color!(
+            danger_text,
+            fallback = if config.mode.is_dark() {
+                self.danger
+            } else {
+                self.danger_active
+            }
+        );
         apply_color!(
             danger_hover,
             fallback = self.background.blend(self.danger.opacity(0.9))
@@ -781,6 +848,7 @@ impl ThemeColor {
         apply_color!(title_bar_border, fallback = self.border);
         apply_color!(tiles, fallback = self.background);
         apply_color!(overlay);
+        apply_color!(overlay_backdrop);
         apply_color!(window_border, fallback = self.border);
 
         // TODO: Apply default fallback colors to highlight.

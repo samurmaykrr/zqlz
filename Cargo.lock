@@ -112,10 +112,54 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4b46cbb362ab8752921c97e041f5e366ee6297bd428a31275b9fcf1e380f7299"
 
 [[package]]
+name = "anstream"
+version = "0.6.21"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43d5b281e737544384e969a5ccad3f1cdd24b48086a0fc1b2a5262a26b8f4f4a"
+dependencies = [
+ "anstyle",
+ "anstyle-parse",
+ "anstyle-query",
+ "anstyle-wincon",
+ "colorchoice",
+ "is_terminal_polyfill",
+ "utf8parse",
+]
+
+[[package]]
 name = "anstyle"
 version = "1.0.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5192cca8006f1fd4f7237516f40fa183bb07f8fbdfedaa0036de5ea9b0b45e78"
+
+[[package]]
+name = "anstyle-parse"
+version = "0.2.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4e7644824f0aa2c7b9384579234ef10eb7efb6a0deb83f9630a49594dd9c15c2"
+dependencies = [
+ "utf8parse",
+]
+
+[[package]]
+name = "anstyle-query"
+version = "1.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
+dependencies = [
+ "windows-sys 0.60.2",
+]
+
+[[package]]
+name = "anstyle-wincon"
+version = "3.0.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
+dependencies = [
+ "anstyle",
+ "once_cell_polyfill",
+ "windows-sys 0.60.2",
+]
 
 [[package]]
 name = "anyhow"
@@ -1393,6 +1437,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6899ea499e3fb9305a65d5ebf6e3d2248c5fab291f300ad0a704fbe142eae31a"
 dependencies = [
  "clap_builder",
+ "clap_derive",
 ]
 
 [[package]]
@@ -1401,8 +1446,22 @@ version = "4.5.57"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7b12c8b680195a62a8364d16b8447b01b6c2c8f9aaf68bee653be34d4245e238"
 dependencies = [
+ "anstream",
  "anstyle",
  "clap_lex",
+ "strsim",
+]
+
+[[package]]
+name = "clap_derive"
+version = "4.5.55"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a92793da1a46a5f2a02a6f4c46c6496b28c43638adea8306fcb0caa1634f24e5"
+dependencies = [
+ "heck 0.5.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
@@ -1564,6 +1623,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
 
 [[package]]
+name = "colorchoice"
+version = "1.0.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b05b61dc5112cbb17e4b6cd61790d9845d13888356391624cbe7e41efeac1e75"
+
+[[package]]
 name = "combine"
 version = "4.6.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1583,6 +1648,8 @@ version = "7.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0d05af1e006a2407bedef5af410552494ce5be9090444dbbcb57258c1af3d56"
 dependencies = [
+ "crossterm 0.27.0",
+ "crossterm 0.28.1",
  "strum 0.26.3",
  "strum_macros 0.26.4",
  "unicode-width",
@@ -2099,6 +2166,39 @@ name = "crossbeam-utils"
 version = "0.8.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d0a5c400df2834b80a4c3327b3aad3a4c4cd4de0629063962b03235697506a28"
+
+[[package]]
+name = "crossterm"
+version = "0.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f476fe445d41c9e991fd07515a6f463074b782242ccf4a5b7b1d1012e70824df"
+dependencies = [
+ "bitflags 2.10.0",
+ "crossterm_winapi",
+ "libc",
+ "parking_lot",
+ "winapi",
+]
+
+[[package]]
+name = "crossterm"
+version = "0.28.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "829d955a0bb380ef178a640b91779e3987da38c9aea133b20614cfed8cdea9c6"
+dependencies = [
+ "bitflags 2.10.0",
+ "parking_lot",
+ "rustix 0.38.44",
+]
+
+[[package]]
+name = "crossterm_winapi"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "acdd7c62a3665c7f6830a51635d9ac9b23ed385797f70a83bb8bafe9c572ab2b"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "crunchy"
@@ -4151,6 +4251,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "is_terminal_polyfill"
+version = "1.70.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
+
+[[package]]
 name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4219,20 +4325,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ee7893dab2e44ae5f9d0173f26ff4aa327c10b01b06a72b52dd9405b628640d"
 dependencies = [
  "indexmap 2.12.1",
-]
-
-[[package]]
-name = "keyring"
-version = "3.6.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eebcc3aff044e5944a8fbaf69eb277d11986064cba30c468730e8b9909fb551c"
-dependencies = [
- "byteorder",
- "log",
- "security-framework 2.11.1",
- "security-framework 3.5.1",
- "windows-sys 0.60.2",
- "zeroize",
 ]
 
 [[package]]
@@ -5515,6 +5607,12 @@ dependencies = [
  "critical-section",
  "portable-atomic",
 ]
+
+[[package]]
+name = "once_cell_polyfill"
+version = "1.70.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "oo7"
@@ -9218,6 +9316,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6c140620e7ffbb22c2dee59cafe6084a59b5ffc27a8859a5f0d494b5d52b6be"
 
 [[package]]
+name = "utf8parse"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
 name = "util"
 version = "0.1.0"
 source = "git+https://github.com/zed-industries/zed?rev=571ea7cf22#571ea7cf2220b2f550066d0fbf6fdc4715a79bd1"
@@ -10881,7 +10985,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-admin"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -10893,7 +10997,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-analyzer"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -10906,7 +11010,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-app"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10925,6 +11029,7 @@ dependencies = [
  "smol 1.3.0",
  "sqlformat",
  "sqlparser",
+ "tokio",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -10932,6 +11037,7 @@ dependencies = [
  "tree-sitter-sequel",
  "uuid",
  "winresource",
+ "zqlz-command-palette",
  "zqlz-connection",
  "zqlz-core",
  "zqlz-drivers",
@@ -10950,16 +11056,44 @@ dependencies = [
 ]
 
 [[package]]
+name = "zqlz-cli"
+version = "0.0.3"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "clap",
+ "comfy-table",
+ "dirs 4.0.0",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zqlz-core",
+ "zqlz-drivers",
+]
+
+[[package]]
+name = "zqlz-command-palette"
+version = "0.0.3"
+dependencies = [
+ "gpui",
+ "uuid",
+ "zqlz-fuzzy",
+ "zqlz-ui",
+]
+
+[[package]]
 name = "zqlz-connection"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
  "gpui",
- "keyring",
  "parking_lot",
- "ring",
  "serde",
  "serde_json",
  "thiserror 2.0.17",
@@ -10973,7 +11107,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-core"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10989,7 +11123,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-clickhouse"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11005,7 +11139,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-duckdb"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11021,7 +11155,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mongodb"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "bson",
@@ -11038,7 +11172,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mssql"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11055,7 +11189,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mysql"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11074,7 +11208,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-postgres"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11096,7 +11230,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-redis"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "redis",
@@ -11112,7 +11246,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-sqlite"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11129,7 +11263,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-tests"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11162,7 +11296,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-drivers"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11183,8 +11317,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "zqlz-fuzzy"
+version = "0.0.3"
+
+[[package]]
 name = "zqlz-interchange"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11207,7 +11345,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-lsp"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11233,7 +11371,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-monitor"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11246,7 +11384,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-objects"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "serde",
@@ -11259,7 +11397,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-query"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11293,7 +11431,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-schema"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11308,18 +11446,6 @@ dependencies = [
  "uuid",
  "zqlz-core",
  "zqlz-ui",
-]
-
-[[package]]
-name = "zqlz-schema-tools"
-version = "0.0.2"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "thiserror 2.0.17",
- "tokio",
- "zqlz-core",
 ]
 
 [[package]]
@@ -11360,7 +11486,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-table-designer"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11379,7 +11505,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-templates"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11392,7 +11518,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-text-editor"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11418,7 +11544,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-trigger-designer"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11437,7 +11563,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-ui"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11489,7 +11615,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-versioning"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "anyhow",
  "async-trait",

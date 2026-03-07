@@ -387,10 +387,10 @@ impl RenderOnce for CompletionMenuItem {
             .rounded_sm()
             .w_full()
             .when(deprecated, |this| this.line_through())
-            .hover(|this| this.bg(cx.theme().accent.opacity(0.8)))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.15)))
             .when(self.selected, |this| {
-                this.bg(cx.theme().accent)
-                    .text_color(cx.theme().accent_foreground)
+                this.bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
             })
             .child(
                 div()

@@ -1,0 +1,9 @@
+[package]
+name = "zqlz-fuzzy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Lightweight fuzzy string matching for ZQLZ - prefix, substring, acronym, and character-by-character matching with scoring"
+
+[lib]
+path = "src/zqlz_fuzzy.rs"

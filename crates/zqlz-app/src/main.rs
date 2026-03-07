@@ -12,6 +12,7 @@ mod assets;
 mod bundled_themes;
 mod components;
 mod icons;
+mod ipc_server;
 mod keymaps;
 mod logging;
 mod main_view;
@@ -96,6 +97,28 @@ fn main() {
         tracing::info!("Setting global AppState...");
         cx.set_global(AppState::new());
         tracing::info!("AppState set");
+
+        // Start the IPC server so the `zqlz` CLI can communicate with this
+        // running instance. We clone only the Arc fields we need so the handle
+        // is Send + Sync without pulling AppState out of GPUI's context.
+        {
+            let state = cx.global::<AppState>();
+            let ipc_handle = ipc_server::IpcServerHandle {
+                connections: state.connections.clone(),
+                query_service: state.query_service.clone(),
+                query_history: state.query_history.clone(),
+                storage: state.storage.clone(),
+            };
+            match ipc_server::default_socket_path() {
+                Ok(socket_path) => {
+                    ipc_server::start(ipc_handle, socket_path);
+                    tracing::info!("IPC server started");
+                }
+                Err(e) => {
+                    tracing::error!("Failed to determine IPC socket path: {}", e);
+                }
+            }
+        }
 
         // Store panic handler reference for UI access
         cx.set_global(PanicHandlerGlobal {

@@ -18,6 +18,9 @@ use zqlz_ui::widgets::{
     v_flex, ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon,
 };
 
+// Keyboard actions for the objects panel
+actions!(objects_panel, [OpenSelected, DeleteSelected, NewObject]);
+
 /// Events emitted by the objects panel
 #[derive(Clone, Debug)]
 pub enum ObjectsPanelEvent {
@@ -982,6 +985,30 @@ impl ObjectsTableDelegate {
                 ))
             })
             .separator()
+            // Export View Data
+            .item({
+                let panel = panel.clone();
+                let views = selected_views.clone();
+                let database_name = database_name.clone();
+                let label = if is_multi {
+                    format!("Export {} Views...", count)
+                } else {
+                    "Export View Data...".to_string()
+                };
+                PopupMenuItem::new(label).on_click(window.listener_for(
+                    &menu_entity,
+                    move |_this, _, _, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(ObjectsPanelEvent::ExportTables {
+                                connection_id,
+                                table_names: views.clone(),
+                                database_name: database_name.clone(),
+                            });
+                        });
+                    },
+                ))
+            })
+            .separator()
             // Copy View Name(s)
             .item({
                 let panel = panel.clone();
@@ -1203,6 +1230,22 @@ impl ObjectsTableDelegate {
                 ))
             })
             .separator()
+            // Copy Database Name
+            .item({
+                let panel = panel.clone();
+                let db_name = obj.name.clone();
+                PopupMenuItem::new("Copy Database Name").on_click(window.listener_for(
+                    &menu_entity,
+                    move |_this, _, _, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(ObjectsPanelEvent::CopyTableNames {
+                                table_names: vec![db_name.clone()],
+                            });
+                        });
+                    },
+                ))
+            })
+            .separator()
             // Refresh
             .item({
                 let panel = panel.clone();
@@ -1257,6 +1300,14 @@ pub struct ObjectsPanel {
     database_name: Option<String>,
     /// Search text for filtering
     search_text: String,
+    /// Context menu for empty area right-click
+    empty_area_menu: Option<Entity<PopupMenu>>,
+    /// Whether the empty area context menu is visible
+    empty_area_menu_open: bool,
+    /// Position for the empty area context menu
+    empty_area_menu_position: Point<Pixels>,
+    /// Subscription for the empty area menu dismiss event
+    _empty_area_menu_subscription: Option<Subscription>,
 }
 
 impl ObjectsPanel {
@@ -1331,6 +1382,10 @@ impl ObjectsPanel {
             connection_name: None,
             database_name: None,
             search_text: String::new(),
+            empty_area_menu: None,
+            empty_area_menu_open: false,
+            empty_area_menu_position: Point::default(),
+            _empty_area_menu_subscription: None,
         }
     }
 
@@ -1455,6 +1510,161 @@ impl ObjectsPanel {
         tracing::info!("ObjectsPanel: Refreshing objects list");
         cx.emit(ObjectsPanelEvent::Refresh);
     }
+
+    /// Open the currently selected row (Enter key handler)
+    fn open_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+        let table_state = self.table_state.read(cx);
+        let Some(row_ix) = table_state.selected_row() else {
+            return;
+        };
+        let delegate = table_state.delegate();
+        let Some(obj) = delegate.filtered_objects().get(row_ix) else {
+            return;
+        };
+        let database_name = self.database_name.clone();
+        if obj.object_type == "redis_database" {
+            if let Some(db_index) = obj.redis_database_index {
+                cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
+                    connection_id,
+                    database_index: db_index,
+                });
+            }
+        } else if obj.object_type == "view" {
+            cx.emit(ObjectsPanelEvent::OpenViews {
+                connection_id,
+                view_names: vec![obj.name.clone()],
+                database_name,
+            });
+        } else {
+            cx.emit(ObjectsPanelEvent::OpenTables {
+                connection_id,
+                table_names: vec![obj.name.clone()],
+                database_name,
+            });
+        }
+    }
+
+    /// Delete the currently selected object(s) (Delete/Backspace key handler)
+    fn delete_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+        let table_state = self.table_state.read(cx);
+        let Some(row_ix) = table_state.selected_row() else {
+            return;
+        };
+        let delegate = table_state.delegate();
+        let Some(obj) = delegate.filtered_objects().get(row_ix) else {
+            return;
+        };
+        let database_name = self.database_name.clone();
+        if obj.object_type == "view" {
+            cx.emit(ObjectsPanelEvent::DeleteViews {
+                connection_id,
+                view_names: vec![obj.name.clone()],
+                database_name,
+            });
+        } else if obj.object_type == "key" {
+            cx.emit(ObjectsPanelEvent::DeleteKeys {
+                connection_id,
+                key_names: vec![obj.name.clone()],
+            });
+        } else if obj.object_type == "table" {
+            cx.emit(ObjectsPanelEvent::DeleteTables {
+                connection_id,
+                table_names: vec![obj.name.clone()],
+                database_name,
+            });
+        }
+    }
+
+    /// Create a new table (Cmd+N handler)
+    fn new_object(&mut self, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+        cx.emit(ObjectsPanelEvent::NewTable {
+            connection_id,
+            database_name: self.database_name.clone(),
+        });
+    }
+
+    /// Show the empty-area context menu (right-click on empty space)
+    fn show_empty_area_menu(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+
+        let driver_category = self.table_state.read(cx).delegate().driver_category();
+        let is_relational = driver_category == DriverCategory::Relational;
+        let database_name = self.database_name.clone();
+        let panel_weak = cx.entity().downgrade();
+
+        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+            let menu = if is_relational {
+                menu.item(PopupMenuItem::new("New Table").on_click({
+                    let panel = panel_weak.clone();
+                    let db = database_name.clone();
+                    move |_, _, cx| {
+                        _ = panel.update(cx, |_, cx| {
+                            cx.emit(ObjectsPanelEvent::NewTable {
+                                connection_id,
+                                database_name: db.clone(),
+                            });
+                        });
+                    }
+                }))
+                .separator()
+            } else {
+                menu
+            };
+
+            menu.item(PopupMenuItem::new("Import Wizard...").on_click({
+                let panel = panel_weak.clone();
+                let db = database_name.clone();
+                move |_, _, cx| {
+                    _ = panel.update(cx, |_, cx| {
+                        cx.emit(ObjectsPanelEvent::ImportData {
+                            connection_id,
+                            table_name: String::new(),
+                            database_name: db.clone(),
+                        });
+                    });
+                }
+            }))
+            .separator()
+            .item(PopupMenuItem::new("Refresh").on_click({
+                let panel = panel_weak.clone();
+                move |_, _, cx| {
+                    _ = panel.update(cx, |_, cx| {
+                        cx.emit(ObjectsPanelEvent::Refresh);
+                    });
+                }
+            }))
+        });
+
+        self._empty_area_menu_subscription = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.empty_area_menu_open = false;
+            cx.notify();
+        }));
+
+        if !menu.focus_handle(cx).contains_focused(window, cx) {
+            menu.focus_handle(cx).focus(window, cx);
+        }
+
+        self.empty_area_menu = Some(menu);
+        self.empty_area_menu_open = true;
+        self.empty_area_menu_position = position;
+        cx.notify();
+    }
 }
 
 impl Render for ObjectsPanel {
@@ -1504,6 +1714,15 @@ impl Render for ObjectsPanel {
             .id("objects-panel")
             .key_context("ObjectsPanel")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &OpenSelected, _, cx| {
+                this.open_selected(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelected, _, cx| {
+                this.delete_selected(cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewObject, _, cx| {
+                this.new_object(cx);
+            }))
             .size_full()
             .bg(theme.background)
             .font_family(theme.font_family.clone())
@@ -1579,6 +1798,12 @@ impl Render for ObjectsPanel {
                     .flex_1()
                     .w_full()
                     .overflow_hidden()
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                            this.show_empty_area_menu(event.position, window, cx);
+                        }),
+                    )
                     .when(!self.has_connection, |this| {
                         this.child(
                             v_flex()
@@ -1609,6 +1834,21 @@ impl Render for ObjectsPanel {
                                 .small(),
                         )
                     }),
+            )
+            .when_some(
+                self.empty_area_menu.clone().filter(|_| self.empty_area_menu_open),
+                |el, menu| {
+                    el.child(
+                        deferred(
+                            anchored()
+                                .snap_to_window_with_margin(px(8.))
+                                .anchor(Corner::TopLeft)
+                                .position(self.empty_area_menu_position)
+                                .child(div().occlude().cursor_default().child(menu)),
+                        )
+                        .with_priority(1),
+                    )
+                },
             )
     }
 }

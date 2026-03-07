@@ -51,6 +51,9 @@ impl ConnectionSidebar {
         filtered_count: usize,
         is_expanded: bool,
         on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
+        on_right_click: Option<
+            impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
+        >,
         muted_foreground: Hsla,
         list_hover: Hsla,
         depth: usize,
@@ -59,7 +62,7 @@ impl ConnectionSidebar {
         let has_search = !self.search_query.is_empty();
         let indent = px(8.0 + depth as f32 * 12.0);
 
-        h_flex()
+        let row = h_flex()
             .id(element_id)
             .w_full()
             .pl(indent)
@@ -85,6 +88,12 @@ impl ConnectionSidebar {
                 format!("{} ({}/{})", label, filtered_count, total_count)
             } else {
                 format!("{} ({})", label, total_count)
-            })
+            });
+
+        if let Some(handler) = on_right_click {
+            row.on_mouse_down(MouseButton::Right, cx.listener(handler))
+        } else {
+            row
+        }
     }
 }

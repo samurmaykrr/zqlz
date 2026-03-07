@@ -12,17 +12,18 @@ pub struct StatusDot {
     size: Size,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub enum ConnectionStatus {
     Connected,
     Connecting,
     Disconnected,
+    #[default]
     Unknown,
 }
 
-impl Default for ConnectionStatus {
+impl Default for StatusDot {
     fn default() -> Self {
-        ConnectionStatus::Unknown
+        Self::new()
     }
 }
 
@@ -78,7 +79,7 @@ impl RenderOnce for StatusDot {
             Size::Small => px(8.),
             Size::Medium => px(10.),
             Size::Large => px(14.),
-            Size::Size(px_val) => px_val,
+            Size::Custom(px_val) => px_val,
         };
 
         div()

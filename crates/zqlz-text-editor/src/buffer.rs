@@ -259,6 +259,11 @@ impl TextBuffer {
         self.rope.clone()
     }
 
+    /// Replace the internal rope with a snapshot, used for undo rollback.
+    pub fn restore_rope(&mut self, rope: Rope) {
+        self.rope = rope;
+    }
+
     /// Returns the length of the buffer in bytes.
     ///
     /// # Performance
@@ -765,10 +770,18 @@ impl TextBuffer {
                     self.rope.len_bytes()
                 ));
             }
-            self.rope.remove(
-                self.rope.byte_to_char(delete_range.start)
-                    ..self.rope.byte_to_char(delete_range.end),
-            );
+            let char_start = self.rope.byte_to_char(delete_range.start);
+            let char_end = self.rope.byte_to_char(delete_range.end);
+            let actual_text = self.rope.slice(char_start..char_end).to_string();
+            if actual_text != change.old_text {
+                return Err(anyhow!(
+                    "Change old_text mismatch at offset {}: expected {:?}, found {:?}",
+                    change.offset,
+                    change.old_text,
+                    actual_text
+                ));
+            }
+            self.rope.remove(char_start..char_end);
         }
 
         if !change.new_text.is_empty() {

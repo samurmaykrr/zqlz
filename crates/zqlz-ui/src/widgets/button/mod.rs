@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 mod button;
 mod button_group;
 mod dropdown_button;

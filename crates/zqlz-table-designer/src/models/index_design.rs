@@ -17,6 +17,10 @@ pub struct IndexDesign {
     pub index_type: String,
     /// Comment/description
     pub comment: Option<String>,
+    /// WHERE clause for partial indexes
+    pub where_clause: Option<String>,
+    /// INCLUDE columns for covering indexes
+    pub include_columns: Vec<String>,
 }
 
 impl IndexDesign {
@@ -29,6 +33,8 @@ impl IndexDesign {
             is_primary: false,
             index_type: "BTREE".to_string(),
             comment: None,
+            where_clause: None,
+            include_columns: Vec::new(),
         }
     }
 
@@ -49,6 +55,8 @@ impl IndexDesign {
             is_primary: info.is_primary,
             index_type: info.index_type.clone(),
             comment: info.comment.clone(),
+            where_clause: None,
+            include_columns: Vec::new(),
         }
     }
 
@@ -62,6 +70,12 @@ impl IndexDesign {
     pub fn unique(mut self) -> Self {
         self.is_unique = true;
         self
+    }
+
+    pub fn auto_name(&self, table_name: &str) -> String {
+        let cols = self.columns.join("_");
+        let prefix = if self.is_unique { "uq" } else { "ix" };
+        format!("{}_{table_name}_{cols}", prefix)
     }
 }
 

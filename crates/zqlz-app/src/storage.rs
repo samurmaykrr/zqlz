@@ -2,7 +2,7 @@
 //!
 //! This module provides a local SQLite database for storing:
 //! - Application settings
-//! - Saved connection details (passwords stored securely in system keychain)
+//! - Saved connection details (passwords stored directly in params_json)
 //! - Saved queries
 //! - Recent files/queries
 //! - Workspace layouts
@@ -15,7 +15,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use uuid::Uuid;
-use zqlz_connection::{SavedConnection, SecureStorage};
+use zqlz_command_palette::{CommandUsageEntry, CommandUsagePersistence};
+use zqlz_connection::SavedConnection;
 use zqlz_query::{HistoryPersistence, QueryHistoryEntry};
 use zqlz_templates::dbt::{ModelConfig, QuotingConfig};
 use zqlz_templates::project::{Model, ModelDependency, Project, SourceDefinition, SourceTable};
@@ -55,8 +56,6 @@ impl SavedQuery {
 /// Local storage manager using SQLite
 pub struct LocalStorage {
     db_path: PathBuf,
-    /// Secure storage for credentials (system keychain)
-    secure_storage: SecureStorage,
 }
 
 #[allow(dead_code)]
@@ -71,13 +70,7 @@ impl LocalStorage {
             std::fs::create_dir_all(parent)?;
         }
 
-        let secure_storage = SecureStorage::new()
-            .map_err(|e| anyhow::anyhow!("Failed to initialize secure storage: {}", e))?;
-
-        let storage = Self {
-            db_path,
-            secure_storage,
-        };
+        let storage = Self { db_path };
         storage.initialize_schema()?;
 
         Ok(storage)
@@ -105,7 +98,7 @@ impl LocalStorage {
             [],
         )?;
 
-        // Connections table (encrypted sensitive fields)
+        // Connections table — all params including passwords are stored in params_json
         conn.execute(
             "CREATE TABLE IF NOT EXISTS connections (
                 id TEXT PRIMARY KEY,
@@ -148,6 +141,11 @@ impl LocalStorage {
         // because that is the expected outcome for up-to-date databases.
         let _ = conn.execute("ALTER TABLE query_history ADD COLUMN error TEXT", []);
 
+        // Migrations for connections columns added after initial schema.
+        // SQLite has no IF NOT EXISTS for ALTER TABLE; the error on duplicate add is expected.
+        let _ = conn.execute("ALTER TABLE connections ADD COLUMN folder TEXT", []);
+        let _ = conn.execute("ALTER TABLE connections ADD COLUMN color TEXT", []);
+
         // Saved queries table
         conn.execute(
             "CREATE TABLE IF NOT EXISTS saved_queries (
@@ -169,6 +167,16 @@ impl LocalStorage {
             [],
         )?;
 
+        // Command palette usage stats for frecency ranking across restarts
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS command_usage (
+                command_id TEXT PRIMARY KEY,
+                use_count REAL NOT NULL,
+                last_used REAL NOT NULL
+            )",
+            [],
+        )?;
+
         Ok(())
     }
 
@@ -178,45 +186,22 @@ impl LocalStorage {
             .with_context(|| format!("Failed to open database at {:?}", self.db_path))
     }
 
-    /// Save a connection (passwords stored securely in system keychain)
+    /// Save a connection, storing all params (including password) directly in params_json.
     pub fn save_connection(&self, connection: &SavedConnection) -> Result<()> {
         let conn = self.connect()?;
         let now = chrono::Utc::now().to_rfc3339();
-
-        // Extract password from params and store in keychain
-        let mut params_without_password = connection.params.clone();
-        if let Some(password) = params_without_password.remove("password") {
-            if !password.is_empty() {
-                self.secure_storage
-                    .store_password(connection.id, &password)
-                    .map_err(|e| anyhow::anyhow!("Failed to store password securely: {}", e))?;
-                tracing::debug!(connection_id = %connection.id, "Password stored in system keychain");
-            }
-        }
-
-        // Also handle SSH passphrase if present
-        if let Some(passphrase) = params_without_password.remove("ssh_passphrase") {
-            if !passphrase.is_empty() {
-                self.secure_storage
-                    .store_ssh_passphrase(connection.id, &passphrase)
-                    .map_err(|e| {
-                        anyhow::anyhow!("Failed to store SSH passphrase securely: {}", e)
-                    })?;
-                tracing::debug!(connection_id = %connection.id, "SSH passphrase stored in system keychain");
-            }
-        }
-
-        // Store params without sensitive data
-        let params_json = serde_json::to_string(&params_without_password)?;
+        let params_json = serde_json::to_string(&connection.params)?;
 
         conn.execute(
-            "INSERT OR REPLACE INTO connections (id, name, driver, params_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO connections (id, name, driver, params_json, folder, color, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 connection.id.to_string(),
                 connection.name,
                 connection.driver,
                 params_json,
+                connection.folder,
+                connection.color,
                 now,
                 now,
             ],
@@ -225,12 +210,12 @@ impl LocalStorage {
         Ok(())
     }
 
-    /// Load all saved connections (passwords retrieved from system keychain)
+    /// Load all saved connections.
     pub fn load_connections(&self) -> Result<Vec<SavedConnection>> {
         let conn = self.connect()?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, driver, params_json FROM connections ORDER BY updated_at DESC",
+            "SELECT id, name, driver, params_json, folder, color FROM connections ORDER BY updated_at DESC",
         )?;
 
         let connections = stmt
@@ -247,6 +232,8 @@ impl LocalStorage {
                 let name: String = row.get(1)?;
                 let driver: String = row.get(2)?;
                 let params_json: String = row.get(3)?;
+                let folder: Option<String> = row.get(4)?;
+                let color: Option<String> = row.get(5)?;
 
                 let params: std::collections::HashMap<String, String> =
                     serde_json::from_str(&params_json).map_err(|e| {
@@ -262,8 +249,8 @@ impl LocalStorage {
                     name,
                     driver,
                     params,
-                    folder: None,
-                    color: None,
+                    folder,
+                    color,
                     created_at: chrono::Utc::now(),
                     modified_at: chrono::Utc::now(),
                     last_connected: None,
@@ -271,73 +258,11 @@ impl LocalStorage {
             })?
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Migrate any old per-connection keychain entries to the new single-entry format
-        // This only triggers on first run after the update and requires one keychain prompt
-        let connection_ids: Vec<Uuid> = connections.iter().map(|c| c.id).collect();
-        if let Err(e) = self.secure_storage.migrate_legacy_entries(&connection_ids) {
-            tracing::warn!("Failed to migrate legacy keychain entries: {}", e);
-        }
-
-        // Retrieve passwords from keychain and add to params
-        let mut connections_with_passwords = Vec::with_capacity(connections.len());
-        for mut connection in connections {
-            // Try to get password from keychain
-            if let Ok(Some(password)) = self.secure_storage.get_password(connection.id) {
-                connection.params.insert("password".to_string(), password);
-                tracing::debug!(connection_id = %connection.id, "Password retrieved from system keychain");
-            } else {
-                // Migration: Check if password exists in params_json (old format)
-                // This handles existing connections that haven't been migrated yet
-                if let Some(password) = connection.params.get("password").cloned() {
-                    if !password.is_empty() {
-                        tracing::debug!(
-                            connection_id = %connection.id,
-                            "Migrating password from SQLite to system keychain"
-                        );
-                        // Migrate to keychain
-                        if let Err(e) = self.secure_storage.store_password(connection.id, &password)
-                        {
-                            tracing::warn!(
-                                connection_id = %connection.id,
-                                error = %e,
-                                "Failed to migrate password to keychain"
-                            );
-                        } else {
-                            // Remove from SQLite (re-save without password)
-                            // We'll do this lazily on next save
-                            tracing::debug!(
-                                connection_id = %connection.id,
-                                "Password migrated to keychain (will be removed from SQLite on next save)"
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Try to get SSH passphrase from keychain
-            if let Ok(Some(passphrase)) = self.secure_storage.get_ssh_passphrase(connection.id) {
-                connection
-                    .params
-                    .insert("ssh_passphrase".to_string(), passphrase);
-            }
-
-            connections_with_passwords.push(connection);
-        }
-
-        Ok(connections_with_passwords)
+        Ok(connections)
     }
 
-    /// Delete a connection (also removes credentials from keychain)
+    /// Delete a connection.
     pub fn delete_connection(&self, id: Uuid) -> Result<()> {
-        // Delete credentials from keychain first
-        if let Err(e) = self.secure_storage.delete_connection_credentials(id) {
-            tracing::warn!(
-                connection_id = %id,
-                error = %e,
-                "Failed to delete credentials from keychain"
-            );
-        }
-
         let conn = self.connect()?;
         conn.execute(
             "DELETE FROM connections WHERE id = ?1",
@@ -497,6 +422,58 @@ impl LocalStorage {
     pub fn clear_query_history(&self) -> Result<()> {
         let conn = self.connect()?;
         conn.execute("DELETE FROM query_history", [])?;
+        Ok(())
+    }
+
+    // ── Command palette usage persistence ───────────────────────────────
+
+    fn upsert_command_usage(&self, entry: &CommandUsageEntry) -> Result<()> {
+        let conn = self.connect()?;
+
+        let last_used_secs = entry
+            .last_used
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs_f64();
+
+        conn.execute(
+            "INSERT OR REPLACE INTO command_usage (command_id, use_count, last_used)
+             VALUES (?1, ?2, ?3)",
+            params![entry.command_id, entry.use_count as f64, last_used_secs],
+        )?;
+
+        Ok(())
+    }
+
+    fn load_command_usage(&self) -> Result<Vec<CommandUsageEntry>> {
+        let conn = self.connect()?;
+
+        let mut stmt =
+            conn.prepare("SELECT command_id, use_count, last_used FROM command_usage")?;
+
+        let entries = stmt
+            .query_map([], |row| {
+                let command_id: String = row.get(0)?;
+                let use_count: f64 = row.get(1)?;
+                let last_used_secs: f64 = row.get(2)?;
+
+                let last_used = std::time::SystemTime::UNIX_EPOCH
+                    + std::time::Duration::from_secs_f64(last_used_secs);
+
+                Ok(CommandUsageEntry {
+                    command_id,
+                    use_count: use_count as f32,
+                    last_used,
+                })
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(entries)
+    }
+
+    fn clear_command_usage(&self) -> Result<()> {
+        let conn = self.connect()?;
+        conn.execute("DELETE FROM command_usage", [])?;
         Ok(())
     }
 
@@ -719,6 +696,30 @@ impl HistoryPersistence for LocalStorage {
     fn clear_all(&self) {
         if let Err(error) = self.clear_query_history() {
             tracing::error!(%error, "Failed to clear persisted query history");
+        }
+    }
+}
+
+impl CommandUsagePersistence for LocalStorage {
+    fn persist_usage(&self, entry: &CommandUsageEntry) {
+        if let Err(error) = self.upsert_command_usage(entry) {
+            tracing::error!(%error, command_id = %entry.command_id, "Failed to persist command usage");
+        }
+    }
+
+    fn load_all(&self) -> Vec<CommandUsageEntry> {
+        match self.load_command_usage() {
+            Ok(entries) => entries,
+            Err(error) => {
+                tracing::error!(%error, "Failed to load command usage from storage");
+                Vec::new()
+            }
+        }
+    }
+
+    fn clear_all(&self) {
+        if let Err(error) = self.clear_command_usage() {
+            tracing::error!(%error, "Failed to clear command usage");
         }
     }
 }

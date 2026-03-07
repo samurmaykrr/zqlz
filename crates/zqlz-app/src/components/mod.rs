@@ -3,7 +3,6 @@
 //! This module exports all reusable UI components.
 
 mod cell_editor;
-mod command_palette;
 mod error_modal;
 mod inspector_panel;
 mod key_value_editor;
@@ -13,7 +12,7 @@ mod template_library;
 mod welcome_panel;
 
 pub use cell_editor::{CellData, CellEditorEvent, CellEditorPanel};
-pub use command_palette::{CommandPalette, CommandPaletteEvent};
+pub use zqlz_command_palette::{Command, CommandCategory, CommandPalette, CommandPaletteEvent, CommandUsagePersistence};
 pub use inspector_panel::{InspectorPanel, InspectorPanelEvent, InspectorView};
 pub use key_value_editor::{
     KeyValueData, KeyValueEditorEvent, KeyValueEditorPanel, RedisValueType, RowData,

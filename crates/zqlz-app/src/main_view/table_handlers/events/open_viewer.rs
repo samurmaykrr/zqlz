@@ -659,6 +659,7 @@ impl MainView {
             return;
         };
 
+        // Verify the main connection exists (we'll get the database-specific one async)
         let Some(conn) = app_state.connections.get(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
@@ -666,6 +667,7 @@ impl MainView {
 
         let table_service = app_state.table_service.clone();
         let schema_service = app_state.schema_service.clone();
+        let connections = app_state.connections.clone();
         // Get connection name for tab title
         let connection_name = app_state
             .connection_manager()
@@ -704,6 +706,23 @@ impl MainView {
 
         let task = cx.spawn_in(window, async move |this, cx| {
             tracing::info!("Loading table data: {}", table_name_for_spawn);
+
+            // Get a database-specific connection for drivers (like PostgreSQL)
+            // where each connection is scoped to a single database.
+            let conn = match &database_name_for_spawn {
+                Some(db_name) => {
+                    connections.get_for_database(connection_id, db_name).await
+                        .map_err(|e| {
+                            tracing::error!(
+                                database = %db_name,
+                                error = %e,
+                                "Failed to get database-specific connection"
+                            );
+                            e
+                        })?
+                }
+                None => conn,
+            };
 
             let is_redis = conn.driver_name() == "redis";
             let driver_category = driver_name_to_category(conn.driver_name());

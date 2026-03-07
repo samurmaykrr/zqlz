@@ -32,18 +32,12 @@ impl Display for Placement {
 impl Placement {
     #[inline]
     pub fn is_horizontal(&self) -> bool {
-        match self {
-            Placement::Left | Placement::Right => true,
-            _ => false,
-        }
+        matches!(self, Placement::Left | Placement::Right)
     }
 
     #[inline]
     pub fn is_vertical(&self) -> bool {
-        match self {
-            Placement::Top | Placement::Bottom => true,
-            _ => false,
-        }
+        matches!(self, Placement::Top | Placement::Bottom)
     }
 
     #[inline]
@@ -218,19 +212,19 @@ impl Side {
 
 /// A trait to extend the [`Axis`] enum with utility methods.
 pub trait AxisExt {
-    fn is_horizontal(self) -> bool;
-    fn is_vertical(self) -> bool;
+    fn is_horizontal(&self) -> bool;
+    fn is_vertical(&self) -> bool;
 }
 
 impl AxisExt for Axis {
     #[inline]
-    fn is_horizontal(self) -> bool {
-        self == Axis::Horizontal
+    fn is_horizontal(&self) -> bool {
+        *self == Axis::Horizontal
     }
 
     #[inline]
-    fn is_vertical(self) -> bool {
-        self == Axis::Vertical
+    fn is_vertical(&self) -> bool {
+        *self == Axis::Vertical
     }
 }
 

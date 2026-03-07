@@ -6,7 +6,7 @@ mod objects_panel;
 mod schema_details_panel;
 mod schema_tree;
 
-pub use objects_panel::{ObjectsPanel, ObjectsPanelEvent};
+pub use objects_panel::{DeleteSelected, NewObject, ObjectsPanel, ObjectsPanelEvent, OpenSelected};
 pub use schema_details_panel::{
     ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaDetails, SchemaDetailsPanel,
     SchemaDetailsPanelEvent,

@@ -1,14 +1,16 @@
 use gpui::{
-    App, Axis, Corners, Edges, ElementId, InteractiveElement, IntoElement, ParentElement,
-    RenderOnce, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    div, prelude::FluentBuilder as _, App, Axis, Corners, Edges, ElementId, InteractiveElement,
+    IntoElement, ParentElement, RenderOnce, StatefulInteractiveElement as _, StyleRefinement,
+    Styled, Window,
 };
 use std::{cell::Cell, rc::Rc};
 
 use crate::widgets::{
-    Disableable, Sizable, Size, StyledExt,
     button::{Button, ButtonVariant, ButtonVariants},
+    Disableable, Sizable, Size, StyledExt,
 };
+
+type OnClickFn = Option<Box<dyn Fn(&Vec<usize>, &mut Window, &mut App) + 'static>>;
 
 /// A ButtonGroup element, to wrap multiple buttons in a group.
 #[derive(IntoElement)]
@@ -26,7 +28,7 @@ pub struct ButtonGroup {
     pub(super) variant: Option<ButtonVariant>,
     pub(super) size: Option<Size>,
 
-    on_click: Option<Box<dyn Fn(&Vec<usize>, &mut Window, &mut App) + 'static>>,
+    on_click: OnClickFn,
 }
 
 impl Disableable for ButtonGroup {

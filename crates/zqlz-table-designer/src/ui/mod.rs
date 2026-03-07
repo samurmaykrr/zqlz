@@ -3,6 +3,7 @@
 //! Sub-module of `panel` — contains tab rendering functions extracted
 //! from the panel to keep the main file smaller.
 
+pub(super) mod check_constraints_tab;
 pub(super) mod fields_tab;
 pub(super) mod foreign_keys_tab;
 pub(super) mod indexes_tab;

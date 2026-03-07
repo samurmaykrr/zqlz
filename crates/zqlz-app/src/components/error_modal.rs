@@ -417,7 +417,7 @@ impl Render for ErrorModal {
             .flex()
             .items_center()
             .justify_center()
-            .bg(gpui::rgba(0x00_00_00_CC))
+            .bg(theme.overlay_backdrop)
             .child(
                 // Main error modal container
                 v_flex()

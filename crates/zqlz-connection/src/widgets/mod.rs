@@ -4,4 +4,7 @@
 
 mod sidebar;
 
-pub use sidebar::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo};
+pub use sidebar::{
+    ActivateConnection, ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent,
+    DeleteSelectedConnection, SavedQueryInfo, ShowContextMenu,
+};

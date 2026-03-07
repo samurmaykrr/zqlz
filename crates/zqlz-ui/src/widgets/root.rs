@@ -1,19 +1,21 @@
 use crate::widgets::{
-    ActiveTheme, ElementExt, Placement,
     dialog::Dialog,
     input::InputState,
     notification::{Notification, NotificationList},
     sheet::Sheet,
-    window_border,
+    window_border, ActiveTheme, ElementExt, Placement,
 };
 use gpui::{
-    AnyView, App, AppContext, Context, DefiniteLength, Entity, FocusHandle, InteractiveElement,
-    IntoElement, KeyBinding, ParentElement as _, Render, Styled, WeakFocusHandle, Window, actions,
-    div, prelude::FluentBuilder as _,
+    actions, div, prelude::FluentBuilder as _, AnyView, App, AppContext, Context, DefiniteLength,
+    Entity, FocusHandle, InteractiveElement, IntoElement, KeyBinding, ParentElement as _, Render,
+    Styled, WeakFocusHandle, Window,
 };
 use std::{any::TypeId, rc::Rc};
 
 actions!(root, [Tab, TabPrev]);
+
+type SheetBuilder = Rc<dyn Fn(Sheet, &mut Window, &mut App) -> Sheet + 'static>;
+type DialogBuilder = Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static>;
 
 const CONTEXT: &str = "Root";
 pub(crate) fn init(cx: &mut App) {
@@ -41,7 +43,7 @@ pub(crate) struct ActiveSheet {
     /// The previous focused handle before opening the Sheet.
     previous_focused_handle: Option<WeakFocusHandle>,
     placement: Placement,
-    builder: Rc<dyn Fn(Sheet, &mut Window, &mut App) -> Sheet + 'static>,
+    builder: SheetBuilder,
 }
 
 #[derive(Clone)]
@@ -49,7 +51,7 @@ pub(crate) struct ActiveDialog {
     focus_handle: FocusHandle,
     /// The previous focused handle before opening the Dialog.
     previous_focused_handle: Option<WeakFocusHandle>,
-    builder: Rc<dyn Fn(Dialog, &mut Window, &mut App) -> Dialog + 'static>,
+    builder: DialogBuilder,
 }
 
 impl ActiveDialog {
@@ -92,7 +94,7 @@ impl Root {
     }
 
     pub fn read<'a>(window: &'a Window, cx: &'a App) -> &'a Self {
-        &window
+        window
             .root::<Root>()
             .expect("The window root view should be of type `ui::Root`.")
             .unwrap()
@@ -190,10 +192,8 @@ impl Root {
             })
             .collect::<Vec<_>>();
 
-        if let Some(ix) = show_overlay_ix {
-            if let Some(dialog) = dialogs.get_mut(ix) {
-                dialog.overlay_visible = true;
-            }
+        if let Some(ix) = show_overlay_ix && let Some(dialog) = dialogs.get_mut(ix) {
+            dialog.overlay_visible = true;
         }
 
         Some(div().children(dialogs))

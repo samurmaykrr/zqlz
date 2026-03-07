@@ -34,7 +34,12 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
         return;
     };
 
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    let database_name = viewer_entity.read(cx).database_name();
+
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        database_name.as_deref(),
+    ) else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -49,7 +54,6 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let database_name = viewer_entity.read(cx).database_name();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
 
     // Extract the viewer's current filter/sort/search state so pagination preserves it
@@ -205,7 +209,12 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
         return;
     };
 
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    let database_name = viewer_entity.read(cx).database_name();
+
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        database_name.as_deref(),
+    ) else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -220,7 +229,6 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let database_name = viewer_entity.read(cx).database_name();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
 
     let (where_clauses, order_by_clauses, visible_columns) =

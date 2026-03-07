@@ -36,6 +36,8 @@ actions!(
         SelectToNextSubwordEnd,
         SelectToPreviousSubwordStart,
         SelectAll,
+        /// Toggle block (column/rectangular) selection mode.
+        ToggleBlockSelection,
         // Editing
         Backspace,
         Delete,
@@ -254,6 +256,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         #[cfg(not(target_os = "macos"))]
         KeyBinding::new("ctrl-a", SelectAll, Some(CONTEXT)),
+        // Block selection toggle (Alt+Shift+B — same as VS Code column selection)
+        KeyBinding::new("alt-shift-b", ToggleBlockSelection, Some(CONTEXT)),
         // Editing
         KeyBinding::new("backspace", Backspace, Some(CONTEXT)),
         KeyBinding::new("delete", Delete, Some(CONTEXT)),

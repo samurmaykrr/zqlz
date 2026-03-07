@@ -677,10 +677,9 @@ impl RoleManagementService {
             }
             RoleDialect::MySQL => {
                 // MySQL doesn't have direct rename - need to create new and transfer
-                format!(
-                    "-- MySQL doesn't support RENAME ROLE directly\n\
+                "-- MySQL doesn't support RENAME ROLE directly\n\
                      -- Create new role and transfer members manually"
-                )
+                    .to_string()
             }
             RoleDialect::MsSql => {
                 format!("ALTER ROLE {} WITH NAME = {}", quoted_old, quoted_new)

@@ -626,7 +626,7 @@ impl QueryTabsPanel {
                 div()
                     .size_16()
                     .rounded_2xl()
-                    .bg(theme.accent)
+                    .bg(theme.primary)
                     .flex()
                     .items_center()
                     .justify_center()
@@ -634,7 +634,7 @@ impl QueryTabsPanel {
                         div()
                             .text_2xl()
                             .font_weight(FontWeight::BOLD)
-                            .text_color(gpui::white())
+                            .text_color(theme.primary_foreground)
                             .child("Z"),
                     ),
             )

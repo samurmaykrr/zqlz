@@ -88,10 +88,10 @@ impl RenderOnce for MenuItem {
             .text_xs()
             .line_height(relative(1.))
             .rounded_sm()
-            .hover(|this| this.bg(cx.theme().accent.opacity(0.8)))
+            .hover(|this| this.bg(cx.theme().accent.opacity(0.15)))
             .when(self.selected, |this| {
-                this.bg(cx.theme().accent)
-                    .text_color(cx.theme().accent_foreground)
+                this.bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
             })
             .child(
                 div().child(StyledText::new(item.action.title.clone()).with_highlights(highlights)),

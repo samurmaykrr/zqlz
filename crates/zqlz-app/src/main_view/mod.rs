@@ -136,6 +136,8 @@ pub struct MainView {
     tab_context_menu: Option<Entity<TabContextMenuState>>,
     query_editors: Vec<WeakEntity<crate::components::QueryEditor>>,
     command_palette: Option<Entity<CommandPalette>>,
+    command_palette_closing: bool,
+    _command_palette_subscription: Option<Subscription>,
     /// DEPRECATED: Use workspace_state for query tracking instead
     /// Running query tasks, keyed by editor index. Dropping a task cancels it.
     /// NOTE: Kept for QueryTabsPanel editors until they're fully migrated to WorkspaceState.
@@ -426,6 +428,8 @@ impl MainView {
             tab_context_menu: None,
             query_editors: Vec::new(),
             command_palette: None,
+            command_palette_closing: false,
+            _command_palette_subscription: None,
             running_query_tasks: HashMap::new(),
             query_cancel_handles: HashMap::new(),
             version_repository,

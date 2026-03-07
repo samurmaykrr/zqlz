@@ -158,6 +158,20 @@ where
         self.focus_handle(cx).focus(window, cx);
     }
 
+    /// Clear the search input's visual text without triggering an input change event.
+    /// Callers are responsible for updating the delegate's search state separately.
+    pub fn set_query(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query: SharedString = query.to_string().into();
+        self.query_input.update(cx, |input, cx| {
+            input.set_value(query, window, cx);
+        });
+    }
+
     /// Return true if either the list or the search input is focused.
     pub(crate) fn is_focused(&self, window: &Window, cx: &App) -> bool {
         self.focus_handle.is_focused(window) || self.query_input.focus_handle(cx).is_focused(window)
@@ -321,7 +335,7 @@ where
         }
     }
 
-    pub(crate) fn reset_on_cancel(mut self, reset: bool) -> Self {
+    pub fn reset_on_cancel(mut self, reset: bool) -> Self {
         self.reset_on_cancel = reset;
         self
     }

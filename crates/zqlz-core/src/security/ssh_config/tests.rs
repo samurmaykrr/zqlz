@@ -1,7 +1,6 @@
 //! Tests for SSH Tunnel Configuration Types
 
 use super::*;
-use std::path::PathBuf;
 
 #[test]
 fn test_ssh_config_creation_with_password() {
@@ -27,7 +26,7 @@ fn test_ssh_config_creation_with_private_key() {
     assert_eq!(config.username, "admin");
     assert!(matches!(
         config.auth,
-        SshAuthMethod::PrivateKey { path, passphrase } if path == PathBuf::from("/home/user/.ssh/id_rsa") && passphrase.is_none()
+        SshAuthMethod::PrivateKey { path, passphrase } if path == std::path::Path::new("/home/user/.ssh/id_rsa") && passphrase.is_none()
     ));
 }
 

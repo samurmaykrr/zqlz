@@ -449,7 +449,7 @@ mod json_type_name_tests {
 
     #[test]
     fn test_json_type_name_float() {
-        let result = json_type_name(&serde_json::json!(3.14));
+        let result = json_type_name(&serde_json::json!(1.5));
         assert_eq!(result, "Double");
     }
 

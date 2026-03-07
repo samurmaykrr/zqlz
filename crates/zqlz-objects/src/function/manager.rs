@@ -16,10 +16,11 @@ use serde::{Deserialize, Serialize};
 /// assert!(mode.is_input());
 /// assert_eq!(mode.as_sql(), "IN");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionParameterMode {
     /// Input parameter (default)
+    #[default]
     In,
     /// Output parameter
     Out,
@@ -56,12 +57,6 @@ impl FunctionParameterMode {
             FunctionParameterMode::InOut => "INOUT",
             FunctionParameterMode::Variadic => "VARIADIC",
         }
-    }
-}
-
-impl Default for FunctionParameterMode {
-    fn default() -> Self {
-        FunctionParameterMode::In
     }
 }
 
@@ -136,7 +131,7 @@ impl FunctionParam {
 /// Function volatility classification
 ///
 /// Determines how the database optimizer can handle function calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionVolatility {
     /// Function always returns the same result for the same arguments (cacheable)
@@ -144,6 +139,7 @@ pub enum FunctionVolatility {
     /// Function returns same result within a single table scan
     Stable,
     /// Function can return different results even with same arguments (default)
+    #[default]
     Volatile,
 }
 
@@ -158,17 +154,12 @@ impl FunctionVolatility {
     }
 }
 
-impl Default for FunctionVolatility {
-    fn default() -> Self {
-        FunctionVolatility::Volatile
-    }
-}
-
 /// Function behavior with NULL arguments
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum NullBehavior {
     /// Function is called even when any argument is NULL (default)
+    #[default]
     CalledOnNullInput,
     /// Function returns NULL immediately if any argument is NULL
     ReturnsNullOnNullInput,
@@ -187,17 +178,12 @@ impl NullBehavior {
     }
 }
 
-impl Default for NullBehavior {
-    fn default() -> Self {
-        NullBehavior::CalledOnNullInput
-    }
-}
-
 /// Function security mode
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum SecurityMode {
     /// Function runs with privileges of the caller (default)
+    #[default]
     Invoker,
     /// Function runs with privileges of the definer
     Definer,
@@ -213,17 +199,12 @@ impl SecurityMode {
     }
 }
 
-impl Default for SecurityMode {
-    fn default() -> Self {
-        SecurityMode::Invoker
-    }
-}
-
 /// Function language
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum FunctionLanguage {
     /// SQL language
+    #[default]
     Sql,
     /// PL/pgSQL (PostgreSQL procedural language)
     PlPgSql,
@@ -245,12 +226,6 @@ impl FunctionLanguage {
             FunctionLanguage::JavaScript => "plv8",
             FunctionLanguage::Custom(name) => name,
         }
-    }
-}
-
-impl Default for FunctionLanguage {
-    fn default() -> Self {
-        FunctionLanguage::Sql
     }
 }
 

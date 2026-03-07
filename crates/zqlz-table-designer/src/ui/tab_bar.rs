@@ -30,16 +30,19 @@ pub(in crate::panel) fn render_tab_bar(
                     DesignerTab::Fields => 0,
                     DesignerTab::Indexes => 1,
                     DesignerTab::ForeignKeys => 2,
-                    DesignerTab::Options => 3,
-                    DesignerTab::SqlPreview => 4,
+                    DesignerTab::CheckConstraints => 3,
+                    DesignerTab::Options => 4,
+                    DesignerTab::SqlPreview => 5,
+                    DesignerTab::Triggers => 6,
                 })
                 .on_click(cx.listener(|this, ix: &usize, _window, cx| {
                     this.active_tab = match ix {
                         0 => DesignerTab::Fields,
                         1 => DesignerTab::Indexes,
                         2 => DesignerTab::ForeignKeys,
-                        3 => DesignerTab::Options,
-                        4 => DesignerTab::SqlPreview,
+                        3 => DesignerTab::CheckConstraints,
+                        4 => DesignerTab::Options,
+                        5 => DesignerTab::SqlPreview,
                         _ => DesignerTab::Fields,
                     };
                     if this.active_tab == DesignerTab::SqlPreview {
@@ -50,6 +53,7 @@ pub(in crate::panel) fn render_tab_bar(
                 .child(Tab::new().label("Fields"))
                 .child(Tab::new().label("Indexes"))
                 .child(Tab::new().label("Foreign Keys"))
+                .child(Tab::new().label("Checks"))
                 .child(Tab::new().label("Options"))
                 .child(Tab::new().label("SQL Preview")),
         )

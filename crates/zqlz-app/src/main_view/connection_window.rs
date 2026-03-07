@@ -531,7 +531,7 @@ impl ConnectionWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(self.grid_view, |this| this.bg(cx.theme().accent))
+                    .when(self.grid_view, |this| this.bg(cx.theme().primary))
                     .hover(|this| this.bg(cx.theme().muted))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.grid_view = true;
@@ -539,7 +539,7 @@ impl ConnectionWindow {
                     }))
                     .child(Icon::new(IconName::LayoutDashboard).size_4().text_color(
                         if self.grid_view {
-                            cx.theme().foreground
+                            cx.theme().primary_foreground
                         } else {
                             cx.theme().muted_foreground
                         },
@@ -555,7 +555,7 @@ impl ConnectionWindow {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .when(!self.grid_view, |this| this.bg(cx.theme().accent))
+                    .when(!self.grid_view, |this| this.bg(cx.theme().primary))
                     .hover(|this| this.bg(cx.theme().muted))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.grid_view = false;
@@ -563,7 +563,7 @@ impl ConnectionWindow {
                     }))
                     .child(Icon::new(ZqlzIcon::ListBullets).size_4().text_color(
                         if !self.grid_view {
-                            cx.theme().foreground
+                            cx.theme().primary_foreground
                         } else {
                             cx.theme().muted_foreground
                         },

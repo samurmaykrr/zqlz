@@ -136,7 +136,7 @@ pub fn parse_tree_format(output: &str) -> Result<QueryPlan> {
         let node = parse_detail(&detail)?;
 
         // Find parent based on indent level
-        while stack.last().map_or(false, |(lvl, _)| *lvl >= indent) {
+        while stack.last().is_some_and(|(lvl, _)| *lvl >= indent) {
             if let Some((_, child)) = stack.pop() {
                 if let Some((_, parent)) = stack.last_mut() {
                     parent.children.push(child);

@@ -238,6 +238,16 @@ pub struct TextEditor {
     find_replace_panel: Option<Entity<find_replace_panel::FindReplacePanel>>,
     /// Subscriptions for the find/replace panel events.
     _find_panel_subscriptions: Vec<Subscription>,
+    /// Number of spaces per indent level (default: 4).
+    indent_size: usize,
+    /// Whether to use tab characters (`\t`) instead of spaces for indentation.
+    use_tabs: bool,
+    /// Debounce task for auto-triggered completions. Cancelled on each new keystroke.
+    completion_debounce_task: Task<anyhow::Result<()>>,
+    /// Set to true when completion should be triggered on next opportunity with window access.
+    completion_pending: bool,
+    /// Cached completion results for local prefix filtering.
+    completion_cache: Option<CompletionCache>,
 }
 
 #[derive(Clone, Copy)]
@@ -281,6 +291,16 @@ struct CompletionMenuState {
     /// Fractional scroll delta carried over between frames to prevent small wheel
     /// movements from being silently discarded by integer truncation.
     scroll_accumulator: f32,
+}
+
+/// Cached completion results for prefix-based filtering.
+struct CompletionCache {
+    /// All completion items from the last full LSP request.
+    all_items: Vec<CompletionItem>,
+    /// The prefix at the time of the original request.
+    trigger_prefix: String,
+    /// The offset at the start of the completed word.
+    trigger_offset: usize,
 }
 
 /// Layout snapshot of the completion menu as last painted, cached so that
@@ -435,6 +455,11 @@ impl TextEditor {
             analysis_debounce_pending: false,
             find_replace_panel: None,
             _find_panel_subscriptions: Vec::new(),
+            indent_size: 4,
+            use_tabs: false,
+            completion_debounce_task: Task::ready(Ok(())),
+            completion_pending: false,
+            completion_cache: None,
         }
     }
 
@@ -497,6 +522,11 @@ impl TextEditor {
             analysis_debounce_pending: false,
             find_replace_panel: None,
             _find_panel_subscriptions: Vec::new(),
+            indent_size: 4,
+            use_tabs: false,
+            completion_debounce_task: Task::ready(Ok(())),
+            completion_pending: false,
+            completion_cache: None,
         };
         // Initial syntax highlighting and diagnostics
         editor.update_syntax_highlights();
@@ -619,6 +649,19 @@ impl TextEditor {
     /// `&self` should use this rather than `get_syntax_highlights().to_vec()`.
     pub fn get_syntax_highlights_arc(&self) -> std::sync::Arc<Vec<Highlight>> {
         self.cached_highlights.clone()
+    }
+
+    /// Returns the highlight kind at the given byte offset using cached highlights.
+    fn highlight_kind_at(&self, offset: usize) -> HighlightKind {
+        for highlight in self.cached_highlights.iter() {
+            if highlight.start > offset {
+                break;
+            }
+            if offset >= highlight.start && offset < highlight.end {
+                return highlight.kind;
+            }
+        }
+        HighlightKind::Default
     }
 
     /// Check if syntax highlighting is enabled
@@ -897,11 +940,28 @@ impl TextEditor {
             return;
         };
 
-        // Delete the character
+        // Check if cursor is between a bracket pair (e.g. `(|)`) before deleting.
+        let text = self.buffer.text();
+        let opener = text[prev_offset..cursor_offset].chars().next();
+        let delete_closer = opener
+            .and_then(|ch| Self::bracket_closer(ch))
+            .is_some_and(|closer| text[cursor_offset..].starts_with(closer));
+
+        // Delete the character before cursor.
         if self.buffer.delete(prev_offset..cursor_offset).is_ok() {
-            // Track change for undo
             if let Some(change) = self.buffer.changes().last() {
                 self.push_undo(change.clone());
+            }
+
+            // Also delete the matching closer if we were between a bracket pair.
+            if delete_closer {
+                let closer = opener.and_then(|ch| Self::bracket_closer(ch)).expect("checked above");
+                let closer_end = prev_offset + closer.len_utf8();
+                if self.buffer.delete(prev_offset..closer_end).is_ok() {
+                    if let Some(change) = self.buffer.changes().last() {
+                        self.push_undo(change.clone());
+                    }
+                }
             }
 
             // Move cursor back to the deletion point
@@ -1632,6 +1692,15 @@ impl TextEditor {
             return false;
         }
 
+        // Skip auto-close for quotes inside strings or comments.
+        let is_quote = opener == '\'' || opener == '"';
+        if is_quote {
+            let kind = self.highlight_kind_at(cursor_offset);
+            if matches!(kind, HighlightKind::String | HighlightKind::Comment) {
+                return false;
+            }
+        }
+
         let mut pair = String::new();
         pair.push(opener);
         pair.push(closer);
@@ -1771,6 +1840,25 @@ impl TextEditor {
             return None;
         }
 
+        // Block selection: extract rectangular region, join lines with newline
+        if self.selection.is_block() {
+            let block_ranges = self.selection.block_ranges();
+            if block_ranges.is_empty() {
+                return None;
+            }
+            let mut lines = Vec::with_capacity(block_ranges.len());
+            for &(line, start_col, end_col) in &block_ranges {
+                if let Some(line_text) = self.buffer.line(line) {
+                    let safe_start = start_col.min(line_text.len());
+                    let safe_end = end_col.min(line_text.len());
+                    lines.push(line_text[safe_start..safe_end].to_string());
+                } else {
+                    lines.push(String::new());
+                }
+            }
+            return Some(lines.join("\n").into());
+        }
+
         let range = self.selection.range();
         let start_offset = self.buffer.position_to_offset(range.start).ok()?;
         let end_offset = self.buffer.position_to_offset(range.end).ok()?;
@@ -1899,17 +1987,41 @@ impl TextEditor {
             return false;
         }
 
+        // Block (column) selection: delete rectangular region per-line
+        if self.selection.is_block() {
+            let block_ranges = self.selection.block_ranges();
+            if block_ranges.is_empty() {
+                return false;
+            }
+            // Process lines bottom-to-top so offsets stay valid
+            for &(line, start_col, end_col) in block_ranges.iter().rev() {
+                let start = Position::new(line, start_col);
+                let end = Position::new(line, end_col);
+                let s_off = self.buffer.position_to_offset(start).unwrap_or(0);
+                let e_off = self.buffer.position_to_offset(end).unwrap_or(0);
+                if s_off < e_off {
+                    if self.buffer.delete(s_off..e_off).is_ok() {
+                        if let Some(change) = self.buffer.changes().last() {
+                            self.push_undo(change.clone());
+                        }
+                    }
+                }
+            }
+            let top = block_ranges.first().map(|r| r.0).unwrap_or(0);
+            let left = block_ranges.first().map(|r| r.1).unwrap_or(0);
+            self.cursor.set_position(Position::new(top, left));
+            self.selection.clear();
+            return true;
+        }
+
         let range = self.selection.range();
         let start_offset = self.buffer.position_to_offset(range.start).unwrap_or(0);
         let end_offset = self.buffer.position_to_offset(range.end).unwrap_or(0);
 
         if self.buffer.delete(start_offset..end_offset).is_ok() {
-            // Track change for undo
             if let Some(change) = self.buffer.changes().last() {
                 self.push_undo(change.clone());
             }
-
-            // Move cursor to start of selection
             self.cursor.set_position(range.start);
             self.selection.clear();
             true
@@ -2011,6 +2123,9 @@ impl TextEditor {
             return false;
         };
 
+        // Snapshot the rope so we can restore on partial failure.
+        let rope_snapshot = self.buffer.rope();
+
         let mut redo_group = Vec::with_capacity(group.len());
 
         // Apply each change's inverse in reverse order so the buffer ends up
@@ -2024,10 +2139,11 @@ impl TextEditor {
                     self.selection.set_position(position);
                 }
             } else {
-                // Restore what we already undid back into the redo group and bail.
-                // This is a safety valve; in practice apply_change should not fail.
-                redo_group.reverse();
-                self.redo_stack.push(redo_group);
+                // Restore buffer to pre-undo state and put the group back.
+                self.buffer.restore_rope(rope_snapshot);
+                let mut original_group: Vec<_> = redo_group.into_iter().rev().collect();
+                original_group.extend(std::iter::once(change));
+                self.undo_stack.push(original_group);
                 return false;
             }
         }
@@ -2045,6 +2161,8 @@ impl TextEditor {
             return false;
         };
 
+        let rope_snapshot = self.buffer.rope();
+
         let mut undo_group = Vec::with_capacity(group.len());
 
         for change in group.into_iter() {
@@ -2056,8 +2174,10 @@ impl TextEditor {
                 }
                 undo_group.push(change);
             } else {
-                undo_group.reverse();
-                self.undo_stack.push(undo_group);
+                self.buffer.restore_rope(rope_snapshot);
+                let mut original_group: Vec<_> = undo_group.into_iter().collect();
+                original_group.push(change);
+                self.redo_stack.push(original_group);
                 return false;
             }
         }
@@ -2606,12 +2726,17 @@ impl TextEditor {
     fn indent_lines(&mut self) {
         self.break_undo_group();
         let (first, last) = self.selected_line_range();
+        let indent_str = if self.use_tabs {
+            "\t".to_string()
+        } else {
+            " ".repeat(self.indent_size)
+        };
         for line in first..=last {
             let line_start = self
                 .buffer
                 .position_to_offset(Position::new(line, 0))
                 .unwrap_or(0);
-            if self.buffer.insert(line_start, "    ").is_ok() {
+            if self.buffer.insert(line_start, &indent_str).is_ok() {
                 if let Some(change) = self.buffer.changes().last().cloned() {
                     self.push_undo(change);
                 }
@@ -2627,19 +2752,24 @@ impl TextEditor {
     fn dedent_lines(&mut self) {
         self.break_undo_group();
         let (first, last) = self.selected_line_range();
+        let indent_size = self.indent_size;
         for line in first..=last {
             let line_start = self
                 .buffer
                 .position_to_offset(Position::new(line, 0))
                 .unwrap_or(0);
             let text = self.buffer.text();
-            let spaces = text[line_start..]
-                .chars()
-                .take(4)
-                .take_while(|&c| c == ' ')
-                .count();
-            if spaces > 0 {
-                if self.buffer.delete(line_start..line_start + spaces).is_ok() {
+            let line_text = &text[line_start..];
+
+            // Remove one indent level: either a leading tab or up to indent_size spaces.
+            let remove_count = if line_text.starts_with('\t') {
+                1
+            } else {
+                line_text.chars().take(indent_size).take_while(|&c| c == ' ').count()
+            };
+
+            if remove_count > 0 {
+                if self.buffer.delete(line_start..line_start + remove_count).is_ok() {
                     if let Some(change) = self.buffer.changes().last().cloned() {
                         self.push_undo(change);
                     }
@@ -2738,11 +2868,27 @@ impl TextEditor {
     fn insert_newline_with_auto_indent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let line = self.cursor.position().line;
         let indent = self.line_leading_whitespace(line);
-        let text = format!("\n{}", indent);
+
+        // Increase indent after SQL block-opening keywords.
+        let extra_indent = if let Some(line_text) = self.buffer.line(line) {
+            let trimmed = line_text.trim_end().to_uppercase();
+            let last_word = trimmed.rsplit_once(char::is_whitespace)
+                .map(|(_, w)| w)
+                .unwrap_or(&trimmed);
+            if matches!(
+                last_word,
+                "BEGIN" | "THEN" | "ELSE" | "LOOP" | "AS" | "DECLARE" | "("
+            ) {
+                if self.use_tabs { "\t".to_string() } else { " ".repeat(self.indent_size) }
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+
+        let text = format!("\n{}{}", indent, extra_indent);
         self.insert_at_cursor(&text, window, cx);
-        // push_undo is skipped here because insert_at_cursor doesn't call it;
-        // the caller (handle_newline) has already cleared the selection and the
-        // buffer.changes() entry for the newline is pushed below.
         if let Some(change) = self.buffer.changes().last().cloned() {
             self.push_undo(change);
         }
@@ -3282,28 +3428,75 @@ impl TextEditor {
             return None;
         }
 
-        // Find start of word
+        // Check if cursor is on a quoted identifier (double-quote or backtick delimited).
+        let byte_at = text.as_bytes().get(offset).copied();
+        if matches!(byte_at, Some(b'"') | Some(b'`')) {
+            let quote = byte_at.unwrap() as char;
+            // Check if this is the opening quote by scanning forward for close.
+            if let Some(close) = text[offset + 1..].find(quote) {
+                return Some(offset..offset + 1 + close + 1);
+            }
+            // Maybe it's a closing quote — scan backward for open.
+            if let Some(open) = text[..offset].rfind(quote) {
+                return Some(open..offset + 1);
+            }
+        }
+
+        // For regular word characters, use byte-level scanning.
+        fn is_word_byte(b: u8) -> bool {
+            b.is_ascii_alphanumeric() || b == b'_'
+        }
+
+        // Extend to multi-byte chars for unicode identifiers.
+        fn is_word_char(ch: char) -> bool {
+            ch.is_alphanumeric() || ch == '_'
+        }
+
+        // Find start of word by scanning backward using bytes for ASCII fast path.
+        let bytes = text.as_bytes();
         let mut start = offset;
         while start > 0 {
-            let prev = start.saturating_sub(1);
-            if let Some(ch) = text.chars().nth(prev) {
-                if ch.is_alphanumeric() || ch == '_' {
+            let prev = start - 1;
+            if prev < bytes.len() && bytes[prev].is_ascii() {
+                if is_word_byte(bytes[prev]) {
                     start = prev;
                 } else {
                     break;
                 }
             } else {
-                break;
+                // Multi-byte char: check if the char starting at the previous boundary is a word char.
+                let boundary = text.floor_char_boundary(prev);
+                if let Some(ch) = text[boundary..].chars().next() {
+                    if is_word_char(ch) {
+                        start = boundary;
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
         }
 
-        // Find end of word
+        // Find end of word by scanning forward.
         let mut end = offset;
-        for (idx, ch) in text.char_indices().skip(offset) {
-            if ch.is_alphanumeric() || ch == '_' {
-                end = idx + ch.len_utf8();
+        while end < text.len() {
+            if bytes[end].is_ascii() {
+                if is_word_byte(bytes[end]) {
+                    end += 1;
+                } else {
+                    break;
+                }
             } else {
-                break;
+                if let Some(ch) = text[end..].chars().next() {
+                    if is_word_char(ch) {
+                        end += ch.len_utf8();
+                    } else {
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
         }
 
@@ -3497,12 +3690,40 @@ impl TextEditor {
         }
 
         let cursor_offset = self.cursor.offset(&self.buffer);
-        // The word start is where we'll delete back to on accept, so any text
-        // the user has already typed (the prefix) gets replaced cleanly.
         let word_start = self
             .find_word_range_at_offset(cursor_offset)
             .map(|r| r.start)
             .unwrap_or(cursor_offset);
+
+        // Try to reuse cached completion results for local prefix filtering.
+        let current_prefix = self.buffer.text().get(word_start..cursor_offset)
+            .unwrap_or("")
+            .to_string();
+        if let Some(ref cache) = self.completion_cache {
+            if cache.trigger_offset == word_start
+                && current_prefix.to_lowercase().starts_with(&cache.trigger_prefix.to_lowercase())
+            {
+                let prefix_lower = current_prefix.to_lowercase();
+                let filtered: Vec<CompletionItem> = cache
+                    .all_items
+                    .iter()
+                    .filter(|item| item.label.to_lowercase().contains(&prefix_lower))
+                    .cloned()
+                    .collect();
+                if filtered.is_empty() {
+                    self.completion_menu = None;
+                } else {
+                    self.completion_menu = Some(CompletionMenuState {
+                        items: filtered,
+                        trigger_offset: word_start,
+                        selected_index: 0,
+                        scroll_offset: 0,
+                        scroll_accumulator: 0.0,
+                    });
+                }
+                return;
+            }
+        }
 
         let Some(provider) = self.lsp.completion_provider.clone() else {
             // No real LSP provider — fall back to the built-in keyword list.
@@ -3544,6 +3765,11 @@ impl TextEditor {
                 if items.is_empty() {
                     editor.completion_menu = None;
                 } else {
+                    editor.completion_cache = Some(CompletionCache {
+                        all_items: items.clone(),
+                        trigger_prefix: current_prefix.clone(),
+                        trigger_offset: word_start,
+                    });
                     editor.completion_menu = Some(CompletionMenuState {
                         items,
                         trigger_offset: word_start,
@@ -3562,6 +3788,7 @@ impl TextEditor {
     /// Show completion menu
     pub fn hide_completion_menu(&mut self, _cx: &mut Context<Self>) {
         self.completion_menu = None;
+        self.completion_cache = None;
     }
 
     /// Update completion menu based on current cursor/prefix context.
@@ -3720,6 +3947,31 @@ impl TextEditor {
     /// Alias for show_completion_menu with auto-trigger behavior
     pub fn show_completions_auto(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.trigger_completions(window, cx);
+    }
+
+    /// Schedule completion trigger after a short debounce (100ms).
+    /// Cancels any pending debounce from a previous keystroke.
+    fn trigger_completions_debounced(&mut self, cx: &mut Context<Self>) {
+        self.completion_pending = false;
+        self.completion_debounce_task = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(100))
+                .await;
+
+            this.update(cx, |editor, cx| {
+                editor.completion_pending = true;
+                cx.notify();
+            })?;
+            Ok(())
+        });
+    }
+
+    /// Fire pending debounced completions. Called from render when window is available.
+    pub fn flush_pending_completions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.completion_pending {
+            self.completion_pending = false;
+            self.trigger_completions(window, cx);
+        }
     }
 
     /// Show completions
@@ -4741,10 +4993,16 @@ impl TextEditor {
             }
 
             VimAction::EnterInsert => {
+                if let Some(ref mut v) = self.vim_state {
+                    v.begin_insert_recording();
+                }
                 cx.notify();
                 return true;
             }
             VimAction::EnterNormal => {
+                if let Some(ref mut v) = self.vim_state {
+                    v.end_insert_recording();
+                }
                 // Clear any selection when returning to Normal.
                 self.selection.clear();
                 cx.notify();
@@ -4786,6 +5044,9 @@ impl TextEditor {
                 let start = self.cursor.position();
                 let end = vim::resolve_motion(&motion, &self.cursor, &self.buffer);
                 self.apply_operator_delete(start, end);
+                if let Some(ref mut v) = self.vim_state {
+                    v.record_action(vim::RepeatableAction::DeleteMotion(motion));
+                }
                 cx.notify();
                 return true;
             }
@@ -4910,23 +5171,110 @@ impl TextEditor {
             VimAction::DeleteCharAtCursor => {
                 self.delete_at_cursor(window, cx);
                 self.selection.set_position(self.cursor.position());
+                if let Some(ref mut v) = self.vim_state {
+                    v.record_action(vim::RepeatableAction::DeleteCharAtCursor);
+                }
                 cx.notify();
                 return true;
             }
 
             VimAction::ReplaceChar(ch) => {
-                // Delete the char under cursor and insert the replacement.
                 self.delete_at_cursor(window, cx);
                 self.insert_at_cursor(ch.to_string(), window, cx);
-                // Move cursor back one so it rests on the replacement char.
                 self.cursor.move_left(&self.buffer);
                 self.selection.set_position(self.cursor.position());
+                if let Some(ref mut v) = self.vim_state {
+                    v.record_action(vim::RepeatableAction::ReplaceChar(ch));
+                }
                 cx.notify();
                 return true;
             }
 
             VimAction::TransformCase { .. } => {
                 // Stub: case transformation not yet implemented; just move on.
+                cx.notify();
+                return true;
+            }
+            VimAction::SearchForward => {
+                self.open_find(window, cx);
+                cx.notify();
+                return true;
+            }
+            VimAction::SearchBackward => {
+                self.open_find(window, cx);
+                cx.notify();
+                return true;
+            }
+            VimAction::FindNext => {
+                self.find_next(cx);
+                cx.notify();
+                return true;
+            }
+            VimAction::FindPrev => {
+                self.find_previous(cx);
+                cx.notify();
+                return true;
+            }
+            VimAction::SetMark(name) => {
+                let pos = self.cursor.position();
+                if let Some(ref mut v) = self.vim_state {
+                    v.set_mark(name, pos);
+                }
+                cx.notify();
+                return true;
+            }
+            VimAction::GoToMark(name) => {
+                if let Some(ref v) = self.vim_state {
+                    if let Some(pos) = v.get_mark(name) {
+                        self.cursor.set_position(pos);
+                        self.selection.set_position(pos);
+                        self.scroll_to_cursor();
+                    }
+                }
+                cx.notify();
+                return true;
+            }
+            VimAction::DotRepeat => {
+                if let Some(ref vim_state) = self.vim_state {
+                    if let Some(action) = vim_state.last_action().cloned() {
+                        self.break_undo_group();
+                        match action {
+                            vim::RepeatableAction::InsertText(text) => {
+                                self.insert_at_cursor(&text, window, cx);
+                                if let Some(change) = self.buffer.changes().last().cloned() {
+                                    self.push_undo(change);
+                                }
+                            }
+                            vim::RepeatableAction::DeleteMotion(motion) => {
+                                let start = self.cursor.position();
+                                let end = vim::resolve_motion(&motion, &self.cursor, &self.buffer);
+                                self.apply_operator_delete(start, end);
+                            }
+                            vim::RepeatableAction::ChangeMotion(motion, text) => {
+                                let start = self.cursor.position();
+                                let end = vim::resolve_motion(&motion, &self.cursor, &self.buffer);
+                                self.apply_operator_delete(start, end);
+                                self.insert_at_cursor(&text, window, cx);
+                                if let Some(change) = self.buffer.changes().last().cloned() {
+                                    self.push_undo(change);
+                                }
+                            }
+                            vim::RepeatableAction::ReplaceChar(ch) => {
+                                self.delete_at_cursor(window, cx);
+                                self.insert_at_cursor(ch.to_string(), window, cx);
+                                self.cursor.move_left(&self.buffer);
+                                self.selection.set_position(self.cursor.position());
+                            }
+                            vim::RepeatableAction::DeleteCharAtCursor => {
+                                self.delete_at_cursor(window, cx);
+                                self.selection.set_position(self.cursor.position());
+                            }
+                        }
+                        self.update_syntax_highlights();
+                        self.update_diagnostics();
+                        self.scroll_to_cursor();
+                    }
+                }
                 cx.notify();
                 return true;
             }
@@ -5107,6 +5455,7 @@ impl Render for TextEditor {
         }
 
         self.schedule_syntax_and_folding_analysis(cx);
+        self.flush_pending_completions(window, cx);
 
         div()
             .size_full()
@@ -5147,6 +5496,7 @@ impl Render for TextEditor {
             .on_action(cx.listener(Self::handle_delete_subword_left))
             .on_action(cx.listener(Self::handle_delete_subword_right))
             .on_action(cx.listener(Self::handle_select_all))
+            .on_action(cx.listener(Self::handle_toggle_block_selection))
             .on_action(cx.listener(Self::handle_backspace))
             .on_action(cx.listener(Self::handle_delete))
             .on_action(cx.listener(Self::handle_newline))
@@ -5790,6 +6140,22 @@ impl TextEditor {
         cx.notify();
     }
 
+    fn handle_toggle_block_selection(
+        &mut self,
+        _: &actions::ToggleBlockSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        use crate::selection::SelectionMode;
+        let new_mode = if self.selection.mode() == SelectionMode::Block {
+            SelectionMode::Character
+        } else {
+            SelectionMode::Block
+        };
+        self.selection.set_mode(new_mode);
+        cx.notify();
+    }
+
     // ============================================================================
     // Action handlers — editing
     // ============================================================================
@@ -6368,34 +6734,26 @@ impl TextEditor {
         // Also trigger if there's a word prefix (1+ characters) at cursor
         // This provides basic auto-completion after typing
         if cursor_offset > 0 {
-            // Look back to find the start of the word
+            // Look back from cursor to find the start of the current word.
+            // Walk backwards over bytes using char boundaries.
             let text_content = buffer.text();
-            let mut start = cursor_offset.saturating_sub(1);
-            let mut found_word_char = false;
+            let text_before = if cursor_offset <= text_content.len()
+                && text_content.is_char_boundary(cursor_offset)
+            {
+                &text_content[..cursor_offset]
+            } else {
+                let safe = text_content.floor_char_boundary(cursor_offset.min(text_content.len()));
+                &text_content[..safe]
+            };
 
-            // Convert to char indices
-            let chars: Vec<char> = text_content.chars().collect();
+            let word_len = text_before
+                .chars()
+                .rev()
+                .take_while(|ch| ch.is_alphanumeric() || *ch == '_')
+                .count();
 
-            while start > 0 {
-                if let Some(&ch) = chars.get(start) {
-                    if ch.is_alphanumeric() || ch == '_' {
-                        found_word_char = true;
-                        start = start.saturating_sub(1);
-                    } else {
-                        break;
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            // If we found a word and it's at least 1 character, trigger completions
-            if found_word_char || cursor_offset > 0 {
-                // Check if the prefix is at least 1 character
-                let prefix_start = if found_word_char { start + 1 } else { start };
-                if cursor_offset > prefix_start {
-                    return true;
-                }
+            if word_len > 0 {
+                return true;
             }
         }
 
@@ -6910,6 +7268,8 @@ impl TextEditor {
         ranges.sort_by(|a, b| b.start.cmp(&a.start));
         ranges.dedup_by_key(|r| r.start);
 
+        let mut batch_changes = Vec::new();
+
         for range in ranges {
             if range.start >= range.end {
                 continue;
@@ -6921,14 +7281,19 @@ impl TextEditor {
             }
             if self.buffer.delete(range.clone()).is_ok() {
                 if let Some(change) = self.buffer.changes().last().cloned() {
-                    self.push_undo(change);
+                    batch_changes.push(change);
                 }
             }
             if self.buffer.insert(range.start, &transformed).is_ok() {
                 if let Some(change) = self.buffer.changes().last().cloned() {
-                    self.push_undo(change);
+                    batch_changes.push(change);
                 }
             }
+        }
+
+        if !batch_changes.is_empty() {
+            self.redo_stack.clear();
+            self.undo_stack.push(batch_changes);
         }
 
         self.update_syntax_highlights();
@@ -8192,9 +8557,14 @@ impl EntityInputHandler for TextEditor {
         self.selection.set_position(self.cursor.position());
         self.ime_marked_range = None;
 
+        // Record text for vim dot-repeat.
+        if let Some(ref mut v) = self.vim_state {
+            v.record_insert_char(new_text);
+        }
+
         if Self::should_auto_trigger_completions(new_text, &self.buffer, self.cursor_byte_offset())
         {
-            self.trigger_completions(window, cx);
+            self.trigger_completions_debounced(cx);
         }
 
         cx.notify();
@@ -8272,13 +8642,25 @@ impl EntityInputHandler for TextEditor {
         &mut self,
         range_utf16: std::ops::Range<usize>,
         bounds: Bounds<Pixels>,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
-        // We use the cursor position as a proxy — precise per-character layout
-        // data is not cached between prepaint and this callback.
+        let char_width = self.cached_char_width;
+        let line_height = window.line_height();
+        let gutter_width = gpui::px(self.cached_gutter_width);
+
+        let cursor_pos = self.cursor.position();
+        let scroll_offset = self.scroll_offset;
+
+        let x = bounds.origin.x + gutter_width + char_width * (cursor_pos.column as f32);
+        let y = bounds.origin.y
+            + line_height * (cursor_pos.line as f32 - scroll_offset);
+
         let _ = range_utf16;
-        Some(bounds)
+        Some(Bounds::new(
+            gpui::point(x, y),
+            gpui::size(char_width, line_height),
+        ))
     }
 
     /// Returns the UTF-16 character index closest to a pixel point (for touch / click).
