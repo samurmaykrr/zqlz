@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+#
+# Bumps the workspace patch version only when committing directly to `main`.
+#
+# For PR-based development the CI `bump-version` job in build.yml owns the
+# bump after each successful merge+release, so this hook is intentionally a
+# no-op on every branch other than main.  That prevents spurious version
+# increments and merge conflicts on feature branches.
+#
+# New clone setup:
+#   git config core.hooksPath .githooks
+
+set -euo pipefail
+
+current_branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+
+# Not on main — CI will handle the bump after the PR is merged.
+if [[ "$current_branch" != "main" ]]; then
+    exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+CARGO_TOML="$ROOT/Cargo.toml"
+
+current_version=$(grep -m1 '^version = "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"' "$CARGO_TOML" \
+    | sed 's/version = "\(.*\)"/\1/')
+
+if [[ -z "$current_version" ]]; then
+    echo "bump-version: could not parse version from $CARGO_TOML" >&2
+    exit 1
+fi
+
+IFS='.' read -r major minor patch <<< "$current_version"
+new_version="${major}.${minor}.$((patch + 1))"
+
+tmp=$(mktemp)
+awk -v old="$current_version" -v new="$new_version" '
+    !done && /^version = "/ && index($0, old) {
+        sub(old, new)
+        done = 1
+    }
+    { print }
+' "$CARGO_TOML" > "$tmp" && mv "$tmp" "$CARGO_TOML"
+
+git add "$CARGO_TOML"
+
+echo "bump-version: $current_version → $new_version"
