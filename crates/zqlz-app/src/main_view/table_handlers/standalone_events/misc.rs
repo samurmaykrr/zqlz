@@ -141,7 +141,10 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        viewer_entity.read(cx).database_name().as_deref(),
+    ) else {
         tracing::error!("LoadFkValues: Connection not found: {}", connection_id);
         return;
     };

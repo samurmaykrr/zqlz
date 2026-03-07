@@ -301,7 +301,7 @@
         "deleted": "#f7768e",
         "deleted.background": "#46190C",
         "deleted.border": "#f7768e",
-        "error": "#f7768e",
+        "error": "#ff9fb0",
         "error.background": "#46190C",
         "error.border": "#802207",
         "hidden": "#9E9E9E",

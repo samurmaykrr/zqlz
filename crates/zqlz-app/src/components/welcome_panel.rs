@@ -102,11 +102,15 @@ impl Render for WelcomePanel {
                         div()
                             .size_16()
                             .rounded_2xl()
-                            .bg(theme.accent)
+                            .bg(theme.primary)
                             .flex()
                             .items_center()
                             .justify_center()
-                            .child(h2("Z").weight(FontWeight::BOLD).color(gpui::white())),
+                            .child(
+                                h2("Z")
+                                    .weight(FontWeight::BOLD)
+                                    .color(theme.primary_foreground),
+                            ),
                     )
                     .child(
                         v_flex()

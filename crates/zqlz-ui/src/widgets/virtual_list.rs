@@ -18,16 +18,18 @@ use std::{
 };
 
 use gpui::{
-    Along, AnyElement, App, AvailableSpace, Axis, Bounds, ContentMask, Context,
-    DeferredScrollToItem, Div, Element, ElementId, Entity, GlobalElementId, Half, Hitbox,
+    div, point, px, size, Along, AnyElement, App, AvailableSpace, Axis, Bounds, ContentMask,
+    Context, DeferredScrollToItem, Div, Element, ElementId, Entity, GlobalElementId, Half, Hitbox,
     InteractiveElement, IntoElement, IsZero as _, ListSizingBehavior, Pixels, Point, Render,
     ScrollHandle, ScrollStrategy, Size, Stateful, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window, div, point, px, size,
+    Styled, Window,
 };
 use smallvec::SmallVec;
 
-use crate::widgets::{AxisExt, PixelsExt, scroll::ScrollbarHandle};
+use crate::widgets::{scroll::ScrollbarHandle, AxisExt, PixelsExt};
 
+type RenderItemsFn =
+    Box<dyn for<'a> Fn(Range<usize>, &'a mut Window, &'a mut App) -> SmallVec<[AnyElement; 64]>>;
 struct VirtualListScrollHandleState {
     axis: Axis,
     items_count: usize,
@@ -76,6 +78,12 @@ impl Deref for VirtualListScrollHandle {
 
     fn deref(&self) -> &Self::Target {
         &self.base_handle
+    }
+}
+
+impl Default for VirtualListScrollHandle {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -208,9 +216,7 @@ pub struct VirtualList {
     scroll_handle: VirtualListScrollHandle,
     items_count: usize,
     item_sizes: Rc<Vec<Size<Pixels>>>,
-    render_items: Box<
-        dyn for<'a> Fn(Range<usize>, &'a mut Window, &'a mut App) -> SmallVec<[AnyElement; 64]>,
-    >,
+    render_items: RenderItemsFn,
     sizing_behavior: ListSizingBehavior,
 }
 
@@ -222,7 +228,7 @@ impl Styled for VirtualList {
 
 impl VirtualList {
     pub fn track_scroll(mut self, scroll_handle: &VirtualListScrollHandle) -> Self {
-        self.base = self.base.track_scroll(&scroll_handle);
+        self.base = self.base.track_scroll(scroll_handle);
         self.scroll_handle = scroll_handle.clone();
         self
     }
@@ -277,12 +283,10 @@ impl VirtualList {
                     } else if bounds.bottom() + scroll_offset.y > content_bounds.bottom() {
                         scroll_offset.y = content_bounds.bottom() - bounds.bottom();
                     }
-                } else {
-                    if bounds.left() + scroll_offset.x < content_bounds.left() {
-                        scroll_offset.x = content_bounds.left() - bounds.left();
-                    } else if bounds.right() + scroll_offset.x > content_bounds.right() {
-                        scroll_offset.x = content_bounds.right() - bounds.right();
-                    }
+                } else if bounds.left() + scroll_offset.x < content_bounds.left() {
+                    scroll_offset.x = content_bounds.left() - bounds.left();
+                } else if bounds.right() + scroll_offset.x > content_bounds.right() {
+                    scroll_offset.x = content_bounds.right() - bounds.right();
                 }
             }
         }
@@ -364,85 +368,85 @@ impl Element for VirtualList {
         let mut size_layout = ItemSizeLayout::default();
         let longest_item_size = self.measure_item(None, window, cx);
 
-        let layout_id = self.base.interactivity().request_layout(
-            global_id,
-            inspector_id,
-            window,
-            cx,
-            |style, window, cx| {
-                size_layout = window.with_element_state(
-                    global_id.unwrap(),
-                    |state: Option<ItemSizeLayout>, _window| {
-                        let mut state = state.unwrap_or(ItemSizeLayout::default());
+        let layout_id =
+            self.base.interactivity().request_layout(
+                global_id,
+                inspector_id,
+                window,
+                cx,
+                |style, window, cx| {
+                    size_layout = window.with_element_state(
+                        global_id.unwrap(),
+                        |state: Option<ItemSizeLayout>, _window| {
+                            let mut state = state.unwrap_or_default();
 
-                        // Including the gap between items for calculate the item size
-                        let gap = style
-                            .gap
-                            .along(self.axis)
-                            .to_pixels(font_size.into(), rem_size);
+                            // Including the gap between items for calculate the item size
+                            let gap = style
+                                .gap
+                                .along(self.axis)
+                                .to_pixels(font_size.into(), rem_size);
 
-                        if state.items_sizes != self.item_sizes {
-                            state.items_sizes = self.item_sizes.clone();
-                            // Prepare each item's size by axis
-                            state.sizes = self
-                                .item_sizes
-                                .iter()
-                                .enumerate()
-                                .map(|(i, size)| {
-                                    let size = size.along(self.axis);
-                                    if i + 1 == self.items_count {
-                                        size
-                                    } else {
-                                        size + gap
+                            if state.items_sizes != self.item_sizes {
+                                state.items_sizes = self.item_sizes.clone();
+                                // Prepare each item's size by axis
+                                state.sizes = self
+                                    .item_sizes
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, size)| {
+                                        let size = size.along(self.axis);
+                                        if i + 1 == self.items_count {
+                                            size
+                                        } else {
+                                            size + gap
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+
+                                // Prepare each item's origin by axis
+                                state.origins = state
+                                    .sizes
+                                    .iter()
+                                    .scan(px(0.), |cumulative, size| match self.axis {
+                                        Axis::Horizontal => {
+                                            let x = *cumulative;
+                                            *cumulative += *size;
+                                            Some(x)
+                                        }
+                                        Axis::Vertical => {
+                                            let y = *cumulative;
+                                            *cumulative += *size;
+                                            Some(y)
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+
+                                state.content_size = if self.axis.is_horizontal() {
+                                    Size {
+                                        width: px(state
+                                            .sizes
+                                            .iter()
+                                            .map(|size| size.as_f32())
+                                            .sum::<f32>()),
+                                        height: longest_item_size.height,
                                     }
-                                })
-                                .collect::<Vec<_>>();
-
-                            // Prepare each item's origin by axis
-                            state.origins = state
-                                .sizes
-                                .iter()
-                                .scan(px(0.), |cumulative, size| match self.axis {
-                                    Axis::Horizontal => {
-                                        let x = *cumulative;
-                                        *cumulative += *size;
-                                        Some(x)
+                                } else {
+                                    Size {
+                                        width: longest_item_size.width,
+                                        height: px(state
+                                            .sizes
+                                            .iter()
+                                            .map(|size| size.as_f32())
+                                            .sum::<f32>()),
                                     }
-                                    Axis::Vertical => {
-                                        let y = *cumulative;
-                                        *cumulative += *size;
-                                        Some(y)
-                                    }
-                                })
-                                .collect::<Vec<_>>();
+                                };
+                            }
 
-                            state.content_size = if self.axis.is_horizontal() {
-                                Size {
-                                    width: px(state
-                                        .sizes
-                                        .iter()
-                                        .map(|size| size.as_f32())
-                                        .sum::<f32>()),
-                                    height: longest_item_size.height,
-                                }
-                            } else {
-                                Size {
-                                    width: longest_item_size.width,
-                                    height: px(state
-                                        .sizes
-                                        .iter()
-                                        .map(|size| size.as_f32())
-                                        .sum::<f32>()),
-                                }
-                            };
-                        }
+                            (state.clone(), state)
+                        },
+                    );
 
-                        (state.clone(), state)
-                    },
-                );
-
-                let axis = self.axis;
-                let layout_id =
+                    let axis = self.axis;
                     match self.sizing_behavior {
                         ListSizingBehavior::Infer => {
                             window.with_text_style(style.text_style().cloned(), |window| {
@@ -500,11 +504,9 @@ impl Element for VirtualList {
                             .with_text_style(style.text_style().cloned(), |window| {
                                 window.request_layout(style, None, cx)
                             }),
-                    };
-
-                layout_id
-            },
-        );
+                    }
+                },
+            );
 
         (
             layout_id,

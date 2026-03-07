@@ -22,6 +22,9 @@ use zqlz_ui::widgets::{
     v_flex, ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
 };
 
+// Keyboard actions for the connection sidebar
+actions!(connection_sidebar, [ActivateConnection, DeleteSelectedConnection, ShowContextMenu]);
+
 /// Events emitted by the connection sidebar
 #[derive(Clone, Debug)]
 pub enum ConnectionSidebarEvent {
@@ -268,6 +271,15 @@ pub struct ConnectionSidebar {
     /// Context menu entity for triggers
     trigger_context_menu: Option<Entity<ContextMenuState>>,
 
+    /// Context menu for section headers (Tables, Views, etc.)
+    section_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu for materialized view items
+    materialized_view_context_menu: Option<Entity<ContextMenuState>>,
+
+    /// Context menu for Redis database items
+    redis_db_context_menu: Option<Entity<ContextMenuState>>,
+
     /// Subscriptions to keep alive
     _subscriptions: Vec<Subscription>,
 }
@@ -288,6 +300,9 @@ impl ConnectionSidebar {
             function_context_menu: None,
             procedure_context_menu: None,
             trigger_context_menu: None,
+            section_context_menu: None,
+            materialized_view_context_menu: None,
+            redis_db_context_menu: None,
             _subscriptions: Vec::new(),
         }
     }
@@ -386,6 +401,41 @@ impl ConnectionSidebar {
         self.selected_connection = Some(id);
         cx.emit(ConnectionSidebarEvent::Selected(id));
         cx.notify();
+    }
+
+    /// Activate (Enter) the selected connection: connect if disconnected, toggle expand if connected
+    fn activate_selected_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(conn_id) = self.selected_connection else {
+            return;
+        };
+        let Some(conn) = self.connections.iter().find(|c| c.id == conn_id) else {
+            return;
+        };
+        if conn.is_connecting {
+            return;
+        }
+        if conn.is_connected {
+            self.toggle_expand(conn_id, cx);
+        } else {
+            cx.emit(ConnectionSidebarEvent::Connect(conn_id));
+        }
+    }
+
+    /// Delete the selected connection (emits event — host is responsible for confirmation)
+    fn delete_selected_connection(&mut self, cx: &mut Context<Self>) {
+        let Some(conn_id) = self.selected_connection else {
+            return;
+        };
+        cx.emit(ConnectionSidebarEvent::DeleteConnection(conn_id));
+    }
+
+    /// Open the context menu for the selected connection at a synthetic position
+    fn show_selected_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(conn_id) = self.selected_connection else {
+            return;
+        };
+        let position = window.mouse_position();
+        self.show_connection_context_menu(conn_id, position, window, cx);
     }
 
     /// Toggle connection expand/collapse
@@ -655,6 +705,15 @@ impl Render for ConnectionSidebar {
             .id("connection-sidebar")
             .key_context("ConnectionSidebar")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(|this, _: &ActivateConnection, _, cx| {
+                this.activate_selected_connection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &DeleteSelectedConnection, _, cx| {
+                this.delete_selected_connection(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ShowContextMenu, window, cx| {
+                this.show_selected_context_menu(window, cx);
+            }))
             .size_full()
             .bg(theme.sidebar)
             .font_family(cx.theme().font_family.clone())
@@ -745,6 +804,9 @@ impl Render for ConnectionSidebar {
             .children(self.function_context_menu.clone())
             .children(self.procedure_context_menu.clone())
             .children(self.trigger_context_menu.clone())
+            .children(self.section_context_menu.clone())
+            .children(self.materialized_view_context_menu.clone())
+            .children(self.redis_db_context_menu.clone())
     }
 }
 

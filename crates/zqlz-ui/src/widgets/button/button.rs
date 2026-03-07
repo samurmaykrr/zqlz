@@ -11,6 +11,13 @@ use gpui::{
     StyleRefinement, Styled, Window,
 };
 
+type TooltipData = Option<(
+    SharedString,
+    Option<(Rc<Box<dyn Action>>, Option<SharedString>)>,
+)>;
+type OnClickFn = Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>;
+type OnHoverFn = Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>;
+
 #[derive(Default, Clone, Copy)]
 pub enum ButtonRounded {
     None,
@@ -192,12 +199,9 @@ pub struct Button {
     dropdown_caret: bool,
     size: Size,
     compact: bool,
-    tooltip: Option<(
-        SharedString,
-        Option<(Rc<Box<dyn Action>>, Option<SharedString>)>,
-    )>,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
-    on_hover: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    tooltip: TooltipData,
+    on_click: OnClickFn,
+    on_hover: OnHoverFn,
     loading: bool,
     loading_icon: Option<Icon>,
 
@@ -429,7 +433,7 @@ impl RenderOnce for Button {
         let hoverable = self.hoverable();
         let normal_style = style.normal(self.outline, cx);
         let icon_size = match self.size {
-            Size::Size(v) => Size::Size(v * 0.75),
+            Size::Custom(v) => Size::Custom(v * 0.75),
             _ => self.size,
         };
 
@@ -469,7 +473,7 @@ impl RenderOnce for Button {
                 if self.label.is_none() && self.children.is_empty() {
                     // Icon Button
                     match self.size {
-                        Size::Size(px) => this.size(px),
+                        Size::Custom(px) => this.size(px),
                         Size::XSmall => this.size_5(),
                         Size::Small => this.size_6(),
                         Size::Large | Size::Medium => this.size_8(),
@@ -477,7 +481,7 @@ impl RenderOnce for Button {
                 } else {
                     // Normal Button
                     match self.size {
-                        Size::Size(size) => this.px(size * 0.2),
+                        Size::Custom(size) => this.px(size * 0.2),
                         Size::XSmall => this.h_5().px_1(),
                         Size::Small => this.h_6().px_3().when(self.compact, |this| this.px_1p5()),
                         _ => this.h_8().px_4().when(self.compact, |this| this.px_2()),
@@ -662,28 +666,28 @@ impl ButtonVariant {
             Self::Ghost => cx.theme().foreground,
             Self::Danger => {
                 if outline {
-                    cx.theme().danger
+                    cx.theme().danger_text
                 } else {
                     cx.theme().danger_foreground
                 }
             }
             Self::Warning => {
                 if outline {
-                    cx.theme().warning
+                    cx.theme().warning_text
                 } else {
                     cx.theme().warning_foreground
                 }
             }
             Self::Success => {
                 if outline {
-                    cx.theme().success
+                    cx.theme().success_text
                 } else {
                     cx.theme().success_foreground
                 }
             }
             Self::Info => {
                 if outline {
-                    cx.theme().info
+                    cx.theme().info_text
                 } else {
                     cx.theme().info_foreground
                 }
@@ -750,10 +754,7 @@ impl ButtonVariant {
     }
 
     fn underline(&self, _: &App) -> bool {
-        match self {
-            Self::Link => true,
-            _ => false,
-        }
+        matches!(self, Self::Link)
     }
 
     fn shadow(&self, outline: bool, _: &App) -> bool {

@@ -1,13 +1,13 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    div, prelude::FluentBuilder as _, AnyElement, App, ElementId, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window,
 };
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
-use crate::widgets::{ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt};
 
 #[derive(Default, Copy, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToggleVariant {
@@ -145,13 +145,13 @@ impl RenderOnce for Toggle {
             })
             .when(hoverable, |this| {
                 this.hover(|this| {
-                    this.bg(cx.theme().accent)
-                        .text_color(cx.theme().accent_foreground)
+                    this.bg(cx.theme().primary)
+                        .text_color(cx.theme().primary_foreground)
                 })
             })
             .when(checked, |this| {
-                this.bg(cx.theme().accent)
-                    .text_color(cx.theme().accent_foreground)
+                this.bg(cx.theme().primary)
+                    .text_color(cx.theme().primary_foreground)
             })
             .refine_style(&self.style)
             .children(self.children)

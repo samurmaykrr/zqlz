@@ -17,6 +17,7 @@ pub(in crate::panel) fn render_toolbar(
         DesignerTab::Fields => this.selected_column_index.is_some(),
         DesignerTab::Indexes => this.selected_index_index.is_some(),
         DesignerTab::ForeignKeys => this.selected_fk_index.is_some(),
+        DesignerTab::CheckConstraints => this.selected_check_index.is_some(),
         _ => false,
     };
 
@@ -44,8 +45,9 @@ pub(in crate::panel) fn render_toolbar(
                 .tooltip("Add")
                 .on_click(cx.listener(|this, _, window, cx| match this.active_tab {
                     DesignerTab::Fields => this.add_column(window, cx),
-                    DesignerTab::Indexes => this.add_index(cx),
-                    DesignerTab::ForeignKeys => this.add_foreign_key(cx),
+                    DesignerTab::Indexes => this.add_index(window, cx),
+                    DesignerTab::ForeignKeys => this.add_foreign_key(window, cx),
+                    DesignerTab::CheckConstraints => this.add_check_constraint(window, cx),
                     _ => {}
                 })),
         )
@@ -60,6 +62,7 @@ pub(in crate::panel) fn render_toolbar(
                     DesignerTab::Fields => this.remove_column(cx),
                     DesignerTab::Indexes => this.remove_index(cx),
                     DesignerTab::ForeignKeys => this.remove_foreign_key(cx),
+                    DesignerTab::CheckConstraints => this.remove_check_constraint(cx),
                     _ => {}
                 })),
         )

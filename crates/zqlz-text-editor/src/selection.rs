@@ -19,6 +19,17 @@
 
 use crate::buffer::{Position, Range};
 
+/// The mode of selection (character, line, or block/column).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SelectionMode {
+    /// Standard character selection (single contiguous range).
+    #[default]
+    Character,
+    /// Block/column (rectangular) selection. The anchor and head define
+    /// opposite corners of the rectangle.
+    Block,
+}
+
 /// Selection state for the text editor.
 ///
 /// A selection is defined by an anchor (where selection started) and a head
@@ -33,6 +44,9 @@ pub struct Selection {
 
     /// The head point (where the cursor is)
     head: Position,
+
+    /// Selection mode (character or block).
+    mode: SelectionMode,
 }
 
 impl Selection {
@@ -41,6 +55,7 @@ impl Selection {
         Self {
             anchor: Position::zero(),
             head: Position::zero(),
+            mode: SelectionMode::Character,
         }
     }
 
@@ -49,12 +64,13 @@ impl Selection {
         Self {
             anchor: position,
             head: position,
+            mode: SelectionMode::Character,
         }
     }
 
     /// Create a selection from anchor to head
     pub fn from_anchor_head(anchor: Position, head: Position) -> Self {
-        Self { anchor, head }
+        Self { anchor, head, mode: SelectionMode::Character }
     }
 
     /// Get the anchor position
@@ -141,6 +157,37 @@ impl Selection {
     /// Check if the selection is reversed (head < anchor)
     pub fn is_reversed(&self) -> bool {
         self.head < self.anchor
+    }
+
+    /// Get the current selection mode.
+    pub fn mode(&self) -> SelectionMode {
+        self.mode
+    }
+
+    /// Set the selection mode.
+    pub fn set_mode(&mut self, mode: SelectionMode) {
+        self.mode = mode;
+    }
+
+    /// Returns true if this is a block (column/rectangular) selection.
+    pub fn is_block(&self) -> bool {
+        self.mode == SelectionMode::Block
+    }
+
+    /// For block selections, returns the per-line column ranges forming the rectangle.
+    /// Each entry is `(line, start_col, end_col)`.
+    pub fn block_ranges(&self) -> Vec<(usize, usize, usize)> {
+        if !self.is_block() || !self.has_selection() {
+            return Vec::new();
+        }
+        let top_line = self.anchor.line.min(self.head.line);
+        let bottom_line = self.anchor.line.max(self.head.line);
+        let left_col = self.anchor.column.min(self.head.column);
+        let right_col = self.anchor.column.max(self.head.column);
+
+        (top_line..=bottom_line)
+            .map(|line| (line, left_col, right_col))
+            .collect()
     }
 }
 

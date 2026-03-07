@@ -34,6 +34,10 @@ pub(in crate::panel) fn render_foreign_keys_tab(
                 fk.referenced_columns.join(", "),
                 fk_action_to_sql(&fk.on_delete),
                 fk_action_to_sql(&fk.on_update),
+                this.fk_name_inputs.get(idx).cloned(),
+                this.fk_columns_inputs.get(idx).cloned(),
+                this.fk_ref_table_inputs.get(idx).cloned(),
+                this.fk_ref_columns_inputs.get(idx).cloned(),
             )
         })
         .collect();
@@ -51,6 +55,10 @@ pub(in crate::panel) fn render_foreign_keys_tab(
         referenced_columns,
         on_delete,
         on_update,
+        name_input,
+        columns_input,
+        ref_table_input,
+        ref_columns_input,
     ) in fk_data
     {
         let element = this
@@ -63,6 +71,10 @@ pub(in crate::panel) fn render_foreign_keys_tab(
                 referenced_columns,
                 on_delete,
                 on_update,
+                name_input,
+                columns_input,
+                ref_table_input,
+                ref_columns_input,
                 cx,
             )
             .into_any_element();
@@ -73,11 +85,11 @@ pub(in crate::panel) fn render_foreign_keys_tab(
     let header = this.render_fk_header(cx).into_any_element();
 
     v_flex().size_full().child(toolbar).child(
-        div().id("fk-content").flex_1().overflow_y_scroll().child(
+        div().id("fk-content").flex_1().overflow_scroll().child(
             v_flex()
+                .min_w(px(800.0))
                 .w_full()
                 .p_2()
-                .gap_1()
                 .child(header)
                 .children(fk_row_elements)
                 .when(!has_fks, |this| {

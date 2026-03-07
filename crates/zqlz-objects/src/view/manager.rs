@@ -280,9 +280,10 @@ impl ViewManager {
         };
 
         Ok(format!(
-            "CREATE {}{} AS\n{}{}",
+            "CREATE {} {}{} AS\n{}{}",
             view_type,
-            format!(" {}{}", qualified_name, columns_clause),
+            qualified_name,
+            columns_clause,
             spec.query.trim(),
             check_option_clause
         ))
@@ -311,9 +312,9 @@ impl ViewManager {
         };
 
         Ok(format!(
-            "CREATE OR REPLACE VIEW{}{} AS\n{}{}",
-            format!(" {}{}", qualified_name, columns_clause),
-            "",
+            "CREATE OR REPLACE VIEW {}{} AS\n{}{}",
+            qualified_name,
+            columns_clause,
             spec.query.trim(),
             check_option_clause
         ))

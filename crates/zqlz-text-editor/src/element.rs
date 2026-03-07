@@ -215,6 +215,29 @@ impl EditorElement {
             line_height * (display_slot as f32 - scroll_offset),
         )
     }
+
+    fn cursor_pixel_position_wrapped(
+        cursor_pos: Position,
+        line_height: Pixels,
+        char_width: Pixels,
+        gutter_width: Pixels,
+        base_y: Pixels,
+        wrap_col: usize,
+    ) -> Point<Pixels> {
+        if wrap_col > 0 {
+            let sub_line = cursor_pos.column / wrap_col;
+            let visual_col = cursor_pos.column % wrap_col;
+            point(
+                gutter_width + char_width * (visual_col as f32),
+                base_y + line_height * (sub_line as f32),
+            )
+        } else {
+            point(
+                gutter_width + char_width * (cursor_pos.column as f32),
+                base_y,
+            )
+        }
+    }
 }
 
 impl IntoElement for EditorElement {
@@ -263,9 +286,12 @@ pub struct PrepaintState {
     indent_guides: Vec<IndentGuideData>,
     /// Pre-calculated scrollbar geometry (None when content fits in viewport)
     scrollbar: Option<ScrollbarData>,
-    /// Whether the editor is in soft-wrap mode (affects line painting)
-    #[allow(dead_code)]
-    soft_wrap: bool,
+    /// When soft_wrap is on, shaped lines stored as WrappedLine (with wrap boundaries).
+    /// When None, the `shaped_lines` Vec is used instead.
+    wrapped_shaped_lines: Option<Vec<gpui::WrappedLine>>,
+    /// Y-offset (from bounds.origin.y) for each shaped/wrapped line entry.
+    /// Accounts for scroll offset and any extra height from wrapped lines.
+    line_y_offsets: Vec<Pixels>,
     /// Pixel rectangles for each visible reference highlight (feat-047)
     reference_highlights: Vec<ReferenceHighlightData>,
     /// Inline rename overlay data (feat-048), present while rename dialog is open
@@ -416,6 +442,7 @@ impl Element for EditorElement {
             has_selection,
             sel_start,
             sel_end,
+            block_ranges,
             total_lines,
             completion_menu_cursor_pos,
             syntax_highlights,
@@ -446,12 +473,13 @@ impl Element for EditorElement {
             let hover_state = editor.hover_state(cx);
             let bracket_pairs_snapshot = editor.bracket_highlight_pairs();
 
-            let (has_selection, sel_start, sel_end) = if editor.has_selection() {
+            let (has_selection, sel_start, sel_end, block_ranges) = if editor.has_selection() {
                 let selection = editor.selection();
                 let sel_range = selection.range();
-                (true, sel_range.start, sel_range.end)
+                let block = selection.block_ranges();
+                (true, sel_range.start, sel_range.end, block)
             } else {
-                (false, Position::new(0, 0), Position::new(0, 0))
+                (false, Position::new(0, 0), Position::new(0, 0), Vec::new())
             };
 
             // Snapshot extra cursor positions and their selection ranges for multi-cursor rendering.
@@ -530,6 +558,7 @@ impl Element for EditorElement {
                 has_selection,
                 sel_start,
                 sel_end,
+                block_ranges,
                 total_lines,
                 completion_menu_cursor_pos,
                 syntax_highlights,
@@ -617,8 +646,10 @@ impl Element for EditorElement {
                     break;
                 }
 
-                let run_start = highlight.start.saturating_sub(line_start_offset);
-                let run_end = (highlight.end - line_start_offset).min(line_text.len());
+                let run_start =
+                    line_text.floor_char_boundary(highlight.start.saturating_sub(line_start_offset));
+                let run_end = line_text
+                    .ceil_char_boundary((highlight.end - line_start_offset).min(line_text.len()));
 
                 if run_start < run_end {
                     runs.push((run_start, run_end, highlight.kind));
@@ -686,42 +717,8 @@ impl Element for EditorElement {
 
         let default_text_color = cx.theme().colors.foreground;
 
-        // Shape visible lines with syntax highlighting.
-        // `visible_range` is in display-slot space; `display_lines[slot]` gives the
-        // actual buffer line for each slot, skipping any lines hidden by folds.
-        let mut shaped_lines = Vec::new();
-        for display_slot in visible_range.clone() {
-            let buffer_line = display_lines[display_slot];
-            // Get line text and strip trailing newline (ropey includes it)
-            let line_text = buffer
-                .line(buffer_line)
-                .unwrap_or_default()
-                .trim_end_matches('\n')
-                .trim_end_matches('\r')
-                .to_string();
-
-            // O(log n) rope B-tree lookup — no per-frame walk over all lines.
-            let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
-
-            // Get text runs with syntax highlighting
-            let text_runs = get_line_text_runs(
-                &line_text,
-                line_start_offset,
-                &syntax_highlights,
-                &font,
-                default_text_color,
-            );
-
-            let shaped_line =
-                window
-                    .text_system()
-                    .shape_line(line_text.into(), font_size, &text_runs, None);
-
-            shaped_lines.push(shaped_line);
-        }
-
-        // Calculate character width (use monospace assumption)
-        // Shape a single character to get its width
+        // Calculate character width (use monospace assumption) — needed before shaping
+        // loop to compute wrap column for soft-wrap.
         let single_char = window.text_system().shape_line(
             "M".into(),
             font_size,
@@ -738,13 +735,108 @@ impl Element for EditorElement {
         let char_width = single_char.width;
 
         // ── Gutter (Phase 6) ──────────────────────────────────────────────────
-        // Compute gutter width from the number of digits needed for the last line.
         let gutter_width = Self::calculate_gutter_width(total_lines, font_size, window);
 
+        // Soft-wrap: compute the available text area width and wrap_width for shape_text
+        let wrap_width: Option<Pixels> = if soft_wrap {
+            let text_area = bounds.size.width - gutter_width;
+            if f32::from(text_area) > f32::from(char_width) {
+                Some(text_area)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Shape visible lines with syntax highlighting.
+        // When soft_wrap is on, we use `shape_text` with wrap_width to get WrappedLine
+        // entries that paint across multiple visual rows. Otherwise, `shape_line` is used.
+        let mut shaped_lines: Vec<ShapedLine> = Vec::new();
+        let mut wrapped_shaped_lines: Option<Vec<gpui::WrappedLine>> = None;
+
+        if wrap_width.is_some() {
+            let mut wrapped = Vec::with_capacity(visible_range.len());
+            for display_slot in visible_range.clone() {
+                let buffer_line = display_lines[display_slot];
+                let line_text = buffer
+                    .line(buffer_line)
+                    .unwrap_or_default()
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string();
+                let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
+                let text_runs = get_line_text_runs(
+                    &line_text,
+                    line_start_offset,
+                    &syntax_highlights,
+                    &font,
+                    default_text_color,
+                );
+                match window.text_system().shape_text(
+                    line_text.into(),
+                    font_size,
+                    &text_runs,
+                    wrap_width,
+                    None,
+                ) {
+                    Ok(mut lines) => {
+                        if let Some(wl) = lines.pop() {
+                            wrapped.push(wl);
+                        }
+                    }
+                    Err(_) => {}
+                }
+            }
+            wrapped_shaped_lines = Some(wrapped);
+        } else {
+            for display_slot in visible_range.clone() {
+                let buffer_line = display_lines[display_slot];
+                let line_text = buffer
+                    .line(buffer_line)
+                    .unwrap_or_default()
+                    .trim_end_matches('\n')
+                    .trim_end_matches('\r')
+                    .to_string();
+                let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
+                let text_runs = get_line_text_runs(
+                    &line_text,
+                    line_start_offset,
+                    &syntax_highlights,
+                    &font,
+                    default_text_color,
+                );
+                let shaped_line =
+                    window
+                        .text_system()
+                        .shape_line(line_text.into(), font_size, &text_runs, None);
+                shaped_lines.push(shaped_line);
+            }
+        }
+
+        // Compute per-line y-offsets accounting for soft-wrap extra height.
+        // line_y_offsets[i] is the y-offset (from bounds.origin.y) of shaped entry i.
+        let line_count = if let Some(ref wl) = wrapped_shaped_lines {
+            wl.len()
+        } else {
+            shaped_lines.len()
+        };
+        let mut line_y_offsets = Vec::with_capacity(line_count);
+        {
+            let mut y = -sub_line_offset;
+            for i in 0..line_count {
+                line_y_offsets.push(y);
+                if let Some(ref wl) = wrapped_shaped_lines {
+                    let visual_rows = wl[i].wrap_boundaries().len() as f32 + 1.0;
+                    y += line_height * visual_rows;
+                } else {
+                    y += line_height;
+                }
+            }
+        }
+
         // Push the gutter width and the element's bounds origin back to the
-        // editor so that mouse handlers — which receive positions in window
-        // coordinates — can correctly subtract both offsets when converting
-        // a pixel point to a buffer (line, column) position.
+        // editor so that mouse handlers can correctly convert pixel positions.
         self.editor.update(cx, |editor, _cx| {
             editor.update_cached_gutter_width(f32::from(gutter_width));
             editor.update_cached_char_width(char_width);
@@ -818,31 +910,62 @@ impl Element for EditorElement {
         // ─────────────────────────────────────────────────────────────────────
 
         // Calculate selection rectangles (offset by gutter_width into text area)
+        // Helper to compute y-offset for a given display slot, accounting for soft-wrap
+        let slot_y = |display_slot: usize| -> Pixels {
+            let shaped_idx = display_slot.saturating_sub(visible_range.start);
+            if soft_wrap && shaped_idx < line_y_offsets.len() {
+                line_y_offsets[shaped_idx]
+            } else {
+                line_height * (display_slot as f32 - scroll_offset)
+            }
+        };
+
         let mut selection_rects = Vec::new();
         if has_selection {
-            for line_idx in sel_start.line..=sel_end.line {
-                let Some(&display_slot) = buf_to_display.get(&line_idx) else {
-                    continue;
-                };
-                let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
-                let start_col = if line_idx == sel_start.line {
-                    sel_start.column
-                } else {
-                    0
-                };
-                let end_col = if line_idx == sel_end.line {
-                    sel_end.column
-                } else {
-                    line_len
-                };
-                if start_col < end_col {
-                    selection_rects.push(Bounds::new(
-                        point(
-                            bounds.origin.x + gutter_width + char_width * (start_col as f32),
-                            bounds.origin.y + line_height * (display_slot as f32 - scroll_offset),
-                        ),
-                        size(char_width * ((end_col - start_col) as f32), line_height),
-                    ));
+            if !block_ranges.is_empty() {
+                // Block (rectangular/column) selection: each entry is (line, left_col, right_col)
+                for (line_idx, start_col, end_col) in &block_ranges {
+                    let Some(&display_slot) = buf_to_display.get(line_idx) else {
+                        continue;
+                    };
+                    if start_col < end_col {
+                        selection_rects.push(Bounds::new(
+                            point(
+                                bounds.origin.x + gutter_width + char_width * (*start_col as f32),
+                                bounds.origin.y + slot_y(display_slot),
+                            ),
+                            size(
+                                char_width * ((*end_col - *start_col) as f32),
+                                line_height,
+                            ),
+                        ));
+                    }
+                }
+            } else {
+                for line_idx in sel_start.line..=sel_end.line {
+                    let Some(&display_slot) = buf_to_display.get(&line_idx) else {
+                        continue;
+                    };
+                    let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
+                    let start_col = if line_idx == sel_start.line {
+                        sel_start.column
+                    } else {
+                        0
+                    };
+                    let end_col = if line_idx == sel_end.line {
+                        sel_end.column
+                    } else {
+                        line_len
+                    };
+                    if start_col < end_col {
+                        selection_rects.push(Bounds::new(
+                            point(
+                                bounds.origin.x + gutter_width + char_width * (start_col as f32),
+                                bounds.origin.y + slot_y(display_slot),
+                            ),
+                            size(char_width * ((end_col - start_col) as f32), line_height),
+                        ));
+                    }
                 }
             }
         }
@@ -887,15 +1010,36 @@ impl Element for EditorElement {
 
         // Calculate cursor bounds — only when the cursor's buffer line is visible.
         let cursor_height = line_height * 0.85; // 85% of line height, centered
+        // Wrap column for cursor positioning on soft-wrapped lines
+        let wrap_col = if soft_wrap {
+            let text_area = f32::from(bounds.size.width - gutter_width);
+            let cw = f32::from(char_width);
+            if cw > 0.0 { (text_area / cw).floor() as usize } else { 0 }
+        } else {
+            0
+        };
+
         let cursor_bounds = buf_to_display.get(&cursor_pos.line).map(|&slot| {
-            let cursor_pixel_pos = self.cursor_pixel_position(
-                cursor_pos,
-                line_height,
-                char_width,
-                scroll_offset,
-                gutter_width,
-                slot,
-            );
+            let shaped_idx = slot.saturating_sub(visible_range.start);
+            let cursor_pixel_pos = if soft_wrap && shaped_idx < line_y_offsets.len() {
+                Self::cursor_pixel_position_wrapped(
+                    cursor_pos,
+                    line_height,
+                    char_width,
+                    gutter_width,
+                    line_y_offsets[shaped_idx],
+                    wrap_col,
+                )
+            } else {
+                self.cursor_pixel_position(
+                    cursor_pos,
+                    line_height,
+                    char_width,
+                    scroll_offset,
+                    gutter_width,
+                    slot,
+                )
+            };
             Bounds::new(
                 point(
                     bounds.origin.x + cursor_pixel_pos.x,
@@ -1357,7 +1501,8 @@ impl Element for EditorElement {
             goto_line_panel,
             indent_guides,
             scrollbar,
-            soft_wrap,
+            wrapped_shaped_lines,
+            line_y_offsets,
             reference_highlights,
             rename_overlay,
             context_menu,
@@ -1411,8 +1556,12 @@ impl Element for EditorElement {
         let gutter_text_area_width =
             gutter_width - GUTTER_SEPARATOR_WIDTH - FOLD_CHEVRON_ZONE - GUTTER_PADDING * 2.0;
         for (slot_idx, gutter_line) in prepaint.gutter_lines.iter().enumerate() {
-            let line_y = prepaint.bounds.origin.y + prepaint.line_height * (slot_idx as f32)
-                - prepaint.sub_line_offset;
+            let line_y = if !prepaint.line_y_offsets.is_empty() && slot_idx < prepaint.line_y_offsets.len() {
+                prepaint.bounds.origin.y + prepaint.line_y_offsets[slot_idx]
+            } else {
+                prepaint.bounds.origin.y + prepaint.line_height * (slot_idx as f32)
+                    - prepaint.sub_line_offset
+            };
 
             // Highlight the current-line row across the entire gutter
             if gutter_line.is_active {
@@ -1542,23 +1691,36 @@ impl Element for EditorElement {
         }
 
         // Paint visible text lines, starting after the gutter
-        let mut offset_y = -prepaint.sub_line_offset;
         let text_origin_x = prepaint.bounds.origin.x + gutter_width;
         let origin_y = prepaint.bounds.origin.y;
 
-        for shaped_line in prepaint.shaped_lines.iter() {
-            let line_origin = point(text_origin_x, origin_y + offset_y);
-
-            _ = shaped_line.paint(
-                line_origin,
-                prepaint.line_height,
-                TextAlign::Left,
-                None,
-                window,
-                cx,
-            );
-
-            offset_y += prepaint.line_height;
+        if let Some(ref wrapped_lines) = prepaint.wrapped_shaped_lines {
+            for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
+                let y = prepaint.line_y_offsets.get(i).copied().unwrap_or(gpui::px(0.0));
+                let line_origin = point(text_origin_x, origin_y + y);
+                _ = wrapped_line.paint(
+                    line_origin,
+                    prepaint.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+            }
+        } else {
+            let mut offset_y = -prepaint.sub_line_offset;
+            for shaped_line in prepaint.shaped_lines.iter() {
+                let line_origin = point(text_origin_x, origin_y + offset_y);
+                _ = shaped_line.paint(
+                    line_origin,
+                    prepaint.line_height,
+                    TextAlign::Left,
+                    None,
+                    window,
+                    cx,
+                );
+                offset_y += prepaint.line_height;
+            }
         }
 
         // Paint cursor if focused (already offset for gutter in prepaint)
@@ -1806,16 +1968,30 @@ impl EditorElement {
         let label_color = cx.theme().colors.popover_foreground;
         let detail_color = cx.theme().colors.muted_foreground;
 
-        // ── Pre-shape ALL items ──────────────────────────────────────────────
-        // We must shape every item (not just the visible window) so that the
-        // required menu width is stable across scroll positions and does not jump
-        // frame-to-frame as different items scroll into view.
+        // ── Estimate menu width from all items (cheap), shape only visible ─
+        // Using character count × approximate char width avoids shaping every
+        // item just for width measurement, keeping large completion lists fast.
         let visible_start = menu.scroll_offset;
-        let shaped_items: Vec<ShapedCompletionItem> = {
+        let visible_end = (visible_start + item_count).min(total_items);
+
+        let approx_char_width = font_size * 0.6;
+        let required_width = menu.items.iter().fold(px(0.0), |acc, item| {
+            let label_w = approx_char_width * item.label.len() as f32;
+            let detail_w = item
+                .detail
+                .as_ref()
+                .map(|d| approx_char_width * (d.len() as f32 + 2.0) + detail_gap)
+                .unwrap_or(px(0.0));
+            let row_w = left_inset + label_w + detail_w + right_padding + scrollbar_width;
+            if row_w > acc { row_w } else { acc }
+        });
+
+        let shaped_items: Vec<(usize, ShapedCompletionItem)> = {
             let text_system = window.text_system();
-            menu.items
+            menu.items[visible_start..visible_end]
                 .iter()
-                .map(|item| {
+                .enumerate()
+                .map(|(i, item)| {
                     let accent = kind_accent_color(item.kind_badge.as_deref());
 
                     let label_run = TextRun {
@@ -1834,7 +2010,6 @@ impl EditorElement {
                     );
 
                     let detail = item.detail.as_ref().map(|d| {
-                        // Prefix with an interpunct to visually separate from the label.
                         let text = format!("· {d}");
                         let run = TextRun {
                             len: text.len(),
@@ -1847,27 +2022,15 @@ impl EditorElement {
                         text_system.shape_line(text.into(), font_size * 0.93, &[run], None)
                     });
 
-                    ShapedCompletionItem {
+                    (visible_start + i, ShapedCompletionItem {
                         label,
                         detail,
                         accent,
-                    }
+                    })
                 })
                 .collect()
         }; // text_system borrow released; window is exclusively ours again.
 
-        // Compute the minimum width needed to show the widest item without clipping,
-        // then clamp: at least 240px, at most 600px. Beyond 600px we let items truncate
-        // naturally — identifiers that long are genuinely rare.
-        let required_width = shaped_items.iter().fold(px(0.0), |acc, s| {
-            let detail_w = s
-                .detail
-                .as_ref()
-                .map(|d| d.width + detail_gap)
-                .unwrap_or(px(0.0));
-            let row_w = left_inset + s.label.width + detail_w + right_padding + scrollbar_width;
-            if row_w > acc { row_w } else { acc }
-        });
         let menu_width = required_width.max(px(240.0)).min(px(600.0));
 
         let menu_height = item_height * item_count as f32;
@@ -1923,16 +2086,9 @@ impl EditorElement {
 
         let mouse_pos = window.mouse_position();
 
-        for (slot_idx, shaped) in shaped_items
-            .iter()
-            .skip(visible_start)
-            .take(MAX_COMPLETION_ITEMS)
-            .enumerate()
-        {
-            // `absolute_idx` is this item's position in the full (unsliced) list.
-            let absolute_idx = visible_start + slot_idx;
+        for (slot_idx, (absolute_idx, shaped)) in shaped_items.iter().enumerate() {
             let item_y = menu_y + item_height * slot_idx as f32;
-            let is_selected = absolute_idx == menu.selected_index;
+            let is_selected = *absolute_idx == menu.selected_index;
             let item_rect = Bounds::new(point(menu_x, item_y), size(menu_width, item_height));
             let is_hovered = !is_selected && item_rect.contains(&mouse_pos);
 

@@ -15,8 +15,8 @@ pub struct SavedConnection {
     /// Driver type (sqlite, postgres, mysql, etc.)
     pub driver: String,
 
-    /// Connection parameters (host, port, database, etc.)
-    /// Sensitive values like passwords should be stored separately
+    /// Connection parameters (host, port, database, username, password, etc.)
+    /// All values including sensitive ones are stored here and persisted in params_json.
     pub params: std::collections::HashMap<String, String>,
 
     /// Optional folder/group for organization

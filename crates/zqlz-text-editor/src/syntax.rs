@@ -315,19 +315,29 @@ impl SyntaxHighlighter {
         let kind = if node_kind == "literal" {
             // The `literal` node covers strings, numbers, and keyword literals
             // (TRUE/FALSE/NULL). Look at the raw text to distinguish them.
-            let literal_text = &text[node.start_byte()..node.end_byte()];
-            if literal_text.starts_with('\'') || literal_text.starts_with('"') {
-                HighlightKind::String
-            } else if literal_text
-                .chars()
-                .next()
-                .map(|c| c.is_ascii_digit())
-                .unwrap_or(false)
+            let start = node.start_byte();
+            let end = node.end_byte();
+            if start > text.len()
+                || end > text.len()
+                || !text.is_char_boundary(start)
+                || !text.is_char_boundary(end)
             {
-                HighlightKind::Number
-            } else {
-                // Boolean/null literals have keyword_ children handled below
                 HighlightKind::Default
+            } else {
+                let literal_text = &text[start..end];
+                if literal_text.starts_with('\'') || literal_text.starts_with('"') {
+                    HighlightKind::String
+                } else if literal_text
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
+                    HighlightKind::Number
+                } else {
+                    // Boolean/null literals have keyword_ children handled below
+                    HighlightKind::Default
+                }
             }
         } else if let Some(&mapped) = self.node_type_map.get(node_kind) {
             mapped
@@ -353,18 +363,26 @@ impl SyntaxHighlighter {
         // than named node types, so they won't be caught by the node_type_map above.
         // Detect them by inspecting unnamed leaf nodes directly.
         if !node.is_named() && node.child_count() == 0 {
-            let text_slice = &text[node.start_byte()..node.end_byte()];
-            match text_slice {
-                "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=" | "+" | "-" | "*" | "/" | "%" | "^"
-                | "||" | "&" | "|" | "~" => {
-                    highlights.push(Highlight {
-                        start: node.start_byte(),
-                        end: node.end_byte(),
-                        kind: HighlightKind::Operator,
-                    });
-                    return;
+            let start = node.start_byte();
+            let end = node.end_byte();
+            if start <= text.len()
+                && end <= text.len()
+                && text.is_char_boundary(start)
+                && text.is_char_boundary(end)
+            {
+                let text_slice = &text[start..end];
+                match text_slice {
+                    "=" | "!=" | "<>" | "<" | "<=" | ">" | ">=" | "+" | "-" | "*" | "/" | "%"
+                    | "^" | "||" | "&" | "|" | "~" => {
+                        highlights.push(Highlight {
+                            start: node.start_byte(),
+                            end: node.end_byte(),
+                            kind: HighlightKind::Operator,
+                        });
+                        return;
+                    }
+                    _ => {}
                 }
-                _ => {}
             }
         }
 

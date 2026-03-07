@@ -24,11 +24,14 @@ pub(in crate::panel) fn render_fields_tab(
                 col.nullable,
                 col.is_primary_key,
                 col.is_unique,
+                col.is_auto_increment,
                 this.column_name_inputs.get(idx).cloned(),
                 this.column_length_inputs.get(idx).cloned(),
+                this.column_scale_inputs.get(idx).cloned(),
                 this.column_default_inputs.get(idx).cloned(),
                 this.column_type_selects.get(idx).cloned(),
                 this.column_comment_inputs.get(idx).cloned(),
+                this.column_generated_inputs.get(idx).cloned(),
             )
         })
         .collect();
@@ -41,11 +44,14 @@ pub(in crate::panel) fn render_fields_tab(
         nullable,
         is_primary_key,
         is_unique,
+        is_auto_increment,
         name_input,
         length_input,
+        scale_input,
         default_input,
         type_select,
         comment_input,
+        generated_input,
     ) in column_data
     {
         let element = this
@@ -55,11 +61,14 @@ pub(in crate::panel) fn render_fields_tab(
                 nullable,
                 is_primary_key,
                 is_unique,
+                is_auto_increment,
                 name_input,
                 length_input,
+                scale_input,
                 default_input,
                 type_select,
                 comment_input,
+                generated_input,
                 cx,
             )
             .into_any_element();
@@ -73,12 +82,12 @@ pub(in crate::panel) fn render_fields_tab(
         div()
             .id("fields-content")
             .flex_1()
-            .overflow_y_scroll()
+            .overflow_scroll()
             .child(
                 v_flex()
+                    .min_w(px(1200.0))
                     .w_full()
                     .p_2()
-                    .gap_1()
                     .child(header)
                     .children(column_row_elements),
             ),

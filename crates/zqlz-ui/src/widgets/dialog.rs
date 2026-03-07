@@ -44,7 +44,9 @@ impl Default for DialogButtonProps {
             ok_text: None,
             ok_variant: ButtonVariant::Primary,
             cancel_text: None,
-            cancel_variant: ButtonVariant::default(),
+            // Ghost gives Cancel a transparent background so it reads as secondary/dismiss
+            // rather than competing visually with the solid action button beside it.
+            cancel_variant: ButtonVariant::Ghost,
         }
     }
 }

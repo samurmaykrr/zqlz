@@ -200,9 +200,18 @@ impl SqlDiagnostics {
             let start_pos = text.offset_to_position(start_byte);
             let end_pos = text.offset_to_position(end_byte);
 
-            let error_text = &source[start_byte..end_byte];
+            let error_text = if start_byte <= source.len()
+                && end_byte <= source.len()
+                && source.is_char_boundary(start_byte)
+                && source.is_char_boundary(end_byte)
+            {
+                &source[start_byte..end_byte]
+            } else {
+                ""
+            };
             let preview = if error_text.len() > 30 {
-                format!("{}...", &error_text[..30])
+                let boundary = error_text.floor_char_boundary(30);
+                format!("{}...", &error_text[..boundary])
             } else {
                 error_text.to_string()
             };

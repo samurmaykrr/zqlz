@@ -26,10 +26,11 @@ use zqlz_core::{QueryResult, Value};
 /// assert!(inout.is_input());
 /// assert!(inout.is_output());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ParameterMode {
     /// Input parameter - value is passed to the procedure
+    #[default]
     In,
     /// Output parameter - value is returned from the procedure
     Out,
@@ -46,12 +47,6 @@ impl ParameterMode {
     /// Check if this parameter produces output values
     pub fn is_output(&self) -> bool {
         matches!(self, ParameterMode::Out | ParameterMode::InOut)
-    }
-}
-
-impl Default for ParameterMode {
-    fn default() -> Self {
-        ParameterMode::In
     }
 }
 

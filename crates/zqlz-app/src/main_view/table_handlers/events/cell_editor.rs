@@ -49,7 +49,18 @@ impl MainView {
                     return;
                 };
 
-                let Some(connection) = app_state.connections.get(cell_data.connection_id) else {
+                let database_name = source_viewer
+                    .as_ref()
+                    .and_then(|v| {
+                        v.read_with(cx, |viewer, _cx| viewer.database_name())
+                            .ok()
+                            .flatten()
+                    });
+
+                let Some(connection) = app_state.connections.get_for_database_cached(
+                    cell_data.connection_id,
+                    database_name.as_deref(),
+                ) else {
                     tracing::error!("Connection not found: {}", cell_data.connection_id);
                     return;
                 };

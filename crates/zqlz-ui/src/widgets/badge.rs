@@ -1,9 +1,9 @@
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
-    div, prelude::FluentBuilder, px, relative,
+    div, prelude::FluentBuilder, px, relative, AnyElement, App, Hsla, IntoElement, ParentElement,
+    RenderOnce, StyleRefinement, Styled, Window,
 };
 
-use crate::widgets::{ActiveTheme, Icon, Sizable, Size, StyledExt, h_flex, white};
+use crate::widgets::{h_flex, white, ActiveTheme, Icon, Sizable, Size, StyledExt};
 
 #[derive(Default, Clone)]
 enum BadgeVariant {
@@ -36,6 +36,12 @@ pub struct Badge {
     children: Vec<AnyElement>,
     color: Option<Hsla>,
     size: Size,
+}
+
+impl Default for Badge {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Badge {
@@ -107,7 +113,7 @@ impl RenderOnce for Badge {
 
         let (size, text_size) = match self.size {
             Size::Large => (px(24.), px(14.)),
-            Size::Medium | Size::Size(_) => (px(16.), px(10.)),
+            Size::Medium | Size::Custom(_) => (px(16.), px(10.)),
             Size::Small | Size::XSmall => (px(10.), px(8.)),
         };
 
@@ -136,7 +142,7 @@ impl RenderOnce for Badge {
 
                                 let (top, left) = match self.size {
                                     Size::Large => (px(2.), -px(count.len() as f32)),
-                                    Size::Medium | Size::Size(_) => {
+                                    Size::Medium | Size::Custom(_) => {
                                         (-px(3.), -px(3.) * count.len())
                                     }
                                     Size::Small | Size::XSmall => (-px(4.), -px(4.) * count.len()),

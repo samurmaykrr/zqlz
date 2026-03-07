@@ -87,8 +87,11 @@ pub(in crate::main_view) fn handle_load_more_event(
         return;
     };
 
-    // Get connection from app state
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    // Get connection from app state (use database-specific connection for drivers like postgres)
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        database_name.as_deref(),
+    ) else {
         tracing::error!("LoadMore: Connection not found: {}", connection_id);
         return;
     };

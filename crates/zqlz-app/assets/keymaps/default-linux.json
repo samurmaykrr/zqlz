@@ -58,5 +58,23 @@
       "backspace": "table_viewer::DeleteSelectedRows",
       "delete": "table_viewer::DeleteSelectedRows"
     }
+  },
+  {
+    "context": "ConnectionSidebar",
+    "bindings": {
+      "enter": "connection_sidebar::ActivateConnection",
+      "backspace": "connection_sidebar::DeleteSelectedConnection",
+      "delete": "connection_sidebar::DeleteSelectedConnection",
+      "shift-f10": "connection_sidebar::ShowContextMenu"
+    }
+  },
+  {
+    "context": "ObjectsPanel",
+    "bindings": {
+      "enter": "objects_panel::OpenSelected",
+      "backspace": "objects_panel::DeleteSelected",
+      "delete": "objects_panel::DeleteSelected",
+      "ctrl-n": "objects_panel::NewObject"
+    }
   }
 ]

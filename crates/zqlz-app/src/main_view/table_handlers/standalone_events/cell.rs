@@ -49,7 +49,10 @@ pub(in crate::main_view) fn handle_save_cell_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        database_name.as_deref(),
+    ) else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };

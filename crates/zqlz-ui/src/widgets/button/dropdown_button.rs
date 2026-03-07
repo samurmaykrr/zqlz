@@ -1,11 +1,12 @@
 use gpui::{
-    App, Context, Corner, Corners, Edges, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement, RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder,
+    div, prelude::FluentBuilder, App, Context, Corner, Corners, Edges, ElementId,
+    InteractiveElement as _, IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled,
+    Window,
 };
 
 use crate::widgets::{
-    Disableable, IconName, Selectable, Sizable, Size, StyledExt as _,
     menu::{DropdownMenu, PopupMenu},
+    Disableable, IconName, Selectable, Sizable, Size, StyledExt as _,
 };
 
 use super::{Button, ButtonRounded, ButtonVariant, ButtonVariants};

@@ -103,8 +103,12 @@ impl ConnectionSidebar {
                     .cursor_pointer()
                     .when(is_selected, |this| this.bg(theme.list_active))
                     .hover(|this| this.bg(theme.list_hover))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.select_connection(conn_id, cx);
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.click_count() == 2 {
+                            this.activate_selected_connection(cx);
+                        } else {
+                            this.select_connection(conn_id, cx);
+                        }
                     }))
                     .on_mouse_down(
                         MouseButton::Right,
@@ -235,8 +239,11 @@ impl ConnectionSidebar {
                                         .px_2()
                                         .py(px(2.0))
                                         .rounded_sm()
-                                        .bg(theme.accent.opacity(0.6))
-                                        .child(caption("Connecting...").color(gpui::white())),
+                                        .bg(theme.primary.opacity(0.6))
+                                        .child(
+                                            caption("Connecting...")
+                                                .color(theme.primary_foreground),
+                                        ),
                                 )
                             })
                             .when(!is_connected && !is_connecting, |this| {
@@ -246,11 +253,11 @@ impl ConnectionSidebar {
                                         .px_2()
                                         .py(px(2.0))
                                         .rounded_sm()
-                                        .bg(theme.accent)
+                                        .bg(theme.primary)
                                         .cursor_pointer()
                                         // Lighten on hover rather than darken — darkening feels
                                         // like a press state, while lightening signals interactivity.
-                                        .hover(|el| el.bg(theme.accent.lighten(0.05)))
+                                        .hover(|el| el.bg(theme.primary.lighten(0.05)))
                                         .on_click(cx.listener(
                                             move |_this, _event: &ClickEvent, _, cx| {
                                                 cx.stop_propagation();
@@ -261,7 +268,7 @@ impl ConnectionSidebar {
                                                 cx.emit(ConnectionSidebarEvent::Connect(conn_id));
                                             },
                                         ))
-                                        .child(caption("Connect").color(gpui::white())),
+                                        .child(caption("Connect").color(theme.primary_foreground)),
                                 )
                             }),
                     ),

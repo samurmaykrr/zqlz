@@ -45,6 +45,8 @@ pub struct ThemeColor {
     pub danger_active: Hsla,
     /// Danger text color.
     pub danger_foreground: Hsla,
+    /// Accessible text color for danger labels and outline buttons on neutral backgrounds.
+    pub danger_text: Hsla,
     /// Danger hover background color.
     pub danger_hover: Hsla,
     /// Description List label background color.
@@ -63,6 +65,8 @@ pub struct ThemeColor {
     pub info_active: Hsla,
     /// Info text color.
     pub info_foreground: Hsla,
+    /// Accessible text color for info labels and outline buttons on neutral backgrounds.
+    pub info_text: Hsla,
     /// Info hover background color.
     pub info_hover: Hsla,
     /// Border color for inputs such as Input, Select, etc.
@@ -145,6 +149,8 @@ pub struct ThemeColor {
     pub success: Hsla,
     /// Success text color.
     pub success_foreground: Hsla,
+    /// Accessible text color for success labels and outline buttons on neutral backgrounds.
+    pub success_text: Hsla,
     /// Success hover background color.
     pub success_hover: Hsla,
     /// Success active background color.
@@ -199,8 +205,12 @@ pub struct ThemeColor {
     pub warning_hover: Hsla,
     /// Warning foreground color.
     pub warning_foreground: Hsla,
+    /// Accessible text color for warning labels and outline buttons on neutral backgrounds.
+    pub warning_text: Hsla,
     /// Overlay background color.
     pub overlay: Hsla,
+    /// Full-screen modal backdrop/scrim color (semi-opaque dark overlay behind modals).
+    pub overlay_backdrop: Hsla,
     /// Window border color.
     ///
     /// # Platform specific:

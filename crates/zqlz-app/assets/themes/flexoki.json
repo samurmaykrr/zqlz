@@ -28,7 +28,7 @@
         "tab_bar.background": "#F2F0E5",
         "tab.active_background": "#FFFCF0",
         "tab.inactive_background": "#F2F0E5",
-        "tab.text": "#8d8986",
+        "tab.text": "#5e5b57",
         "tab.active_text": "#100F0F",
         "title_bar.background": "#F2F0E5",
         "title_bar.inactive_background": "#F2F0E5",
@@ -110,7 +110,7 @@
         "unreachable": "#6F6E69",
         "unreachable.background": "#F2F0E5",
         "unreachable.border": "#6F6E69",
-        "warning": "#AD8301",
+        "warning": "#7a5c00",
         "warning.background": "#FAEEC6",
         "warning.border": "#AD8301",
         "syntax": {

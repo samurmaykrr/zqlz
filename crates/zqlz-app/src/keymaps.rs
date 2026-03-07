@@ -279,6 +279,28 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "versioning::RestoreVersion" => bind!(RestoreVersion),
         "versioning::SaveVersion" => bind!(SaveVersion),
 
+        // === connection_sidebar namespace ===
+        "connection_sidebar::ActivateConnection" => {
+            bind!(zqlz_connection::widgets::ActivateConnection)
+        }
+        "connection_sidebar::DeleteSelectedConnection" => {
+            bind!(zqlz_connection::widgets::DeleteSelectedConnection)
+        }
+        "connection_sidebar::ShowContextMenu" => {
+            bind!(zqlz_connection::widgets::ShowContextMenu)
+        }
+
+        // === objects_panel namespace ===
+        "objects_panel::OpenSelected" => {
+            bind!(zqlz_schema::OpenSelected)
+        }
+        "objects_panel::DeleteSelected" => {
+            bind!(zqlz_schema::DeleteSelected)
+        }
+        "objects_panel::NewObject" => {
+            bind!(zqlz_schema::NewObject)
+        }
+
         // Unknown action
         _ => false,
     }

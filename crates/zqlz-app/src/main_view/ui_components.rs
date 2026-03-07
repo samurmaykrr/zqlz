@@ -1,8 +1,11 @@
 // UI rendering methods for MainView
 
+use std::time::Duration;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    animation::cubic_bezier,
     button::{Button, ButtonVariants},
     caption, h_flex,
     tooltip::Tooltip,
@@ -19,17 +22,22 @@ use crate::AppMenuBarGlobal;
 use super::MainView;
 
 impl MainView {
-    /// Render the command palette as an overlay
+    /// Render the command palette as an overlay with open/close animations.
     pub(super) fn render_command_palette_overlay(
         &self,
         cx: &mut Context<Self>,
     ) -> Option<impl IntoElement> {
         let palette = self.command_palette.as_ref()?;
         let theme = cx.theme();
+        let closing = self.command_palette_closing;
+
+        let animation = Animation::new(Duration::from_secs_f64(0.2))
+            .with_easing(cubic_bezier(0.32, 0.72, 0., 1.));
 
         Some(
             div()
                 .id("command-palette-overlay")
+                .occlude()
                 .absolute()
                 .inset_0()
                 .on_mouse_down(MouseButton::Left, |_event, _, _| {
@@ -44,15 +52,14 @@ impl MainView {
                         .id("command-palette-backdrop")
                         .absolute()
                         .inset_0()
-                        .bg(theme.background.opacity(0.5))
+                        .bg(theme.overlay)
                         .on_mouse_down(MouseButton::Left, {
                             cx.listener(|this, _event, _window, cx| {
-                                this.command_palette = None;
-                                cx.notify();
+                                this.begin_dismiss_command_palette(cx);
                             })
                         }),
                 )
-                // Centered palette container
+                // Centered palette container with slide + shadow animation
                 .child(
                     div()
                         .absolute()
@@ -61,7 +68,32 @@ impl MainView {
                         .right_0()
                         .flex()
                         .justify_center()
-                        .child(palette.clone()),
+                        .child(palette.clone())
+                        .with_animation(
+                            ElementId::NamedInteger("palette-slide".into(), closing as u64),
+                            animation.clone(),
+                            move |this, delta| {
+                                if closing {
+                                    let y_offset = delta * px(-12.0);
+                                    this.top(px(80.0) + y_offset).opacity(1.0 - delta)
+                                } else {
+                                    let y_offset = px(-20.0) + delta * px(20.0);
+                                    this.top(px(80.0) + y_offset).opacity(delta)
+                                }
+                            },
+                        ),
+                )
+                // Fade the entire overlay (backdrop + content together)
+                .with_animation(
+                    ElementId::NamedInteger("palette-fade".into(), closing as u64),
+                    animation,
+                    move |this, delta| {
+                        if closing {
+                            this.opacity(1.0 - delta)
+                        } else {
+                            this.opacity(delta)
+                        }
+                    },
                 ),
         )
     }

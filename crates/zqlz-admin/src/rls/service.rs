@@ -76,9 +76,10 @@ impl PolicyCommand {
 /// let ptype = PolicyType::Permissive;
 /// assert_eq!(ptype.as_sql(), "PERMISSIVE");
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PolicyType {
     /// Permissive - policies are combined with OR
+    #[default]
     Permissive,
     /// Restrictive - policies are combined with AND
     Restrictive,
@@ -91,12 +92,6 @@ impl PolicyType {
             PolicyType::Permissive => "PERMISSIVE",
             PolicyType::Restrictive => "RESTRICTIVE",
         }
-    }
-}
-
-impl Default for PolicyType {
-    fn default() -> Self {
-        PolicyType::Permissive
     }
 }
 
@@ -348,15 +343,15 @@ impl RlsService {
         }
 
         // Validate expressions are not empty strings
-        if let Some(expr) = &policy.using_expr {
-            if expr.trim().is_empty() {
-                return Err(RlsError::EmptyExpression);
-            }
+        if let Some(expr) = &policy.using_expr
+            && expr.trim().is_empty()
+        {
+            return Err(RlsError::EmptyExpression);
         }
-        if let Some(expr) = &policy.check_expr {
-            if expr.trim().is_empty() {
-                return Err(RlsError::EmptyExpression);
-            }
+        if let Some(expr) = &policy.check_expr
+            && expr.trim().is_empty()
+        {
+            return Err(RlsError::EmptyExpression);
         }
 
         Ok(())

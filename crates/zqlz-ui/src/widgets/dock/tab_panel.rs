@@ -11,12 +11,14 @@ use rust_i18n::t;
 
 use crate::widgets::{
     ActiveTheme, AxisExt, IconName, Placement, Selectable, Sizable,
-    button::{Button, ButtonVariants as _},
+    button::{Button, ButtonVariant, ButtonVariants as _},
+    dialog::DialogButtonProps,
     dock::PanelInfo,
     h_flex,
     menu::{DropdownMenu, PopupMenu},
     tab::{Tab, TabBar},
     v_flex,
+    WindowExt as _,
 };
 
 use super::{
@@ -385,6 +387,41 @@ impl TabPanel {
         if let Some(panel) = panel {
             // Check if this panel is closable
             if !panel.closable(cx) {
+                return;
+            }
+
+            // Check for unsaved changes and prompt if needed
+            if panel.has_unsaved_changes(cx) {
+                let panel_for_close = panel.clone();
+                let tab_panel = cx.entity().downgrade();
+
+                window.open_dialog(cx, move |dialog, _window, _cx| {
+                    let panel_for_close = panel_for_close.clone();
+                    let tab_panel = tab_panel.clone();
+
+                    dialog
+                        .title("Unsaved Changes")
+                        .child(
+                            div()
+                                .text_sm()
+                                .child("This tab has unsaved changes. Are you sure you want to close it?"),
+                        )
+                        .confirm()
+                        .button_props(
+                            DialogButtonProps::default()
+                                .ok_text("Discard & Close")
+                                .ok_variant(ButtonVariant::Danger)
+                                .cancel_text("Cancel"),
+                        )
+                        .on_ok(move |_, window, cx| {
+                            if let Some(tab_panel) = tab_panel.upgrade() {
+                                tab_panel.update(cx, |this, cx| {
+                                    this.remove_panel(panel_for_close.clone(), window, cx);
+                                });
+                            }
+                            true
+                        })
+                });
                 return;
             }
 

@@ -17,8 +17,11 @@ pub(super) mod state;
 
 mod connection_menu;
 mod function_menu;
+mod materialized_view_menu;
 mod procedure_menu;
 mod query_menu;
+mod redis_menu;
+mod section_menu;
 mod sidebar_menu;
 mod table_menu;
 mod trigger_menu;

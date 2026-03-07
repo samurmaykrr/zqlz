@@ -16,12 +16,13 @@ use serde::{Deserialize, Serialize};
 /// assert!(timing.is_before());
 /// assert!(!timing.is_instead_of());
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerTiming {
     /// Execute before the triggering statement
     Before,
     /// Execute after the triggering statement
+    #[default]
     After,
     /// Execute instead of the triggering statement (views only)
     InsteadOf,
@@ -50,12 +51,6 @@ impl TriggerTiming {
             TriggerTiming::After => "AFTER",
             TriggerTiming::InsteadOf => "INSTEAD OF",
         }
-    }
-}
-
-impl Default for TriggerTiming {
-    fn default() -> Self {
-        TriggerTiming::After
     }
 }
 
@@ -103,12 +98,13 @@ impl TriggerEvent {
 }
 
 /// Level at which the trigger executes
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum TriggerLevel {
     /// Fire once per statement (default)
     Statement,
     /// Fire once per affected row
+    #[default]
     Row,
 }
 
@@ -119,12 +115,6 @@ impl TriggerLevel {
             TriggerLevel::Statement => "FOR EACH STATEMENT",
             TriggerLevel::Row => "FOR EACH ROW",
         }
-    }
-}
-
-impl Default for TriggerLevel {
-    fn default() -> Self {
-        TriggerLevel::Row
     }
 }
 

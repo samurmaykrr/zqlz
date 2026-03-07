@@ -200,9 +200,9 @@ impl SchemaDetailsPanel {
                                             .px_2()
                                             .py(px(2.0))
                                             .rounded_sm()
-                                            .bg(theme.accent)
+                                            .bg(theme.primary)
                                             .text_xs()
-                                            .text_color(gpui::white())
+                                            .text_color(theme.primary_foreground)
                                             .flex_shrink_0()
                                             .child(details.object_type.clone()),
                                     )
@@ -271,7 +271,6 @@ impl SchemaDetailsPanel {
                     .overflow_hidden()
                     .children(columns.iter().enumerate().map(|(idx, col)| {
                         h_flex()
-                            .w_full()
                             .px_2()
                             .py_1()
                             .gap_2()
@@ -281,9 +280,15 @@ impl SchemaDetailsPanel {
                             } else {
                                 theme.table
                             })
-                            .child(h_flex().gap_1().when(col.primary_key, |this| {
-                                this.child(div().text_xs().text_color(theme.warning).child("PK"))
-                            }))
+                            .when(col.primary_key, |this| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .flex_shrink_0()
+                                        .text_color(theme.warning)
+                                        .child("PK"),
+                                )
+                            })
                             .child(
                                 div()
                                     .flex_1()

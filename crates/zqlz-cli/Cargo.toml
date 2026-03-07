@@ -1,0 +1,40 @@
+[package]
+name = "zqlz-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "zqlz"
+path = "src/cli.rs"
+
+[dependencies]
+# Argument parsing
+clap = { version = "4", features = ["derive", "env"] }
+
+# Async runtime
+tokio = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Database / connection layer (no GPUI)
+zqlz-core = { workspace = true }
+zqlz-drivers = { workspace = true }
+
+# Sync primitives (none needed currently)
+
+# Storage (read the shared SQLite DB)
+rusqlite = { workspace = true }
+
+# Utilities
+uuid = { workspace = true }
+chrono = { workspace = true }
+anyhow = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# Terminal output formatting
+comfy-table = "7"

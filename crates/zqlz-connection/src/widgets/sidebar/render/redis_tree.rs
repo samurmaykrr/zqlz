@@ -109,6 +109,20 @@ impl ConnectionSidebar {
                 move |this, _, _, cx| {
                     this.toggle_redis_databases_expand(conn_id, cx);
                 },
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "redis_databases",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 1,
@@ -141,7 +155,20 @@ impl ConnectionSidebar {
                                 database_index: db_index,
                             });
                         },
-                        None::<fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>)>,
+                        Some(
+                            move |this: &mut Self,
+                                  event: &MouseDownEvent,
+                                  window: &mut Window,
+                                  cx: &mut Context<Self>| {
+                                this.show_redis_db_context_menu(
+                                    conn_id,
+                                    db_index,
+                                    event.position,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        ),
                         list_hover,
                         2,
                         cx,
@@ -169,6 +196,20 @@ impl ConnectionSidebar {
                 move |this, _, _, cx| {
                     this.toggle_queries_expand(conn_id, cx);
                 },
+                Some(
+                    move |this: &mut Self,
+                          event: &MouseDownEvent,
+                          window: &mut Window,
+                          cx: &mut Context<Self>| {
+                        this.show_section_context_menu(
+                            conn_id,
+                            "queries",
+                            event.position,
+                            window,
+                            cx,
+                        );
+                    },
+                ),
                 muted_foreground,
                 list_hover,
                 1,

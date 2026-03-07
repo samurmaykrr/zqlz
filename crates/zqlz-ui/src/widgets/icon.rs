@@ -369,7 +369,7 @@ impl RenderOnce for Icon {
             .text_color(text_color)
             .when(!has_base_size, |this| this.size(text_size))
             .when_some(self.size, |this, size| match size {
-                Size::Size(px) => this.size(px),
+                Size::Custom(px) => this.size(px),
                 Size::XSmall => this.size_3(),
                 Size::Small => this.size_3p5(),
                 Size::Medium => this.size_4(),
@@ -402,7 +402,7 @@ impl Render for Icon {
             .text_color(text_color)
             .when(!has_base_size, |this| this.size(text_size))
             .when_some(self.size, |this, size| match size {
-                Size::Size(px) => this.size(px),
+                Size::Custom(px) => this.size(px),
                 Size::XSmall => this.size_3(),
                 Size::Small => this.size_3p5(),
                 Size::Medium => this.size_4(),

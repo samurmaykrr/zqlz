@@ -100,7 +100,7 @@ impl MainView {
                                 div()
                                     .text_xs()
                                     .when_some(error, |this, err| {
-                                        this.text_color(gpui::red()).child(err)
+                                        this.text_color(cx.theme().danger_text).child(err)
                                     })
                                     .when(error_message.read(cx).is_none(), |this| {
                                         this.text_color(cx.theme().muted_foreground)

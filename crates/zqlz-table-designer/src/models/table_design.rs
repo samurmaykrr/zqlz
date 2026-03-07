@@ -4,7 +4,8 @@ use std::collections::HashSet;
 use zqlz_core::TableDetails;
 
 use super::{
-    ColumnDesign, DatabaseDialect, ForeignKeyDesign, IndexDesign, TableOptions, ValidationError,
+    CheckConstraintDesign, ColumnDesign, DatabaseDialect, ForeignKeyDesign, IndexDesign,
+    TableOptions, ValidationError,
 };
 
 /// Table design model for creating/editing tables
@@ -28,6 +29,8 @@ pub struct TableDesign {
     pub comment: Option<String>,
     /// Whether this is a new table (vs editing existing)
     pub is_new: bool,
+    /// Check constraints
+    pub check_constraints: Vec<CheckConstraintDesign>,
 }
 
 impl TableDesign {
@@ -43,6 +46,7 @@ impl TableDesign {
             options: TableOptions::default(),
             comment: None,
             is_new: true,
+            check_constraints: Vec::new(),
         }
     }
 
@@ -81,6 +85,7 @@ impl TableDesign {
             options: TableOptions::default(),
             comment: details.info.comment,
             is_new: false,
+            check_constraints: Vec::new(),
         }
     }
 
@@ -249,5 +254,14 @@ impl TableDesign {
     /// Get primary key columns
     pub fn primary_key_columns(&self) -> Vec<&ColumnDesign> {
         self.columns.iter().filter(|c| c.is_primary_key).collect()
+    }
+
+    pub fn duplicate_column(&mut self, index: usize) {
+        if let Some(col) = self.columns.get(index).cloned() {
+            let mut new_col = col;
+            new_col.column_id = uuid::Uuid::new_v4();
+            new_col.name = format!("{}_copy", new_col.name);
+            self.columns.insert(index + 1, new_col);
+        }
     }
 }

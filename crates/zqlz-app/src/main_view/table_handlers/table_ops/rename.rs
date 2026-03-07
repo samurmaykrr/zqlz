@@ -4,6 +4,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme,
     WindowExt,
     input::{Input, InputState},
     v_flex,
@@ -108,7 +109,7 @@ impl MainView {
                                     .text_xs()
                                     .h(px(16.0))
                                     .when_some(error, |this, err| {
-                                        this.text_color(gpui::red()).child(err)
+                                        this.text_color(cx.theme().danger_text).child(err)
                                     })
                             }),
                     )
