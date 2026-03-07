@@ -5,11 +5,13 @@ on:
     branches:
       - main
 
+# Every job skips itself when the triggering commit is the bot's version-bump
+# commit (identified by the "chore: bump version" prefix), which prevents the
+# workflow from re-entering itself after the bump-version job pushes to main.
+
 jobs:
-  # Reads the workspace version from Cargo.toml, creates (or updates) the
-  # GitHub Release for that version tag, and passes the version string to the
-  # build jobs so they all upload to the same release without racing.
   create-release:
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -33,6 +35,7 @@ jobs:
 
   build:
     needs: create-release
+    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -107,3 +110,46 @@ jobs:
         with:
           tag_name: v${{ needs.create-release.outputs.version }}
           files: artifacts/*
+
+  # Runs after every platform build succeeds. Bumps the patch version in
+  # Cargo.toml and pushes it directly to main so the next PR starts from the
+  # correct base version without any manual intervention.
+  #
+  # The commit uses the GITHUB_TOKEN bot identity. GitHub Actions does not
+  # re-trigger workflows for pushes made with GITHUB_TOKEN, so there is no
+  # infinite loop — the guard above is a belt-and-suspenders measure.
+  bump-version:
+    needs: build
+    if: >-
+      !startsWith(github.event.head_commit.message, 'chore: bump version') &&
+      needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Fetch the tip of main at job start so concurrent pushes don't cause
+          # a non-fast-forward rejection.
+          ref: main
+
+      - name: Bump patch version
+        id: bump
+        run: |
+          current=$(grep -m1 '^version = "[0-9]' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+          IFS='.' read -r major minor patch <<< "$current"
+          new="${major}.${minor}.$((patch + 1))"
+          awk -v old="$current" -v new="$new" '
+            !done && /^version = "/ && index($0, old) { sub(old, new); done=1 }
+            { print }
+          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
+          echo "previous=$current" >> "$GITHUB_OUTPUT"
+          echo "version=$new" >> "$GITHUB_OUTPUT"
+
+      - name: Commit and push version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml
+          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }}"
+          git push origin main
