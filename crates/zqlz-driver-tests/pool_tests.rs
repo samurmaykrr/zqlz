@@ -17,13 +17,13 @@ mod pool_tests {
     use zqlz_connection::pool::{PoolConfig, PoolStats};
     use zqlz_core::Connection;
 
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
 
     /// Test pool configuration creation and validation
     #[test]
     fn test_pool_config_creation() -> anyhow::Result<()> {
         let config = PoolConfig::new(2, 10);
-        
+
         assert_eq!(config.min_size(), 2, "Min size should be 2");
         assert_eq!(config.max_size(), 10, "Max size should be 10");
         assert_eq!(
@@ -73,7 +73,7 @@ mod pool_tests {
     #[test]
     fn test_pool_config_default() -> anyhow::Result<()> {
         let config = PoolConfig::default();
-        
+
         assert_eq!(config.min_size(), 1, "Default min_size should be 1");
         assert_eq!(config.max_size(), 10, "Default max_size should be 10");
 
@@ -113,7 +113,7 @@ mod pool_tests {
     #[test]
     fn test_pool_stats_creation() -> anyhow::Result<()> {
         let stats = PoolStats::new(10, 6, 4, 2);
-        
+
         assert_eq!(stats.total(), 10, "Total connections should be 10");
         assert_eq!(stats.idle(), 6, "Idle connections should be 6");
         assert_eq!(stats.active(), 4, "Active connections should be 4");
@@ -151,7 +151,10 @@ mod pool_tests {
         assert!(full.is_full(), "Pool with 0 idle should be full");
 
         let partial = PoolStats::new(10, 5, 5, 0);
-        assert!(!partial.is_full(), "Pool with idle connections should not be full");
+        assert!(
+            !partial.is_full(),
+            "Pool with idle connections should not be full"
+        );
 
         let empty = PoolStats::new(0, 0, 0, 0);
         assert!(!empty.is_full(), "Empty pool should not be full");
@@ -162,12 +165,15 @@ mod pool_tests {
     #[test]
     fn test_pool_stats_serialization() -> anyhow::Result<()> {
         let stats = PoolStats::new(10, 6, 4, 2);
-        
+
         let json = serde_json::to_string(&stats).context("Failed to serialize stats")?;
         let deserialized: PoolStats =
             serde_json::from_str(&json).context("Failed to deserialize stats")?;
-        
-        assert_eq!(stats, deserialized, "Serialized stats should match original");
+
+        assert_eq!(
+            stats, deserialized,
+            "Serialized stats should match original"
+        );
 
         Ok(())
     }
@@ -215,10 +221,7 @@ mod pool_tests {
         let conn2 = test_connection(driver)
             .await
             .context("Failed to create second connection")?;
-        assert!(
-            !conn2.is_closed(),
-            "Second connection should be valid"
-        );
+        assert!(!conn2.is_closed(), "Second connection should be valid");
 
         Ok(())
     }
@@ -239,11 +242,7 @@ mod pool_tests {
                     .await
                     .context(format!("Task {} failed to get connection", i))?;
 
-                assert!(
-                    !conn.is_closed(),
-                    "Task {} got closed connection",
-                    i
-                );
+                assert!(!conn.is_closed(), "Task {} got closed connection", i);
 
                 sleep(Duration::from_millis(50)).await;
                 Ok::<_, anyhow::Error>(())
@@ -270,10 +269,7 @@ mod pool_tests {
     #[tokio::test]
     async fn test_pool_timeout(#[case] driver: TestDriver) -> anyhow::Result<()> {
         // Test that connection creation doesn't hang indefinitely
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            test_connection(driver)
-        ).await;
+        let result = tokio::time::timeout(Duration::from_secs(10), test_connection(driver)).await;
 
         assert!(
             result.is_ok(),

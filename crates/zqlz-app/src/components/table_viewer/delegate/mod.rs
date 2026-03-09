@@ -4,41 +4,42 @@
 // and declares submodules that implement functionality split out of
 // the original large `delegate.rs` file.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult};
+use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult, Value};
 use zqlz_ui::widgets::{
-    date_picker::{DatePickerInline, DatePickerPopover, DatePickerState},
+    ActiveTheme, Icon, IconName, IndexPath, Sizable, Size, ZqlzIcon,
+    date_picker::{DatePickerInline, DatePickerMode, DatePickerPopover, DatePickerState},
     input::{Input, InputEvent, InputState},
     menu::PopupMenu,
-    select::{SearchableVec, Select, SelectState},
+    select::{SearchableVec, Select, SelectEvent, SelectState},
     table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState},
-    ActiveTheme, Icon, IconName, Sizable, Size,
+    tooltip::Tooltip,
 };
 
 use super::events::TableViewerEvent;
 use super::panel::TableViewerPanel;
 
-pub mod types;
-mod init;
-mod inline_edit;
 mod bulk_edit;
 mod clipboard;
-mod render;
 mod column_types;
-mod fk;
 mod columns;
-mod pending;
-mod filtering;
-mod sort;
 mod context_menu;
+mod filtering;
+mod fk;
+mod init;
+pub(crate) mod inline_edit;
+mod pending;
+mod render;
+mod sort;
 mod trait_impl;
+pub mod types;
 
-pub use types::*;
-pub use types::PendingCellChange; // ensure public re-export
+pub use types::PendingCellChange;
+pub use types::*; // ensure public re-export
 
 /// Table viewer delegate - implements the TableDelegate trait
 ///
@@ -51,8 +52,8 @@ pub struct TableViewerDelegate {
     /// Column metadata from the database (excludes row number column)
     pub(crate) column_meta: Vec<ColumnMeta>,
 
-    /// Table data as strings (easier to display and edit)
-    pub(crate) rows: Vec<Vec<String>>,
+    /// Table data as typed Values (preserving original database types)
+    pub(crate) rows: Vec<Vec<Value>>,
 
     /// UI size (small/medium/large - affects padding/fonts)
     pub(super) size: Size,
@@ -93,9 +94,6 @@ pub struct TableViewerDelegate {
     /// This prevents immediate commit when focus transfers to the input
     pub(super) ignore_next_blur: bool,
 
-    /// Selected row indices (for delete operations)
-    pub(super) selected_rows: HashSet<usize>,
-
     /// Context menu selected rows (from cell selection, set when context menu opens)
     /// Used by delete menu item to know which rows to delete
     pub(super) context_menu_selected_rows: Vec<usize>,
@@ -134,6 +132,9 @@ pub struct TableViewerDelegate {
     /// Prevent duplicate load_more requests (pub for error handling)
     pub(crate) is_loading_more: bool,
 
+    /// Primary key column names (for rendering PK indicators in headers)
+    pub(super) primary_key_columns: Vec<String>,
+
     /// Foreign key mapping: column index -> FK info
     /// Used to detect FK columns and show dropdown with referenced values
     pub(super) fk_by_column: HashMap<usize, ForeignKeyInfo>,
@@ -148,9 +149,20 @@ pub struct TableViewerDelegate {
     /// Whether FK values are currently being loaded
     pub(super) fk_loading: bool,
 
-    /// Raw binary data for blob/binary cells, keyed by (row_index, data_col_index).
-    /// Only populated for Value::Bytes columns to avoid holding all data as strings.
-    pub(crate) raw_bytes: HashMap<(usize, usize), Vec<u8>>,
+    /// Last filter conditions applied via apply_advanced_filters.
+    /// Stored so that recompute_filtered_indices can re-apply them after a sort.
+    pub(super) last_filter_conditions:
+        Vec<crate::components::table_viewer::filter_types::FilterCondition>,
+
+    /// Last search text applied via apply_advanced_filters.
+    pub(super) last_filter_search_text: String,
+
+    /// Undo stack — most recent entry is at the end.
+    /// Only populated in non-auto-commit mode (batch editing).
+    pub(super) undo_stack: Vec<UndoEntry>,
+
+    /// Redo stack — cleared whenever a new edit is performed.
+    pub(super) redo_stack: Vec<UndoEntry>,
 }
 
 // Re-export submodules' public items where appropriate

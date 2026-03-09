@@ -478,15 +478,16 @@ async fn handle_connections(
                 }
             }
             let connections = standalone::load_connections()?;
-            let summaries: Vec<ConnectionSummary> =
-                connections.iter().map(ConnectionSummary::from_saved).collect();
+            let summaries: Vec<ConnectionSummary> = connections
+                .iter()
+                .map(ConnectionSummary::from_saved)
+                .collect();
             output::print_connections(&summaries);
         }
 
         ConnectionsAction::Show { name_or_id } => {
             if use_ipc {
-                let response =
-                    ipc::send_request(socket_path, ipc::Request::ListConnections).await;
+                let response = ipc::send_request(socket_path, ipc::Request::ListConnections).await;
                 match response {
                     Ok(ipc::Response::Connections(summaries)) => {
                         let conn = find_summary(&summaries, &name_or_id)?;
@@ -507,11 +508,9 @@ async fn handle_connections(
         ConnectionsAction::Add(add_args) => {
             let saved = build_saved_connection(add_args)?;
             if use_ipc {
-                let response = ipc::send_request(
-                    socket_path,
-                    ipc::Request::SaveConnection(saved.clone()),
-                )
-                .await;
+                let response =
+                    ipc::send_request(socket_path, ipc::Request::SaveConnection(saved.clone()))
+                        .await;
                 match response {
                     Ok(ipc::Response::Ok) => {
                         println!("Connection '{}' saved (via GUI)", saved.name);
@@ -534,11 +533,9 @@ async fn handle_connections(
             let conn = apply_updates(conn, update_args)?;
 
             if use_ipc {
-                let response = ipc::send_request(
-                    socket_path,
-                    ipc::Request::SaveConnection(conn.clone()),
-                )
-                .await;
+                let response =
+                    ipc::send_request(socket_path, ipc::Request::SaveConnection(conn.clone()))
+                        .await;
                 match response {
                     Ok(ipc::Response::Ok) => {
                         println!("Connection '{}' updated (via GUI)", conn.name);
@@ -578,15 +575,13 @@ async fn handle_connections(
     Ok(())
 }
 
-async fn handle_connect(
-    args: ConnectArgs,
-    use_ipc: bool,
-    socket_path: &Path,
-) -> Result<()> {
+async fn handle_connect(args: ConnectArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
     if use_ipc {
-        let response =
-            ipc::send_request(socket_path, ipc::Request::TestConnection(args.name_or_id.clone()))
-                .await;
+        let response = ipc::send_request(
+            socket_path,
+            ipc::Request::TestConnection(args.name_or_id.clone()),
+        )
+        .await;
         match response {
             Ok(ipc::Response::Ok) => {
                 println!("Connection successful (tested via GUI)");
@@ -610,11 +605,7 @@ async fn handle_connect(
     Ok(())
 }
 
-async fn handle_query(
-    args: QueryArgs,
-    use_ipc: bool,
-    socket_path: &Path,
-) -> Result<()> {
+async fn handle_query(args: QueryArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
     let sql = resolve_sql(args.sql, args.file)?;
 
     if args.warn {
@@ -633,7 +624,9 @@ async fn handle_query(
 
     if use_ipc {
         if args.single_transaction {
-            eprintln!("Note: --single-transaction is only honoured in standalone mode and will be ignored");
+            eprintln!(
+                "Note: --single-transaction is only honoured in standalone mode and will be ignored"
+            );
         }
         let response = ipc::send_request(
             socket_path,
@@ -646,7 +639,13 @@ async fn handle_query(
         .await;
         match response {
             Ok(ipc::Response::QueryResult(execution)) => {
-                emit_query_output(&execution, &args.format, args.limit, &opts, args.output.as_deref())?;
+                emit_query_output(
+                    &execution,
+                    &args.format,
+                    args.limit,
+                    &opts,
+                    args.output.as_deref(),
+                )?;
                 return Ok(());
             }
             Ok(ipc::Response::Error(msg)) => {
@@ -662,18 +661,24 @@ async fn handle_query(
 
     let connections = standalone::load_connections()?;
     let saved = find_connection(&connections, &args.connection)?.clone();
-    let execution =
-        standalone::execute_query(&saved, args.database.as_deref(), &sql, args.single_transaction)
-            .await?;
-    emit_query_output(&execution, &args.format, args.limit, &opts, args.output.as_deref())?;
+    let execution = standalone::execute_query(
+        &saved,
+        args.database.as_deref(),
+        &sql,
+        args.single_transaction,
+    )
+    .await?;
+    emit_query_output(
+        &execution,
+        &args.format,
+        args.limit,
+        &opts,
+        args.output.as_deref(),
+    )?;
     Ok(())
 }
 
-async fn handle_schema(
-    args: SchemaArgs,
-    use_ipc: bool,
-    socket_path: &Path,
-) -> Result<()> {
+async fn handle_schema(args: SchemaArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
     // Always load connections from standalone storage so we have full credentials
     // for the fallback driver path. The IPC path uses connection name/id strings
     // directly in the request, so no lookup is needed there.
@@ -761,8 +766,7 @@ async fn handle_schema(
                     _ => {}
                 }
             }
-            let columns =
-                standalone::list_columns(&saved, database.as_deref(), &table).await?;
+            let columns = standalone::list_columns(&saved, database.as_deref(), &table).await?;
             output::print_columns(&columns);
         }
 
@@ -780,8 +784,7 @@ async fn handle_schema(
         }
 
         SchemaAction::Indexes { table, database } => {
-            let indexes =
-                standalone::list_indexes(&saved, database.as_deref(), &table).await?;
+            let indexes = standalone::list_indexes(&saved, database.as_deref(), &table).await?;
             output::print_indexes(&indexes);
         }
 
@@ -810,11 +813,7 @@ async fn handle_schema(
     Ok(())
 }
 
-async fn handle_history(
-    args: HistoryArgs,
-    use_ipc: bool,
-    socket_path: &Path,
-) -> Result<()> {
+async fn handle_history(args: HistoryArgs, use_ipc: bool, socket_path: &Path) -> Result<()> {
     match args.action {
         HistoryAction::List(list_args) => {
             handle_history_list(list_args, use_ipc, socket_path).await
@@ -854,8 +853,11 @@ async fn handle_history_list(
         }
     }
 
-    let entries =
-        standalone::load_history(args.limit, args.connection.as_deref(), args.search.as_deref())?;
+    let entries = standalone::load_history(
+        args.limit,
+        args.connection.as_deref(),
+        args.search.as_deref(),
+    )?;
     output::print_history(&entries, &args.format);
     Ok(())
 }
@@ -867,8 +869,7 @@ async fn handle_history_list(
 /// returns an unexpected response.
 async fn handle_history_show(id: Uuid, use_ipc: bool, socket_path: &Path) -> Result<()> {
     if use_ipc {
-        let response =
-            ipc::send_request(socket_path, ipc::Request::QueryHistoryEntry { id }).await;
+        let response = ipc::send_request(socket_path, ipc::Request::QueryHistoryEntry { id }).await;
         match response {
             Ok(ipc::Response::HistoryEntry(entry)) => {
                 output::print_history_entry(&entry);
@@ -907,7 +908,9 @@ fn find_connection<'a>(
     name_or_id: &str,
 ) -> Result<&'a SavedConnection> {
     // Try UUID first
-    if let Ok(id) = Uuid::parse_str(name_or_id) && let Some(conn) = connections.iter().find(|c| c.id == id) {
+    if let Ok(id) = Uuid::parse_str(name_or_id)
+        && let Some(conn) = connections.iter().find(|c| c.id == id)
+    {
         return Ok(conn);
     }
     // Fall back to name (case-insensitive)
@@ -922,7 +925,9 @@ fn find_summary<'a>(
     summaries: &'a [ConnectionSummary],
     name_or_id: &str,
 ) -> Result<&'a ConnectionSummary> {
-    if let Ok(id) = Uuid::parse_str(name_or_id) && let Some(conn) = summaries.iter().find(|c| c.id == id) {
+    if let Ok(id) = Uuid::parse_str(name_or_id)
+        && let Some(conn) = summaries.iter().find(|c| c.id == id)
+    {
         return Ok(conn);
     }
     summaries
@@ -1004,9 +1009,9 @@ fn build_saved_connection(args: AddConnectionArgs) -> Result<SavedConnection> {
         conn.color = Some(color);
     }
     for param in args.params {
-        let (key, value) = param
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--param must be in KEY=VALUE format, got '{}'", param))?;
+        let (key, value) = param.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--param must be in KEY=VALUE format, got '{}'", param)
+        })?;
         conn = conn.with_param(key, value);
     }
 
@@ -1047,9 +1052,9 @@ fn apply_updates(mut conn: SavedConnection, args: UpdateConnectionArgs) -> Resul
         conn.color = Some(color);
     }
     for param in args.params {
-        let (key, value) = param
-            .split_once('=')
-            .ok_or_else(|| anyhow::anyhow!("--param must be in KEY=VALUE format, got '{}'", param))?;
+        let (key, value) = param.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("--param must be in KEY=VALUE format, got '{}'", param)
+        })?;
         conn.params.insert(key.to_string(), value.to_string());
     }
     conn.modified_at = chrono::Utc::now();
@@ -1064,7 +1069,10 @@ fn validate_color(color: &str) -> Result<()> {
     {
         Ok(())
     } else {
-        bail!("color must be in #RRGGBB format (e.g. #FF5733), got '{}'", color)
+        bail!(
+            "color must be in #RRGGBB format (e.g. #FF5733), got '{}'",
+            color
+        )
     }
 }
 
@@ -1117,10 +1125,7 @@ fn detect_destructive(sql: &str) -> Vec<String> {
                 ));
             }
         } else if upper.starts_with("TRUNCATE") {
-            warnings.push(format!(
-                "TRUNCATE removes all rows: {}",
-                preview
-            ));
+            warnings.push(format!("TRUNCATE removes all rows: {}", preview));
         } else if upper.starts_with("DROP TABLE")
             || upper.starts_with("DROP DATABASE")
             || upper.starts_with("DROP SCHEMA")

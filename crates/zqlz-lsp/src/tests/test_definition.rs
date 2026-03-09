@@ -47,7 +47,9 @@ fn test_definition_for_qualified_column() {
     let mut lsp = create_test_lsp();
 
     // Test going to definition for a qualified column (table.column)
-    let text = Rope::from("SELECT users.username, audit_log.log_message FROM users JOIN audit_log ON users.user_id = audit_log.log_id");
+    let text = Rope::from(
+        "SELECT users.username, audit_log.log_message FROM users JOIN audit_log ON users.user_id = audit_log.log_id",
+    );
     let offset = text.to_string().find("users.username").unwrap() + 6; // Middle of "username" in "users.username"
 
     let result = lsp.get_definition(&text, offset);

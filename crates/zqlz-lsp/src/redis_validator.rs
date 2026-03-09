@@ -6,7 +6,7 @@
 //!
 //! This follows the industry standard approach used by redis-cli and RedisInsight.
 
-use crate::command_tokenizer::{parse_commands, CommandTokenizer, ParsedCommand};
+use crate::command_tokenizer::{CommandTokenizer, ParsedCommand, parse_commands};
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use std::collections::HashMap;
 use zqlz_core::DiagnosticSeverity as CoreSeverity;

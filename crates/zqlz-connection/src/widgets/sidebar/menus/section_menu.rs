@@ -41,39 +41,42 @@ impl ConnectionSidebar {
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
                     let menu = match section {
-                        "tables" => menu.item(PopupMenuItem::new("New Table").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::NewTable {
-                                        connection_id: conn_id,
+                        "tables" => menu
+                            .item(PopupMenuItem::new("New Table").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::NewTable {
+                                            connection_id: conn_id,
+                                        });
                                     });
-                                });
-                            }
-                        }))
-                        .separator(),
-                        "views" => menu.item(PopupMenuItem::new("New View").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::NewView {
-                                        connection_id: conn_id,
+                                }
+                            }))
+                            .separator(),
+                        "views" => menu
+                            .item(PopupMenuItem::new("New View").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::NewView {
+                                            connection_id: conn_id,
+                                        });
                                     });
-                                });
-                            }
-                        }))
-                        .separator(),
-                        "triggers" => menu.item(PopupMenuItem::new("New Trigger").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::NewTrigger {
-                                        connection_id: conn_id,
+                                }
+                            }))
+                            .separator(),
+                        "triggers" => menu
+                            .item(PopupMenuItem::new("New Trigger").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::NewTrigger {
+                                            connection_id: conn_id,
+                                        });
                                     });
-                                });
-                            }
-                        }))
-                        .separator(),
+                                }
+                            }))
+                            .separator(),
                         _ => menu,
                     };
 

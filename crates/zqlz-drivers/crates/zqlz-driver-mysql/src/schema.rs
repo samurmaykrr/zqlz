@@ -947,10 +947,7 @@ impl SchemaIntrospection for MySqlConnection {
                     .unwrap_or("")
                     .to_string();
 
-                let table_type_str = row
-                    .get(1)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("BASE TABLE");
+                let table_type_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("BASE TABLE");
 
                 let object_type = if table_type_str == "VIEW" {
                     "view"

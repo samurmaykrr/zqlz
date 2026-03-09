@@ -235,18 +235,24 @@ mod dialect_tests {
             .iter()
             .find(|o| o.key == "engine")
             .unwrap();
-        assert!(engine_option
-            .choices
-            .iter()
-            .any(|c| c.as_ref() == "MergeTree"));
-        assert!(engine_option
-            .choices
-            .iter()
-            .any(|c| c.as_ref() == "ReplacingMergeTree"));
-        assert!(engine_option
-            .choices
-            .iter()
-            .any(|c| c.as_ref() == "Distributed"));
+        assert!(
+            engine_option
+                .choices
+                .iter()
+                .any(|c| c.as_ref() == "MergeTree")
+        );
+        assert!(
+            engine_option
+                .choices
+                .iter()
+                .any(|c| c.as_ref() == "ReplacingMergeTree")
+        );
+        assert!(
+            engine_option
+                .choices
+                .iter()
+                .any(|c| c.as_ref() == "Distributed")
+        );
     }
 }
 

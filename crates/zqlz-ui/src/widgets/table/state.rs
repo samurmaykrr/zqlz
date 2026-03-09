@@ -1,15 +1,21 @@
 use std::{ops::Range, rc::Rc, time::Duration};
 
-    use crate::widgets::{
-    ActiveTheme, ElementExt, Icon, IconName, StyleSized as _, StyledExt, VirtualListScrollHandle,
+use crate::widgets::{
+    ActiveTheme,
+    ElementExt,
+    Icon,
+    IconName,
+    StyleSized as _,
+    StyledExt,
+    VirtualListScrollHandle,
     actions::{Cancel, SelectDown, SelectUp},
+    // Checkbox for header select-all
+    checkbox::Checkbox,
     h_flex,
     menu::{ContextMenuExt, PopupMenu},
     scroll::{ScrollableMask, Scrollbar},
     v_flex,
-    // Checkbox for header select-all
-    checkbox::Checkbox,
- };
+};
 use gpui::{
     AppContext, Axis, Bounds, ClickEvent, ClipboardItem, Context, Div, DragMoveEvent, ElementId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
@@ -275,6 +281,14 @@ where
         self.selection_state = SelectionState::Row;
         self.right_clicked_row = None;
         self.right_clicked_col = None;
+        self.selected_col = None;
+        self.selected_cell = None;
+        if !self.cell_selection.is_empty() {
+            self.cell_selection.clear();
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
+        }
         self.selected_row = Some(row_ix);
         if let Some(row_ix) = self.selected_row {
             self.vertical_scroll_handle.scroll_to_item(
@@ -298,6 +312,14 @@ where
     /// Sets the selected col to the given index.
     pub fn set_selected_col(&mut self, col_ix: usize, cx: &mut Context<Self>) {
         self.selection_state = SelectionState::Column;
+        self.selected_row = None;
+        self.selected_cell = None;
+        if !self.cell_selection.is_empty() {
+            self.cell_selection.clear();
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
+        }
         self.selected_col = Some(col_ix);
         if let Some(col_ix) = self.selected_col {
             self.scroll_to_col(col_ix, cx);
@@ -311,6 +333,12 @@ where
         self.selected_cell = Some((row_ix, col_ix));
         self.selected_row = None;
         self.selected_col = None;
+        if !self.cell_selection.is_empty() {
+            self.cell_selection.clear();
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
+        }
         self.cell_was_clicked = true;
         cx.notify();
     }
@@ -335,24 +363,39 @@ where
     /// Start a new cell selection at the given position.
     /// This clears any previous selection and sets the anchor to this cell.
     pub fn start_cell_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.selected_row = None;
+        self.selected_col = None;
+        self.selected_cell = None;
         self.cell_selection.start_selection(row, col);
-        cx.emit(TableEvent::CellSelectionChanged(self.cell_selection.clone()));
+        cx.emit(TableEvent::CellSelectionChanged(
+            self.cell_selection.clone(),
+        ));
         cx.notify();
     }
 
     /// Extend the current selection to include the given cell.
     /// Used for Shift+Click or drag selection.
     pub fn extend_cell_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.selected_row = None;
+        self.selected_col = None;
+        self.selected_cell = None;
         self.cell_selection.extend_selection(row, col);
-        cx.emit(TableEvent::CellSelectionChanged(self.cell_selection.clone()));
+        cx.emit(TableEvent::CellSelectionChanged(
+            self.cell_selection.clone(),
+        ));
         cx.notify();
     }
 
     /// Toggle a cell in the selection (for Cmd+Click).
     /// This adds or removes individual cells to/from the selection.
     pub fn toggle_cell_in_selection(&mut self, row: usize, col: usize, cx: &mut Context<Self>) {
+        self.selected_row = None;
+        self.selected_col = None;
+        self.selected_cell = None;
         self.cell_selection.toggle_cell(row, col);
-        cx.emit(TableEvent::CellSelectionChanged(self.cell_selection.clone()));
+        cx.emit(TableEvent::CellSelectionChanged(
+            self.cell_selection.clone(),
+        ));
         cx.notify();
     }
 
@@ -360,7 +403,9 @@ where
     pub fn clear_cell_selection(&mut self, cx: &mut Context<Self>) {
         if !self.cell_selection.is_empty() {
             self.cell_selection.clear();
-            cx.emit(TableEvent::CellSelectionChanged(self.cell_selection.clone()));
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
             cx.notify();
         }
     }
@@ -369,10 +414,15 @@ where
     pub fn select_all_cells(&mut self, cx: &mut Context<Self>) {
         let row_count = self.delegate.rows_count(cx);
         let col_count = self.delegate.columns_count(cx);
-        
+
         if row_count > 0 && col_count > 0 {
+            self.selected_row = None;
+            self.selected_col = None;
+            self.selected_cell = None;
             self.cell_selection.select_all(row_count, col_count);
-            cx.emit(TableEvent::CellSelectionChanged(self.cell_selection.clone()));
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
             cx.notify();
         }
     }
@@ -383,6 +433,12 @@ where
         self.selected_row = None;
         self.selected_col = None;
         self.selected_cell = None;
+        if !self.cell_selection.is_empty() {
+            self.cell_selection.clear();
+            cx.emit(TableEvent::CellSelectionChanged(
+                self.cell_selection.clone(),
+            ));
+        }
         cx.notify();
     }
 
@@ -418,6 +474,34 @@ where
             .count()
     }
 
+    fn fixed_left_col_indices(&self) -> Vec<usize> {
+        if !self.col_fixed {
+            return Vec::new();
+        }
+
+        self.col_groups
+            .iter()
+            .enumerate()
+            .filter_map(|(col_ix, col)| {
+                (col.column.fixed == Some(ColumnFixed::Left)).then_some(col_ix)
+            })
+            .collect()
+    }
+
+    fn scrollable_col_indices(&self) -> Vec<usize> {
+        if !self.col_fixed {
+            return (0..self.col_groups.len()).collect();
+        }
+
+        self.col_groups
+            .iter()
+            .enumerate()
+            .filter_map(|(col_ix, col)| {
+                (col.column.fixed != Some(ColumnFixed::Left)).then_some(col_ix)
+            })
+            .collect()
+    }
+
     /// Resolve column index from an x coordinate (for hit-testing).
     /// Returns `None` if the x coordinate is outside all column bounds.
     ///
@@ -438,7 +522,8 @@ where
     ///
     /// Note: `row_ix` must be determined separately (from the row container).
     pub fn resolve_cell_from_point(&self, row_ix: usize, x: Pixels) -> Option<CellPosition> {
-        self.resolve_col_from_x(x).map(|col_ix| CellPosition::new(row_ix, col_ix))
+        self.resolve_col_from_x(x)
+            .map(|col_ix| CellPosition::new(row_ix, col_ix))
     }
 
     fn on_row_right_click(
@@ -492,6 +577,15 @@ where
 
         // Handle cell-level single-click logic
         if let Some(col_ix) = col_ix {
+            if col_ix == 0 {
+                self.clear_cell_selection(cx);
+                if !self.row_selectable {
+                    return;
+                }
+                self.set_selected_row(row_ix, cx);
+                return;
+            }
+
             let modifiers = e.modifiers();
 
             if modifiers.shift && self.cell_selection.anchor().is_some() {
@@ -659,14 +753,12 @@ where
         self.select_all_cells(cx);
     }
 
-    pub(super) fn action_copy(
-        &mut self,
-        _: &Copy,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::info!("action_copy called, selection empty: {}", self.cell_selection.is_empty());
-        
+    pub(super) fn action_copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
+        tracing::info!(
+            "action_copy called, selection empty: {}",
+            self.cell_selection.is_empty()
+        );
+
         // Only copy if there's a selection
         if self.cell_selection.is_empty() {
             return;
@@ -710,14 +802,9 @@ where
         cx.write_to_clipboard(ClipboardItem::new_string(tsv));
     }
 
-    pub(super) fn action_paste(
-        &mut self,
-        _: &Paste,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn action_paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
         tracing::info!("action_paste called");
-        
+
         // Read from clipboard
         let Some(clipboard_item) = cx.read_from_clipboard() else {
             tracing::warn!("No clipboard item");
@@ -725,27 +812,22 @@ where
         };
 
         // Get text from clipboard
-        let text = clipboard_item
-            .text()
-            .unwrap_or_default();
-        
+        let text = clipboard_item.text().unwrap_or_default();
+
         tracing::info!("Clipboard text length: {}", text.len());
-        
+
         if text.is_empty() {
             return;
         }
 
         // Check if we have multi-cell selection (more than 1 cell)
         let cell_count = self.cell_selection.cell_count();
-        
+
         if cell_count > 1 {
             // BULK PASTE: Fill all selected cells with the clipboard value
             let cells = self.cell_selection.selected_cells();
             tracing::info!("Bulk paste to {} cells", cells.len());
-            cx.emit(TableEvent::BulkPasteCells {
-                cells,
-                value: text,
-            });
+            cx.emit(TableEvent::BulkPasteCells { cells, value: text });
         } else {
             // SINGLE/TSV PASTE: Paste starting from anchor position
             let anchor = if let Some(anchor_pos) = self.cell_selection.anchor() {
@@ -758,15 +840,12 @@ where
             };
 
             // Emit event for the delegate to handle (TSV grid paste)
-            cx.emit(TableEvent::PasteCells {
-                anchor,
-                data: text,
-            });
+            cx.emit(TableEvent::PasteCells { anchor, data: text });
         }
     }
 
     /// Handle key down events for bulk editing.
-    /// 
+    ///
     /// When multiple cells are selected and a printable character is typed,
     /// this starts bulk editing mode where the typed value will be applied
     /// to all selected cells.
@@ -807,10 +886,10 @@ where
         cx: &mut Context<Self>,
     ) {
         tracing::info!("action_start_editing_cell called");
-        
+
         // Check how many cells are selected
         let cell_count = self.cell_selection.cell_count();
-        
+
         // Get current selected cell (anchor)
         let (row, col) = if let Some(anchor) = self.cell_selection.anchor() {
             (anchor.row, anchor.col)
@@ -825,7 +904,9 @@ where
         if cell_count > 1 {
             tracing::info!(
                 "Starting BULK editing for {} cells (anchor: row={}, col={})",
-                cell_count, row, col
+                cell_count,
+                row,
+                col
             );
             // Emit StartBulkEdit with no initial character (Enter key starts blank edit)
             cx.emit(TableEvent::StartBulkEdit { initial_char: None });
@@ -1006,6 +1087,119 @@ where
         }
     }
 
+    fn auto_fit_column(&mut self, col_ix: usize, _window: &mut Window, cx: &mut Context<Self>) {
+        let optimal_width = self.delegate.calculate_auto_fit_width(col_ix, cx);
+        if let Some(col_group) = self.col_groups.get_mut(col_ix) {
+            let new_width =
+                px(optimal_width).clamp(col_group.column.min_width, col_group.column.max_width);
+            if col_group.width != new_width {
+                col_group.width = new_width;
+                let new_widths = self.col_groups.iter().map(|g| g.width).collect();
+                cx.emit(TableEvent::ColumnWidthsChanged(new_widths));
+                cx.notify();
+            }
+        }
+    }
+
+    fn current_position(&self) -> CellPosition {
+        self.cell_selection
+            .anchor()
+            .or_else(|| {
+                self.selected_cell
+                    .map(|(row, col)| CellPosition { row, col })
+            })
+            .unwrap_or(CellPosition { row: 0, col: 0 })
+    }
+
+    pub(super) fn action_move_to_first_row(
+        &mut self,
+        _: &MoveToFirstRow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_col = self.current_position().col;
+        self.start_cell_selection(0, current_col, cx);
+        self.set_selected_cell(0, current_col, cx);
+        self.scroll_to_row(0, cx);
+    }
+
+    pub(super) fn action_move_to_last_row(
+        &mut self,
+        _: &MoveToLastRow,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let row_count = self.delegate.rows_count(cx);
+        if row_count == 0 {
+            return;
+        }
+
+        let last_row = row_count - 1;
+        let current_col = self.current_position().col;
+        self.start_cell_selection(last_row, current_col, cx);
+        self.set_selected_cell(last_row, current_col, cx);
+        self.scroll_to_row(last_row, cx);
+    }
+
+    pub(super) fn action_move_to_first_column(
+        &mut self,
+        _: &MoveToFirstColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let current_row = self.current_position().row;
+        self.start_cell_selection(current_row, 0, cx);
+        self.set_selected_cell(current_row, 0, cx);
+        self.scroll_to_col(0, cx);
+    }
+
+    pub(super) fn action_move_to_last_column(
+        &mut self,
+        _: &MoveToLastColumn,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let col_count = self.delegate.columns_count(cx);
+        if col_count == 0 {
+            return;
+        }
+
+        let last_col = col_count - 1;
+        let current_row = self.current_position().row;
+        self.start_cell_selection(current_row, last_col, cx);
+        self.set_selected_cell(current_row, last_col, cx);
+        self.scroll_to_col(last_col, cx);
+    }
+
+    pub(super) fn action_table_page_up(
+        &mut self,
+        _: &TablePageUp,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page_size = 20;
+        let current = self.current_position();
+        let new_row = current.row.saturating_sub(page_size);
+        self.start_cell_selection(new_row, current.col, cx);
+        self.set_selected_cell(new_row, current.col, cx);
+        self.scroll_to_row(new_row, cx);
+    }
+
+    pub(super) fn action_table_page_down(
+        &mut self,
+        _: &TablePageDown,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page_size = 20;
+        let row_count = self.delegate.rows_count(cx);
+        let current = self.current_position();
+        let new_row = (current.row + page_size).min(row_count.saturating_sub(1));
+        self.start_cell_selection(new_row, current.col, cx);
+        self.set_selected_cell(new_row, current.col, cx);
+        self.scroll_to_row(new_row, cx);
+    }
+
     /// Scroll table when mouse position is near the edge of the table bounds.
     fn scroll_table_by_col_resizing(
         &mut self,
@@ -1062,12 +1256,10 @@ where
             return;
         }
 
-        let sort = self.col_groups.get(col_ix).and_then(|g| g.column.sort);
-        if sort.is_none() {
+        let Some(sort) = self.col_groups.get(col_ix).and_then(|g| g.column.sort) else {
             return;
-        }
+        };
 
-        let sort = sort.unwrap();
         let sort = match sort {
             ColumnSort::Ascending => ColumnSort::Default,
             ColumnSort::Descending => ColumnSort::Ascending,
@@ -1222,20 +1414,26 @@ where
         // Use O(1) cached lookup for selection state
         let is_multi_selected = self.cell_selection.is_selected(row_ix, col_ix);
         // Use cached anchor check when available
-        let is_anchor = self.cell_selection.visible_cache().is_anchor(row_ix, col_ix)
+        let is_anchor = self
+            .cell_selection
+            .visible_cache()
+            .is_anchor(row_ix, col_ix)
             || self.cell_selection.anchor() == Some(CellPosition::new(row_ix, col_ix));
 
         self.render_col_wrap(col_ix, window, cx).child(
             div()
                 // Use NamedInteger to avoid format! string allocation
-                .id(ElementId::NamedInteger("cell".into(), (row_ix * 10000 + col_ix) as u64))
+                .id(ElementId::NamedInteger(
+                    "cell".into(),
+                    (row_ix * 10000 + col_ix) as u64,
+                ))
                 .size_full()
                 .relative()
                 .on_click(cx.listener(move |this, e: &ClickEvent, _window, cx| {
                     if e.click_count() == 1 {
                         // Check modifiers for multi-cell selection
                         let modifiers = e.modifiers();
-                        
+
                         if modifiers.shift && this.cell_selection.anchor().is_some() {
                             // Shift+Click: extend selection only if there's already a multi-selection anchor
                             this.extend_cell_selection(row_ix, col_ix, cx);
@@ -1260,7 +1458,7 @@ where
                                 });
                             }
                         }
-                        
+
                         // Don't stop propagation - allow row handler to work too
                     } else if e.click_count() == 2 {
                         // Double click on cell: emit DoubleClickedCell event
@@ -1271,7 +1469,7 @@ where
                                 col: col_ix,
                             });
                         }
-                        
+
                         // IMPORTANT: Don't stop propagation! Let the row handler also
                         // receive the double-click so it can emit DoubleClickedRow.
                         // This is needed for objects panel which listens to DoubleClickedRow.
@@ -1291,8 +1489,8 @@ where
                 .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _window, cx| {
                     // Only allow drag selection when Ctrl/Cmd is held
                     let modifiers = e.modifiers;
-                    if (modifiers.platform || modifiers.control) 
-                        && this.cell_selection.should_drag_select(row_ix, col_ix) 
+                    if (modifiers.platform || modifiers.control)
+                        && this.cell_selection.should_drag_select(row_ix, col_ix)
                     {
                         this.extend_cell_selection(row_ix, col_ix, cx);
                     }
@@ -1320,8 +1518,7 @@ where
                             .bg(cx.theme().table_active)
                             .when(is_anchor, |div| {
                                 // Anchor cell gets a thicker border
-                                div.border_2()
-                                    .border_color(cx.theme().table_active_border)
+                                div.border_2().border_color(cx.theme().table_active_border)
                             })
                             .when(!is_anchor, |div| {
                                 // Non-anchor cells get a subtle border
@@ -1350,7 +1547,7 @@ where
 
     /// Render a cell with selection styling but WITHOUT event handlers.
     /// This is the performance-optimized version for use with row-level event handling.
-    /// 
+    ///
     /// Event handling should be done at the row level using `resolve_col_from_x()`.
     fn render_cell_styled(
         &mut self,
@@ -1363,13 +1560,19 @@ where
         // Use O(1) cached lookup for selection state
         let is_multi_selected = self.cell_selection.is_selected(row_ix, col_ix);
         // Use cached anchor check when available
-        let is_anchor = self.cell_selection.visible_cache().is_anchor(row_ix, col_ix)
+        let is_anchor = self
+            .cell_selection
+            .visible_cache()
+            .is_anchor(row_ix, col_ix)
             || self.cell_selection.anchor() == Some(CellPosition::new(row_ix, col_ix));
 
         self.render_col_wrap(col_ix, window, cx).child(
             div()
                 // Use a simpler ID without format! allocation
-                .id(ElementId::NamedInteger("cell".into(), (row_ix * 10000 + col_ix) as u64))
+                .id(ElementId::NamedInteger(
+                    "cell".into(),
+                    (row_ix * 10000 + col_ix) as u64,
+                ))
                 .size_full()
                 .relative()
                 // Selection styling (without event handlers)
@@ -1382,8 +1585,7 @@ where
                             .bg(cx.theme().table_active)
                             .when(is_anchor, |div| {
                                 // Anchor cell gets a thicker border
-                                div.border_2()
-                                    .border_color(cx.theme().table_active_border)
+                                div.border_2().border_color(cx.theme().table_active_border)
                             })
                             .when(!is_anchor, |div| {
                                 // Non-anchor cells get a subtle border
@@ -1465,11 +1667,14 @@ where
                             let ix = *ix;
                             view.resizing_col = Some(ix);
 
-                            let col_group = view
-                                .col_groups
-                                .get(ix)
-                                .expect("BUG: invalid col index")
-                                .clone();
+                            let Some(col_group) = view.col_groups.get(ix).cloned() else {
+                                tracing::error!(
+                                    "Ignoring column resize for invalid index {} (column_count={})",
+                                    ix,
+                                    view.col_groups.len()
+                                );
+                                return;
+                            };
 
                             view.resize_cols(
                                 ix,
@@ -1488,6 +1693,11 @@ where
                 cx.stop_propagation();
                 cx.new(|_| drag.clone())
             })
+            .on_click(cx.listener(move |table, e: &ClickEvent, window, cx| {
+                if e.click_count() == 2 {
+                    table.auto_fit_column(ix, window, cx);
+                }
+            }))
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|view, _, _, cx| {
@@ -1554,7 +1764,14 @@ where
     /// calculate the item position for itself's `scroll_to_item` method.
     fn render_th(&mut self, col_ix: usize, window: &mut Window, cx: &mut Context<Self>) -> Div {
         let entity_id = cx.entity_id();
-        let col_group = self.col_groups.get(col_ix).expect("BUG: invalid col index");
+        let Some(col_group) = self.col_groups.get(col_ix).cloned() else {
+            tracing::error!(
+                "Skipping header render for invalid column index {} (column_count={})",
+                col_ix,
+                self.col_groups.len()
+            );
+            return h_flex();
+        };
 
         let movable = self.col_movable && col_group.column.movable;
         let paddings = col_group.column.paddings;
@@ -1673,18 +1890,32 @@ where
             // to save the bounds of this col.
             .on_prepaint({
                 let view = cx.entity().clone();
-                move |bounds, _, cx| view.update(cx, |r, _| r.col_groups[col_ix].bounds = bounds)
+                move |bounds, _, cx| {
+                    view.update(cx, |table, _| {
+                        if let Some(col_group) = table.col_groups.get_mut(col_ix) {
+                            col_group.bounds = bounds;
+                        } else {
+                            tracing::error!(
+                                "Skipping prepaint bounds update for invalid column index {} (column_count={})",
+                                col_ix,
+                                table.col_groups.len()
+                            );
+                        }
+                    })
+                }
             })
     }
 
     fn render_table_header(
         &mut self,
-        left_columns_count: usize,
+        fixed_col_indices: Rc<Vec<usize>>,
+        scrollable_col_indices: Rc<Vec<usize>>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let view = cx.entity().clone();
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
+        let left_columns_count = fixed_col_indices.len();
 
         // Reset fixed head columns bounds, if no fixed columns are present
         if left_columns_count == 0 {
@@ -1705,11 +1936,7 @@ where
             .refine_style(&style)
             .when(left_columns_count > 0, |this| {
                 let view = view.clone();
-
-                // Pre-collect fixed-left column indices to avoid cloning col_groups
-                let fixed_col_indices: Vec<usize> = (0..self.col_groups.len())
-                    .filter(|&i| self.col_groups[i].column.fixed == Some(ColumnFixed::Left))
-                    .collect();
+                let fixed_col_indices = fixed_col_indices.clone();
 
                 // Render left fixed columns
                 this.child(
@@ -1719,9 +1946,9 @@ where
                         .bg(cx.theme().table_head)
                         .children(
                             fixed_col_indices
-                                .into_iter()
-                                .enumerate()
-                                .map(|(col_ix, _)| self.render_th(col_ix, window, cx)),
+                                .iter()
+                                .copied()
+                                .map(|col_ix| self.render_th(col_ix, window, cx)),
                         )
                         .child(
                             // Fixed columns border
@@ -1750,16 +1977,15 @@ where
                     .track_scroll(&horizontal_scroll_handle)
                     .bg(cx.theme().table_head)
                     .child({
-                        // Pre-collect scrollable column count to avoid cloning col_groups
-                        let scrollable_count = self.col_groups.len().saturating_sub(left_columns_count);
+                        let scrollable_col_indices = scrollable_col_indices.clone();
 
                         h_flex()
                             .relative()
                             .children(
-                                (0..scrollable_count)
-                                    .map(|col_ix| {
-                                        self.render_th(left_columns_count + col_ix, window, cx)
-                                    }),
+                                scrollable_col_indices
+                                    .iter()
+                                    .copied()
+                                    .map(|col_ix| self.render_th(col_ix, window, cx)),
                             )
                             .child(self.delegate.render_last_empty_col(window, cx))
                     }),
@@ -1771,14 +1997,15 @@ where
         &mut self,
         row_ix: usize,
         rows_count: usize,
-        left_columns_count: usize,
+        fixed_col_indices: Rc<Vec<usize>>,
+        scrollable_col_indices: Rc<Vec<usize>>,
         col_sizes: Rc<Vec<gpui::Size<Pixels>>>,
-        columns_count: usize,
         is_filled: bool,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Stateful<Div> {
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
+        let left_columns_count = fixed_col_indices.len();
         let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
         let is_selected = self.selected_row == Some(row_ix);
         let view = cx.entity().clone();
@@ -1807,15 +2034,17 @@ where
                     }
                 })
                 .when(left_columns_count > 0, |this| {
+                    let fixed_col_indices = fixed_col_indices.clone();
+
                     // Left fixed columns
                     this.child(
                         h_flex()
                             .relative()
                             .h_full()
                             .children({
-                                let mut items = Vec::with_capacity(left_columns_count);
+                                let mut items = Vec::with_capacity(fixed_col_indices.len());
 
-                                (0..left_columns_count).for_each(|col_ix| {
+                                fixed_col_indices.iter().copied().for_each(|col_ix| {
                                     items.push(
                                         self.render_cell_styled(row_ix, col_ix, window, cx),
                                     );
@@ -1850,6 +2079,8 @@ where
                                 Axis::Horizontal,
                                 col_sizes,
                                 {
+                                    let scrollable_col_indices = scrollable_col_indices.clone();
+
                                     move |table, visible_range: Range<usize>, window, cx| {
                                         table.update_visible_range_if_need(
                                             visible_range.clone(),
@@ -1863,7 +2094,15 @@ where
                                         );
 
                                         visible_range.for_each(|col_ix| {
-                                            let col_ix = col_ix + left_columns_count;
+                                            let Some(&col_ix) = scrollable_col_indices.get(col_ix) else {
+                                                tracing::error!(
+                                                    "Skipping render for invalid scrollable column position {} (scrollable_column_count={})",
+                                                    col_ix,
+                                                    scrollable_col_indices.len()
+                                                );
+                                                return;
+                                            };
+
                                             let el = table.render_cell_styled(
                                                 row_ix, col_ix, window, cx,
                                             );
@@ -1961,11 +2200,34 @@ where
                 .border_b_1()
                 .border_color(cx.theme().table_row_border)
                 .when(is_stripe_row, |this| this.bg(cx.theme().table_even))
-                .children((0..columns_count).map(|col_ix| {
+                .when(left_columns_count > 0, |this| {
+                    let fixed_col_indices = fixed_col_indices.clone();
+
+                    this.child(
+                        h_flex().relative().h_full().children(
+                            fixed_col_indices
+                                .iter()
+                                .copied()
+                                .map(|col_ix| self.render_cell(col_ix, window, cx)),
+                        ),
+                    )
+                })
+                .child(
                     h_flex()
-                        .left(horizontal_scroll_handle.offset().x)
-                        .child(self.render_cell(col_ix, window, cx))
-                }))
+                        .flex_1()
+                        .h_full()
+                        .overflow_hidden()
+                        .relative()
+                        .child(
+                            h_flex().children(scrollable_col_indices.iter().copied().map(
+                                |col_ix| {
+                                    h_flex()
+                                        .left(horizontal_scroll_handle.offset().x)
+                                        .child(self.render_cell(col_ix, window, cx))
+                                },
+                            )),
+                        ),
+                )
                 .child(self.delegate.render_last_empty_col(window, cx))
         }
     }
@@ -2081,12 +2343,8 @@ where
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.measure(window, cx);
 
-        let columns_count = self.delegate.columns_count(cx);
-        let left_columns_count = self
-            .col_groups
-            .iter()
-            .filter(|col| self.col_fixed && col.column.fixed == Some(ColumnFixed::Left))
-            .count();
+        let fixed_col_indices = Rc::new(self.fixed_left_col_indices());
+        let scrollable_col_indices = Rc::new(self.scrollable_col_indices());
         let rows_count = self.delegate.rows_count(cx);
         let loading = self.delegate.loading(cx);
 
@@ -2135,7 +2393,12 @@ where
             .id("table-inner")
             .size_full()
             .overflow_hidden()
-            .child(self.render_table_header(left_columns_count, window, cx))
+            .child(self.render_table_header(
+                fixed_col_indices.clone(),
+                scrollable_col_indices.clone(),
+                window,
+                cx,
+            ))
             .context_menu({
                 let view = cx.entity().clone();
                 move |this, window: &mut Window, cx: &mut Context<PopupMenu>| {
@@ -2172,7 +2435,8 @@ where
                         view.update(cx, |menu, cx| {
                             menu.context_menu_selected_rows = selected_rows.clone();
                             // Pass selected rows to delegate so it can use them in on_click handlers
-                            menu.delegate_mut().set_context_menu_selection(selected_rows);
+                            menu.delegate_mut()
+                                .set_context_menu_selection(selected_rows);
                             menu.delegate_mut()
                                 .context_menu(row_ix, col_ix, this, window, cx)
                         })
@@ -2195,11 +2459,14 @@ where
                                         // We must calculate the col sizes here, because the col sizes
                                         // need render_th first, then that method will set the bounds of each col.
                                         let col_sizes: Rc<Vec<gpui::Size<Pixels>>> = Rc::new(
-                                            table
-                                                .col_groups
+                                            scrollable_col_indices
                                                 .iter()
-                                                .skip(left_columns_count)
-                                                .map(|col| col.bounds.size)
+                                                .filter_map(|&col_ix| {
+                                                    table
+                                                        .col_groups
+                                                        .get(col_ix)
+                                                        .map(|col| col.bounds.size)
+                                                })
                                                 .collect(),
                                         );
 
@@ -2244,9 +2511,9 @@ where
                                             items.push(table.render_table_row(
                                                 row_ix,
                                                 rows_count,
-                                                left_columns_count,
+                                                fixed_col_indices.clone(),
+                                                scrollable_col_indices.clone(),
                                                 col_sizes.clone(),
-                                                columns_count,
                                                 is_filled,
                                                 window,
                                                 cx,

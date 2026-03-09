@@ -6,13 +6,13 @@
 
 use std::fmt::Write as _;
 
-use comfy_table::{presets::UTF8_FULL, Cell, Table};
+use comfy_table::{Cell, Table, presets::UTF8_FULL};
 
+use crate::OutputFormat;
 use crate::ipc::{
     ColumnInfo, ConnectionSummary, FunctionSummary, HistoryEntry, IndexSummary, QueryExecution,
     StatementResult, ViewSummary,
 };
-use crate::OutputFormat;
 
 // ---------------------------------------------------------------------------
 // Output options

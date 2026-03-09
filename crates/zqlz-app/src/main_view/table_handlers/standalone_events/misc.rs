@@ -4,6 +4,7 @@ use gpui::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use zqlz_core::ColumnMeta;
+use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::components::{PendingCellChange, TableViewerPanel};
@@ -183,11 +184,8 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
                             // Try to build a display label from multiple columns if available
                             let label = if row.values.len() > 1 {
                                 // Format: "id - name" or similar for better UX
-                                let extra = row
-                                    .values
-                                    .get(1)
-                                    .map(|v| v.to_string())
-                                    .unwrap_or_default();
+                                let extra =
+                                    row.values.get(1).map(|v| v.to_string()).unwrap_or_default();
                                 format!("{} - {}", value, extra)
                             } else {
                                 value.clone()
@@ -208,11 +206,108 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
                     });
                 }
                 Err(e) => {
+                    tracing::error!("LoadFkValues: Failed to query {}: {}", referenced_table, e);
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+}
+
+pub(in crate::main_view) fn handle_load_distinct_values_event(
+    connection_id: Uuid,
+    table_name: &str,
+    column_name: &str,
+    viewer_entity: Entity<TableViewerPanel>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use crate::components::table_viewer::FilterOperator;
+
+    let Some(app_state) = cx.try_global::<AppState>() else {
+        tracing::error!("LoadDistinctValues: No AppState available");
+        return;
+    };
+
+    let Some(connection) = app_state.connections.get_for_database_cached(
+        connection_id,
+        viewer_entity.read(cx).database_name().as_deref(),
+    ) else {
+        tracing::error!(
+            "LoadDistinctValues: Connection not found: {}",
+            connection_id
+        );
+        return;
+    };
+
+    let connection = connection.clone();
+    let table_name = table_name.to_string();
+    let column_name = column_name.to_string();
+
+    window
+        .spawn(cx, async move |cx| {
+            let escaped_column = format!("\"{}\"", column_name.replace('"', "\"\""));
+            let escaped_table = format!("\"{}\"", table_name.replace('"', "\"\""));
+
+            let sql = format!(
+                "SELECT DISTINCT {} FROM {} WHERE {} IS NOT NULL ORDER BY {} LIMIT 500",
+                escaped_column, escaped_table, escaped_column, escaped_column
+            );
+
+            match connection.query(&sql, &[]).await {
+                Ok(result) => {
+                    let values: Vec<String> = result
+                        .rows
+                        .iter()
+                        .filter_map(|row| row.values.first().map(|v| v.to_string()))
+                        .collect();
+
+                    let count = values.len();
+
+                    if values.is_empty() {
+                        _ = viewer_entity.update_in(cx, |_viewer, window, cx| {
+                            window.push_notification(
+                                Notification::info(format!(
+                                    "No distinct values found for column '{}'",
+                                    column_name
+                                )),
+                                cx,
+                            );
+                        });
+                    } else {
+                        let filter_value = values.join(", ");
+                        _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                            viewer.add_quick_filter(
+                                column_name.clone(),
+                                FilterOperator::IsInList,
+                                filter_value,
+                                window,
+                                cx,
+                            );
+                            window.push_notification(
+                                Notification::success(format!(
+                                    "Added filter with {} distinct values for '{}'",
+                                    count, column_name
+                                )),
+                                cx,
+                            );
+                        });
+                    }
+                }
+                Err(e) => {
                     tracing::error!(
-                        "LoadFkValues: Failed to query {}: {}",
-                        referenced_table,
+                        "LoadDistinctValues: Failed to query distinct values for {}.{}: {}",
+                        table_name,
+                        column_name,
                         e
                     );
+                    _ = viewer_entity.update_in(cx, |_viewer, window, cx| {
+                        window.push_notification(
+                            Notification::error(format!("Failed to load distinct values: {}", e)),
+                            cx,
+                        );
+                    });
                 }
             }
 

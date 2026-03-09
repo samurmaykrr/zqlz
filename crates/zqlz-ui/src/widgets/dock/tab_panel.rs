@@ -10,7 +10,7 @@ use gpui::{
 use rust_i18n::t;
 
 use crate::widgets::{
-    ActiveTheme, AxisExt, IconName, Placement, Selectable, Sizable,
+    ActiveTheme, AxisExt, IconName, Placement, Selectable, Sizable, WindowExt as _,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     dock::PanelInfo,
@@ -18,7 +18,6 @@ use crate::widgets::{
     menu::{DropdownMenu, PopupMenu},
     tab::{Tab, TabBar},
     v_flex,
-    WindowExt as _,
 };
 
 use super::{
@@ -401,11 +400,9 @@ impl TabPanel {
 
                     dialog
                         .title("Unsaved Changes")
-                        .child(
-                            div()
-                                .text_sm()
-                                .child("This tab has unsaved changes. Are you sure you want to close it?"),
-                        )
+                        .child(div().text_sm().child(
+                            "This tab has unsaved changes. Are you sure you want to close it?",
+                        ))
                         .confirm()
                         .button_props(
                             DialogButtonProps::default()
@@ -907,10 +904,8 @@ impl TabPanel {
                 )
             })
             .children(self.panels.iter().enumerate().filter_map(|(ix, panel)| {
-                let (visible, tab_name, closable) = tab_props
-                    .get(ix)
-                    .cloned()
-                    .unwrap_or((false, None, false));
+                let (visible, tab_name, closable) =
+                    tab_props.get(ix).cloned().unwrap_or((false, None, false));
                 let mut active = state.active_panel.as_ref() == Some(panel);
                 let droppable = self.collapsed;
 

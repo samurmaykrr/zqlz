@@ -8,9 +8,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_services::SchemaService;
 use zqlz_ui::widgets::{
+    ActiveTheme,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
-    h_flex, v_flex, ActiveTheme,
+    h_flex, v_flex,
 };
 
 use super::{DiagnosticInfo, EditorObjectType, QueryEditor, QueryEditorEvent};

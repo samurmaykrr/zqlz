@@ -1,14 +1,14 @@
 use std::rc::Rc;
 
 use crate::widgets::{
-    h_flex, spinner::Spinner, tooltip::Tooltip, ActiveTheme, Disableable, FocusableExt as _, Icon,
-    IconName, Selectable, Sizable, Size, StyleSized, StyledExt,
+    ActiveTheme, Disableable, FocusableExt as _, Icon, IconName, Selectable, Sizable, Size,
+    StyleSized, StyledExt, h_flex, spinner::Spinner, tooltip::Tooltip,
 };
 use gpui::{
-    div, prelude::FluentBuilder as _, px, relative, Action, AnyElement, App, ClickEvent, Corners,
-    Div, Edges, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
-    StyleRefinement, Styled, Window,
+    Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
+    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
+    prelude::FluentBuilder as _, px, relative,
 };
 
 type TooltipData = Option<(
@@ -47,9 +47,19 @@ pub struct ButtonCustomVariant {
 pub trait ButtonVariants: Sized {
     fn with_variant(self, variant: ButtonVariant) -> Self;
 
+    /// With the secondary style for the Button.
+    fn secondary(self) -> Self {
+        self.with_variant(ButtonVariant::Secondary)
+    }
+
     /// With the primary style for the Button.
     fn primary(self) -> Self {
         self.with_variant(ButtonVariant::Primary)
+    }
+
+    /// With the secondary surface and primary-colored label.
+    fn secondary_primary(self) -> Self {
+        self.with_variant(ButtonVariant::SecondaryPrimary)
     }
 
     /// With the danger style for the Button.
@@ -148,6 +158,7 @@ pub enum ButtonVariant {
     Primary,
     #[default]
     Secondary,
+    SecondaryPrimary,
     Danger,
     Info,
     Success,
@@ -641,6 +652,7 @@ impl ButtonVariant {
         match self {
             Self::Primary => cx.theme().primary,
             Self::Secondary => cx.theme().secondary,
+            Self::SecondaryPrimary => cx.theme().secondary,
             Self::Danger => cx.theme().danger,
             Self::Warning => cx.theme().warning,
             Self::Success => cx.theme().success,
@@ -660,6 +672,7 @@ impl ButtonVariant {
                 }
             }
             Self::Secondary => cx.theme().secondary_foreground,
+            Self::SecondaryPrimary => cx.theme().primary,
             // Ghost renders on a transparent background (like plain text), so it reads from the
             // base foreground token rather than secondary_foreground, which custom themes may
             // assign to a brand/accent color that would look wrong on a transparent surface.
@@ -713,6 +726,13 @@ impl ButtonVariant {
                     bg
                 }
             }
+            Self::SecondaryPrimary => {
+                if outline {
+                    cx.theme().border
+                } else {
+                    bg
+                }
+            }
             Self::Primary => {
                 if outline {
                     cx.theme().primary
@@ -759,7 +779,7 @@ impl ButtonVariant {
 
     fn shadow(&self, outline: bool, _: &App) -> bool {
         match self {
-            Self::Primary | Self::Secondary | Self::Danger => outline,
+            Self::Primary | Self::Secondary | Self::SecondaryPrimary | Self::Danger => outline,
             Self::Custom(c) => c.shadow,
             _ => false,
         }
@@ -791,6 +811,7 @@ impl ButtonVariant {
                 }
             }
             Self::Secondary => cx.theme().secondary_hover,
+            Self::SecondaryPrimary => cx.theme().primary.opacity(0.08),
             Self::Danger => {
                 if outline {
                     cx.theme().danger.opacity(0.1)
@@ -864,6 +885,7 @@ impl ButtonVariant {
                 }
             }
             Self::Secondary => cx.theme().secondary_active,
+            Self::SecondaryPrimary => cx.theme().primary.opacity(0.14),
             Self::Ghost => {
                 // Slightly stronger than hover to signal the press state.
                 cx.theme().list_active
@@ -927,7 +949,9 @@ impl ButtonVariant {
     fn selected(&self, outline: bool, cx: &mut App) -> ButtonVariantStyle {
         let bg = match self {
             Self::Primary => cx.theme().primary_active,
-            Self::Secondary | Self::Ghost => cx.theme().secondary_active,
+            Self::Secondary => cx.theme().secondary_active,
+            Self::SecondaryPrimary => cx.theme().primary.opacity(0.14),
+            Self::Ghost => cx.theme().secondary_active,
             Self::Danger => cx.theme().danger_active,
             Self::Warning => cx.theme().warning_active,
             Self::Success => cx.theme().success_active,
@@ -964,6 +988,7 @@ impl ButtonVariant {
             Self::Success => cx.theme().success.opacity(0.15),
             Self::Info => cx.theme().info.opacity(0.15),
             Self::Secondary => cx.theme().secondary.opacity(1.5),
+            Self::SecondaryPrimary => cx.theme().secondary.opacity(1.5),
             Self::Custom(style) => style.color.opacity(0.15),
         };
         let fg = cx.theme().muted_foreground.opacity(0.5);

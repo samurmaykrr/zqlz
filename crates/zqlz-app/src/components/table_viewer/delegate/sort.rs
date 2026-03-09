@@ -67,14 +67,16 @@ impl TableViewerDelegate {
         let table_name = self.table_name.clone();
         let connection_id = self.connection_id;
 
-        _ = viewer_panel.update(cx, |_panel, cx| {
+        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
             cx.emit(TableViewerEvent::SortColumn {
                 connection_id,
                 table_name,
                 column_name,
                 direction,
             });
-        });
+        }) {
+            tracing::error!("Failed to emit SortColumn event: {:?}", e);
+        }
 
         tracing::info!("Server-side sort requested");
         cx.notify();
@@ -90,11 +92,17 @@ impl TableViewerDelegate {
         use super::super::filter_types::SortDirection;
 
         self.rows.sort_by(|a, b| {
-            let val_a = a.get(data_col_ix).map(|s| s.as_str()).unwrap_or("");
-            let val_b = b.get(data_col_ix).map(|s| s.as_str()).unwrap_or("");
+            let val_a = a
+                .get(data_col_ix)
+                .map(|v| v.display_for_table())
+                .unwrap_or_default();
+            let val_b = b
+                .get(data_col_ix)
+                .map(|v| v.display_for_table())
+                .unwrap_or_default();
 
             // Try numeric comparison first (handles sizes like "1.2 KB", integers, etc.)
-            let ordering = match (try_parse_numeric(val_a), try_parse_numeric(val_b)) {
+            let ordering = match (try_parse_numeric(&val_a), try_parse_numeric(&val_b)) {
                 (Some(na), Some(nb)) => na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal),
                 _ => val_a.to_lowercase().cmp(&val_b.to_lowercase()),
             };
@@ -134,10 +142,16 @@ impl TableViewerDelegate {
 
         self.rows.sort_by(|a, b| {
             for (col_ix, direction) in &resolved_sorts {
-                let val_a = a.get(*col_ix).map(|s| s.as_str()).unwrap_or("");
-                let val_b = b.get(*col_ix).map(|s| s.as_str()).unwrap_or("");
+                let val_a = a
+                    .get(*col_ix)
+                    .map(|v| v.display_for_table())
+                    .unwrap_or_default();
+                let val_b = b
+                    .get(*col_ix)
+                    .map(|v| v.display_for_table())
+                    .unwrap_or_default();
 
-                let ordering = match (try_parse_numeric(val_a), try_parse_numeric(val_b)) {
+                let ordering = match (try_parse_numeric(&val_a), try_parse_numeric(&val_b)) {
                     (Some(na), Some(nb)) => {
                         na.partial_cmp(&nb).unwrap_or(std::cmp::Ordering::Equal)
                     }
@@ -160,22 +174,15 @@ impl TableViewerDelegate {
     }
 
     /// Re-sync `filtered_row_indices` after a sort reorders `self.rows`.
+    /// Re-applies the last advanced filter + search text so the visible set
+    /// reflects both the new row order and any active filter criteria.
     fn recompute_filtered_indices(&mut self) {
-        if self.is_filtering {
-            if let Some(ref search_text) = self.search_filter {
-                let search_text = search_text.clone();
-                self.filtered_row_indices = self
-                    .rows
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, row)| {
-                        row.iter()
-                            .any(|cell| cell.to_lowercase().contains(&search_text))
-                    })
-                    .map(|(idx, _)| idx)
-                    .collect();
-            }
+        if !self.is_filtering {
+            return;
         }
+        let conditions = self.last_filter_conditions.clone();
+        let search_text = self.last_filter_search_text.clone();
+        self.apply_advanced_filters(&conditions, &search_text);
     }
 }
 

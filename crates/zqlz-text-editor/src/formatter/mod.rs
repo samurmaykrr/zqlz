@@ -26,4 +26,4 @@ mod format;
 mod tests;
 
 pub use config::FormatterConfig;
-pub use format::{format_sql, format_sql_with_config, FormatError, SqlFormatter};
+pub use format::{FormatError, SqlFormatter, format_sql, format_sql_with_config};

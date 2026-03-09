@@ -17,7 +17,7 @@
 //!
 //! All tests use the pre-loaded Sakila/Pagila data from the Docker containers.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 use zqlz_core::Value;
@@ -32,7 +32,10 @@ async fn test_select_actor_by_primary_key(
 
     // Sakila/Pagila databases have actor with actor_id=1 (typically "PENELOPE GUINESS")
     let result = conn
-        .query("SELECT actor_id, first_name, last_name FROM actor WHERE actor_id = 1", &[])
+        .query(
+            "SELECT actor_id, first_name, last_name FROM actor WHERE actor_id = 1",
+            &[],
+        )
         .await
         .context("failed to query actor by id")?;
 
@@ -45,7 +48,10 @@ async fn test_select_actor_by_primary_key(
 
     // Verify we got a non-empty name
     let first_name = row.get(1).context("missing first_name")?;
-    assert!(!first_name.as_str().unwrap_or("").is_empty(), "first_name should not be empty");
+    assert!(
+        !first_name.as_str().unwrap_or("").is_empty(),
+        "first_name should not be empty"
+    );
 
     Ok(())
 }
@@ -72,8 +78,15 @@ async fn test_select_actor_by_name(
 
     // Verify all returned rows have first_name = 'PENELOPE'
     for row in &result.rows {
-        let first_name = row.get(1).context("missing first_name")?.as_str().unwrap_or("");
-        assert_eq!(first_name, "PENELOPE", "all rows should have first_name = PENELOPE");
+        let first_name = row
+            .get(1)
+            .context("missing first_name")?
+            .as_str()
+            .unwrap_or("");
+        assert_eq!(
+            first_name, "PENELOPE",
+            "all rows should have first_name = PENELOPE"
+        );
     }
 
     Ok(())
@@ -89,12 +102,18 @@ async fn test_select_films_by_rating(
 
     // Query for PG-rated films
     let result = conn
-        .query("SELECT film_id, title, rating FROM film WHERE rating = 'PG'", &[])
+        .query(
+            "SELECT film_id, title, rating FROM film WHERE rating = 'PG'",
+            &[],
+        )
         .await
         .context("failed to query films by rating")?;
 
     // There should be multiple PG-rated films
-    assert!(result.rows.len() > 0, "should have at least one PG-rated film");
+    assert!(
+        result.rows.len() > 0,
+        "should have at least one PG-rated film"
+    );
 
     // Verify all returned films have rating = 'PG'
     for row in &result.rows {
@@ -115,17 +134,27 @@ async fn test_select_films_with_like_pattern(
 
     // Query for films starting with 'ACADEMY'
     let result = conn
-        .query("SELECT film_id, title FROM film WHERE title LIKE 'ACADEMY%'", &[])
+        .query(
+            "SELECT film_id, title FROM film WHERE title LIKE 'ACADEMY%'",
+            &[],
+        )
         .await
         .context("failed to query films with LIKE")?;
 
     // There should be at least one film starting with 'ACADEMY'
-    assert!(result.rows.len() > 0, "should have at least one film starting with ACADEMY");
+    assert!(
+        result.rows.len() > 0,
+        "should have at least one film starting with ACADEMY"
+    );
 
     // Verify all returned films start with 'ACADEMY'
     for row in &result.rows {
         let title = row.get(1).context("missing title")?.as_str().unwrap_or("");
-        assert!(title.starts_with("ACADEMY"), "title should start with ACADEMY: {}", title);
+        assert!(
+            title.starts_with("ACADEMY"),
+            "title should start with ACADEMY: {}",
+            title
+        );
     }
 
     Ok(())
@@ -146,7 +175,10 @@ async fn test_select_distinct_ratings(
         .context("failed to query distinct ratings")?;
 
     // Sakila has 5 ratings: G, PG, PG-13, R, NC-17
-    assert!(result.rows.len() >= 4, "should have at least 4 distinct ratings");
+    assert!(
+        result.rows.len() >= 4,
+        "should have at least 4 distinct ratings"
+    );
 
     // Verify no duplicates
     let mut seen_ratings = std::collections::HashSet::new();
@@ -232,7 +264,10 @@ async fn test_select_min_max_length(
 
     // Get min and max film length
     let result = conn
-        .query("SELECT MIN(length) as min_length, MAX(length) as max_length FROM film", &[])
+        .query(
+            "SELECT MIN(length) as min_length, MAX(length) as max_length FROM film",
+            &[],
+        )
         .await
         .context("failed to get min/max length")?;
 
@@ -251,8 +286,14 @@ async fn test_select_min_max_length(
         .context("max_length should be a number")?;
 
     assert!(min_length > 0, "min length should be positive");
-    assert!(max_length > min_length, "max length should be greater than min length");
-    assert!(max_length <= 200, "max length should be reasonable (under 200 minutes)");
+    assert!(
+        max_length > min_length,
+        "max length should be greater than min length"
+    );
+    assert!(
+        max_length <= 200,
+        "max length should be reasonable (under 200 minutes)"
+    );
 
     Ok(())
 }
@@ -275,7 +316,10 @@ async fn test_select_group_by_rating(
         .context("failed to group by rating")?;
 
     // Should have multiple rating groups
-    assert!(result.rows.len() >= 4, "should have at least 4 rating groups");
+    assert!(
+        result.rows.len() >= 4,
+        "should have at least 4 rating groups"
+    );
 
     let mut total_count: i64 = 0;
     for row in &result.rows {
@@ -288,7 +332,11 @@ async fn test_select_group_by_rating(
     }
 
     // Total should be around 1000 films
-    assert!(total_count > 900, "total films should be around 1000, got {}", total_count);
+    assert!(
+        total_count > 900,
+        "total films should be around 1000, got {}",
+        total_count
+    );
 
     Ok(())
 }
@@ -385,7 +433,10 @@ async fn test_select_offset_pagination(
 
     // Get second page
     let page2 = conn
-        .query("SELECT actor_id FROM actor ORDER BY actor_id LIMIT 5 OFFSET 5", &[])
+        .query(
+            "SELECT actor_id FROM actor ORDER BY actor_id LIMIT 5 OFFSET 5",
+            &[],
+        )
         .await
         .context("failed to get page 2")?;
 
@@ -404,7 +455,10 @@ async fn test_select_offset_pagination(
         .collect();
 
     for id in &page2_ids {
-        assert!(!page1_ids.contains(id), "page 2 should not contain IDs from page 1");
+        assert!(
+            !page1_ids.contains(id),
+            "page 2 should not contain IDs from page 1"
+        );
     }
 
     Ok(())
@@ -508,11 +562,18 @@ async fn test_select_or_conditions(
         .await
         .context("failed to query with OR conditions")?;
 
-    assert!(result.rows.len() > 0, "should have at least one matching actor");
+    assert!(
+        result.rows.len() > 0,
+        "should have at least one matching actor"
+    );
 
     // Verify all rows match at least one condition
     for row in &result.rows {
-        let first_name = row.get(1).context("missing first_name")?.as_str().unwrap_or("");
+        let first_name = row
+            .get(1)
+            .context("missing first_name")?
+            .as_str()
+            .unwrap_or("");
         assert!(
             first_name == "PENELOPE" || first_name == "NICK",
             "first_name should be PENELOPE or NICK, got {}",
@@ -533,11 +594,17 @@ async fn test_select_between(
 
     // Query with BETWEEN
     let result = conn
-        .query("SELECT film_id, title, length FROM film WHERE length BETWEEN 100 AND 120", &[])
+        .query(
+            "SELECT film_id, title, length FROM film WHERE length BETWEEN 100 AND 120",
+            &[],
+        )
         .await
         .context("failed to query with BETWEEN")?;
 
-    assert!(result.rows.len() > 0, "should have at least one film in range");
+    assert!(
+        result.rows.len() > 0,
+        "should have at least one film in range"
+    );
 
     // Verify all rows are in range
     for row in &result.rows {
@@ -562,7 +629,10 @@ async fn test_select_not_operator(
 
     // Query with NOT
     let result = conn
-        .query("SELECT film_id, title, rating FROM film WHERE NOT rating = 'PG' LIMIT 10", &[])
+        .query(
+            "SELECT film_id, title, rating FROM film WHERE NOT rating = 'PG' LIMIT 10",
+            &[],
+        )
         .await
         .context("failed to query with NOT operator")?;
 

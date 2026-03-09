@@ -21,13 +21,15 @@ use zqlz_ui::widgets::{
 };
 
 use crate::app::AppState;
-use crate::components::{ObjectsPanelEvent, QueryEditor};
+use crate::components::QueryEditor;
+use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 use zqlz_services::SchemaService;
 
 use super::MainView;
+use super::rename_window::RenameWindow;
 
 /// Validates a view name and returns an error message if invalid.
-fn validate_view_name(name: &str) -> Option<&'static str> {
+pub(in crate::main_view) fn validate_view_name(name: &str) -> Option<&'static str> {
     let name = name.trim();
 
     if name.is_empty() {
@@ -131,7 +133,7 @@ fn validate_view_name(name: &str) -> Option<&'static str> {
 }
 
 /// Fetches the SELECT statement definition of a view from the database.
-async fn fetch_view_definition(
+pub(in crate::main_view) async fn fetch_view_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     view_name: &str,
     driver_type: &str,
@@ -483,14 +485,14 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let view_name_for_dialog = view_name.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let view_name = view_name_for_dialog.clone();
 
             dialog
@@ -516,8 +518,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let view_name = view_name.clone();
 
                     cx.spawn(async move |cx| {
@@ -526,12 +527,14 @@ impl MainView {
                             Ok(_) => {
                                 tracing::info!("View '{}' deleted successfully", view_name);
 
-                                _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                    sidebar.remove_view(connection_id, &view_name, cx);
-                                });
-
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
+                                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                    let _ = main_view.update(cx, |main_view, cx| {
+                                        main_view.refresh_connection_surfaces(
+                                            RefreshTarget::Connection(connection_id),
+                                            SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                            cx,
+                                        );
+                                    });
                                 });
                             }
                             Err(e) => {
@@ -580,8 +583,8 @@ impl MainView {
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let source_view_name = view_name.clone();
 
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New view name"));
@@ -614,8 +617,8 @@ impl MainView {
             move |dialog, _window, cx| {
                 let connection = connection.clone();
                 let schema_service = schema_service.clone();
-                let connection_sidebar = connection_sidebar.clone();
-                let objects_panel = objects_panel.clone();
+                let window_handle = window_handle;
+                let main_view = main_view.clone();
                 let source_view_name = source_view_name.clone();
                 let driver_name = driver_name.clone();
                 let name_input = name_input.clone();
@@ -668,8 +671,8 @@ impl MainView {
 
                         let connection = connection.clone();
                         let schema_service = schema_service.clone();
-                        let connection_sidebar = connection_sidebar.clone();
-                        let objects_panel = objects_panel.clone();
+                        let window_handle = window_handle;
+                        let main_view = main_view.clone();
                         let source_view_name = source_view_name.clone();
                         let driver_name = driver_name.clone();
 
@@ -694,12 +697,14 @@ impl MainView {
                                             // Invalidate schema cache so refresh works correctly
                                             schema_service.invalidate_connection_cache(connection_id);
 
-                                            _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                                sidebar.add_view(connection_id, new_view_name.clone(), cx);
-                                            });
-
-                                            _ = objects_panel.update(cx, |_, cx| {
-                                                cx.emit(ObjectsPanelEvent::Refresh);
+                                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                                let _ = main_view.update(cx, |main_view, cx| {
+                                                    main_view.refresh_connection_surfaces(
+                                                        RefreshTarget::Connection(connection_id),
+                                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                                        cx,
+                                                    );
+                                                });
                                             });
                                         }
                                         Err(e) => {
@@ -728,7 +733,7 @@ impl MainView {
         &mut self,
         connection_id: Uuid,
         view_name: String,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!("Rename view: {} on connection {}", view_name, connection_id);
@@ -750,159 +755,14 @@ impl MainView {
             .map(|c| c.driver.clone())
             .unwrap_or_else(|| "sqlite".to_string());
 
-        let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
-        let old_view_name = view_name.clone();
-
-        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New view name"));
-        name_input.update(cx, |input, cx| {
-            input.set_value(view_name.clone(), window, cx);
-        });
-
-        let error_message: Entity<Option<String>> = cx.new(|_| None);
-
-        cx.subscribe(&name_input, {
-            let error_message = error_message.clone();
-            move |_this, _input, event, cx| {
-                if matches!(event, zqlz_ui::widgets::input::InputEvent::Change) {
-                    error_message.update(cx, |msg, cx| {
-                        if msg.is_some() {
-                            *msg = None;
-                            cx.notify();
-                        }
-                    });
-                }
-            }
-        })
-        .detach();
-
-        window.open_dialog(cx, {
-            let name_input = name_input.clone();
-            let old_view_name = old_view_name.clone();
-            let error_message = error_message.clone();
-
-            move |dialog, _window, cx| {
-                let connection = connection.clone();
-                let connection_sidebar = connection_sidebar.clone();
-                let objects_panel = objects_panel.clone();
-                let old_view_name = old_view_name.clone();
-                let driver_name = driver_name.clone();
-                let name_input = name_input.clone();
-                let error_message = error_message.clone();
-                let error_message_for_ok = error_message.clone();
-
-                dialog
-                    .title("Rename View")
-                    .w(px(400.0))
-                    .child(
-                        v_flex()
-                            .gap_2()
-                            .child(
-                                div().text_sm().child(format!(
-                                    "Enter a new name for view '{}':",
-                                    old_view_name
-                                )),
-                            )
-                            .child(Input::new(&name_input))
-                            .child({
-                                let error = error_message.read(cx).clone();
-                                div().text_xs().h(px(16.0)).when_some(error, |this, err| {
-                                    this.text_color(cx.theme().danger_text).child(err)
-                                })
-                            }),
-                    )
-                    .on_ok(move |_, _window, cx| {
-                        let new_view_name =
-                            name_input.read(cx).text().to_string().trim().to_string();
-
-                        if let Some(err) = validate_view_name(&new_view_name) {
-                            error_message_for_ok.update(cx, |msg, cx| {
-                                *msg = Some(err.to_string());
-                                cx.notify();
-                            });
-                            return false;
-                        }
-
-                        if new_view_name == old_view_name {
-                            return true;
-                        }
-
-                        let connection = connection.clone();
-                        let connection_sidebar = connection_sidebar.clone();
-                        let objects_panel = objects_panel.clone();
-                        let old_view_name = old_view_name.clone();
-                        let driver_name = driver_name.clone();
-
-                        cx.spawn(async move |cx| {
-                            // Most databases don't support ALTER VIEW ... RENAME
-                            // We need to: 1) Get the definition, 2) Drop the old view, 3) Create with new name
-                            match fetch_view_definition(&connection, &old_view_name, &driver_name)
-                                .await
-                            {
-                                Ok(definition) => {
-                                    // Drop old view
-                                    let drop_sql = format!("DROP VIEW \"{}\"", old_view_name);
-                                    if let Err(e) = connection.execute(&drop_sql, &[]).await {
-                                        tracing::error!("Failed to drop old view: {}", e);
-                                        return;
-                                    }
-
-                                    // Create new view
-                                    let create_sql = format!(
-                                        "CREATE VIEW \"{}\" AS {}",
-                                        new_view_name, definition
-                                    );
-                                    match connection.execute(&create_sql, &[]).await {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                "View '{}' renamed to '{}' successfully",
-                                                old_view_name,
-                                                new_view_name
-                                            );
-
-                                            _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                                sidebar.remove_view(
-                                                    connection_id,
-                                                    &old_view_name,
-                                                    cx,
-                                                );
-                                                sidebar.add_view(
-                                                    connection_id,
-                                                    new_view_name.clone(),
-                                                    cx,
-                                                );
-                                            });
-
-                                            _ = objects_panel.update(cx, |_, cx| {
-                                                cx.emit(ObjectsPanelEvent::Refresh);
-                                            });
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Failed to create renamed view: {}", e);
-                                            // Try to restore the old view
-                                            let restore_sql = format!(
-                                                "CREATE VIEW \"{}\" AS {}",
-                                                old_view_name, definition
-                                            );
-                                            _ = connection.execute(&restore_sql, &[]).await;
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Failed to fetch view definition: {}", e);
-                                }
-                            }
-                        })
-                        .detach();
-
-                        true
-                    })
-                    .confirm()
-            }
-        });
-
-        name_input.focus_handle(cx).focus(window, cx);
+        RenameWindow::open_view(
+            connection_id,
+            view_name,
+            driver_name,
+            connection.clone(),
+            cx.entity().downgrade(),
+            cx,
+        );
     }
 
     /// Copies view name to clipboard
@@ -926,35 +786,35 @@ impl MainView {
                 connection_id,
                 object_type,
                 definition,
-            } => {
-                match object_type {
-                    EditorObjectType::View { .. } => {
-                        self.save_view(
-                            *connection_id,
-                            object_type.clone(),
-                            definition.clone(),
-                            editor_weak,
-                            window,
-                            cx,
-                        );
-                    }
-                    EditorObjectType::Function { .. }
-                    | EditorObjectType::Procedure { .. }
-                    | EditorObjectType::Trigger { .. } => {
-                        self.save_database_object(
-                            *connection_id,
-                            object_type.clone(),
-                            definition.clone(),
-                            editor_weak,
-                            window,
-                            cx,
-                        );
-                    }
-                    EditorObjectType::Query => {
-                        tracing::warn!("SaveObject event for Query type — should use SaveQuery instead");
-                    }
+            } => match object_type {
+                EditorObjectType::View { .. } => {
+                    self.save_view(
+                        *connection_id,
+                        object_type.clone(),
+                        definition.clone(),
+                        editor_weak,
+                        window,
+                        cx,
+                    );
                 }
-            }
+                EditorObjectType::Function { .. }
+                | EditorObjectType::Procedure { .. }
+                | EditorObjectType::Trigger { .. } => {
+                    self.save_database_object(
+                        *connection_id,
+                        object_type.clone(),
+                        definition.clone(),
+                        editor_weak,
+                        window,
+                        cx,
+                    );
+                }
+                EditorObjectType::Query => {
+                    tracing::warn!(
+                        "SaveObject event for Query type — should use SaveQuery instead"
+                    );
+                }
+            },
             // For standard query execution events, delegate to the normal query handler
             QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
                 tracing::info!("Executing view query: {}", sql);
@@ -1202,10 +1062,7 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         let type_name = object_type.display_name().to_string();
-        let object_name = object_type
-            .object_name()
-            .unwrap_or("unnamed")
-            .to_string();
+        let object_name = object_type.object_name().unwrap_or("unnamed").to_string();
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -1234,10 +1091,7 @@ impl MainView {
 
                     _ = cx.update(|window, cx| {
                         window.push_notification(
-                            Notification::success(format!(
-                                "{} '{}' saved",
-                                type_name, object_name
-                            )),
+                            Notification::success(format!("{} '{}' saved", type_name, object_name)),
                             cx,
                         );
                     });
@@ -2504,15 +2358,15 @@ END;"#
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
         let continue_on_error = Rc::new(RefCell::new(false));
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let schema_service = schema_service.clone();
             let view_names = view_names.clone();
             let continue_on_error = continue_on_error.clone();
@@ -2557,8 +2411,8 @@ END;"#
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let window_handle = window_handle;
+                    let main_view = main_view.clone();
                     let schema_service = schema_service.clone();
                     let view_names = view_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
@@ -2574,12 +2428,7 @@ END;"#
                                     tracing::info!("View '{}' deleted successfully", view_name);
                                     deleted_views.push(view_name.clone());
 
-                                    cx.update(|cx| {
-                                        _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                            sidebar.remove_view(connection_id, view_name, cx);
-                                        });
-                                    })
-;
+                                    tracing::debug!(view_name = %view_name, "Queued view refresh after delete");
                                 }
                                 Err(e) => {
                                     let error_msg = format!("'{}': {}", view_name, e);
@@ -2597,12 +2446,15 @@ END;"#
                         if !deleted_views.is_empty() {
                             schema_service.invalidate_connection_cache(connection_id);
 
-                            cx.update(|cx| {
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
+                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                let _ = main_view.update(cx, |main_view, cx| {
+                                    main_view.refresh_connection_surfaces(
+                                        RefreshTarget::Connection(connection_id),
+                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                        cx,
+                                    );
                                 });
-                            })
-;
+                            });
                         }
 
                         if !errors.is_empty() {
@@ -2613,10 +2465,7 @@ END;"#
                                 errors.join("; ")
                             );
                         } else if !deleted_views.is_empty() {
-                            tracing::info!(
-                                "Successfully deleted {} view(s)",
-                                deleted_views.len()
-                            );
+                            tracing::info!("Successfully deleted {} view(s)", deleted_views.len());
                         }
                     })
                     .detach();
@@ -2680,16 +2529,16 @@ END;"#
             .unwrap_or_else(|| "sqlite".to_string());
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
         let continue_on_error = Rc::new(RefCell::new(true));
         let new_names: Vec<String> = view_names.iter().map(|n| format!("{}_copy", n)).collect();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let schema_service = schema_service.clone();
             let view_names = view_names.clone();
             let driver_name = driver_name.clone();
@@ -2724,8 +2573,8 @@ END;"#
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let window_handle = window_handle;
+                    let main_view = main_view.clone();
                     let schema_service = schema_service.clone();
                     let view_names = view_names.clone();
                     let driver_name = driver_name.clone();
@@ -2742,10 +2591,8 @@ END;"#
                             match fetch_view_definition(&connection, view_name, &driver_name).await
                             {
                                 Ok(definition) => {
-                                    let create_sql = format!(
-                                        "CREATE VIEW \"{}\" AS {}",
-                                        new_name, definition
-                                    );
+                                    let create_sql =
+                                        format!("CREATE VIEW \"{}\" AS {}", new_name, definition);
 
                                     match connection.execute(&create_sql, &[]).await {
                                         Ok(_) => {
@@ -2756,21 +2603,14 @@ END;"#
                                             );
                                             duplicated_views.push(new_name.clone());
 
-                                            cx.update(|cx| {
-                                                _ = connection_sidebar
-                                                    .update(cx, |sidebar, cx| {
-                                                        sidebar.add_view(
-                                                            connection_id,
-                                                            new_name,
-                                                            cx,
-                                                        );
-                                                    });
-                                            })
-;
+                                            tracing::debug!(
+                                                connection_id = %connection_id,
+                                                view_name = %new_name,
+                                                "Queued view refresh after duplication"
+                                            );
                                         }
                                         Err(e) => {
-                                            let error_msg =
-                                                format!("'{}': {}", view_name, e);
+                                            let error_msg = format!("'{}': {}", view_name, e);
                                             tracing::error!(
                                                 "Failed to duplicate view {}",
                                                 error_msg
@@ -2803,12 +2643,15 @@ END;"#
                         if !duplicated_views.is_empty() {
                             schema_service.invalidate_connection_cache(connection_id);
 
-                            cx.update(|cx| {
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
+                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                let _ = main_view.update(cx, |main_view, cx| {
+                                    main_view.refresh_connection_surfaces(
+                                        RefreshTarget::Connection(connection_id),
+                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                        cx,
+                                    );
                                 });
-                            })
-;
+                            });
                         }
 
                         if !errors.is_empty() {
@@ -2819,10 +2662,7 @@ END;"#
                                 errors.join("; ")
                             );
                         } else if !duplicated_views.is_empty() {
-                            tracing::info!(
-                                "Duplicated {} view(s)",
-                                duplicated_views.len()
-                            );
+                            tracing::info!("Duplicated {} view(s)", duplicated_views.len());
                         }
                     })
                     .detach();

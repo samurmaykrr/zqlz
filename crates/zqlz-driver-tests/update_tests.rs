@@ -16,7 +16,7 @@
 //! All tests use the pre-loaded Sakila/Pagila data from the Docker containers.
 //! Tests insert temporary data, update it, verify the changes, and clean up.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 use zqlz_core::Value;
@@ -36,7 +36,7 @@ async fn test_update_single_actor_last_name(
         }
         _ => "INSERT INTO actor (actor_id, first_name, last_name) VALUES (?, ?, ?)",
     };
-    
+
     conn.execute(
         insert_sql,
         &[
@@ -53,7 +53,7 @@ async fn test_update_single_actor_last_name(
         TestDriver::Postgres => "UPDATE actor SET last_name = $1 WHERE actor_id = $2",
         _ => "UPDATE actor SET last_name = ? WHERE actor_id = ?",
     };
-    
+
     let update_result = conn
         .execute(
             update_sql,
@@ -62,14 +62,17 @@ async fn test_update_single_actor_last_name(
         .await
         .context("failed to update actor")?;
 
-    assert_eq!(update_result.affected_rows, 1, "should update exactly one row");
+    assert_eq!(
+        update_result.affected_rows, 1,
+        "should update exactly one row"
+    );
 
     // Verify the update
     let verify_sql = match driver {
         TestDriver::Postgres => "SELECT last_name FROM actor WHERE actor_id = $1",
         _ => "SELECT last_name FROM actor WHERE actor_id = ?",
     };
-    
+
     let result = conn
         .query(verify_sql, &[Value::Int64(99999)])
         .await
@@ -88,7 +91,7 @@ async fn test_update_single_actor_last_name(
         TestDriver::Postgres => "DELETE FROM actor WHERE actor_id = $1",
         _ => "DELETE FROM actor WHERE actor_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test actor")?;
@@ -136,10 +139,12 @@ async fn test_update_multiple_films_by_rating(
 
     // Update all NC-17 films (our test films + possibly existing ones)
     let update_sql = match driver {
-        TestDriver::Postgres => "UPDATE film SET rental_rate = $1 WHERE film_id >= $2 AND film_id <= $3",
+        TestDriver::Postgres => {
+            "UPDATE film SET rental_rate = $1 WHERE film_id >= $2 AND film_id <= $3"
+        }
         _ => "UPDATE film SET rental_rate = ? WHERE film_id >= ? AND film_id <= ?",
     };
-    
+
     let update_result = conn
         .execute(
             update_sql,
@@ -159,17 +164,19 @@ async fn test_update_multiple_films_by_rating(
 
     // Verify the updates
     let verify_sql = match driver {
-        TestDriver::Postgres => "SELECT rental_rate FROM film WHERE film_id >= $1 AND film_id <= $2 ORDER BY film_id",
+        TestDriver::Postgres => {
+            "SELECT rental_rate FROM film WHERE film_id >= $1 AND film_id <= $2 ORDER BY film_id"
+        }
         _ => "SELECT rental_rate FROM film WHERE film_id >= ? AND film_id <= ? ORDER BY film_id",
     };
-    
+
     let result = conn
         .query(verify_sql, &[Value::Int64(90000), Value::Int64(90002)])
         .await
         .context("failed to verify updates")?;
 
     assert_eq!(result.rows.len(), 3, "should find all 3 updated films");
-    
+
     for row in &result.rows {
         let rental_rate = row.get(0).context("missing rental_rate")?;
         assert_eq!(
@@ -184,7 +191,7 @@ async fn test_update_multiple_films_by_rating(
         TestDriver::Postgres => "DELETE FROM film WHERE film_id >= $1 AND film_id <= $2",
         _ => "DELETE FROM film WHERE film_id >= ? AND film_id <= ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(90000), Value::Int64(90002)])
         .await
         .context("failed to cleanup test films")?;
@@ -211,7 +218,7 @@ async fn test_update_with_expression(
              VALUES (?, ?, ?, ?, ?, ?, ?)"
         }
     };
-    
+
     conn.execute(
         insert_sql,
         &[
@@ -232,7 +239,7 @@ async fn test_update_with_expression(
         TestDriver::Postgres => "UPDATE film SET length = length + $1 WHERE film_id = $2",
         _ => "UPDATE film SET length = length + ? WHERE film_id = ?",
     };
-    
+
     let update_result = conn
         .execute(update_sql, &[Value::Int64(20), Value::Int64(99999)])
         .await
@@ -245,7 +252,7 @@ async fn test_update_with_expression(
         TestDriver::Postgres => "SELECT length FROM film WHERE film_id = $1",
         _ => "SELECT length FROM film WHERE film_id = ?",
     };
-    
+
     let result = conn
         .query(verify_sql, &[Value::Int64(99999)])
         .await
@@ -264,7 +271,7 @@ async fn test_update_with_expression(
         TestDriver::Postgres => "DELETE FROM film WHERE film_id = $1",
         _ => "DELETE FROM film WHERE film_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test film")?;
@@ -282,7 +289,7 @@ async fn test_update_set_nullable_column_null(
 
     // Note: We can't easily insert into rental without valid FKs, so we'll use a different approach
     // Let's update a film's special_features column instead, which is nullable
-    
+
     let film_insert = match driver {
         TestDriver::Postgres => {
             "INSERT INTO film (film_id, title, language_id, rental_duration, rental_rate, replacement_cost, special_features) 
@@ -293,7 +300,7 @@ async fn test_update_set_nullable_column_null(
              VALUES (?, ?, ?, ?, ?, ?, ?)"
         }
     };
-    
+
     conn.execute(
         film_insert,
         &[
@@ -314,7 +321,7 @@ async fn test_update_set_nullable_column_null(
         TestDriver::Postgres => "UPDATE film SET special_features = $1 WHERE film_id = $2",
         _ => "UPDATE film SET special_features = ? WHERE film_id = ?",
     };
-    
+
     let update_result = conn
         .execute(update_sql, &[Value::Null, Value::Int64(99999)])
         .await
@@ -327,7 +334,7 @@ async fn test_update_set_nullable_column_null(
         TestDriver::Postgres => "SELECT special_features FROM film WHERE film_id = $1",
         _ => "SELECT special_features FROM film WHERE film_id = ?",
     };
-    
+
     let result = conn
         .query(verify_sql, &[Value::Int64(99999)])
         .await
@@ -335,14 +342,18 @@ async fn test_update_set_nullable_column_null(
 
     assert_eq!(result.rows.len(), 1, "should find the updated film");
     let special_features = result.rows[0].get(0).context("missing special_features")?;
-    assert_eq!(special_features, &Value::Null, "special_features should be NULL");
+    assert_eq!(
+        special_features,
+        &Value::Null,
+        "special_features should be NULL"
+    );
 
     // Cleanup
     let delete_sql = match driver {
         TestDriver::Postgres => "DELETE FROM film WHERE film_id = $1",
         _ => "DELETE FROM film WHERE film_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test film")?;
@@ -370,7 +381,7 @@ async fn test_update_customer_email(
              VALUES (?, ?, ?, ?, ?, ?, ?)"
         }
     };
-    
+
     conn.execute(
         insert_sql,
         &[
@@ -391,7 +402,7 @@ async fn test_update_customer_email(
         TestDriver::Postgres => "UPDATE customer SET email = $1 WHERE customer_id = $2",
         _ => "UPDATE customer SET email = ? WHERE customer_id = ?",
     };
-    
+
     let update_result = conn
         .execute(
             update_sql,
@@ -410,7 +421,7 @@ async fn test_update_customer_email(
         TestDriver::Postgres => "SELECT email FROM customer WHERE customer_id = $1",
         _ => "SELECT email FROM customer WHERE customer_id = ?",
     };
-    
+
     let result = conn
         .query(verify_sql, &[Value::Int64(99999)])
         .await
@@ -429,7 +440,7 @@ async fn test_update_customer_email(
         TestDriver::Postgres => "DELETE FROM customer WHERE customer_id = $1",
         _ => "DELETE FROM customer WHERE customer_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test customer")?;
@@ -450,7 +461,7 @@ async fn test_update_no_matching_rows(
         TestDriver::Postgres => "UPDATE actor SET last_name = $1 WHERE actor_id = $2",
         _ => "UPDATE actor SET last_name = ? WHERE actor_id = ?",
     };
-    
+
     let update_result = conn
         .execute(
             update_sql,
@@ -486,7 +497,7 @@ async fn test_update_foreign_key_violation(
              VALUES (?, ?, ?, ?, ?, ?)"
         }
     };
-    
+
     conn.execute(
         insert_sql,
         &[
@@ -506,7 +517,7 @@ async fn test_update_foreign_key_violation(
         TestDriver::Postgres => "UPDATE film SET language_id = $1 WHERE film_id = $2",
         _ => "UPDATE film SET language_id = ? WHERE film_id = ?",
     };
-    
+
     let result = conn
         .execute(update_sql, &[Value::Int64(999999), Value::Int64(99999)])
         .await;
@@ -521,7 +532,7 @@ async fn test_update_foreign_key_violation(
         TestDriver::Postgres => "DELETE FROM film WHERE film_id = $1",
         _ => "DELETE FROM film WHERE film_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test film")?;
@@ -544,7 +555,7 @@ async fn test_update_not_null_violation(
         }
         _ => "INSERT INTO actor (actor_id, first_name, last_name) VALUES (?, ?, ?)",
     };
-    
+
     conn.execute(
         insert_sql,
         &[
@@ -561,7 +572,7 @@ async fn test_update_not_null_violation(
         TestDriver::Postgres => "UPDATE actor SET last_name = $1 WHERE actor_id = $2",
         _ => "UPDATE actor SET last_name = ? WHERE actor_id = ?",
     };
-    
+
     let result = conn
         .execute(update_sql, &[Value::Null, Value::Int64(99999)])
         .await;
@@ -576,7 +587,7 @@ async fn test_update_not_null_violation(
         TestDriver::Postgres => "DELETE FROM actor WHERE actor_id = $1",
         _ => "DELETE FROM actor WHERE actor_id = ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99999)])
         .await
         .context("failed to cleanup test actor")?;
@@ -615,10 +626,12 @@ async fn test_update_affected_rows_count(
 
     // Update all 5 actors
     let update_sql = match driver {
-        TestDriver::Postgres => "UPDATE actor SET last_name = $1 WHERE actor_id >= $2 AND actor_id <= $3",
+        TestDriver::Postgres => {
+            "UPDATE actor SET last_name = $1 WHERE actor_id >= $2 AND actor_id <= $3"
+        }
         _ => "UPDATE actor SET last_name = ? WHERE actor_id >= ? AND actor_id <= ?",
     };
-    
+
     let update_result = conn
         .execute(
             update_sql,
@@ -641,7 +654,7 @@ async fn test_update_affected_rows_count(
         TestDriver::Postgres => "DELETE FROM actor WHERE actor_id >= $1 AND actor_id <= $2",
         _ => "DELETE FROM actor WHERE actor_id >= ? AND actor_id <= ?",
     };
-    
+
     conn.execute(delete_sql, &[Value::Int64(99990), Value::Int64(99994)])
         .await
         .context("failed to cleanup test actors")?;
@@ -683,7 +696,10 @@ async fn integration_test_update_works() -> Result<()> {
 
     // Verify the update
     let query_result = conn
-        .query("SELECT value FROM test_update WHERE id = ?", &[Value::Int64(1)])
+        .query(
+            "SELECT value FROM test_update WHERE id = ?",
+            &[Value::Int64(1)],
+        )
         .await
         .context("failed to query updated row")?;
 

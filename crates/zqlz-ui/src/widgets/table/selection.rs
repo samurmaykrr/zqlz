@@ -323,11 +323,7 @@ impl FastCellSelection {
 
     /// Get total number of selected cells
     pub fn cell_count(&self) -> usize {
-        let mut count = self.additional_cells.len();
-        if let Some(ref range) = self.range {
-            count += range.cell_count();
-        }
-        count
+        self.selected_cells().len()
     }
 
     /// Check if selection is empty

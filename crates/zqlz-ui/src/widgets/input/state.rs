@@ -4,11 +4,11 @@
 //! https://github.com/zed-industries/zed/blob/main/crates/gpui/examples/input.rs
 use anyhow::Result;
 use gpui::{
-    actions, div, point, prelude::FluentBuilder as _, px, Action, App, AppContext, Bounds,
-    ClipboardItem, Context, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    ScrollWheelEvent, SharedString, Styled as _, Subscription, Task, UTF16Selection, Window,
+    Action, App, AppContext, Bounds, ClipboardItem, Context, Entity, EntityInputHandler,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _,
+    Pixels, Point, Render, ScrollHandle, ScrollWheelEvent, SharedString, Styled as _, Subscription,
+    Task, UTF16Selection, Window, actions, div, point, prelude::FluentBuilder as _, px,
 };
 use ropey::{LineType, Rope, RopeSlice};
 use serde::Deserialize;
@@ -21,20 +21,20 @@ use super::{
     blink_cursor::BlinkCursor, change::Change, element::TextElement, fold::FoldState,
     mask_pattern::MaskPattern, mode::InputMode, number_input, text_wrapper::TextWrapper,
 };
+use crate::widgets::Size;
 use crate::widgets::actions::{SelectDown, SelectLeft, SelectRight, SelectUp};
 use crate::widgets::input::movement::MoveDirection;
 use crate::widgets::input::{
+    HoverDefinition, Lsp, Position,
     element::RIGHT_MARGIN,
     popovers::{ContextMenu, DiagnosticPopoverData, MouseContextMenu},
     search::{self, SearchPanel},
     text_wrapper::LineLayout,
-    HoverDefinition, Lsp, Position,
 };
 use crate::widgets::input::{InlineCompletion, RopeExt as _, Selection};
 use crate::widgets::text::TextViewState;
-use crate::widgets::Size;
+use crate::widgets::{Root, history::History};
 use crate::widgets::{highlighter::DiagnosticSet, input::text_wrapper::LineItem};
-use crate::widgets::{history::History, Root};
 
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = input, no_json)]
@@ -2129,7 +2129,7 @@ impl InputState {
         if !self.mode.show_inline_diagnostics() {
             return None;
         }
-        use crate::widgets::input::popovers::{diagnostic_popover_origin, DiagnosticPopover};
+        use crate::widgets::input::popovers::{DiagnosticPopover, diagnostic_popover_origin};
 
         let data = self.diagnostic_popover_data.as_ref()?;
         let text_view_state = self.diagnostic_text_view_state.as_ref()?;

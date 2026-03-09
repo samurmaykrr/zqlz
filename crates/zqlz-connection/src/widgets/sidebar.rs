@@ -14,16 +14,24 @@ use gpui::*;
 use menus::state::ContextMenuState;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
     typography::body_small,
-    v_flex, ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
+    v_flex,
 };
 
 // Keyboard actions for the connection sidebar
-actions!(connection_sidebar, [ActivateConnection, DeleteSelectedConnection, ShowContextMenu]);
+actions!(
+    connection_sidebar,
+    [
+        ActivateConnection,
+        DeleteSelectedConnection,
+        ShowContextMenu
+    ]
+);
 
 /// Events emitted by the connection sidebar
 #[derive(Clone, Debug)]

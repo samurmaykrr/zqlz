@@ -3,8 +3,8 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use zqlz_core::{
-    CellUpdateRequest, ColumnInfo, Connection, DatabaseObject, ForeignKeyInfo, IndexInfo,
-    PrimaryKeyInfo, QueryResult, Result, Row, ColumnMeta, SchemaIntrospection, StatementResult,
+    CellUpdateRequest, ColumnInfo, ColumnMeta, Connection, DatabaseObject, ForeignKeyInfo,
+    IndexInfo, PrimaryKeyInfo, QueryResult, Result, Row, SchemaIntrospection, StatementResult,
     TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
 };
 
@@ -326,10 +326,7 @@ impl SchemaIntrospection for MockConnection {
         Ok(vec![])
     }
 
-    async fn list_functions(
-        &self,
-        _schema: Option<&str>,
-    ) -> Result<Vec<zqlz_core::FunctionInfo>> {
+    async fn list_functions(&self, _schema: Option<&str>) -> Result<Vec<zqlz_core::FunctionInfo>> {
         Ok(vec![])
     }
 
@@ -362,10 +359,7 @@ impl SchemaIntrospection for MockConnection {
         }])
     }
 
-    async fn list_sequences(
-        &self,
-        _schema: Option<&str>,
-    ) -> Result<Vec<zqlz_core::SequenceInfo>> {
+    async fn list_sequences(&self, _schema: Option<&str>) -> Result<Vec<zqlz_core::SequenceInfo>> {
         Ok(vec![])
     }
 
@@ -440,10 +434,8 @@ pub fn failing_connection() -> Arc<dyn Connection> {
 /// Helper to create a MySQL-flavored mock connection that responds to
 /// `SELECT DATABASE()` with the given database name.
 pub fn mysql_connection(database_name: &str) -> Arc<MockConnection> {
-    let db_result = mock_single_value_result(
-        "DATABASE()",
-        Value::String(database_name.to_string()),
-    );
+    let db_result =
+        mock_single_value_result("DATABASE()", Value::String(database_name.to_string()));
     Arc::new(
         MockConnection::new(database_name)
             .with_driver("mysql")
@@ -458,10 +450,8 @@ pub fn postgres_connection(database_name: &str, schema_name: &str) -> Arc<MockCo
         "current_database()",
         Value::String(database_name.to_string()),
     );
-    let schema_result = mock_single_value_result(
-        "current_schema()",
-        Value::String(schema_name.to_string()),
-    );
+    let schema_result =
+        mock_single_value_result("current_schema()", Value::String(schema_name.to_string()));
     Arc::new(
         MockConnection::new(database_name)
             .with_driver("postgresql")

@@ -3,13 +3,16 @@
 //! Provides centralized schema operations with automatic caching to reduce
 //! database round-trips.
 
+use futures::future::join_all;
+use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
-use parking_lot::RwLock;
 use uuid::Uuid;
-use zqlz_core::{Connection, DatabaseObject, FunctionInfo, ObjectType, ObjectsPanelData, ProcedureInfo, TableInfo, TriggerInfo, ViewInfo};
+use zqlz_core::{
+    Connection, DatabaseObject, FunctionInfo, ObjectType, ObjectsPanelData, ProcedureInfo,
+    TableInfo, TriggerInfo, ViewInfo,
+};
 use zqlz_schema::SchemaCache;
-use futures::future::join_all;
 
 use crate::error::{ServiceError, ServiceResult};
 use crate::view_models::{ColumnInfo, DatabaseSchema, TableDetails};
@@ -96,11 +99,17 @@ impl SchemaService {
                 let tables: Vec<String> = cached_tables.iter().map(|t| t.name.clone()).collect();
                 let objects_panel_data = self.cache.get_objects_panel_data(connection_id);
                 let views = self.cache.get_views(connection_id).unwrap_or_default();
-                let materialized_views = self.cache.get_materialized_views(connection_id).unwrap_or_default();
+                let materialized_views = self
+                    .cache
+                    .get_materialized_views(connection_id)
+                    .unwrap_or_default();
                 let triggers = self.cache.get_triggers(connection_id).unwrap_or_default();
                 let functions = self.cache.get_functions(connection_id).unwrap_or_default();
                 let procedures = self.cache.get_procedures(connection_id).unwrap_or_default();
-                let table_indexes = self.cache.get_all_indexes(connection_id).unwrap_or_default();
+                let table_indexes = self
+                    .cache
+                    .get_all_indexes(connection_id)
+                    .unwrap_or_default();
                 let database_name = self.cache.get_database_name(connection_id);
                 let schema_name = self.cache.get_schema_name(connection_id);
 
@@ -133,16 +142,20 @@ impl SchemaService {
             "sqlite" => ("SELECT 'main'", "SELECT 'main'"),
             _ => ("SELECT current_database()", "SELECT current_schema()"),
         };
-        let database_name = connection
-            .query(db_query, &[])
-            .await
-            .ok()
-            .and_then(|r| r.rows.first().and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))));
+        let database_name = connection.query(db_query, &[]).await.ok().and_then(|r| {
+            r.rows
+                .first()
+                .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
+        });
         let schema_name = connection
             .query(schema_query, &[])
             .await
             .ok()
-            .and_then(|r| r.rows.first().and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))));
+            .and_then(|r| {
+                r.rows
+                    .first()
+                    .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
+            });
 
         // For MySQL/MSSQL the "schema" parameter to introspection methods is the
         // database name. For PostgreSQL it's the schema name (e.g. "public").
@@ -212,19 +225,26 @@ impl SchemaService {
         // Cache tables and all other schema objects for future use
         if !tables.is_empty() {
             self.cache.set_tables(connection_id, tables.clone());
-            self.cache.set_connection_names(connection_id, database_name.clone(), schema_name.clone());
+            self.cache.set_connection_names(
+                connection_id,
+                database_name.clone(),
+                schema_name.clone(),
+            );
             self.cache
                 .set_objects_panel_data(connection_id, objects_panel_data.clone());
             self.cache.set_views(connection_id, views.clone());
-            self.cache.set_materialized_views(connection_id, materialized_views.clone());
+            self.cache
+                .set_materialized_views(connection_id, materialized_views.clone());
             self.cache.set_triggers(connection_id, triggers.clone());
             self.cache.set_functions(connection_id, functions.clone());
             self.cache.set_procedures(connection_id, procedures.clone());
-            self.cache.set_all_indexes(connection_id, table_indexes.clone());
+            self.cache
+                .set_all_indexes(connection_id, table_indexes.clone());
         }
 
         let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
-        let materialized_view_names: Vec<String> = materialized_views.into_iter().map(|v| v.name).collect();
+        let materialized_view_names: Vec<String> =
+            materialized_views.into_iter().map(|v| v.name).collect();
         let db_schema = DatabaseSchema {
             table_infos: tables,
             objects_panel_data: Some(objects_panel_data),
@@ -268,12 +288,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let tables = schema.list_tables(introspection_schema.as_deref()).await.map_err(|e| {
-            tracing::error!("Failed to load tables: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let tables = schema
+            .list_tables(introspection_schema.as_deref())
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load tables: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         // Populate cache so subsequent load_database_schema calls can use cached data.
         // Also purge any stale table-details entries for this connection so that
@@ -282,7 +307,11 @@ impl SchemaService {
         self.table_details_cache
             .write()
             .retain(|(conn_id, _), _| *conn_id != connection_id);
-        tracing::debug!("Cached {} tables for connection {}", tables.len(), connection_id);
+        tracing::debug!(
+            "Cached {} tables for connection {}",
+            tables.len(),
+            connection_id
+        );
 
         tracing::info!("Loaded {} tables", tables.len());
         Ok(tables)
@@ -299,12 +328,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let views = schema.list_views(introspection_schema.as_deref()).await.map_err(|e| {
-            tracing::error!("Failed to load views: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let views = schema
+            .list_views(introspection_schema.as_deref())
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load views: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         tracing::info!("Loaded {} views", views.len());
         Ok(views)
@@ -321,12 +355,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let views = schema.list_materialized_views(introspection_schema.as_deref()).await.map_err(|e| {
-            tracing::error!("Failed to load materialized views: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let views = schema
+            .list_materialized_views(introspection_schema.as_deref())
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load materialized views: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         tracing::info!("Loaded {} materialized views", views.len());
         Ok(views)
@@ -343,12 +382,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let functions = schema.list_functions(introspection_schema.as_deref()).await.map_err(|e| {
-            tracing::error!("Failed to load functions: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let functions = schema
+            .list_functions(introspection_schema.as_deref())
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load functions: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         tracing::info!("Loaded {} functions", functions.len());
         Ok(functions)
@@ -365,12 +409,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let procedures = schema.list_procedures(introspection_schema.as_deref()).await.map_err(|e| {
-            tracing::error!("Failed to load procedures: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let procedures = schema
+            .list_procedures(introspection_schema.as_deref())
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load procedures: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         tracing::info!("Loaded {} procedures", procedures.len());
         Ok(procedures)
@@ -392,12 +441,17 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
-        let introspection_schema = self.get_introspection_schema_cached(&connection, connection_id).await;
+        let introspection_schema = self
+            .get_introspection_schema_cached(&connection, connection_id)
+            .await;
 
-        let triggers = schema.list_triggers(introspection_schema.as_deref(), None).await.map_err(|e| {
-            tracing::error!("Failed to load triggers: {}", e);
-            ServiceError::SchemaLoadFailed(e.to_string())
-        })?;
+        let triggers = schema
+            .list_triggers(introspection_schema.as_deref(), None)
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to load triggers: {}", e);
+                ServiceError::SchemaLoadFailed(e.to_string())
+            })?;
 
         tracing::info!("Loaded {} triggers", triggers.len());
         Ok(triggers)
@@ -422,7 +476,8 @@ impl SchemaService {
         connection: &Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> Option<String> {
-        self.get_introspection_schema_impl(connection, Some(connection_id)).await
+        self.get_introspection_schema_impl(connection, Some(connection_id))
+            .await
     }
 
     /// Return the current database name (e.g. `"neondb"`, `"mydb"`) for the
@@ -451,7 +506,9 @@ impl SchemaService {
 
         // Not in cache yet — fetch and populate via the shared impl, then read
         // back the database name directly from the cache.
-        let _ = self.get_introspection_schema_impl(connection, Some(connection_id)).await;
+        let _ = self
+            .get_introspection_schema_impl(connection, Some(connection_id))
+            .await;
         self.cache.get_database_name(connection_id)
     }
 
@@ -484,19 +541,24 @@ impl SchemaService {
             _ => ("SELECT current_database()", "SELECT current_schema()"),
         };
 
-        let database_name = connection
-            .query(db_query, &[])
-            .await
-            .ok()
-            .and_then(|r| r.rows.first().and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))));
+        let database_name = connection.query(db_query, &[]).await.ok().and_then(|r| {
+            r.rows
+                .first()
+                .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
+        });
         let schema_name = connection
             .query(schema_query, &[])
             .await
             .ok()
-            .and_then(|r| r.rows.first().and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))));
+            .and_then(|r| {
+                r.rows
+                    .first()
+                    .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
+            });
 
         if let Some(conn_id) = connection_id {
-            self.cache.set_connection_names(conn_id, database_name.clone(), schema_name.clone());
+            self.cache
+                .set_connection_names(conn_id, database_name.clone(), schema_name.clone());
         }
 
         match connection.driver_name() {
@@ -556,7 +618,8 @@ impl SchemaService {
                     .get_columns(schema, table_name)
                     .await
                     .map_err(|e| ServiceError::SchemaLoadFailed(e.to_string()))?;
-                self.cache.set_columns(connection_id, table_name, cols.clone());
+                self.cache
+                    .set_columns(connection_id, table_name, cols.clone());
                 cols
             }
         };
@@ -800,7 +863,11 @@ impl SchemaService {
             let results = join_all(futures).await;
             for (table_name, result) in batch.iter().zip(results) {
                 if let Err(e) = result {
-                    tracing::warn!("Failed to pre-warm details for table '{}': {}", table_name, e);
+                    tracing::warn!(
+                        "Failed to pre-warm details for table '{}': {}",
+                        table_name,
+                        e
+                    );
                 }
             }
 
@@ -808,7 +875,10 @@ impl SchemaService {
             smol::Timer::after(PREFETCH_INTER_BATCH_DELAY).await;
         }
 
-        tracing::info!("Table details pre-warm complete for connection {}", connection_id);
+        tracing::info!(
+            "Table details pre-warm complete for connection {}",
+            connection_id
+        );
     }
 
     /// Return all currently-cached `TableDetails` for a connection in one map.

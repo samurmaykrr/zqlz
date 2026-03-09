@@ -539,19 +539,15 @@ impl SchemaIntrospection for RedisConnection {
                 let mut cmd = format!("ZADD {}", key);
                 // ZRANGE WITHSCORES returns alternating member, score
                 let mut iter = result.rows.iter();
-                    while let Some(member_row) = iter.next() {
-                        if let Some(score_row) = iter.next()
-                            && let (Some(member), Some(score)) = (
-                                member_row.get_by_name("value").and_then(|v| v.as_str()),
-                                score_row.get_by_name("value").and_then(|v| v.as_str()),
-                            )
-                        {
-                            cmd.push_str(&format!(
-                                " {} \"{}\"",
-                                score,
-                                escape_redis_string(member)
-                            ));
-                        }
+                while let Some(member_row) = iter.next() {
+                    if let Some(score_row) = iter.next()
+                        && let (Some(member), Some(score)) = (
+                            member_row.get_by_name("value").and_then(|v| v.as_str()),
+                            score_row.get_by_name("value").and_then(|v| v.as_str()),
+                        )
+                    {
+                        cmd.push_str(&format!(" {} \"{}\"", score, escape_redis_string(member)));
+                    }
                 }
                 cmd
             }

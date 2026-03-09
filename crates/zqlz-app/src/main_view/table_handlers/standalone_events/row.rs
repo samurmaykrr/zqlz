@@ -14,21 +14,32 @@ use uuid::Uuid;
 use zqlz_core::ColumnMeta;
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    notification::Notification,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
+    notification::Notification, v_flex,
 };
 
 use crate::app::AppState;
 use crate::components::{PendingCellChange, TableViewerEvent, TableViewerPanel};
 
 use super::super::super::table_handlers_utils::{
-    conversion::resolve_schema_qualifier,
-    formatting::escape_redis_value,
+    conversion::resolve_schema_qualifier, formatting::escape_redis_value,
     validation::parse_inline_value,
 };
+
+#[derive(Clone, Debug)]
+struct FailedModifiedCell {
+    original_row_values: Vec<String>,
+    column_index: usize,
+    column_name: String,
+    change: PendingCellChange,
+}
+
+#[derive(Clone, Debug)]
+struct FailedNewRow {
+    row_number: usize,
+    row_values: Vec<String>,
+    error_message: String,
+}
 
 pub(in crate::main_view) fn handle_add_row_event(
     _connection_id: Uuid,
@@ -54,22 +65,36 @@ pub(in crate::main_view) fn handle_add_row_event(
                 // Get the display row index for the new row
                 // (last row in filtered view, or last row if not filtering)
                 let display_row_idx = if table.delegate().is_filtering {
-                    table.delegate().filtered_row_indices.len().saturating_sub(1)
+                    table
+                        .delegate()
+                        .filtered_row_indices
+                        .len()
+                        .saturating_sub(1)
                 } else {
                     table.delegate().rows.len().saturating_sub(1)
                 };
 
+                // Find the first editable column (skip auto-increment columns and the row number col 0)
+                let first_editable_col = table
+                    .delegate()
+                    .column_meta
+                    .iter()
+                    .enumerate()
+                    .find(|(_i, col)| !col.auto_increment)
+                    .map(|(i, _)| i + 1) // +1 because col 0 is the row number column
+                    .unwrap_or(1);
+
                 // Scroll to the new row so it's visible
                 table.scroll_to_row(display_row_idx, cx);
 
-                // Select the first editable cell (column 1, since column 0 is row number)
-                table.start_cell_selection(display_row_idx, 1, cx);
-                table.set_selected_cell(display_row_idx, 1, cx);
+                // Select the first editable cell
+                table.start_cell_selection(display_row_idx, first_editable_col, cx);
+                table.set_selected_cell(display_row_idx, first_editable_col, cx);
 
-                // Auto-start editing on the first cell so user can immediately type
+                // Auto-start editing so user can immediately type
                 table
                     .delegate_mut()
-                    .start_editing(display_row_idx, 1, window, cx);
+                    .start_editing(display_row_idx, first_editable_col, window, cx);
 
                 cx.notify();
             });
@@ -168,7 +193,11 @@ pub(in crate::main_view) fn handle_save_new_row_event(
                     database_name: viewer.database_name.clone(),
                 });
             } else if let Some(ref err) = error_message {
-                tracing::error!("Failed to insert new row: table={}, error={}", table_name, err);
+                tracing::error!(
+                    "Failed to insert new row: table={}, error={}",
+                    table_name,
+                    err
+                );
             }
 
             Ok::<_, anyhow::Error>(())
@@ -259,11 +288,8 @@ pub(in crate::main_view) fn handle_delete_rows_event(
             }
 
             if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> = viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
+                let all_column_names: Vec<String> =
+                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
 
                 if !all_column_names.is_empty() {
                     let escaped_search = viewer
@@ -274,8 +300,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                     let column_conditions: Vec<String> = all_column_names
                         .iter()
                         .map(|col_name| {
-                            let escaped_col =
-                                format!("\"{}\"", col_name.replace('"', "\"\""));
+                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
                             format!(
                                 "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
                                 escaped_col, escaped_search
@@ -303,7 +328,12 @@ pub(in crate::main_view) fn handle_delete_rows_event(
     window
         .spawn(cx, async move |cx| {
             match table_service
-                .delete_rows(connection.clone(), &table_name, schema_qualifier.as_deref(), row_delete_data)
+                .delete_rows(
+                    connection.clone(),
+                    &table_name,
+                    schema_qualifier.as_deref(),
+                    row_delete_data,
+                )
                 .await
             {
                 Ok(deleted_count) => {
@@ -454,10 +484,7 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
                     );
                 } else {
                     window.push_notification(
-                        Notification::success(&format!(
-                            "{} key(s) deleted",
-                            deleted_count
-                        )),
+                        Notification::success(&format!("{} key(s) deleted", deleted_count)),
                         cx,
                     );
                 }
@@ -515,14 +542,30 @@ pub(in crate::main_view) fn handle_commit_changes_event(
 
     window
         .spawn(cx, async move |cx| {
-            let mut success_count = 0;
-            let mut error_messages: Vec<String> = Vec::new();
+            let mut successful_operations = 0usize;
+            let mut failed_modified_cells: Vec<FailedModifiedCell> = Vec::new();
+            let mut failed_deleted_rows: Vec<Vec<String>> = Vec::new();
+            let mut failed_new_rows: Vec<FailedNewRow> = Vec::new();
 
             // Execute UPDATE statements for modified cells
             // Calculate the boundary between original and new rows so we can
             // skip any modified_cells entries that accidentally target new rows
             // (new rows are handled separately via INSERT below).
-            let original_row_count = all_rows.len() - new_rows.len();
+            let Some(original_row_count) = all_rows.len().checked_sub(new_rows.len()) else {
+                tracing::error!(
+                    "Cannot commit changes because pending new rows exceed total rows: total_rows={}, new_rows={}",
+                    all_rows.len(),
+                    new_rows.len()
+                );
+                let error_message =
+                    "The table state is inconsistent. Please refresh the table and try again."
+                        .to_string();
+                _ = cx.update(|window, cx| {
+                    window.push_notification(Notification::error(&error_message), cx);
+                });
+                return anyhow::Ok(());
+            };
+
             for ((row_idx, col_idx), change) in &modified_cells {
                 if *row_idx >= original_row_count {
                     tracing::warn!(
@@ -550,7 +593,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                             column_name: col_name.clone(),
                             new_value: parse_inline_value(&change.new_value),
                             all_column_names: column_names.clone(),
-                            all_row_values: original_row_values,
+                            all_row_values: original_row_values.clone(),
                             all_column_types: column_types.clone(),
                         };
 
@@ -559,15 +602,21 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                             .await
                         {
                             Ok(()) => {
-                                success_count += 1;
+                                successful_operations += 1;
                             }
                             Err(e) => {
-                                error_messages.push(format!(
-                                    "Failed to update row {}, column {}: {}",
-                                    row_idx + 1,
-                                    col_name,
-                                    e
-                                ));
+                                failed_modified_cells.push(FailedModifiedCell {
+                                    original_row_values: original_row_values.clone(),
+                                    column_index: *col_idx,
+                                    column_name: col_name.clone(),
+                                    change: change.clone(),
+                                });
+                                tracing::error!(
+                                    row = row_idx + 1,
+                                    column = %col_name,
+                                    error = %e,
+                                    "Failed to commit modified cell"
+                                );
                             }
                         }
                     }
@@ -584,7 +633,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                 if !rows_to_delete.is_empty() {
                     let row_delete_data = zqlz_services::RowDeleteData {
                         all_column_names: column_names.clone(),
-                        rows: rows_to_delete,
+                        rows: rows_to_delete.clone(),
                     };
 
                     match table_service
@@ -592,10 +641,11 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                         .await
                     {
                         Ok(deleted_count) => {
-                            success_count += deleted_count;
+                            successful_operations += deleted_count as usize;
                         }
                         Err(e) => {
-                            error_messages.push(format!("Failed to delete rows: {}", e));
+                            failed_deleted_rows = rows_to_delete;
+                            tracing::error!(error = %e, "Failed to commit deleted rows");
                         }
                     }
                 }
@@ -607,7 +657,10 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                 let values: Vec<Option<String>> = row_values
                     .iter()
                     .map(|v| {
-                        if v.is_empty() || v == "NULL" {
+                        if v.is_empty()
+                            || v == "NULL"
+                            || v == crate::components::table_viewer::delegate::inline_edit::AUTO_INCREMENT_PLACEHOLDER
+                        {
                             None
                         } else {
                             Some(v.clone())
@@ -626,21 +679,23 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     .await
                 {
                     Ok(()) => {
-                        success_count += 1;
+                        successful_operations += 1;
                     }
                     Err(e) => {
-                        error_messages.push(format!(
-                            "Failed to insert new row {}: {}",
-                            row_idx + 1,
-                            e
-                        ));
+                        failed_new_rows.push(FailedNewRow {
+                            row_number: row_idx + 1,
+                            row_values: row_values.clone(),
+                            error_message: e.to_string(),
+                        });
                     }
                 }
             }
 
-            // Clear pending changes and refresh the table
-            if error_messages.is_empty() {
-                // All changes committed successfully
+            let has_failures = !failed_modified_cells.is_empty()
+                || !failed_deleted_rows.is_empty()
+                || !failed_new_rows.is_empty();
+
+            if !has_failures {
                 _ = viewer_entity.update(cx, |viewer, cx| {
                     if let Some(table_state) = &viewer.table_state {
                         table_state.update(cx, |table, cx| {
@@ -670,16 +725,65 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     });
                 }
 
-                tracing::info!("{} changes committed successfully", success_count);
+                tracing::info!("{} changes committed successfully", successful_operations);
             } else {
-                // Some changes failed
                 tracing::error!(
-                    "Commit partially failed: {} successes, {} errors",
-                    success_count,
-                    error_messages.len()
+                    "Commit partially failed: {} successes, modified_failures={}, delete_failures={}, insert_failures={}",
+                    successful_operations,
+                    failed_modified_cells.len(),
+                    failed_deleted_rows.len(),
+                    failed_new_rows.len()
                 );
 
-                // Show error dialog
+                _ = viewer_entity.update(cx, |viewer, cx| {
+                    if let Some(table_state) = &viewer.table_state {
+                        table_state.update(cx, |table, cx| {
+                            table.delegate_mut().restore_failed_commit_state(
+                                failed_modified_cells
+                                    .iter()
+                                    .map(|failure| {
+                                        (
+                                            failure.original_row_values.clone(),
+                                            failure.column_index,
+                                            failure.change.clone(),
+                                        )
+                                    })
+                                    .collect(),
+                                failed_deleted_rows.clone(),
+                                failed_new_rows
+                                    .iter()
+                                    .map(|failure| failure.row_values.clone())
+                                    .collect(),
+                            );
+                            cx.notify();
+                        });
+                    }
+                });
+
+                let mut error_messages: Vec<String> = failed_modified_cells
+                    .iter()
+                    .map(|failure| {
+                        format!(
+                            "Failed to update column '{}' on an existing row",
+                            failure.column_name
+                        )
+                    })
+                    .collect();
+
+                if !failed_deleted_rows.is_empty() {
+                    error_messages.push(format!(
+                        "Failed to delete {} row(s)",
+                        failed_deleted_rows.len()
+                    ));
+                }
+
+                error_messages.extend(failed_new_rows.iter().map(|failure| {
+                    format!(
+                        "Failed to insert new row {}: {}",
+                        failure.row_number, failure.error_message
+                    )
+                }));
+
                 _ = cx.update(|window, cx| {
                     window.open_dialog(cx, move |dialog, _window, cx| {
                         dialog
@@ -689,7 +793,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                                     .gap_2()
                                     .child(div().child(format!(
                                         "{} changes succeeded, {} failed:",
-                                        success_count,
+                                        successful_operations,
                                         error_messages.len()
                                     )))
                                     .children(error_messages.iter().take(5).map(|msg| {

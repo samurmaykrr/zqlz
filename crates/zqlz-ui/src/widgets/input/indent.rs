@@ -1,15 +1,15 @@
 use gpui::{
-    point, px, Bounds, Context, EntityInputHandler as _, Hsla, Path, PathBuilder, Pixels,
-    SharedString, TextRun, TextStyle, Window,
+    Bounds, Context, EntityInputHandler as _, Hsla, Path, PathBuilder, Pixels, SharedString,
+    TextRun, TextStyle, Window, point, px,
 };
 use ropey::RopeSlice;
 
 use crate::widgets::{
-    input::{
-        element::TextElement, mode::InputMode, Indent, IndentInline, InputState, LastLayout,
-        Outdent, OutdentInline,
-    },
     RopeExt,
+    input::{
+        Indent, IndentInline, InputState, LastLayout, Outdent, OutdentInline, element::TextElement,
+        mode::InputMode,
+    },
 };
 
 #[derive(Debug, Copy, Clone)]

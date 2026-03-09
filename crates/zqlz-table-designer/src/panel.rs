@@ -27,6 +27,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
@@ -34,7 +35,7 @@ use zqlz_ui::widgets::{
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, PopupMenuItem},
     select::{Select, SelectEvent, SelectState},
-    v_flex, ActiveTheme, Disableable, Sizable,
+    v_flex,
 };
 
 #[path = "ui/mod.rs"]
@@ -42,25 +43,10 @@ mod ui;
 
 use crate::events::TableDesignerEvent;
 use crate::models::{
-    get_data_types, ColumnDesign, DataTypeInfo, DatabaseDialect, ForeignKeyDesign, IndexDesign,
-    TableDesign,
+    ColumnDesign, DataTypeInfo, DatabaseDialect, ForeignKeyDesign, IndexDesign, TableDesign,
+    get_data_types,
 };
 use crate::service::DdlGenerator;
-
-/// Default column widths for the Fields tab: [Name, Type, Length, NN, PK, UQ, Default, Comment]
-const DEFAULT_FIELD_COL_WIDTHS: [f32; 8] = [180.0, 140.0, 100.0, 50.0, 50.0, 50.0, 0.0, 180.0];
-const MIN_COL_WIDTH: f32 = 30.0;
-
-#[derive(Clone)]
-struct ColumnResizeDrag {
-    col_index: usize,
-}
-
-impl Render for ColumnResizeDrag {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        Empty
-    }
-}
 
 actions!(
     table_designer,
@@ -223,9 +209,6 @@ pub struct TableDesignerPanel {
     /// Redo stack (snapshots of undone design states)
     redo_stack: Vec<TableDesign>,
 
-    /// Column widths for the Fields tab
-    field_col_widths: [f32; 8],
-
     /// Selected check constraint index
     selected_check_index: Option<usize>,
 
@@ -272,8 +255,10 @@ impl TableDesignerPanel {
             }),
         );
 
-        let schema_input = cx.new(|cx| InputState::new(window, cx).placeholder("Schema (optional)"));
-        let table_comment_input = cx.new(|cx| InputState::new(window, cx).placeholder("Table comment"));
+        let schema_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Schema (optional)"));
+        let table_comment_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Table comment"));
         let mysql_engine_input = cx.new(|cx| {
             let mut state = InputState::new(window, cx).placeholder("InnoDB");
             state.set_value("InnoDB", window, cx);
@@ -289,7 +274,8 @@ impl TableDesignerPanel {
             state.set_value("utf8mb4_unicode_ci", window, cx);
             state
         });
-        let pg_tablespace_input = cx.new(|cx| InputState::new(window, cx).placeholder("Tablespace (optional)"));
+        let pg_tablespace_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Tablespace (optional)"));
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -327,7 +313,6 @@ impl TableDesignerPanel {
             pg_tablespace_input,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            field_col_widths: DEFAULT_FIELD_COL_WIDTHS,
             selected_check_index: None,
             data_types,
             ddl_preview: None,
@@ -489,11 +474,13 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            subscriptions.push(cx.subscribe(&scale_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&scale_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             column_scale_inputs.push(scale_input);
         }
 
@@ -512,9 +499,21 @@ impl TableDesignerPanel {
             state
         });
 
-        let engine_val = design.options.engine.clone().unwrap_or_else(|| "InnoDB".to_string());
-        let charset_val = design.options.charset.clone().unwrap_or_else(|| "utf8mb4".to_string());
-        let collation_val = design.options.collation.clone().unwrap_or_else(|| "utf8mb4_unicode_ci".to_string());
+        let engine_val = design
+            .options
+            .engine
+            .clone()
+            .unwrap_or_else(|| "InnoDB".to_string());
+        let charset_val = design
+            .options
+            .charset
+            .clone()
+            .unwrap_or_else(|| "utf8mb4".to_string());
+        let collation_val = design
+            .options
+            .collation
+            .clone()
+            .unwrap_or_else(|| "utf8mb4_unicode_ci".to_string());
         let tablespace_val = design.options.tablespace.clone().unwrap_or_default();
 
         let mysql_engine_input = cx.new(|cx| {
@@ -551,11 +550,13 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            subscriptions.push(cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             check_name_inputs.push(name_input);
 
             let expr_input = cx.new(|cx| {
@@ -563,11 +564,13 @@ impl TableDesignerPanel {
                 state.set_value(&cc.expression, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&expr_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&expr_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             check_expression_inputs.push(expr_input);
         }
 
@@ -583,11 +586,13 @@ impl TableDesignerPanel {
                 state.set_value(&index.name, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             index_name_inputs.push(name_input);
 
             let cols_input = cx.new(|cx| {
@@ -595,11 +600,13 @@ impl TableDesignerPanel {
                 state.set_value(&index.columns.join(", "), window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             index_columns_inputs.push(cols_input);
 
             let type_input = cx.new(|cx| {
@@ -607,11 +614,13 @@ impl TableDesignerPanel {
                 state.set_value(&index.index_type, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&type_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&type_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             index_type_inputs.push(type_input);
 
             let where_clause_val = index.where_clause.clone().unwrap_or_default();
@@ -622,11 +631,13 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            subscriptions.push(cx.subscribe(&where_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&where_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             index_where_inputs.push(where_input);
 
             let include_cols_val = index.include_columns.join(", ");
@@ -637,11 +648,13 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            subscriptions.push(cx.subscribe(&include_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&include_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             index_include_inputs.push(include_input);
         }
 
@@ -661,11 +674,13 @@ impl TableDesignerPanel {
                 state.set_value(&fk_name_val, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             fk_name_inputs.push(name_input);
 
             let cols_input = cx.new(|cx| {
@@ -673,11 +688,13 @@ impl TableDesignerPanel {
                 state.set_value(&fk_cols_val, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }));
+            subscriptions.push(
+                cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                }),
+            );
             fk_columns_inputs.push(cols_input);
 
             let ref_table_input = cx.new(|cx| {
@@ -700,14 +717,13 @@ impl TableDesignerPanel {
                 state.set_value(&fk_ref_cols_val, window, cx);
                 state
             });
-            subscriptions.push(cx.subscribe(
-                &ref_cols_input,
-                |this, _, event: &InputEvent, cx| {
+            subscriptions.push(
+                cx.subscribe(&ref_cols_input, |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                },
-            ));
+                }),
+            );
             fk_ref_columns_inputs.push(ref_cols_input);
         }
 
@@ -747,7 +763,6 @@ impl TableDesignerPanel {
             pg_tablespace_input,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
-            field_col_widths: DEFAULT_FIELD_COL_WIDTHS,
             selected_check_index: None,
             data_types,
             ddl_preview: None,
@@ -823,13 +838,14 @@ impl TableDesignerPanel {
                 state.set_value(&col.name, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &name_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.column_name_inputs.push(name_input);
 
             let default_input = cx.new(|cx| {
@@ -856,13 +872,14 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&length_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &length_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.column_length_inputs.push(length_input);
 
             let scale_input = cx.new(|cx| {
@@ -872,13 +889,14 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&scale_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &scale_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.column_scale_inputs.push(scale_input);
 
             let comment_input = cx.new(|cx| {
@@ -948,13 +966,14 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &name_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.check_name_inputs.push(name_input);
 
             let expr_input = cx.new(|cx| {
@@ -962,13 +981,14 @@ impl TableDesignerPanel {
                 state.set_value(&cc.expression, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&expr_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &expr_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.check_expression_inputs.push(expr_input);
         }
 
@@ -978,28 +998,34 @@ impl TableDesignerPanel {
         self.index_type_inputs.clear();
         self.index_where_inputs.clear();
         self.index_include_inputs.clear();
-        let index_values: Vec<_> = self.design.indexes.iter().map(|index| {
-            (
-                index.name.clone(),
-                index.columns.join(", "),
-                index.index_type.clone(),
-                index.where_clause.clone().unwrap_or_default(),
-                index.include_columns.join(", "),
-            )
-        }).collect();
+        let index_values: Vec<_> = self
+            .design
+            .indexes
+            .iter()
+            .map(|index| {
+                (
+                    index.name.clone(),
+                    index.columns.join(", "),
+                    index.index_type.clone(),
+                    index.where_clause.clone().unwrap_or_default(),
+                    index.include_columns.join(", "),
+                )
+            })
+            .collect();
         for (name_val, cols_val, type_val, where_val, include_val) in index_values {
             let name_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("Index name");
                 state.set_value(&name_val, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &name_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.index_name_inputs.push(name_input);
 
             let cols_input = cx.new(|cx| {
@@ -1007,13 +1033,14 @@ impl TableDesignerPanel {
                 state.set_value(&cols_val, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &cols_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.index_columns_inputs.push(cols_input);
 
             let type_input = cx.new(|cx| {
@@ -1021,13 +1048,14 @@ impl TableDesignerPanel {
                 state.set_value(&type_val, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&type_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &type_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.index_type_inputs.push(type_input);
 
             let where_input = cx.new(|cx| {
@@ -1037,13 +1065,14 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&where_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &where_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.index_where_inputs.push(where_input);
 
             let include_input = cx.new(|cx| {
@@ -1053,13 +1082,14 @@ impl TableDesignerPanel {
                 }
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&include_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &include_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.index_include_inputs.push(include_input);
         }
 
@@ -1068,27 +1098,33 @@ impl TableDesignerPanel {
         self.fk_columns_inputs.clear();
         self.fk_ref_table_inputs.clear();
         self.fk_ref_columns_inputs.clear();
-        let fk_values: Vec<_> = self.design.foreign_keys.iter().map(|fk| {
-            (
-                fk.name.clone().unwrap_or_default(),
-                fk.columns.join(", "),
-                fk.referenced_table.clone(),
-                fk.referenced_columns.join(", "),
-            )
-        }).collect();
+        let fk_values: Vec<_> = self
+            .design
+            .foreign_keys
+            .iter()
+            .map(|fk| {
+                (
+                    fk.name.clone().unwrap_or_default(),
+                    fk.columns.join(", "),
+                    fk.referenced_table.clone(),
+                    fk.referenced_columns.join(", "),
+                )
+            })
+            .collect();
         for (fk_name_val, fk_cols_val, fk_ref_table_val, fk_ref_cols_val) in fk_values {
             let name_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("FK name");
                 state.set_value(&fk_name_val, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &name_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.fk_name_inputs.push(name_input);
 
             let cols_input = cx.new(|cx| {
@@ -1096,13 +1132,14 @@ impl TableDesignerPanel {
                 state.set_value(&fk_cols_val, window, cx);
                 state
             });
-            self._subscriptions.push(
-                cx.subscribe(&cols_input, |this, _, event: &InputEvent, cx| {
+            self._subscriptions.push(cx.subscribe(
+                &cols_input,
+                |this, _, event: &InputEvent, cx| {
                     if matches!(event, InputEvent::Change) {
                         this.mark_dirty(cx);
                     }
-                }),
-            );
+                },
+            ));
             self.fk_columns_inputs.push(cols_input);
 
             let ref_table_input = cx.new(|cx| {
@@ -1137,16 +1174,28 @@ impl TableDesignerPanel {
         }
 
         // Adjust selections
-        if self.selected_column_index.map_or(false, |i| i >= self.design.columns.len()) {
+        if self
+            .selected_column_index
+            .map_or(false, |i| i >= self.design.columns.len())
+        {
             self.selected_column_index = self.design.columns.len().checked_sub(1);
         }
-        if self.selected_check_index.map_or(false, |i| i >= self.design.check_constraints.len()) {
+        if self
+            .selected_check_index
+            .map_or(false, |i| i >= self.design.check_constraints.len())
+        {
             self.selected_check_index = self.design.check_constraints.len().checked_sub(1);
         }
-        if self.selected_index_index.map_or(false, |i| i >= self.design.indexes.len()) {
+        if self
+            .selected_index_index
+            .map_or(false, |i| i >= self.design.indexes.len())
+        {
             self.selected_index_index = self.design.indexes.len().checked_sub(1);
         }
-        if self.selected_fk_index.map_or(false, |i| i >= self.design.foreign_keys.len()) {
+        if self
+            .selected_fk_index
+            .map_or(false, |i| i >= self.design.foreign_keys.len())
+        {
             self.selected_fk_index = self.design.foreign_keys.len().checked_sub(1);
         }
     }
@@ -1254,14 +1303,12 @@ impl TableDesignerPanel {
         self.column_comment_inputs.push(comment_input);
 
         let gen_input = cx.new(|cx| InputState::new(window, cx).placeholder("Expression"));
-        self._subscriptions.push(cx.subscribe(
-            &gen_input,
-            |this, _, event: &InputEvent, cx| {
+        self._subscriptions
+            .push(cx.subscribe(&gen_input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.mark_dirty(cx);
                 }
-            },
-        ));
+            }));
         self.column_generated_inputs.push(gen_input);
 
         self.selected_column_index = Some(ordinal);
@@ -1311,7 +1358,9 @@ impl TableDesignerPanel {
                 self.column_length_inputs.swap(idx, idx - 1);
                 self.column_type_selects.swap(idx, idx - 1);
                 self.column_comment_inputs.swap(idx, idx - 1);
-                if idx < self.column_generated_inputs.len() && idx - 1 < self.column_generated_inputs.len() {
+                if idx < self.column_generated_inputs.len()
+                    && idx - 1 < self.column_generated_inputs.len()
+                {
                     self.column_generated_inputs.swap(idx, idx - 1);
                 }
 
@@ -1336,7 +1385,9 @@ impl TableDesignerPanel {
                 self.column_length_inputs.swap(idx, idx + 1);
                 self.column_type_selects.swap(idx, idx + 1);
                 self.column_comment_inputs.swap(idx, idx + 1);
-                if idx < self.column_generated_inputs.len() && idx + 1 < self.column_generated_inputs.len() {
+                if idx < self.column_generated_inputs.len()
+                    && idx + 1 < self.column_generated_inputs.len()
+                {
                     self.column_generated_inputs.swap(idx, idx + 1);
                 }
 
@@ -1479,13 +1530,14 @@ impl TableDesignerPanel {
         self.index_where_inputs.push(where_input);
 
         let include_input = cx.new(|cx| InputState::new(window, cx).placeholder("col1, col2, ..."));
-        self._subscriptions.push(
-            cx.subscribe(&include_input, |this, _, event: &InputEvent, cx| {
+        self._subscriptions.push(cx.subscribe(
+            &include_input,
+            |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     this.mark_dirty(cx);
                 }
-            }),
-        );
+            },
+        ));
         self.index_include_inputs.push(include_input);
 
         self.selected_index_index = Some(self.design.indexes.len() - 1);
@@ -1575,7 +1627,8 @@ impl TableDesignerPanel {
         ));
         self.fk_ref_table_inputs.push(ref_table_input);
 
-        let ref_cols_input = cx.new(|cx| InputState::new(window, cx).placeholder("col1, col2, ..."));
+        let ref_cols_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("col1, col2, ..."));
         self._subscriptions.push(cx.subscribe(
             &ref_cols_input,
             |this, _, event: &InputEvent, cx| {
@@ -1642,13 +1695,14 @@ impl TableDesignerPanel {
                     state.set_value(&new_col.name, window, cx);
                     state
                 });
-                self._subscriptions.push(
-                    cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
+                self._subscriptions.push(cx.subscribe(
+                    &name_input,
+                    |this, _, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::Change) {
                             this.mark_dirty(cx);
                         }
-                    }),
-                );
+                    },
+                ));
                 self.column_name_inputs.insert(idx + 1, name_input);
 
                 let default_input = cx.new(|cx| {
@@ -1675,13 +1729,14 @@ impl TableDesignerPanel {
                     }
                     state
                 });
-                self._subscriptions.push(
-                    cx.subscribe(&length_input, |this, _, event: &InputEvent, cx| {
+                self._subscriptions.push(cx.subscribe(
+                    &length_input,
+                    |this, _, event: &InputEvent, cx| {
                         if matches!(event, InputEvent::Change) {
                             this.mark_dirty(cx);
                         }
-                    }),
-                );
+                    },
+                ));
                 self.column_length_inputs.insert(idx + 1, length_input);
 
                 let comment_input = cx.new(|cx| {
@@ -1752,7 +1807,12 @@ impl TableDesignerPanel {
         let (data_type, default_val) = match self.design.dialect {
             DatabaseDialect::Postgres => ("UUID", Some("gen_random_uuid()")),
             DatabaseDialect::Mysql => ("CHAR", Some("(UUID())")),
-            DatabaseDialect::Sqlite => ("TEXT", Some("(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))))")),
+            DatabaseDialect::Sqlite => (
+                "TEXT",
+                Some(
+                    "(lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))),2) || '-' || substr('89ab',abs(random()) % 4 + 1, 1) || substr(lower(hex(randomblob(2))),2) || '-' || lower(hex(randomblob(6))))",
+                ),
+            ),
         };
         let mut col = ColumnDesign::new(0);
         col.name = "id".to_string();
@@ -1836,8 +1896,7 @@ impl TableDesignerPanel {
             .push(crate::models::CheckConstraintDesign::new());
         let idx = self.design.check_constraints.len() - 1;
 
-        let name_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Constraint name"));
+        let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Constraint name"));
         self._subscriptions.push(
             cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1847,8 +1906,7 @@ impl TableDesignerPanel {
         );
         self.check_name_inputs.push(name_input);
 
-        let expr_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("CHECK expression"));
+        let expr_input = cx.new(|cx| InputState::new(window, cx).placeholder("CHECK expression"));
         self._subscriptions.push(
             cx.subscribe(&expr_input, |this, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
@@ -1874,8 +1932,7 @@ impl TableDesignerPanel {
                 if self.design.check_constraints.is_empty() {
                     self.selected_check_index = None;
                 } else if idx >= self.design.check_constraints.len() {
-                    self.selected_check_index =
-                        Some(self.design.check_constraints.len() - 1);
+                    self.selected_check_index = Some(self.design.check_constraints.len() - 1);
                 }
 
                 self.mark_dirty(cx);
@@ -1957,18 +2014,42 @@ impl TableDesignerPanel {
 
     fn sync_options_from_inputs(&mut self, cx: &Context<Self>) {
         let engine = self.mysql_engine_input.read(cx).value().to_string();
-        self.design.options.engine = if engine.is_empty() { None } else { Some(engine) };
+        self.design.options.engine = if engine.is_empty() {
+            None
+        } else {
+            Some(engine)
+        };
         let charset = self.mysql_charset_input.read(cx).value().to_string();
-        self.design.options.charset = if charset.is_empty() { None } else { Some(charset) };
+        self.design.options.charset = if charset.is_empty() {
+            None
+        } else {
+            Some(charset)
+        };
         let collation = self.mysql_collation_input.read(cx).value().to_string();
-        self.design.options.collation = if collation.is_empty() { None } else { Some(collation) };
+        self.design.options.collation = if collation.is_empty() {
+            None
+        } else {
+            Some(collation)
+        };
         let tablespace = self.pg_tablespace_input.read(cx).value().to_string();
-        self.design.options.tablespace = if tablespace.is_empty() { None } else { Some(tablespace) };
+        self.design.options.tablespace = if tablespace.is_empty() {
+            None
+        } else {
+            Some(tablespace)
+        };
 
         let schema = self.schema_input.read(cx).value().to_string();
-        self.design.schema = if schema.is_empty() { None } else { Some(schema) };
+        self.design.schema = if schema.is_empty() {
+            None
+        } else {
+            Some(schema)
+        };
         let comment = self.table_comment_input.read(cx).value().to_string();
-        self.design.comment = if comment.is_empty() { None } else { Some(comment) };
+        self.design.comment = if comment.is_empty() {
+            None
+        } else {
+            Some(comment)
+        };
     }
 
     /// Sync column data from inputs to design
@@ -2416,44 +2497,48 @@ impl TableDesignerPanel {
             .context_menu({
                 let view = cx.entity().clone();
                 move |menu, window, _cx| {
-                    menu.item(
-                        PopupMenuItem::new("Duplicate").on_click({
-                            let view = view.clone();
-                            window.listener_for(&view, move |this: &mut TableDesignerPanel, _, window, cx| {
+                    menu.item(PopupMenuItem::new("Duplicate").on_click({
+                        let view = view.clone();
+                        window.listener_for(
+                            &view,
+                            move |this: &mut TableDesignerPanel, _, window, cx| {
                                 this.selected_column_index = Some(idx);
                                 this.handle_duplicate_column(window, cx);
-                            })
-                        }),
-                    )
+                            },
+                        )
+                    }))
                     .separator()
-                    .item(
-                        PopupMenuItem::new("Move Up").disabled(idx == 0).on_click({
-                            let view = view.clone();
-                            window.listener_for(&view, move |this: &mut TableDesignerPanel, _, _, cx| {
+                    .item(PopupMenuItem::new("Move Up").disabled(idx == 0).on_click({
+                        let view = view.clone();
+                        window.listener_for(
+                            &view,
+                            move |this: &mut TableDesignerPanel, _, _, cx| {
                                 this.selected_column_index = Some(idx);
                                 this.move_column_up(cx);
-                            })
-                        }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Move Down").on_click({
-                            let view = view.clone();
-                            window.listener_for(&view, move |this: &mut TableDesignerPanel, _, _, cx| {
+                            },
+                        )
+                    }))
+                    .item(PopupMenuItem::new("Move Down").on_click({
+                        let view = view.clone();
+                        window.listener_for(
+                            &view,
+                            move |this: &mut TableDesignerPanel, _, _, cx| {
                                 this.selected_column_index = Some(idx);
                                 this.move_column_down(cx);
-                            })
-                        }),
-                    )
+                            },
+                        )
+                    }))
                     .separator()
-                    .item(
-                        PopupMenuItem::new("Delete").on_click({
-                            let view = view.clone();
-                            window.listener_for(&view, move |this: &mut TableDesignerPanel, _, _, cx| {
+                    .item(PopupMenuItem::new("Delete").on_click({
+                        let view = view.clone();
+                        window.listener_for(
+                            &view,
+                            move |this: &mut TableDesignerPanel, _, _, cx| {
                                 this.selected_column_index = Some(idx);
                                 this.remove_column(cx);
-                            })
-                        }),
-                    )
+                            },
+                        )
+                    }))
                 }
             })
     }
@@ -2521,13 +2606,7 @@ impl TableDesignerPanel {
                     .border_color(theme.border)
                     .child("WHERE"),
             )
-            .child(
-                div()
-                    .w(px(150.0))
-                    .px_2()
-                    .py_1()
-                    .child("INCLUDE"),
-            )
+            .child(div().w(px(150.0)).px_2().py_1().child("INCLUDE"))
     }
 
     /// Build a single index row element
@@ -2576,7 +2655,9 @@ impl TableDesignerPanel {
                     .child(
                         name_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2589,7 +2670,9 @@ impl TableDesignerPanel {
                     .child(
                         columns_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2602,7 +2685,9 @@ impl TableDesignerPanel {
                     .child(
                         type_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2614,15 +2699,15 @@ impl TableDesignerPanel {
                     .border_r_1()
                     .border_color(theme.border)
                     .child(
-                    Checkbox::new(SharedString::from(format!("idx-unique-{}", idx)))
-                        .checked(is_unique)
-                        .on_click(cx.listener(move |this, _checked, _window, cx| {
-                            if let Some(index) = this.design.indexes.get_mut(idx) {
-                                index.is_unique = !index.is_unique;
-                                this.mark_dirty(cx);
-                            }
-                        })),
-                ),
+                        Checkbox::new(SharedString::from(format!("idx-unique-{}", idx)))
+                            .checked(is_unique)
+                            .on_click(cx.listener(move |this, _checked, _window, cx| {
+                                if let Some(index) = this.design.indexes.get_mut(idx) {
+                                    index.is_unique = !index.is_unique;
+                                    this.mark_dirty(cx);
+                                }
+                            })),
+                    ),
             )
             // WHERE clause input (partial index)
             .child(
@@ -2635,20 +2720,18 @@ impl TableDesignerPanel {
                     .child(
                         where_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             // INCLUDE columns input (covering index)
             .child(
-                div()
-                    .w(px(150.0))
-                    .px_2()
-                    .py_1()
-                    .child(
-                        include_input
-                            .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
-                    ),
+                div().w(px(150.0)).px_2().py_1().child(
+                    include_input
+                        .map(|input| Input::new(&input).xsmall().w_full())
+                        .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                ),
             )
     }
 
@@ -2764,7 +2847,9 @@ impl TableDesignerPanel {
                     .child(
                         name_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2777,7 +2862,9 @@ impl TableDesignerPanel {
                     .child(
                         columns_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2790,7 +2877,9 @@ impl TableDesignerPanel {
                     .child(
                         ref_table_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -2803,7 +2892,9 @@ impl TableDesignerPanel {
                     .child(
                         ref_columns_input
                             .map(|input| Input::new(&input).xsmall().w_full())
-                            .unwrap_or_else(|| Input::new(&self.table_name_input).xsmall().w_full()),
+                            .unwrap_or_else(|| {
+                                Input::new(&self.table_name_input).xsmall().w_full()
+                            }),
                     ),
             )
             .child(
@@ -3079,7 +3170,7 @@ impl TableDesignerPanel {
     }
 }
 
-    impl Render for TableDesignerPanel {
+impl Render for TableDesignerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Extract theme colors before any mutable borrows
         let bg_color;
@@ -3138,14 +3229,14 @@ impl TableDesignerPanel {
             .on_action(cx.listener(|this, _: &AddColumn, window, cx| {
                 this.add_column(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &RemoveSelected, _window, cx| {
-                match this.active_tab {
+            .on_action(cx.listener(
+                |this, _: &RemoveSelected, _window, cx| match this.active_tab {
                     DesignerTab::Fields => this.remove_column(cx),
                     DesignerTab::Indexes => this.remove_index(cx),
                     DesignerTab::ForeignKeys => this.remove_foreign_key(cx),
                     _ => {}
-                }
-            }))
+                },
+            ))
             .on_action(cx.listener(|this, _: &MoveColumnUp, _window, cx| {
                 this.move_column_up(cx);
             }))
@@ -3158,9 +3249,11 @@ impl TableDesignerPanel {
             .on_action(cx.listener(|this, _: &AddTemplateUuidPk, window, cx| {
                 this.add_template_uuid_pk(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &AddTemplateAuditColumns, window, cx| {
-                this.add_template_audit_columns(window, cx);
-            }))
+            .on_action(
+                cx.listener(|this, _: &AddTemplateAuditColumns, window, cx| {
+                    this.add_template_audit_columns(window, cx);
+                }),
+            )
             .on_action(cx.listener(|this, _: &AddTemplateSoftDelete, window, cx| {
                 this.add_template_soft_delete(window, cx);
             }))
@@ -3196,9 +3289,7 @@ impl TableDesignerPanel {
                                         .font_weight(FontWeight::MEDIUM)
                                         .child("Schema:"),
                                 )
-                                .child(
-                                    Input::new(&self.schema_input).small().w(px(150.0)),
-                                )
+                                .child(Input::new(&self.schema_input).small().w(px(150.0)))
                             })
                             .child(
                                 div()
@@ -3206,11 +3297,7 @@ impl TableDesignerPanel {
                                     .font_weight(FontWeight::MEDIUM)
                                     .child("Comment:"),
                             )
-                            .child(
-                                Input::new(&self.table_comment_input)
-                                    .small()
-                                    .w(px(200.0)),
-                            ),
+                            .child(Input::new(&self.table_comment_input).small().w(px(200.0))),
                     ),
             )
             // Validation error banner

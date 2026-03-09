@@ -14,7 +14,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::{Connection, QueryResult, StatementResult, Value};
@@ -42,7 +42,9 @@ mod tests {
             }
             TestDriver::Redis => sql.to_string(),
         };
-        conn.execute(&sql, params).await.map_err(|e| anyhow::anyhow!("{}", e))
+        conn.execute(&sql, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     /// Helper to query SQL that works across drivers.
@@ -63,7 +65,9 @@ mod tests {
             }
             TestDriver::Redis => sql.to_string(),
         };
-        conn.query(&sql, params).await.map_err(|e| anyhow::anyhow!("{}", e))
+        conn.query(&sql, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     fn json_value_as_string(value: &Value) -> Option<String> {
@@ -132,18 +136,29 @@ mod tests {
         .await?;
 
         // Retrieve JSON
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         // Verify JSON contains expected data (allow for formatting differences)
         assert!(data.contains("John Doe"), "JSON should contain name");
         assert!(data.contains("30"), "JSON should contain age");
-        assert!(data.contains("true") || data.contains("1"), "JSON should contain active=true");
+        assert!(
+            data.contains("true") || data.contains("1"),
+            "JSON should contain active=true"
+        );
 
         drop_json_table(conn.as_ref()).await?;
         Ok(())
@@ -170,8 +185,12 @@ mod tests {
 
         // Extract nested value using driver-specific syntax
         let extract_sql = match driver {
-            TestDriver::Postgres => "SELECT data->'person'->>'name' as name FROM json_test WHERE id = 1",
-            TestDriver::Mysql => "SELECT JSON_EXTRACT(data, '$.person.name') as name FROM json_test WHERE id = 1",
+            TestDriver::Postgres => {
+                "SELECT data->'person'->>'name' as name FROM json_test WHERE id = 1"
+            }
+            TestDriver::Mysql => {
+                "SELECT JSON_EXTRACT(data, '$.person.name') as name FROM json_test WHERE id = 1"
+            }
             _ => anyhow::bail!("JSON extraction not implemented for this driver"),
         };
 
@@ -216,13 +235,21 @@ mod tests {
         .await?;
 
         // Retrieve JSON
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         // Verify JSON contains array
         assert!(data.contains("rust"), "JSON should contain 'rust'");
@@ -266,17 +293,28 @@ mod tests {
         .await?;
 
         // Retrieve and verify nested structure
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         // Verify nested data is present
         assert!(data.contains("Bob"), "JSON should contain name");
-        assert!(data.contains("bob@example.com"), "JSON should contain email");
+        assert!(
+            data.contains("bob@example.com"),
+            "JSON should contain email"
+        );
         assert!(data.contains("dark"), "JSON should contain theme");
 
         drop_json_table(conn.as_ref()).await?;
@@ -304,13 +342,21 @@ mod tests {
         .await?;
 
         // Retrieve JSON
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         // Verify null is preserved in JSON
         assert!(data.contains("null"), "JSON should contain null value");
@@ -340,10 +386,18 @@ mod tests {
         .await?;
 
         // Retrieve NULL value
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
-        let data = result.rows[0].get_by_name("data").context("Missing data column")?;
+        let data = result.rows[0]
+            .get_by_name("data")
+            .context("Missing data column")?;
 
         // Verify column value is NULL
         assert!(matches!(data, Value::Null), "Expected NULL value");
@@ -363,7 +417,8 @@ mod tests {
         create_json_table(conn.as_ref(), driver).await?;
 
         // Insert JSON with special characters
-        let json_data = r#"{"message": "Hello \"World\"", "emoji": "😀", "newline": "line1\nline2"}"#;
+        let json_data =
+            r#"{"message": "Hello \"World\"", "emoji": "😀", "newline": "line1\nline2"}"#;
         execute_sql(
             conn.as_ref(),
             "INSERT INTO json_test (data) VALUES ($1)",
@@ -373,13 +428,21 @@ mod tests {
         .await?;
 
         // Retrieve JSON
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         // Verify special characters are preserved (escaped)
         assert!(
@@ -423,16 +486,27 @@ mod tests {
         .await?;
 
         // Verify update
-        let result = query_sql(conn.as_ref(), "SELECT data FROM json_test WHERE id = 1", &[], driver).await?;
+        let result = query_sql(
+            conn.as_ref(),
+            "SELECT data FROM json_test WHERE id = 1",
+            &[],
+            driver,
+        )
+        .await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 row");
         let data = result.rows[0]
             .get_by_name("data")
             .context("Missing data column")
-            .and_then(|value| json_value_as_string(value).context("data should be string or json"))?;
+            .and_then(|value| {
+                json_value_as_string(value).context("data should be string or json")
+            })?;
 
         assert!(data.contains("2"), "JSON should contain counter=2");
-        assert!(data.contains("inactive"), "JSON should contain status=inactive");
+        assert!(
+            data.contains("inactive"),
+            "JSON should contain status=inactive"
+        );
 
         drop_json_table(conn.as_ref()).await?;
         Ok(())
@@ -441,8 +515,8 @@ mod tests {
     /// Integration test for basic JSON functionality (works without Docker)
     #[tokio::test]
     async fn integration_test_json_works() -> Result<()> {
-        use zqlz_driver_sqlite::SqliteDriver;
         use zqlz_core::DatabaseDriver;
+        use zqlz_driver_sqlite::SqliteDriver;
 
         // Use in-memory SQLite database
         let driver = SqliteDriver::new();
@@ -481,10 +555,17 @@ mod tests {
         .await?;
 
         // Query JSON
-        let result = conn.query("SELECT data FROM test_json WHERE id = ?", &[Value::Int64(1)]).await?;
+        let result = conn
+            .query(
+                "SELECT data FROM test_json WHERE id = ?",
+                &[Value::Int64(1)],
+            )
+            .await?;
 
         assert_eq!(result.rows.len(), 1);
-        let data = result.rows[0].get_by_name("data").context("Missing data column")?;
+        let data = result.rows[0]
+            .get_by_name("data")
+            .context("Missing data column")?;
         let json_str = data.as_str().context("data should be string")?;
         assert!(json_str.contains("test"));
         assert!(json_str.contains("42"));

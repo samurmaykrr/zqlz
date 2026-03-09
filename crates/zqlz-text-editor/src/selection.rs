@@ -70,7 +70,11 @@ impl Selection {
 
     /// Create a selection from anchor to head
     pub fn from_anchor_head(anchor: Position, head: Position) -> Self {
-        Self { anchor, head, mode: SelectionMode::Character }
+        Self {
+            anchor,
+            head,
+            mode: SelectionMode::Character,
+        }
     }
 
     /// Get the anchor position

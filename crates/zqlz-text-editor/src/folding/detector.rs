@@ -438,8 +438,10 @@ $$ LANGUAGE plpgsql;"#;
         let regions = detect_folds(sql);
 
         assert!(regions.iter().any(|r| r.kind == FoldKind::Comment));
-        assert!(regions
-            .iter()
-            .any(|r| r.kind == FoldKind::Function || r.kind == FoldKind::Block));
+        assert!(
+            regions
+                .iter()
+                .any(|r| r.kind == FoldKind::Function || r.kind == FoldKind::Block)
+        );
     }
 }

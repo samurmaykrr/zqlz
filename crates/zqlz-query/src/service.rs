@@ -6,7 +6,9 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_analyzer::{QueryAnalyzer, parse_postgres_explain, parse_mysql_explain, parse_sqlite_explain};
+use zqlz_analyzer::{
+    QueryAnalyzer, parse_mysql_explain, parse_postgres_explain, parse_sqlite_explain,
+};
 use zqlz_core::{Connection, ExplainConfig};
 
 use crate::engine::QueryEngine;
@@ -481,7 +483,7 @@ impl QueryService {
             &connection,
             raw_output.as_ref(),
             query_plan.as_ref(),
-            duration_ms
+            duration_ms,
         );
 
         tracing::info!(
@@ -514,7 +516,7 @@ impl QueryService {
         duration_ms: u64,
     ) -> Option<zqlz_analyzer::QueryAnalysis> {
         let dialect = connection.dialect_id()?;
-        
+
         // Try to parse based on dialect
         let parsed_plan = match dialect {
             "postgresql" | "postgres" => {
@@ -569,7 +571,7 @@ impl QueryService {
         parsed_plan.map(|mut plan| {
             // Add execution time from EXPLAIN itself
             plan.execution_time_ms = Some(duration_ms as f64);
-            
+
             // Run the analyzer to get suggestions
             let analyzer = QueryAnalyzer::new();
             analyzer.analyze(plan)
@@ -579,19 +581,19 @@ impl QueryService {
     /// Convert QueryResult to text format for parsing
     fn query_result_to_text(result: &zqlz_core::QueryResult) -> String {
         let mut lines = Vec::new();
-        
+
         // Add header
         if !result.columns.is_empty() {
             let header: Vec<_> = result.columns.iter().map(|c| c.name.as_str()).collect();
             lines.push(header.join("\t"));
         }
-        
+
         // Add rows
         for row in &result.rows {
             let row_text: Vec<_> = row.values.iter().map(|v| v.to_string()).collect();
             lines.push(row_text.join("\t"));
         }
-        
+
         lines.join("\n")
     }
 

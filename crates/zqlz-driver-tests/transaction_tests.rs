@@ -5,7 +5,7 @@
 //!
 //! Tests use the Sakila/Pagila sample databases available in Docker containers.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 
@@ -81,7 +81,11 @@ async fn test_transaction_rollback(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let initial_count = initial_result.rows[0].get(0).context("missing count")?.as_i64().unwrap_or(0);
+    let initial_count = initial_result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap_or(0);
 
     // Start transaction
     conn.execute("BEGIN", &[]).await?;
@@ -100,7 +104,11 @@ async fn test_transaction_rollback(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = select_result.rows[0].get(0).context("missing count")?.as_i64().unwrap_or(0);
+    let count = select_result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap_or(0);
     assert_eq!(
         count,
         initial_count + 1,
@@ -117,7 +125,11 @@ async fn test_transaction_rollback(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = select_result.rows[0].get(0).context("missing count")?.as_i64().unwrap_or(0);
+    let count = select_result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap_or(0);
     assert_eq!(
         count, initial_count,
         "Actor should not exist after rollback"
@@ -157,7 +169,11 @@ async fn test_multiple_operations_in_transaction(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let count1 = result1.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count1 = result1.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count1, 1);
 
     let result2 = conn
@@ -166,7 +182,11 @@ async fn test_multiple_operations_in_transaction(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let count2 = result2.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count2 = result2.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count2, 1);
 
     // Rollback
@@ -179,7 +199,11 @@ async fn test_multiple_operations_in_transaction(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let count1 = result1.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count1 = result1.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count1, 0);
 
     let result2 = conn
@@ -188,7 +212,11 @@ async fn test_multiple_operations_in_transaction(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let count2 = result2.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count2 = result2.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count2, 0);
 
     Ok(())
@@ -221,8 +249,14 @@ async fn test_transaction_read_your_writes(#[case] driver: TestDriver) -> Result
         )
         .await?;
     let row = &result.rows[0];
-    assert_eq!(row.get(0).context("missing first_name")?.as_str(), Some("Charlie"));
-    assert_eq!(row.get(1).context("missing last_name")?.as_str(), Some("ReadWrite"));
+    assert_eq!(
+        row.get(0).context("missing first_name")?.as_str(),
+        Some("Charlie")
+    );
+    assert_eq!(
+        row.get(1).context("missing last_name")?.as_str(),
+        Some("ReadWrite")
+    );
 
     // Update it
     conn.execute(
@@ -239,7 +273,10 @@ async fn test_transaction_read_your_writes(#[case] driver: TestDriver) -> Result
         )
         .await?;
     let row = &result.rows[0];
-    assert_eq!(row.get(0).context("missing first_name")?.as_str(), Some("Updated"));
+    assert_eq!(
+        row.get(0).context("missing first_name")?.as_str(),
+        Some("Updated")
+    );
 
     // Rollback
     conn.execute("ROLLBACK", &[]).await?;
@@ -270,7 +307,11 @@ async fn test_transaction_autocommit_behavior(#[case] driver: TestDriver) -> Res
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 1, "Autocommit insert should be immediately visible");
 
     // Cleanup
@@ -296,8 +337,11 @@ async fn test_transaction_isolation_read_committed(#[case] driver: TestDriver) -
                 .await
         }
         TestDriver::Mysql => {
-            conn.execute("SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED", &[])
-                .await?;
+            conn.execute(
+                "SET SESSION TRANSACTION ISOLATION LEVEL READ COMMITTED",
+                &[],
+            )
+            .await?;
             conn.execute("BEGIN", &[]).await
         }
         TestDriver::Sqlite => {
@@ -326,7 +370,11 @@ async fn test_transaction_isolation_read_committed(#[case] driver: TestDriver) -
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 1);
 
     conn.execute("ROLLBACK", &[]).await?;
@@ -384,7 +432,11 @@ async fn test_transaction_isolation_serializable(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 1);
 
     conn.execute("ROLLBACK", &[]).await?;
@@ -491,7 +543,11 @@ async fn test_concurrent_transactions(#[case] driver: TestDriver) -> Result<()> 
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 2, "Both concurrent transactions should succeed");
 
     // Cleanup
@@ -550,7 +606,11 @@ async fn test_transaction_rollback_on_disconnect(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let initial_count = initial_result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let initial_count = initial_result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
 
     // Create a new connection for the transaction
     {
@@ -573,7 +633,11 @@ async fn test_transaction_rollback_on_disconnect(#[case] driver: TestDriver) -> 
             &[],
         )
         .await?;
-    let final_count = final_result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let final_count = final_result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
 
     assert_eq!(
         final_count, initial_count,
@@ -614,7 +678,11 @@ async fn test_savepoint_creation(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 2, "Both inserts should be visible");
 
     conn.execute("COMMIT", &[]).await?;
@@ -648,7 +716,11 @@ async fn test_rollback_to_savepoint(#[case] driver: TestDriver) -> Result<()> {
         test_marker
     );
     let result = conn.query(&count_sql, &[]).await?;
-    let count_before = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count_before = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count_before, 1, "First insert should be visible");
 
     conn.execute("SAVEPOINT sp1", &[]).await?;
@@ -660,13 +732,21 @@ async fn test_rollback_to_savepoint(#[case] driver: TestDriver) -> Result<()> {
     conn.execute(&insert_after_sql, &[]).await?;
 
     let result = conn.query(&count_sql, &[]).await?;
-    let count_after = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count_after = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count_after, 2, "Both inserts should be visible");
 
     conn.execute("ROLLBACK TO SAVEPOINT sp1", &[]).await?;
 
     let result = conn.query(&count_sql, &[]).await?;
-    let count_rollback = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count_rollback = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(
         count_rollback, 1,
         "Only first insert should remain after rollback to savepoint"
@@ -713,16 +793,17 @@ async fn test_release_savepoint(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 2, "Both inserts should remain after release");
 
     conn.execute("COMMIT", &[]).await?;
 
-    conn.execute(
-        "DELETE FROM actor WHERE first_name = 'Release'",
-        &[],
-    )
-    .await?;
+    conn.execute("DELETE FROM actor WHERE first_name = 'Release'", &[])
+        .await?;
 
     Ok(())
 }
@@ -774,7 +855,11 @@ async fn test_multiple_savepoints(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 4, "All four inserts should be visible");
 
     conn.execute("ROLLBACK TO SAVEPOINT sp2", &[]).await?;
@@ -785,7 +870,11 @@ async fn test_multiple_savepoints(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(
         count, 2,
         "Only first two inserts should remain after rollback to sp2"
@@ -838,7 +927,11 @@ async fn test_nested_savepoints(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 3, "All three inserts should be visible");
 
     conn.execute("ROLLBACK TO SAVEPOINT inner_sp", &[]).await?;
@@ -849,7 +942,11 @@ async fn test_nested_savepoints(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 2, "Inner rollback should remove innermost insert");
 
     conn.execute("ROLLBACK TO SAVEPOINT outer_sp", &[]).await?;
@@ -860,7 +957,11 @@ async fn test_nested_savepoints(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 1, "Outer rollback should remove middle insert");
 
     conn.execute("COMMIT", &[]).await?;
@@ -916,7 +1017,11 @@ async fn test_savepoint_after_error(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(
         count, 2,
         "First and third insert should succeed after error recovery"
@@ -969,7 +1074,11 @@ async fn test_savepoint_name_reuse(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(count, 3, "All three inserts should be visible");
 
     conn.execute("ROLLBACK TO SAVEPOINT sp", &[]).await?;
@@ -980,7 +1089,11 @@ async fn test_savepoint_name_reuse(#[case] driver: TestDriver) -> Result<()> {
             &[],
         )
         .await?;
-    let count = result.rows[0].get(0).context("missing count")?.as_i64().unwrap();
+    let count = result.rows[0]
+        .get(0)
+        .context("missing count")?
+        .as_i64()
+        .unwrap();
     assert_eq!(
         count, 2,
         "Rollback should use most recent savepoint with that name"
@@ -1035,11 +1148,8 @@ async fn test_savepoint_rollback_then_commit(#[case] driver: TestDriver) -> Resu
         Some("Keep")
     );
 
-    conn.execute(
-        "DELETE FROM actor WHERE first_name = 'RollCommit'",
-        &[],
-    )
-    .await?;
+    conn.execute("DELETE FROM actor WHERE first_name = 'RollCommit'", &[])
+        .await?;
 
     Ok(())
 }
@@ -1139,11 +1249,8 @@ async fn test_savepoint_multiple_tables(#[case] driver: TestDriver) -> Result<()
 
     conn.execute("COMMIT", &[]).await?;
 
-    conn.execute(
-        "DELETE FROM actor WHERE first_name = 'MultiTable'",
-        &[],
-    )
-    .await?;
+    conn.execute("DELETE FROM actor WHERE first_name = 'MultiTable'", &[])
+        .await?;
 
     Ok(())
 }

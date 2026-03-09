@@ -3,7 +3,7 @@
 //! Tests UNION, UNION ALL, INTERSECT, and EXCEPT operations across SQL drivers.
 //! These tests use the Sakila/Pagila sample database tables.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 
@@ -48,11 +48,7 @@ async fn test_set_union_all(
     let result = conn.query(query, &[]).await?;
 
     // Should have 2 rows since UNION ALL keeps duplicates
-    assert_eq!(
-        result.rows.len(),
-        2,
-        "UNION ALL should keep duplicate rows"
-    );
+    assert_eq!(result.rows.len(), 2, "UNION ALL should keep duplicate rows");
 
     Ok(())
 }

@@ -1,7 +1,7 @@
 //! Tests for MS SQL Server connection module
 
 use crate::connection::{
-    column_data_to_value, values_to_tiberius_params, MssqlConnectionError, TiberiusParam,
+    MssqlConnectionError, TiberiusParam, column_data_to_value, values_to_tiberius_params,
 };
 use tiberius::ColumnData;
 use zqlz_core::{Value, ZqlzError};

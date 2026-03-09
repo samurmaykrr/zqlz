@@ -4,12 +4,12 @@
 //! Uses sqlparser-rs for accurate SQL parsing and validation.
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
 use lsp_types::{
     CodeAction, CompletionItem, CompletionItemKind, Diagnostic, GotoDefinitionResponse, Hover,
-    HoverContents, MarkedString, Position, Range, ParameterInformation, ParameterLabel,
-    SignatureHelp, SignatureInformation, Location, Uri, TextEdit, WorkspaceEdit,
+    HoverContents, Location, MarkedString, ParameterInformation, ParameterLabel, Position, Range,
+    SignatureHelp, SignatureInformation, TextEdit, Uri, WorkspaceEdit,
 };
+use serde::{Deserialize, Serialize};
 use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -394,7 +394,9 @@ impl SqlLsp {
                     for col in &column_infos {
                         cache.objects.push(DatabaseObject::Column(col.clone()));
                     }
-                    cache.columns_by_table.insert(table_name.clone(), column_infos);
+                    cache
+                        .columns_by_table
+                        .insert(table_name.clone(), column_infos);
 
                     for fk in &details.foreign_keys {
                         cache
@@ -424,7 +426,9 @@ impl SqlLsp {
                 timing: String::new(),
                 definition: None,
             };
-            cache.triggers.insert(trigger_name.clone(), trigger_info.clone());
+            cache
+                .triggers
+                .insert(trigger_name.clone(), trigger_info.clone());
             cache.objects.push(DatabaseObject::Trigger(trigger_info));
         }
 
@@ -438,7 +442,9 @@ impl SqlLsp {
                 is_aggregate: false,
                 comment: None,
             };
-            cache.functions.insert(function_name.clone(), function_info.clone());
+            cache
+                .functions
+                .insert(function_name.clone(), function_info.clone());
             cache.objects.push(DatabaseObject::Function(function_info));
         }
 
@@ -451,8 +457,12 @@ impl SqlLsp {
                 definition: None,
                 comment: None,
             };
-            cache.procedures.insert(procedure_name.clone(), procedure_info.clone());
-            cache.objects.push(DatabaseObject::StoredProcedure(procedure_info));
+            cache
+                .procedures
+                .insert(procedure_name.clone(), procedure_info.clone());
+            cache
+                .objects
+                .push(DatabaseObject::StoredProcedure(procedure_info));
         }
 
         for (table_name, indexes) in &db_schema.table_indexes {
@@ -522,12 +532,15 @@ impl SqlLsp {
     /// Does NOT clear `schema_loading` — that remains the full fetch's responsibility.
     pub fn pre_populate_tables(&mut self, table_names: &[String]) {
         for name in table_names {
-            self.schema_cache.tables.entry(name.clone()).or_insert_with(|| TableInfo {
-                name: name.clone(),
-                schema: None,
-                comment: None,
-                row_count: None,
-            });
+            self.schema_cache
+                .tables
+                .entry(name.clone())
+                .or_insert_with(|| TableInfo {
+                    name: name.clone(),
+                    schema: None,
+                    comment: None,
+                    row_count: None,
+                });
         }
     }
 
@@ -579,8 +592,8 @@ impl SqlLsp {
                 // MySQL: SELECT name, type FROM mysql.proc WHERE db = DATABASE() AND type = 'PROCEDURE'
                 let result = conn
                     .query(
-                        "SELECT ROUTINE_NAME, ROUTINE_DEFINITION, ROUTINE_COMMENT 
-                     FROM INFORMATION_SCHEMA.ROUTINES 
+                        "SELECT ROUTINE_NAME, ROUTINE_DEFINITION, ROUTINE_COMMENT
+                     FROM INFORMATION_SCHEMA.ROUTINES
                      WHERE ROUTINE_TYPE = 'PROCEDURE' AND ROUTINE_SCHEMA = DATABASE()",
                         &[],
                     )
@@ -607,8 +620,8 @@ impl SqlLsp {
                 // PostgreSQL: Query pg_proc for procedures
                 let result = conn
                     .query(
-                        "SELECT proname, prosrc, obj_description(oid, 'pg_proc') 
-                     FROM pg_proc 
+                        "SELECT proname, prosrc, obj_description(oid, 'pg_proc')
+                     FROM pg_proc
                      WHERE prokind = 'p'",
                         &[],
                     )
@@ -647,8 +660,8 @@ impl SqlLsp {
             "mysql" | "mariadb" => {
                 let result = conn
                     .query(
-                        "SELECT ROUTINE_NAME, DTD_IDENTIFIER, ROUTINE_DEFINITION, ROUTINE_COMMENT 
-                     FROM INFORMATION_SCHEMA.ROUTINES 
+                        "SELECT ROUTINE_NAME, DTD_IDENTIFIER, ROUTINE_DEFINITION, ROUTINE_COMMENT
+                     FROM INFORMATION_SCHEMA.ROUTINES
                      WHERE ROUTINE_TYPE = 'FUNCTION' AND ROUTINE_SCHEMA = DATABASE()",
                         &[],
                     )
@@ -676,9 +689,9 @@ impl SqlLsp {
             "postgres" | "postgresql" => {
                 let result = conn
                     .query(
-                        "SELECT proname, pg_get_function_result(oid), prosrc, 
-                            proisagg, obj_description(oid, 'pg_proc') 
-                     FROM pg_proc 
+                        "SELECT proname, pg_get_function_result(oid), prosrc,
+                            proisagg, obj_description(oid, 'pg_proc')
+                     FROM pg_proc
                      WHERE prokind = 'f'",
                         &[],
                     )
@@ -745,8 +758,8 @@ impl SqlLsp {
             }
             "mysql" | "mariadb" => {
                 let result = conn.query(
-                    "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT 
-                     FROM INFORMATION_SCHEMA.TRIGGERS 
+                    "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT
+                     FROM INFORMATION_SCHEMA.TRIGGERS
                      WHERE TRIGGER_SCHEMA = DATABASE()",
                     &[]
                 ).await?;
@@ -995,7 +1008,9 @@ impl SqlLsp {
 
         // Filter based on context and current input
         match context {
-            AstSqlContext::SelectList { ref available_tables } => {
+            AstSqlContext::SelectList {
+                ref available_tables,
+            } => {
                 tracing::debug!("In SELECT list, available tables: {:?}", available_tables);
 
                 if available_tables.is_empty() {
@@ -1092,7 +1107,9 @@ impl SqlLsp {
                     }
                 }
             }
-            AstSqlContext::JoinClause { ref existing_tables } => {
+            AstSqlContext::JoinClause {
+                ref existing_tables,
+            } => {
                 tracing::debug!("In JOIN clause, existing tables: {:?}", existing_tables);
                 // Show tables with suggested JOINs based on foreign keys
                 self.add_tables_with_fk_suggestions(
@@ -1124,7 +1141,9 @@ impl SqlLsp {
                 // Add only JOIN-related keywords
                 self.add_specific_keywords(&["ON", "USING"], &current_word_lower, &mut completions);
             }
-            AstSqlContext::ConditionClause { ref available_tables } => {
+            AstSqlContext::ConditionClause {
+                ref available_tables,
+            } => {
                 tracing::debug!(
                     "In WHERE/HAVING clause, available tables count: {}",
                     available_tables.len()
@@ -1169,26 +1188,34 @@ impl SqlLsp {
                     });
                 }
             }
-            AstSqlContext::AfterDot { ref table_or_alias, ref available_tables } => {
+            AstSqlContext::AfterDot {
+                ref table_or_alias,
+                ref available_tables,
+            } => {
                 tracing::debug!("After dot for table/alias: {}", table_or_alias);
 
                 // Resolve alias to actual table name using available_tables from context
-                let table_name = self.resolve_alias_from_context(&table_or_alias, &available_tables);
+                let table_name =
+                    self.resolve_alias_from_context(&table_or_alias, &available_tables);
 
                 tracing::debug!("Resolved '{}' to table '{}'", table_or_alias, table_name);
 
                 // Show ONLY columns for the specific table - NO keywords at all
                 // Do case-insensitive lookup for table name
-                let columns = self.schema_cache.columns_by_table.get(&table_name)
+                let columns = self
+                    .schema_cache
+                    .columns_by_table
+                    .get(&table_name)
                     .or_else(|| {
                         // Try case-insensitive lookup
                         let table_name_lower = table_name.to_lowercase();
-                        self.schema_cache.columns_by_table
+                        self.schema_cache
+                            .columns_by_table
                             .iter()
                             .find(|(k, _)| k.to_lowercase() == table_name_lower)
                             .map(|(_, v)| v)
                     });
-                
+
                 if let Some(columns) = columns {
                     tracing::debug!("Found {} columns for table '{}'", columns.len(), table_name);
                     for column in columns {
@@ -1473,10 +1500,36 @@ impl SqlLsp {
 
         // The SQL clause keywords we recognise
         let clause_keywords: &[&str] = &[
-            "select", "from", "into", "update", "table", "join", "left", "right", "inner",
-            "outer", "cross", "full", "where", "and", "or", "not", "on", "having", "group",
-            "order", "limit", "offset", "union", "except", "intersect", "set", "values",
-            "with", "as", "create",
+            "select",
+            "from",
+            "into",
+            "update",
+            "table",
+            "join",
+            "left",
+            "right",
+            "inner",
+            "outer",
+            "cross",
+            "full",
+            "where",
+            "and",
+            "or",
+            "not",
+            "on",
+            "having",
+            "group",
+            "order",
+            "limit",
+            "offset",
+            "union",
+            "except",
+            "intersect",
+            "set",
+            "values",
+            "with",
+            "as",
+            "create",
         ];
 
         // Scan backward to find the most recent SQL clause keyword, then decide context.
@@ -1513,7 +1566,10 @@ impl SqlLsp {
                 }
                 kw @ ("from" | "into" | "update") => {
                     // Count non-keyword tokens after this clause keyword.
-                    let tokens_after = words[i + 1..].iter().filter(|&&w| !clause_keywords.contains(&w)).count();
+                    let tokens_after = words[i + 1..]
+                        .iter()
+                        .filter(|&&w| !clause_keywords.contains(&w))
+                        .count();
                     let _ = kw;
                     if tokens_after <= 1 {
                         return AstSqlContext::FromClause;
@@ -1746,33 +1802,113 @@ impl SqlLsp {
         let constraints: &[(&str, &str, &str)] = &[
             // Most-frequently-needed column constraints first
             ("NOT NULL", "Column cannot contain NULL values", "NOT NULL"),
-            ("PRIMARY KEY", "Designates this column as the primary key", "PRIMARY KEY"),
-            ("UNIQUE", "All values in this column must be distinct", "UNIQUE"),
-            ("DEFAULT", "Specifies a default value for the column", "DEFAULT "),
+            (
+                "PRIMARY KEY",
+                "Designates this column as the primary key",
+                "PRIMARY KEY",
+            ),
+            (
+                "UNIQUE",
+                "All values in this column must be distinct",
+                "UNIQUE",
+            ),
+            (
+                "DEFAULT",
+                "Specifies a default value for the column",
+                "DEFAULT ",
+            ),
             ("NULL", "Column can contain NULL values (default)", "NULL"),
-            ("CHECK", "Validates column data against an expression", "CHECK ("),
-            ("REFERENCES", "Inline foreign key to a referenced table", "REFERENCES "),
+            (
+                "CHECK",
+                "Validates column data against an expression",
+                "CHECK (",
+            ),
+            (
+                "REFERENCES",
+                "Inline foreign key to a referenced table",
+                "REFERENCES ",
+            ),
             // Table-level constraints placed before dialect-specific modifiers so
             // they remain reachable within the 20-item completion truncation window.
-            ("CONSTRAINT", "Names a constraint for clearer error messages", "CONSTRAINT "),
-            ("FOREIGN KEY", "Defines a multi-column foreign key relationship", "FOREIGN KEY ("),
-            ("INDEX", "Creates an index inside the table definition", "INDEX "),
+            (
+                "CONSTRAINT",
+                "Names a constraint for clearer error messages",
+                "CONSTRAINT ",
+            ),
+            (
+                "FOREIGN KEY",
+                "Defines a multi-column foreign key relationship",
+                "FOREIGN KEY (",
+            ),
+            (
+                "INDEX",
+                "Creates an index inside the table definition",
+                "INDEX ",
+            ),
             // Auto-increment variants
-            ("AUTO_INCREMENT", "Value increments automatically on insert (MySQL)", "AUTO_INCREMENT"),
-            ("AUTOINCREMENT", "Value increments automatically on insert (SQLite)", "AUTOINCREMENT"),
-            ("GENERATED ALWAYS AS", "Computed column derived from an expression", "GENERATED ALWAYS AS ("),
-            ("COLLATE", "Specifies the collation for string comparison", "COLLATE "),
+            (
+                "AUTO_INCREMENT",
+                "Value increments automatically on insert (MySQL)",
+                "AUTO_INCREMENT",
+            ),
+            (
+                "AUTOINCREMENT",
+                "Value increments automatically on insert (SQLite)",
+                "AUTOINCREMENT",
+            ),
+            (
+                "GENERATED ALWAYS AS",
+                "Computed column derived from an expression",
+                "GENERATED ALWAYS AS (",
+            ),
+            (
+                "COLLATE",
+                "Specifies the collation for string comparison",
+                "COLLATE ",
+            ),
             // MySQL-specific column modifiers
             ("UNSIGNED", "Disallows negative values (MySQL)", "UNSIGNED"),
-            ("ZEROFILL", "Pads numeric display values with zeros (MySQL)", "ZEROFILL"),
+            (
+                "ZEROFILL",
+                "Pads numeric display values with zeros (MySQL)",
+                "ZEROFILL",
+            ),
             // Actions used with ON DELETE / ON UPDATE inside REFERENCES clauses
-            ("ON DELETE", "Action taken when the referenced row is deleted", "ON DELETE "),
-            ("ON UPDATE", "Action taken when the referenced row is updated", "ON UPDATE "),
-            ("CASCADE", "Propagates changes to all dependent rows", "CASCADE"),
-            ("RESTRICT", "Prevents changes that would break referential integrity", "RESTRICT"),
-            ("SET NULL", "Sets the foreign key column to NULL on parent change", "SET NULL"),
-            ("SET DEFAULT", "Resets the foreign key column to its default on parent change", "SET DEFAULT"),
-            ("NO ACTION", "Defers constraint checking until end of transaction", "NO ACTION"),
+            (
+                "ON DELETE",
+                "Action taken when the referenced row is deleted",
+                "ON DELETE ",
+            ),
+            (
+                "ON UPDATE",
+                "Action taken when the referenced row is updated",
+                "ON UPDATE ",
+            ),
+            (
+                "CASCADE",
+                "Propagates changes to all dependent rows",
+                "CASCADE",
+            ),
+            (
+                "RESTRICT",
+                "Prevents changes that would break referential integrity",
+                "RESTRICT",
+            ),
+            (
+                "SET NULL",
+                "Sets the foreign key column to NULL on parent change",
+                "SET NULL",
+            ),
+            (
+                "SET DEFAULT",
+                "Resets the foreign key column to its default on parent change",
+                "SET DEFAULT",
+            ),
+            (
+                "NO ACTION",
+                "Defers constraint checking until end of transaction",
+                "NO ACTION",
+            ),
         ];
 
         for (label, description, insert) in constraints {
@@ -1792,7 +1928,8 @@ impl SqlLsp {
         }
     }
 
-    fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {        // Add SQL data types from dialect - let fuzzy matching filter them
+    fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
+        // Add SQL data types from dialect - let fuzzy matching filter them
         for data_type in self.dialect.data_types() {
             // Skip if already in completions
             if completions
@@ -2298,7 +2435,7 @@ impl SqlLsp {
                 "DELETE",
                 "Removes rows from a table.\n\n**Syntax:**\n```sql\nDELETE FROM table_name WHERE condition;\n```\n\n**Example:**\n```sql\nDELETE FROM logs WHERE created_at < '2023-01-01';\n```\n\n⚠️ **Warning:** Without a WHERE clause, all rows will be deleted!"
             )),
-            
+
             // JOIN Operations
             "JOIN" => return Some(self.create_keyword_hover(
                 "JOIN",
@@ -2328,7 +2465,7 @@ impl SqlLsp {
                 "ON",
                 "Specifies the join condition between tables.\n\n**Example:**\n```sql\nSELECT * FROM users u\nJOIN orders o ON u.id = o.user_id;\n```"
             )),
-            
+
             // Grouping and Aggregation
             "GROUP" => return Some(self.create_keyword_hover(
                 "GROUP BY",
@@ -2338,7 +2475,7 @@ impl SqlLsp {
                 "HAVING",
                 "Filters grouped rows based on a condition. Similar to WHERE but used after GROUP BY.\n\n**Syntax:**\n```sql\nSELECT column, COUNT(*)\nFROM table_name\nGROUP BY column\nHAVING COUNT(*) > value;\n```\n\n**Example:**\n```sql\nSELECT category, AVG(price)\nFROM products\nGROUP BY category\nHAVING AVG(price) > 100;\n```"
             )),
-            
+
             // Ordering and Limiting
             "ORDER" => return Some(self.create_keyword_hover(
                 "ORDER BY",
@@ -2360,7 +2497,7 @@ impl SqlLsp {
                 "OFFSET",
                 "Skips a specified number of rows before returning results. Used for pagination.\n\n**Syntax:**\n```sql\nSELECT * FROM table_name LIMIT count OFFSET skip;\n```\n\n**Example:**\n```sql\nSELECT * FROM users LIMIT 10 OFFSET 20;  -- Gets rows 21-30\n```"
             )),
-            
+
             // Modifiers
             "DISTINCT" => return Some(self.create_keyword_hover(
                 "DISTINCT",
@@ -2374,7 +2511,7 @@ impl SqlLsp {
                 "AS",
                 "Creates an alias for a column or table.\n\n**Syntax:**\n```sql\nSELECT column AS alias_name FROM table AS t;\n```\n\n**Example:**\n```sql\nSELECT \n    first_name || ' ' || last_name AS full_name,\n    price * 1.1 AS price_with_tax\nFROM products;\n```"
             )),
-            
+
             // Aggregate Functions
             "COUNT" => return Some(self.create_keyword_hover(
                 "COUNT()",
@@ -2396,7 +2533,7 @@ impl SqlLsp {
                 "MIN()",
                 "Returns the minimum value.\n\n**Syntax:**\n```sql\nMIN(column)\n```\n\n**Example:**\n```sql\nSELECT MIN(price) as lowest_price FROM products;\nSELECT MIN(created_at) as first_order FROM orders;\n```"
             )),
-            
+
             // Conditional Logic
             "CASE" => return Some(self.create_keyword_hover(
                 "CASE",
@@ -2418,7 +2555,7 @@ impl SqlLsp {
                 "END",
                 "Marks the end of a CASE expression or other control structures."
             )),
-            
+
             // Operators
             "AND" => return Some(self.create_keyword_hover(
                 "AND",
@@ -2452,7 +2589,7 @@ impl SqlLsp {
                 "NULL",
                 "Represents a missing or unknown value.\n\n**Important:**\n- NULL is not equal to anything, including NULL\n- Use `IS NULL` or `IS NOT NULL` to check for NULL\n- Arithmetic operations with NULL return NULL\n- Most aggregate functions ignore NULL values\n\n**Example:**\n```sql\nSELECT * FROM users WHERE phone IS NULL;\nINSERT INTO products (name, price) VALUES ('Item', NULL);\n```"
             )),
-            
+
             // Set Operations
             "UNION" => return Some(self.create_keyword_hover(
                 "UNION",
@@ -2466,7 +2603,7 @@ impl SqlLsp {
                 "EXCEPT",
                 "Returns rows from the first query that are not in the second query.\n\n**Example:**\n```sql\nSELECT email FROM all_users\nEXCEPT\nSELECT email FROM unsubscribed;\n```"
             )),
-            
+
             // DDL - Data Definition Language
             "CREATE" => return Some(self.create_keyword_hover(
                 "CREATE",
@@ -2488,7 +2625,7 @@ impl SqlLsp {
                 "TRUNCATE",
                 "Removes all rows from a table quickly, but keeps the table structure.\n\n**Syntax:**\n```sql\nTRUNCATE TABLE table_name;\n```\n\n**Differences from DELETE:**\n- Faster than DELETE\n- Cannot be rolled back in some databases\n- Resets auto-increment counters\n- Does not fire triggers"
             )),
-            
+
             // Constraints
             "PRIMARY" => return Some(self.create_keyword_hover(
                 "PRIMARY KEY",
@@ -2510,7 +2647,7 @@ impl SqlLsp {
                 "DEFAULT",
                 "Provides a default value for a column when no value is specified.\n\n**Example:**\n```sql\nCREATE TABLE users (\n    id INTEGER PRIMARY KEY,\n    status TEXT DEFAULT 'active',\n    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,\n    login_count INTEGER DEFAULT 0\n);\n```"
             )),
-            
+
             // Subqueries and Exists
             "EXISTS" => return Some(self.create_keyword_hover(
                 "EXISTS",
@@ -2524,7 +2661,7 @@ impl SqlLsp {
                 "SOME",
                 "Synonym for ANY. Compares a value to any value returned by a subquery.\n\n**Example:**\n```sql\nSELECT * FROM employees\nWHERE salary > SOME (SELECT salary FROM managers);\n```"
             )),
-            
+
             // String Functions
             "CONCAT" => return Some(self.create_keyword_hover(
                 "CONCAT()",
@@ -2550,7 +2687,7 @@ impl SqlLsp {
                 "SUBSTRING() / SUBSTR()",
                 "Extracts a portion of a string.\n\n**Syntax:**\n```sql\nSUBSTRING(string, start, length)\nSUBSTR(string, start, length)\n```\n\n**Example:**\n```sql\nSELECT SUBSTRING(phone, 1, 3) as area_code FROM contacts;\nSELECT SUBSTR(product_code, 4, 6) FROM products;\n```"
             )),
-            
+
             // Date/Time Functions
             "NOW" => return Some(self.create_keyword_hover(
                 "NOW()",
@@ -2572,7 +2709,7 @@ impl SqlLsp {
                 "YEAR() / MONTH() / DAY()",
                 "Extracts the year, month, or day from a date.\n\n**Example:**\n```sql\nSELECT YEAR(created_at) as year, COUNT(*) FROM orders GROUP BY year;\nSELECT * FROM events WHERE MONTH(event_date) = 12;\nSELECT * FROM logs WHERE DAY(created_at) = 1;\n```"
             )),
-            
+
             // Transaction Control
             "BEGIN" => return Some(self.create_keyword_hover(
                 "BEGIN",
@@ -2586,7 +2723,7 @@ impl SqlLsp {
                 "ROLLBACK",
                 "Undoes all changes made in the current transaction.\n\n**Example:**\n```sql\nBEGIN;\nDELETE FROM important_data;\n-- Oops, that was a mistake!\nROLLBACK;\n```"
             )),
-            
+
             // Window Functions
             "OVER" => return Some(self.create_keyword_hover(
                 "OVER",
@@ -2600,7 +2737,7 @@ impl SqlLsp {
                 "ROWS",
                 "Defines the window frame in terms of physical rows.\n\n**Example:**\n```sql\nSELECT \n    date,\n    sales,\n    AVG(sales) OVER (\n        ORDER BY date\n        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW\n    ) as moving_avg\nFROM daily_sales;\n```"
             )),
-            
+
             // Other Common Keywords
             "INDEX" => return Some(self.create_keyword_hover(
                 "INDEX",
@@ -2626,7 +2763,7 @@ impl SqlLsp {
                 "IFNULL() / ISNULL()",
                 "Returns an alternative value if the expression is NULL.\n\n**Example:**\n```sql\nSELECT name, IFNULL(phone, 'N/A') as phone FROM users;\nSELECT IFNULL(SUM(amount), 0) as total FROM orders;\n```"
             )),
-            
+
             _ => {}
         }
 
@@ -2669,7 +2806,8 @@ impl SqlLsp {
         // Check if it's a qualified reference (table.column or alias.column)
         if let Some(dot_pos) = before_cursor.rfind('.') {
             let table_part = &before_cursor[..dot_pos];
-            if let Some(table_start) = table_part.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
+            if let Some(table_start) = table_part.rfind(|c: char| !c.is_alphanumeric() && c != '_')
+            {
                 let table_name = &table_part[table_start + 1..];
                 tracing::debug!("qualified column reference: {}.{}", table_name, word);
 
@@ -2683,8 +2821,14 @@ impl SqlLsp {
                             return Some(GotoDefinitionResponse::Scalar(Location {
                                 uri: "sql://internal".parse::<Uri>().unwrap(),
                                 range: Range {
-                                    start: Position { line: 0, character: 0 },
-                                    end: Position { line: 0, character: 0 },
+                                    start: Position {
+                                        line: 0,
+                                        character: 0,
+                                    },
+                                    end: Position {
+                                        line: 0,
+                                        character: 0,
+                                    },
                                 },
                             }));
                         }
@@ -2699,8 +2843,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2714,8 +2864,14 @@ impl SqlLsp {
                     return Some(GotoDefinitionResponse::Scalar(Location {
                         uri: "sql://internal".parse::<Uri>().unwrap(),
                         range: Range {
-                            start: Position { line: 0, character: 0 },
-                            end: Position { line: 0, character: 0 },
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: 0,
+                                character: 0,
+                            },
                         },
                     }));
                 }
@@ -2728,8 +2884,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2740,8 +2902,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2752,8 +2920,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2764,8 +2938,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2776,8 +2956,14 @@ impl SqlLsp {
             return Some(GotoDefinitionResponse::Scalar(Location {
                 uri: "sql://internal".parse::<Uri>().unwrap(),
                 range: Range {
-                    start: Position { line: 0, character: 0 },
-                    end: Position { line: 0, character: 0 },
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: 0,
+                        character: 0,
+                    },
                 },
             }));
         }
@@ -2860,11 +3046,10 @@ impl SqlLsp {
                 if remaining_lower.starts_with(word_lower) {
                     // Check word boundaries (before and after the match)
                     let before_ok = col_idx == 0
-                        || !chars[col_idx - 1].is_alphanumeric()
-                        && chars[col_idx - 1] != '_';
+                        || !chars[col_idx - 1].is_alphanumeric() && chars[col_idx - 1] != '_';
                     let after_ok = col_idx + word_len >= chars.len()
                         || !chars[col_idx + word_len].is_alphanumeric()
-                        && chars[col_idx + word_len] != '_';
+                            && chars[col_idx + word_len] != '_';
 
                     if before_ok && after_ok {
                         // Found a reference
@@ -2901,12 +3086,21 @@ impl SqlLsp {
                 if col.name.to_lowercase() == *word_lower {
                     // Found a column - add a reference to indicate the table uses this column
                     // For now, we add a reference with the table name in the URI
-                    let Ok(uri) = format!("sql://internal/table/{}", table_name).parse::<Uri>() else { continue; };
+                    let Ok(uri) = format!("sql://internal/table/{}", table_name).parse::<Uri>()
+                    else {
+                        continue;
+                    };
                     let location = Location {
                         uri,
                         range: Range {
-                            start: Position { line: 0, character: 0 },
-                            end: Position { line: 0, character: 0 },
+                            start: Position {
+                                line: 0,
+                                character: 0,
+                            },
+                            end: Position {
+                                line: 0,
+                                character: 0,
+                            },
                         },
                     };
                     // Only add if not already present
@@ -2922,12 +3116,20 @@ impl SqlLsp {
             // Find views that join with this table
             for (view_name, _view) in &self.schema_cache.views {
                 // Simplified - could check actual JOINs in view definitions
-                let Ok(uri) = format!("sql://internal/view/{}", view_name).parse::<Uri>() else { continue; };
+                let Ok(uri) = format!("sql://internal/view/{}", view_name).parse::<Uri>() else {
+                    continue;
+                };
                 let location = Location {
                     uri,
                     range: Range {
-                        start: Position { line: 0, character: 0 },
-                        end: Position { line: 0, character: 0 },
+                        start: Position {
+                            line: 0,
+                            character: 0,
+                        },
+                        end: Position {
+                            line: 0,
+                            character: 0,
+                        },
                     },
                 };
                 if !references.iter().any(|r| r.uri == location.uri) {
@@ -3008,11 +3210,10 @@ impl SqlLsp {
             if remaining_lower.starts_with(&word_lower) {
                 // Check word boundaries (before and after the match)
                 let before_ok = col_idx == 0
-                    || !chars[col_idx - 1].is_alphanumeric()
-                    && chars[col_idx - 1] != '_';
+                    || !chars[col_idx - 1].is_alphanumeric() && chars[col_idx - 1] != '_';
                 let after_ok = col_idx + word_len >= chars.len()
                     || !chars[col_idx + word_len].is_alphanumeric()
-                    && chars[col_idx + word_len] != '_';
+                        && chars[col_idx + word_len] != '_';
 
                 if before_ok && after_ok {
                     // Calculate the line number for this position
@@ -3022,13 +3223,19 @@ impl SqlLsp {
                         .count();
 
                     // Get the character position within the line
-                    let char_in_line = if let Some(last_newline) = text_str[..col_idx.min(text_str.len())].rfind('\n') {
+                    let char_in_line = if let Some(last_newline) =
+                        text_str[..col_idx.min(text_str.len())].rfind('\n')
+                    {
                         col_idx - last_newline - 1
                     } else {
                         col_idx
                     };
 
-                    tracing::debug!("found rename location at line {}, col {}", line_idx, col_idx);
+                    tracing::debug!(
+                        "found rename location at line {}, col {}",
+                        line_idx,
+                        col_idx
+                    );
                     text_edits.push(TextEdit {
                         range: Range {
                             start: Position {
@@ -3097,7 +3304,12 @@ impl SqlLsp {
     /// based on the context at the cursor position.
     ///
     /// Returns a list of code actions that can be applied.
-    pub fn get_code_actions(&self, text: &Rope, offset: usize, diagnostics: &[Diagnostic]) -> Vec<CodeAction> {
+    pub fn get_code_actions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        diagnostics: &[Diagnostic],
+    ) -> Vec<CodeAction> {
         tracing::debug!("get_code_actions: offset={}", offset);
 
         let mut code_actions = Vec::new();
@@ -3129,7 +3341,11 @@ impl SqlLsp {
     }
 
     /// Generate code actions for a specific diagnostic
-    fn generate_actions_for_diagnostic(&self, diagnostic: &Diagnostic, text: &str) -> Vec<CodeAction> {
+    fn generate_actions_for_diagnostic(
+        &self,
+        diagnostic: &Diagnostic,
+        text: &str,
+    ) -> Vec<CodeAction> {
         let mut actions = Vec::new();
 
         let message = &diagnostic.message;
@@ -3137,7 +3353,9 @@ impl SqlLsp {
 
         // Action: Add missing semicolon
         if message_lower.contains("expecting") && message_lower.contains(";") {
-            if let Some(semi_pos) = self.find_semicolon_insertion_point(text, Some(&diagnostic.range)) {
+            if let Some(semi_pos) =
+                self.find_semicolon_insertion_point(text, Some(&diagnostic.range))
+            {
                 actions.push(CodeAction {
                     title: "Add missing semicolon".to_string(),
                     kind: Some(lsp_types::CodeActionKind::QUICKFIX),
@@ -3171,7 +3389,10 @@ impl SqlLsp {
         }
 
         // Action: Quote identifier that's a reserved word
-        if message_lower.contains("exposing") || message_lower.contains("reserved") || message_lower.contains("keyword") {
+        if message_lower.contains("exposing")
+            || message_lower.contains("reserved")
+            || message_lower.contains("keyword")
+        {
             if let Some(word_range) = self.find_unquoted_identifier(text, Some(&diagnostic.range)) {
                 let identifier = self.extract_identifier(text, &word_range);
                 if !identifier.is_empty() {
@@ -3249,8 +3470,14 @@ impl SqlLsp {
                             "sql://internal".parse::<Uri>().unwrap(),
                             vec![TextEdit {
                                 range: Range {
-                                    start: Position { line, character: col },
-                                    end: Position { line, character: col },
+                                    start: Position {
+                                        line,
+                                        character: col,
+                                    },
+                                    end: Position {
+                                        line,
+                                        character: col,
+                                    },
                                 },
                                 new_text: ";".to_string(),
                             }],
@@ -3282,7 +3509,11 @@ impl SqlLsp {
     }
 
     /// Find where to insert a semicolon based on the diagnostic
-    fn find_semicolon_insertion_point(&self, text: &str, range: Option<&Range>) -> Option<(u32, u32)> {
+    fn find_semicolon_insertion_point(
+        &self,
+        text: &str,
+        range: Option<&Range>,
+    ) -> Option<(u32, u32)> {
         if let Some(r) = range {
             // Insert at the end of the range
             return Some((r.end.line, r.end.character + 1));
@@ -3385,12 +3616,17 @@ impl SqlLsp {
 
         let (func_name, active_param) = self.find_function_call_context(before_cursor)?;
 
-        tracing::debug!("Found function call context: func={}, active_param={}", func_name, active_param);
+        tracing::debug!(
+            "Found function call context: func={}, active_param={}",
+            func_name,
+            active_param
+        );
 
         let info = self.dialect.dialect_info();
-        let func_info = info.functions.iter().find(|f| {
-            f.name.eq_ignore_ascii_case(&func_name)
-        })?;
+        let func_info = info
+            .functions
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(&func_name))?;
 
         if func_info.signatures.is_empty() {
             return None;
@@ -3405,17 +3641,19 @@ impl SqlLsp {
                     .iter()
                     .map(|p| ParameterInformation {
                         label: ParameterLabel::Simple(format!("{}: {}", p.name, p.param_type)),
-                        documentation: p.description.as_ref().map(|d| {
-                            lsp_types::Documentation::String(d.to_string())
-                        }),
+                        documentation: p
+                            .description
+                            .as_ref()
+                            .map(|d| lsp_types::Documentation::String(d.to_string())),
                     })
                     .collect();
 
                 SignatureInformation {
                     label: sig.signature.to_string(),
-                    documentation: func_info.description.as_ref().map(|d| {
-                        lsp_types::Documentation::String(d.to_string())
-                    }),
+                    documentation: func_info
+                        .description
+                        .as_ref()
+                        .map(|d| lsp_types::Documentation::String(d.to_string())),
                     parameters: Some(params),
                     active_parameter: None,
                 }
@@ -3495,10 +3733,14 @@ impl SqlLsp {
 
     /// Resolve a table alias to the actual table name using the provided table references
     /// This uses the AST-extracted TableRef information for accurate alias resolution
-    fn resolve_alias_from_context(&self, identifier: &str, available_tables: &[TableRef]) -> String {
+    fn resolve_alias_from_context(
+        &self,
+        identifier: &str,
+        available_tables: &[TableRef],
+    ) -> String {
         // Build alias map from available tables
         let alias_map = context_analyzer::build_alias_map(available_tables);
-        
+
         // Try to resolve the identifier using the alias map
         if let Some(table_name) = alias_map.get(identifier) {
             tracing::debug!(
@@ -3508,7 +3750,7 @@ impl SqlLsp {
             );
             return table_name.clone();
         }
-        
+
         // Fallback: return the identifier as-is (might be a table name that's not in the schema yet)
         tracing::debug!(
             "Could not resolve identifier '{}' from context, using as-is",
@@ -3679,15 +3921,16 @@ impl SqlLsp {
     pub fn get_schema_for_metadata(&self) -> DatabaseSchema {
         let tables: Vec<String> = self.schema_cache.tables.keys().cloned().collect();
         let views: Vec<String> = self.schema_cache.views.keys().cloned().collect();
-        
+
         // Collect materialized views, functions, procedures, triggers
         let materialized_views: Vec<String> = vec![]; // SchemaCache doesn't track this separately
         let functions: Vec<String> = self.schema_cache.functions.keys().cloned().collect();
         let procedures: Vec<String> = self.schema_cache.procedures.keys().cloned().collect();
         let triggers: Vec<String> = self.schema_cache.triggers.keys().cloned().collect();
-        
+
         // Convert table_infos to the expected format
-        let table_infos: Vec<zqlz_core::TableInfo> = self.schema_cache
+        let table_infos: Vec<zqlz_core::TableInfo> = self
+            .schema_cache
             .tables
             .values()
             .map(|t| zqlz_core::TableInfo {
@@ -3703,9 +3946,9 @@ impl SqlLsp {
                 key_value_info: None,
             })
             .collect();
-        
+
         // Convert table_indexes to zqlz_core::IndexInfo format
-        let mut table_indexes: std::collections::HashMap<String, Vec<zqlz_core::IndexInfo>> = 
+        let mut table_indexes: std::collections::HashMap<String, Vec<zqlz_core::IndexInfo>> =
             std::collections::HashMap::new();
         for (table_name, index_info) in &self.schema_cache.indexes {
             // SchemaCache stores single IndexInfo per name, wrap in Vec
@@ -3713,7 +3956,7 @@ impl SqlLsp {
                 name: index_info.name.clone(),
                 columns: index_info.columns.clone(),
                 is_unique: index_info.is_unique,
-                is_primary: false, // SchemaCache doesn't track this
+                is_primary: false,               // SchemaCache doesn't track this
                 index_type: "btree".to_string(), // Default
                 comment: None,
                 ..Default::default()

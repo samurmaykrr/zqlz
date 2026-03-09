@@ -44,9 +44,9 @@ impl DatabaseType {
     /// Only includes database types whose drivers are actually compiled in.
     pub fn all() -> Vec<Self> {
         use zqlz_drivers::DriverRegistry;
-        
+
         let registry = DriverRegistry::with_defaults();
-        
+
         // Define all possible database types
         let all_types = vec![
             // SQL databases
@@ -106,7 +106,7 @@ impl DatabaseType {
                 supported: true,
             },
         ];
-        
+
         // Filter to only include types where the driver is actually available
         all_types
             .into_iter()
@@ -220,7 +220,7 @@ impl MainView {
                     _ = this.update(cx, |main_view, cx| {
                         let mut updated_count = 0;
                         let mut dead_editors = Vec::new();
-                        
+
                         for (i, weak_editor) in main_view.query_editors.iter().enumerate() {
                             if let Some(editor) = weak_editor.upgrade() {
                                 editor.update(cx, |ed, cx| {
@@ -231,11 +231,11 @@ impl MainView {
                                 dead_editors.push(i);
                             }
                         }
-                        
+
                         for i in dead_editors.iter().rev() {
                             main_view.query_editors.swap_remove(*i);
                         }
-                        
+
                         tracing::info!("Updated {} QueryEditor panels with connection", updated_count);
                     });
 
@@ -249,7 +249,7 @@ impl MainView {
                                     name: q.name,
                                 })
                                 .collect();
-                            
+
                             if !saved_queries.is_empty() {
                                 tracing::info!("Loaded {} saved queries for connection {}", saved_queries.len(), conn_id);
                                 _ = sidebar.update(cx, |sidebar, cx| {
@@ -264,7 +264,7 @@ impl MainView {
 
                     // Step 3: Load schema in background (slow operation)
                     tracing::info!("Starting background schema load for connection {}", conn_id);
-                    
+
                     if driver_type == "redis" {
                         // For Redis, load databases list
                         if let Some(schema_introspection) = conn.as_schema_introspection() {
@@ -526,17 +526,17 @@ impl MainView {
                 }
                 Err(e) => {
                     tracing::error!("Failed to connect: {}", e);
-                    
+
                     // Clear connecting state
                     _ = workspace_state.update(cx, |state, _cx| {
                         state.set_connecting(id, false);
                     });
-                    
+
                     // Clear connecting state in sidebar
                     _ = sidebar.update_in(cx, |sidebar, _window, cx| {
                         sidebar.set_connecting(id, false, cx);
                     });
-                    
+
                     // Show notification to user
                     _ = this.update_in(cx, |_this, window, cx| {
                         window.push_notification(
@@ -574,7 +574,10 @@ impl MainView {
         };
 
         let Some(connection) = app_state.connections.get(connection_id) else {
-            tracing::error!("No active connection {} for load_database_schema", connection_id);
+            tracing::error!(
+                "No active connection {} for load_database_schema",
+                connection_id
+            );
             return;
         };
 
@@ -689,7 +692,16 @@ impl MainView {
     async fn load_schema_via_existing_connection(
         connection: &std::sync::Arc<dyn zqlz_core::Connection>,
         database_name: &str,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>, Option<ObjectsPanelData>)> {
+    ) -> anyhow::Result<(
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Option<String>,
+        Option<ObjectsPanelData>,
+    )> {
         let introspection = connection
             .as_schema_introspection()
             .ok_or_else(|| anyhow::anyhow!("Connection does not support schema introspection"))?;
@@ -697,7 +709,15 @@ impl MainView {
         let schema_param = Some(database_name);
 
         // All schema queries are independent reads — fire them all concurrently.
-        let (tables_result, views_result, mat_views_result, triggers_result, functions_result, procedures_result, extended_result) = futures::join!(
+        let (
+            tables_result,
+            views_result,
+            mat_views_result,
+            triggers_result,
+            functions_result,
+            procedures_result,
+            extended_result,
+        ) = futures::join!(
             introspection.list_tables(schema_param),
             introspection.list_views(schema_param),
             introspection.list_materialized_views(schema_param),
@@ -715,7 +735,16 @@ impl MainView {
         let procedures = procedures_result?.into_iter().map(|p| p.name).collect();
         let objects_panel_data = extended_result.ok();
 
-        Ok((tables, views, materialized_views, triggers, functions, procedures, Some(database_name.to_string()), objects_panel_data))
+        Ok((
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            Some(database_name.to_string()),
+            objects_panel_data,
+        ))
     }
 
     /// Load schema by creating a temporary connection to the target database.
@@ -723,7 +752,16 @@ impl MainView {
     async fn load_schema_via_temp_connection(
         saved: &zqlz_connection::SavedConnection,
         database_name: &str,
-    ) -> anyhow::Result<(Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Vec<String>, Option<String>, Option<ObjectsPanelData>)> {
+    ) -> anyhow::Result<(
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Vec<String>,
+        Option<String>,
+        Option<ObjectsPanelData>,
+    )> {
         let registry = zqlz_drivers::DriverRegistry::with_defaults();
         let driver = registry
             .get(&saved.driver)
@@ -737,26 +775,30 @@ impl MainView {
 
         let temp_conn = driver.connect(&config).await?;
 
-        let introspection = temp_conn
-            .as_schema_introspection()
-            .ok_or_else(|| anyhow::anyhow!("Temp connection does not support schema introspection"))?;
+        let introspection = temp_conn.as_schema_introspection().ok_or_else(|| {
+            anyhow::anyhow!("Temp connection does not support schema introspection")
+        })?;
 
-        let schema_name = introspection
-            .list_schemas()
-            .await
-            .ok()
-            .and_then(|schemas| {
-                schemas
-                    .into_iter()
-                    .find(|s| s.name == "public")
-                    .map(|s| s.name)
-            });
+        let schema_name = introspection.list_schemas().await.ok().and_then(|schemas| {
+            schemas
+                .into_iter()
+                .find(|s| s.name == "public")
+                .map(|s| s.name)
+        });
 
         let schema_param = schema_name.as_deref();
         let is_postgres = saved.driver == "postgres";
 
         // All schema queries are independent reads — fire them all concurrently.
-        let (tables_result, views_result, mat_views_result, triggers_result, functions_result, procedures_result, extended_result) = futures::join!(
+        let (
+            tables_result,
+            views_result,
+            mat_views_result,
+            triggers_result,
+            functions_result,
+            procedures_result,
+            extended_result,
+        ) = futures::join!(
             introspection.list_tables(schema_param),
             introspection.list_views(schema_param),
             introspection.list_materialized_views(schema_param),
@@ -782,10 +824,23 @@ impl MainView {
         let objects_panel_data = extended_result.ok();
 
         if let Err(e) = temp_conn.close().await {
-            tracing::warn!("Failed to close temp connection to '{}': {}", database_name, e);
+            tracing::warn!(
+                "Failed to close temp connection to '{}': {}",
+                database_name,
+                e
+            );
         }
 
-        Ok((tables, views, materialized_views, triggers, functions, procedures, schema_name, objects_panel_data))
+        Ok((
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            schema_name,
+            objects_panel_data,
+        ))
     }
 
     /// Disconnect from a database
@@ -1006,23 +1061,21 @@ impl MainView {
 
         cx.spawn_in(window, async move |_this, cx| {
             match section {
-                "views" => {
-                    match schema_service.load_views(connection, connection_id).await {
-                        Ok(views) => {
-                            let names: Vec<String> = views.into_iter().map(|v| v.name).collect();
-                            tracing::info!("Lazy-loaded {} views", names.len());
-                            _ = sidebar.update_in(cx, |s, _window, cx| {
-                                s.set_views_only(connection_id, names, cx);
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!("Failed to lazy-load views: {}", e);
-                            _ = sidebar.update_in(cx, |s, _window, cx| {
-                                s.clear_section_loading(connection_id, "views", cx);
-                            });
-                        }
+                "views" => match schema_service.load_views(connection, connection_id).await {
+                    Ok(views) => {
+                        let names: Vec<String> = views.into_iter().map(|v| v.name).collect();
+                        tracing::info!("Lazy-loaded {} views", names.len());
+                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                            s.set_views_only(connection_id, names, cx);
+                        });
                     }
-                }
+                    Err(e) => {
+                        tracing::warn!("Failed to lazy-load views: {}", e);
+                        _ = sidebar.update_in(cx, |s, _window, cx| {
+                            s.clear_section_loading(connection_id, "views", cx);
+                        });
+                    }
+                },
                 "materialized_views" => {
                     match schema_service
                         .load_materialized_views(connection, connection_id)
@@ -1044,7 +1097,10 @@ impl MainView {
                     }
                 }
                 "functions" => {
-                    match schema_service.load_functions(connection, connection_id).await {
+                    match schema_service
+                        .load_functions(connection, connection_id)
+                        .await
+                    {
                         Ok(functions) => {
                             let names: Vec<String> =
                                 functions.into_iter().map(|f| f.name).collect();
@@ -1062,7 +1118,10 @@ impl MainView {
                     }
                 }
                 "procedures" => {
-                    match schema_service.load_procedures(connection, connection_id).await {
+                    match schema_service
+                        .load_procedures(connection, connection_id)
+                        .await
+                    {
                         Ok(procedures) => {
                             let names: Vec<String> =
                                 procedures.into_iter().map(|p| p.name).collect();
@@ -1080,10 +1139,12 @@ impl MainView {
                     }
                 }
                 "triggers" => {
-                    match schema_service.load_triggers(connection, connection_id).await {
+                    match schema_service
+                        .load_triggers(connection, connection_id)
+                        .await
+                    {
                         Ok(triggers) => {
-                            let names: Vec<String> =
-                                triggers.into_iter().map(|t| t.name).collect();
+                            let names: Vec<String> = triggers.into_iter().map(|t| t.name).collect();
                             tracing::info!("Lazy-loaded {} triggers", names.len());
                             _ = sidebar.update_in(cx, |s, _window, cx| {
                                 s.set_triggers_only(connection_id, names, cx);

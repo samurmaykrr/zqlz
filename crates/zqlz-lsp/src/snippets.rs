@@ -282,9 +282,11 @@ mod tests {
         let completions = provider.get_completions("");
 
         assert!(!completions.is_empty());
-        assert!(completions
-            .iter()
-            .all(|c| c.kind == Some(CompletionItemKind::SNIPPET)));
+        assert!(
+            completions
+                .iter()
+                .all(|c| c.kind == Some(CompletionItemKind::SNIPPET))
+        );
     }
 
     #[test]
@@ -293,9 +295,11 @@ mod tests {
         let completions = provider.get_completions("select");
 
         assert!(!completions.is_empty());
-        assert!(completions
-            .iter()
-            .all(|c| c.label.to_lowercase().contains("select")));
+        assert!(
+            completions
+                .iter()
+                .all(|c| c.label.to_lowercase().contains("select"))
+        );
     }
 
     #[test]

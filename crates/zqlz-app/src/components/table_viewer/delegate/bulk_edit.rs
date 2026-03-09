@@ -55,7 +55,12 @@ impl TableViewerDelegate {
                 state.replace(char.clone(), window, cx);
             });
         } else {
-            let display_value = anchor_value.replace('\n', " ").replace('\r', "");
+            let display_value = if anchor_value.is_null() {
+                String::new()
+            } else {
+                let s = anchor_value.display_for_table();
+                s.replace('\n', " ").replace('\r', "")
+            };
             input.update(cx, |state, cx| {
                 state.replace(display_value, window, cx);
             });
@@ -97,9 +102,14 @@ impl TableViewerDelegate {
         });
 
         let viewer_panel = self.viewer_panel.clone();
-        _ = viewer_panel.update(cx, |_panel, cx| {
+        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
             cx.emit(TableViewerEvent::InlineEditStarted);
-        });
+        }) {
+            tracing::error!(
+                "Failed to emit InlineEditStarted from start_bulk_editing: {:?}",
+                e
+            );
+        }
 
         cx.notify();
     }
@@ -116,22 +126,23 @@ impl TableViewerDelegate {
             cells.len(),
             value.len()
         );
-        self.apply_value_to_cells(&cells, value, cx);
+        self.apply_value_to_cells(&cells, &value, cx);
         cx.notify();
     }
 
     pub(super) fn apply_value_to_cells(
         &mut self,
         cells: &[zqlz_ui::widgets::table::CellPosition],
-        new_value: String,
+        new_value_str: &str,
         cx: &mut Context<TableState<Self>>,
     ) {
         tracing::info!(
             "apply_value_to_cells: processing {} cells with new_value='{}'",
             cells.len(),
-            new_value
+            new_value_str
         );
         let mut updated_count = 0;
+        let mut undo_edits = Vec::new();
 
         for cell in cells {
             if cell.col == 0 {
@@ -145,6 +156,13 @@ impl TableViewerDelegate {
                 continue;
             }
 
+            let data_type = self
+                .column_meta
+                .get(data_col)
+                .map(|c| c.data_type.as_str())
+                .unwrap_or("text");
+            let new_value = Value::parse_from_string(new_value_str, data_type);
+
             let original_value = self
                 .rows
                 .get(row)
@@ -156,90 +174,50 @@ impl TableViewerDelegate {
                 continue;
             }
 
+            // Same null no-op rule as single-cell stop_editing: clearing the input on a
+            // NULL cell should not replace NULL with an empty string across all selected cells.
+            if new_value_str.is_empty() && original_value.is_null() {
+                continue;
+            }
+
+            undo_edits.push(UndoCellEdit {
+                row,
+                data_col,
+                old_value: original_value.clone(),
+                new_value: new_value.clone(),
+            });
+
             if self.auto_commit_mode {
                 let total_rows = self.rows.len();
                 let new_row_idx = self.pending_changes.get_new_row_index(row, total_rows);
 
                 if let Some(new_row_idx) = new_row_idx {
-                    if let Some(row_data) = self.rows.get_mut(row) {
-                        if let Some(cell_data) = row_data.get_mut(data_col) {
-                            *cell_data = new_value.clone();
-                        }
-                    }
-                    self.pending_changes.update_new_row_cell(
-                        new_row_idx,
-                        data_col,
-                        new_value.clone(),
-                    );
+                    self.apply_value_locally(row, data_col, new_value.clone());
+                    self.pending_changes
+                        .update_new_row_cell(new_row_idx, data_col, new_value);
                 } else {
-                    let table_name = self.table_name.clone();
-                    let connection_id = self.connection_id;
-                    let all_row_values = self.rows.get(row).cloned().unwrap_or_default();
-                    let all_column_names: Vec<String> =
-                        self.column_meta.iter().map(|c| c.name.clone()).collect();
-                    let all_column_types: Vec<String> = self
-                        .column_meta
-                        .iter()
-                        .map(|c| c.data_type.clone())
-                        .collect();
-                    let column_name = self
-                        .column_meta
-                        .get(data_col)
-                        .map(|c| c.name.clone())
-                        .unwrap_or_default();
-
-                    if let Some(row_data) = self.rows.get_mut(row) {
-                        if let Some(cell_data) = row_data.get_mut(data_col) {
-                            *cell_data = new_value.clone();
-                        }
-                    }
-
-                    let viewer_panel = self.viewer_panel.clone();
-                    _ = viewer_panel.update(cx, |_panel, cx| {
-                        cx.emit(TableViewerEvent::SaveCell {
-                            table_name,
-                            connection_id,
-                            row,
-                            col: data_col,
-                            column_name,
-                            new_value: new_value.clone(),
-                            original_value: original_value.clone(),
-                            all_row_values,
-                            all_column_names,
-                            all_column_types,
-                        });
-                    });
+                    self.save_existing_cell_or_queue(row, data_col, new_value, &original_value, cx);
                 }
             } else {
                 let total_rows = self.rows.len();
                 let new_row_idx = self.pending_changes.get_new_row_index(row, total_rows);
 
-                if let Some(row_data) = self.rows.get_mut(row) {
-                    if let Some(cell_data) = row_data.get_mut(data_col) {
-                        if let Some(new_row_idx) = new_row_idx {
-                            self.pending_changes.update_new_row_cell(
-                                new_row_idx,
-                                data_col,
-                                new_value.clone(),
-                            );
-                        } else {
-                            self.pending_changes.modified_cells.insert(
-                                (row, data_col),
-                                PendingCellChange {
-                                    original_value: original_value.clone(),
-                                    new_value: new_value.clone(),
-                                },
-                            );
-                        }
-
-                        *cell_data = new_value.clone();
-                    }
+                if let Some(new_row_idx) = new_row_idx {
+                    self.pending_changes.update_new_row_cell(
+                        new_row_idx,
+                        data_col,
+                        new_value.clone(),
+                    );
+                    self.apply_value_locally(row, data_col, new_value);
+                } else {
+                    self.store_pending_cell_change(row, data_col, new_value, &original_value);
                 }
             }
 
             updated_count += 1;
         }
 
+        self.push_undo(UndoEntry { edits: undo_edits });
         tracing::info!("apply_value_to_cells: updated {} cells", updated_count);
     }
 }

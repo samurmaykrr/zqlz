@@ -6,11 +6,12 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     menu::{PopupMenu, PopupMenuItem},
-    v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable,
+    v_flex,
 };
 
 /// Context menu state for schema tree

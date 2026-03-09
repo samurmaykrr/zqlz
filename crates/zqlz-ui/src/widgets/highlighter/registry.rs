@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::widgets::{
-    highlighter::{languages, Language},
-    ActiveTheme, ThemeMode, DEFAULT_THEME_COLORS,
+    ActiveTheme, DEFAULT_THEME_COLORS, ThemeMode,
+    highlighter::{Language, languages},
 };
 
 pub(super) const HIGHLIGHT_NAMES: [&str; 40] = [

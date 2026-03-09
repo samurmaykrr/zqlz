@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::{Connection, QueryResult, StatementResult, Value};
@@ -24,7 +24,7 @@ mod tests {
             }
             result
         };
-        
+
         conn.execute(&sql, params)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))
@@ -48,7 +48,7 @@ mod tests {
             }
             result
         };
-        
+
         conn.query(&sql, params)
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))
@@ -78,13 +78,7 @@ mod tests {
 
         // Query with positional parameters
         let query_sql = "SELECT first_name, last_name FROM actor WHERE actor_id = $1";
-        let result = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[Value::Int64(88888)],
-        )
-        .await?;
+        let result = query_params(conn.as_ref(), driver, query_sql, &[Value::Int64(88888)]).await?;
 
         assert_eq!(result.rows.len(), 1, "Expected exactly 1 row");
         let row = &result.rows[0];
@@ -105,13 +99,7 @@ mod tests {
 
         // Cleanup
         let delete_sql = "DELETE FROM actor WHERE actor_id = $1";
-        execute_params(
-            conn.as_ref(),
-            driver,
-            delete_sql,
-            &[Value::Int64(88888)],
-        )
-        .await?;
+        execute_params(conn.as_ref(), driver, delete_sql, &[Value::Int64(88888)]).await?;
 
         Ok(())
     }
@@ -126,13 +114,7 @@ mod tests {
 
         // Query with NULL parameter - should return rows where return_date IS NULL
         let query_sql = "SELECT rental_id FROM rental WHERE return_date IS NULL LIMIT 5";
-        let result = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[],
-        )
-        .await?;
+        let result = query_params(conn.as_ref(), driver, query_sql, &[]).await?;
 
         // We're just checking that the query executes successfully
         // The actual number of rows depends on the sample data
@@ -164,7 +146,8 @@ mod tests {
         .await?;
 
         // Query with different parameter types
-        let query_sql = "SELECT actor_id, first_name FROM actor WHERE actor_id = $1 AND first_name = $2";
+        let query_sql =
+            "SELECT actor_id, first_name FROM actor WHERE actor_id = $1 AND first_name = $2";
         let result = query_params(
             conn.as_ref(),
             driver,
@@ -185,13 +168,7 @@ mod tests {
 
         // Cleanup
         let delete_sql = "DELETE FROM actor WHERE actor_id = $1";
-        execute_params(
-            conn.as_ref(),
-            driver,
-            delete_sql,
-            &[Value::Int64(77777)],
-        )
-        .await?;
+        execute_params(conn.as_ref(), driver, delete_sql, &[Value::Int64(77777)]).await?;
 
         Ok(())
     }
@@ -232,14 +209,9 @@ mod tests {
 
         // Reuse the same query with different parameters
         let query_sql = "SELECT last_name FROM actor WHERE actor_id = $1";
-        
-        let result1 = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[Value::Int64(66666)],
-        )
-        .await?;
+
+        let result1 =
+            query_params(conn.as_ref(), driver, query_sql, &[Value::Int64(66666)]).await?;
         assert_eq!(result1.rows.len(), 1);
         assert_eq!(
             result1.rows[0]
@@ -250,13 +222,8 @@ mod tests {
             "TEST1"
         );
 
-        let result2 = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[Value::Int64(66667)],
-        )
-        .await?;
+        let result2 =
+            query_params(conn.as_ref(), driver, query_sql, &[Value::Int64(66667)]).await?;
         assert_eq!(result2.rows.len(), 1);
         assert_eq!(
             result2.rows[0]
@@ -332,7 +299,11 @@ mod tests {
             conn.as_ref(),
             driver,
             query_sql,
-            &[Value::Int64(55551), Value::Int64(55552), Value::Int64(55553)],
+            &[
+                Value::Int64(55551),
+                Value::Int64(55552),
+                Value::Int64(55553),
+            ],
         )
         .await?;
 
@@ -383,13 +354,8 @@ mod tests {
 
         // Verify insertion
         let query_sql = "SELECT first_name FROM actor WHERE actor_id = $1";
-        let query_result = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[Value::Int64(44444)],
-        )
-        .await?;
+        let query_result =
+            query_params(conn.as_ref(), driver, query_sql, &[Value::Int64(44444)]).await?;
 
         assert_eq!(query_result.rows.len(), 1);
         assert_eq!(
@@ -403,13 +369,7 @@ mod tests {
 
         // Cleanup
         let delete_sql = "DELETE FROM actor WHERE actor_id = $1";
-        execute_params(
-            conn.as_ref(),
-            driver,
-            delete_sql,
-            &[Value::Int64(44444)],
-        )
-        .await?;
+        execute_params(conn.as_ref(), driver, delete_sql, &[Value::Int64(44444)]).await?;
 
         Ok(())
     }
@@ -454,13 +414,8 @@ mod tests {
 
         // Verify update
         let query_sql = "SELECT first_name, last_name FROM actor WHERE actor_id = $1";
-        let query_result = query_params(
-            conn.as_ref(),
-            driver,
-            query_sql,
-            &[Value::Int64(33333)],
-        )
-        .await?;
+        let query_result =
+            query_params(conn.as_ref(), driver, query_sql, &[Value::Int64(33333)]).await?;
 
         assert_eq!(query_result.rows.len(), 1);
         assert_eq!(
@@ -482,13 +437,7 @@ mod tests {
 
         // Cleanup
         let delete_sql = "DELETE FROM actor WHERE actor_id = $1";
-        execute_params(
-            conn.as_ref(),
-            driver,
-            delete_sql,
-            &[Value::Int64(33333)],
-        )
-        .await?;
+        execute_params(conn.as_ref(), driver, delete_sql, &[Value::Int64(33333)]).await?;
 
         Ok(())
     }
@@ -527,17 +476,16 @@ mod tests {
         .await?;
 
         // Should return 0 rows (no actor with that last name), not execute the DROP TABLE
-        assert_eq!(result.rows.len(), 0, "Malicious input should not match any rows");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "Malicious input should not match any rows"
+        );
 
         // Verify that the actor table still exists by querying our test data
         let verify_sql = "SELECT first_name FROM actor WHERE actor_id = $1";
-        let verify_result = query_params(
-            conn.as_ref(),
-            driver,
-            verify_sql,
-            &[Value::Int64(22222)],
-        )
-        .await?;
+        let verify_result =
+            query_params(conn.as_ref(), driver, verify_sql, &[Value::Int64(22222)]).await?;
 
         assert_eq!(verify_result.rows.len(), 1, "Table should still exist");
         assert_eq!(
@@ -551,13 +499,7 @@ mod tests {
 
         // Cleanup
         let delete_sql = "DELETE FROM actor WHERE actor_id = $1";
-        execute_params(
-            conn.as_ref(),
-            driver,
-            delete_sql,
-            &[Value::Int64(22222)],
-        )
-        .await?;
+        execute_params(conn.as_ref(), driver, delete_sql, &[Value::Int64(22222)]).await?;
 
         Ok(())
     }
@@ -589,7 +531,10 @@ mod tests {
 
         // Query with parameter
         let result = conn
-            .query("SELECT name, value FROM test_params WHERE id = ?", &[Value::Int64(1)])
+            .query(
+                "SELECT name, value FROM test_params WHERE id = ?",
+                &[Value::Int64(1)],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 

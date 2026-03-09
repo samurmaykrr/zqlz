@@ -5,7 +5,7 @@
 use gpui::*;
 
 use crate::widgets::sidebar::ConnectionSidebar;
-use zqlz_ui::widgets::{h_flex, Icon, IconName};
+use zqlz_ui::widgets::{Icon, IconName, h_flex};
 
 impl ConnectionSidebar {
     /// Render a collapsible section header with count indicator.
@@ -91,7 +91,13 @@ impl ConnectionSidebar {
             });
 
         if let Some(handler) = on_right_click {
-            row.on_mouse_down(MouseButton::Right, cx.listener(handler))
+            row.on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                    cx.stop_propagation();
+                    handler(this, event, window, cx);
+                }),
+            )
         } else {
             row
         }

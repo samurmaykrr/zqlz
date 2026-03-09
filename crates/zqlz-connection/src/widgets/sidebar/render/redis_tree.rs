@@ -8,7 +8,7 @@ use uuid::Uuid;
 use crate::widgets::sidebar::{
     ConnectionSidebar, ConnectionSidebarEvent, RedisDatabaseInfo, SavedQueryInfo,
 };
-use zqlz_ui::widgets::{caption, v_flex, ActiveTheme, Icon, ZqlzIcon};
+use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, caption, v_flex};
 
 impl ConnectionSidebar {
     /// Render the Redis-specific schema tree.

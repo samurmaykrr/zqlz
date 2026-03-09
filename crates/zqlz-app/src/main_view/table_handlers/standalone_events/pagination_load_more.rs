@@ -42,14 +42,12 @@ pub(in crate::main_view) fn handle_load_more_event(
         }
 
         if !viewer.search_text.is_empty() {
-            let all_column_names: Vec<String> = viewer
-                .column_meta
-                .iter()
-                .map(|c| c.name.clone())
-                .collect();
+            let all_column_names: Vec<String> =
+                viewer.column_meta.iter().map(|c| c.name.clone()).collect();
 
             if !all_column_names.is_empty() {
-                let escaped_search = viewer.search_text
+                let escaped_search = viewer
+                    .search_text
                     .replace("'", "''")
                     .replace('%', "\\%")
                     .replace('_', "\\_");
@@ -73,13 +71,33 @@ pub(in crate::main_view) fn handle_load_more_event(
             .map(|state| state.read(cx).visible_columns())
             .unwrap_or_else(|| viewer.column_meta.iter().map(|c| c.name.clone()).collect());
 
-        Some((connection_id, table_name, limit, where_clauses, order_by_clauses, visible_columns, viewer.database_name.clone()))
+        Some((
+            connection_id,
+            table_name,
+            limit,
+            where_clauses,
+            order_by_clauses,
+            visible_columns,
+            viewer.database_name.clone(),
+        ))
     });
 
-    let Some((connection_id, table_name, limit, where_clauses, order_by_clauses, visible_columns, database_name)) = viewer_info else {
+    let Some((
+        connection_id,
+        table_name,
+        limit,
+        where_clauses,
+        order_by_clauses,
+        visible_columns,
+        database_name,
+    )) = viewer_info
+    else {
         tracing::warn!("LoadMore: Missing connection_id, table_name, or pagination state");
         return;
     };
+
+    let request_generation =
+        viewer_entity.read_with(cx, |viewer, _cx| viewer.current_request_generation());
 
     // Get app state
     let Some(app_state) = cx.try_global::<AppState>() else {
@@ -88,10 +106,10 @@ pub(in crate::main_view) fn handle_load_more_event(
     };
 
     // Get connection from app state (use database-specific connection for drivers like postgres)
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        database_name.as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connections
+        .get_for_database_cached(connection_id, database_name.as_deref())
+    else {
         tracing::error!("LoadMore: Connection not found: {}", connection_id);
         return;
     };
@@ -128,11 +146,21 @@ pub(in crate::main_view) fn handle_load_more_event(
                     );
 
                     _ = viewer_entity.update_in(cx, |viewer, _window, cx| {
-                        // Convert result rows to string vectors
-                        let new_rows: Vec<Vec<String>> = result
+                        if !viewer.is_current_request(request_generation) {
+                            tracing::debug!(
+                                "Discarding stale load-more result for '{}' (generation={}, current={})",
+                                table_name,
+                                request_generation,
+                                viewer.current_request_generation()
+                            );
+                            return;
+                        }
+
+                        // Pass Value rows directly (no string conversion)
+                        let new_rows = result
                             .rows
                             .iter()
-                            .map(|row| row.values.iter().map(|val| val.to_string()).collect())
+                            .map(|row| row.values.clone())
                             .collect();
 
                         // Append to existing rows via delegate
@@ -161,8 +189,12 @@ pub(in crate::main_view) fn handle_load_more_event(
                 Err(e) => {
                     tracing::error!("LoadMore failed: {}", e);
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if !viewer.is_current_request(request_generation) {
+                            return;
+                        }
+
                         use zqlz_ui::widgets::{WindowExt, notification::Notification};
-                        
+
                         if let Some(table_state) = &viewer.table_state {
                             table_state.update(cx, |table, _cx| {
                                 let delegate = table.delegate_mut();

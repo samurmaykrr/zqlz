@@ -3,16 +3,13 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    checkbox::Checkbox,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, checkbox::Checkbox,
+    dialog::DialogButtonProps, v_flex,
 };
 
 use crate::app::AppState;
-use crate::components::ObjectsPanelEvent;
 use crate::main_view::MainView;
+use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 
 impl MainView {
     pub(in crate::main_view) fn empty_table(
@@ -39,12 +36,14 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let table_name_for_dialog = table_name.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let table_name = table_name_for_dialog.clone();
 
             dialog
@@ -72,7 +71,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let table_name = table_name.clone();
 
                     cx.spawn(async move |cx| {
@@ -86,10 +85,13 @@ impl MainView {
                                     rows_deleted
                                 );
 
-                                // Row counts changed, refresh objects panel
-                                cx.update(|cx| {
-                                    _ = objects_panel.update(cx, |_, cx| {
-                                        cx.emit(ObjectsPanelEvent::Refresh);
+                                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                    let _ = main_view.update(cx, |main_view, cx| {
+                                        main_view.refresh_connection_surfaces(
+                                            RefreshTarget::Connection(connection_id),
+                                            SurfaceRefreshOptions::OBJECTS_ONLY,
+                                            cx,
+                                        );
                                     });
                                 })
 ;
@@ -123,7 +125,12 @@ impl MainView {
 
         // For single table, use the existing handler
         if !is_multi {
-            self.empty_table(connection_id, table_names.into_iter().next().unwrap(), window, cx);
+            let Some(table_name) = table_names.into_iter().next() else {
+                tracing::error!("Single-table empty requested without a table name");
+                return;
+            };
+
+            self.empty_table(connection_id, table_name, window, cx);
             return;
         }
 
@@ -145,12 +152,14 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let continue_on_error = Rc::new(RefCell::new(false));
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let table_names = table_names.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
@@ -194,7 +203,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
@@ -231,9 +240,13 @@ impl MainView {
 
                         // Refresh objects panel after any successful emptying (row counts changed)
                         if !emptied_tables.is_empty() {
-                            cx.update(|cx| {
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
+                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                let _ = main_view.update(cx, |main_view, cx| {
+                                    main_view.refresh_connection_surfaces(
+                                        RefreshTarget::Connection(connection_id),
+                                        SurfaceRefreshOptions::OBJECTS_ONLY,
+                                        cx,
+                                    );
                                 });
                             })
 ;

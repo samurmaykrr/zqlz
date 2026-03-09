@@ -539,9 +539,7 @@ impl ExportWizard {
                 window.activate_window();
                 window.set_window_title("Export Wizard");
 
-                let wizard = cx.new(|cx| {
-                    ExportWizard::new(initial_state, connection, window, cx)
-                });
+                let wizard = cx.new(|cx| ExportWizard::new(initial_state, connection, window, cx));
 
                 cx.new(|cx| Root::new(wizard, window, cx))
             })?;
@@ -1052,11 +1050,10 @@ impl ExportWizard {
                             selected_tables.join("_")
                         };
                         let target_label = this.state.output_filename.clone();
-                        if let Ok(path) = this.state.write_log_file(
-                            &driver_name,
-                            &source_label,
-                            &target_label,
-                        ) {
+                        if let Ok(path) =
+                            this.state
+                                .write_log_file(&driver_name, &source_label, &target_label)
+                        {
                             this.state.log_file_path = Some(path);
                         }
 
@@ -1099,30 +1096,35 @@ impl ExportWizard {
             .pl_4()
             .border_b_1()
             .border_color(theme.border)
-            .children(ExportWizardStep::all().iter().enumerate().map(|(visual_idx, step)| {
-                let is_current = *step == current;
-                let is_done = visual_idx < current.index();
+            .children(
+                ExportWizardStep::all()
+                    .iter()
+                    .enumerate()
+                    .map(|(visual_idx, step)| {
+                        let is_current = *step == current;
+                        let is_done = visual_idx < current.index();
 
-                div()
-                    .text_sm()
-                    .px_3()
-                    .py_2()
-                    .border_b_2()
-                    .when(is_current, |s| {
-                        s.border_color(theme.accent)
-                            .text_color(theme.accent)
-                            .font_weight(FontWeight::SEMIBOLD)
-                    })
-                    .when(is_done, |s| {
-                        s.border_color(transparent_black())
-                            .text_color(theme.foreground)
-                    })
-                    .when(!is_current && !is_done, |s| {
-                        s.border_color(transparent_black())
-                            .text_color(theme.muted_foreground)
-                    })
-                    .child(step.display_name())
-            }))
+                        div()
+                            .text_sm()
+                            .px_3()
+                            .py_2()
+                            .border_b_2()
+                            .when(is_current, |s| {
+                                s.border_color(theme.accent)
+                                    .text_color(theme.accent)
+                                    .font_weight(FontWeight::SEMIBOLD)
+                            })
+                            .when(is_done, |s| {
+                                s.border_color(transparent_black())
+                                    .text_color(theme.foreground)
+                            })
+                            .when(!is_current && !is_done, |s| {
+                                s.border_color(transparent_black())
+                                    .text_color(theme.muted_foreground)
+                            })
+                            .child(step.display_name())
+                    }),
+            )
     }
 
     fn render_step_1_table_selection(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1166,6 +1168,7 @@ impl ExportWizard {
                         let view = view.clone();
                         Button::new("change-folder")
                             .child("Change...")
+                            .primary()
                             .small()
                             .on_click(move |_, window, cx| {
                                 let folder_input = folder_input.clone();
@@ -1309,32 +1312,26 @@ impl ExportWizard {
                     let row_idx = context_menu_row;
 
                     menu.when_some(row_idx, |menu, idx| {
-                        menu.item(
-                            PopupMenuItem::new("Select Only This").on_click({
-                                let view = view_for_container_menu.clone();
-                                window.listener_for(&view, move |this, _, _, cx| {
-                                    this.select_only_table(idx, cx);
-                                })
-                            }),
-                        )
+                        menu.item(PopupMenuItem::new("Select Only This").on_click({
+                            let view = view_for_container_menu.clone();
+                            window.listener_for(&view, move |this, _, _, cx| {
+                                this.select_only_table(idx, cx);
+                            })
+                        }))
                         .separator()
                     })
-                    .item(
-                        PopupMenuItem::new("Select All").on_click({
-                            let view = view_for_container_menu.clone();
-                            window.listener_for(&view, |this, _, _, cx| {
-                                this.select_all_tables(cx);
-                            })
-                        }),
-                    )
-                    .item(
-                        PopupMenuItem::new("Deselect All").on_click({
-                            let view = view_for_container_menu.clone();
-                            window.listener_for(&view, |this, _, _, cx| {
-                                this.deselect_all_tables(cx);
-                            })
-                        }),
-                    )
+                    .item(PopupMenuItem::new("Select All").on_click({
+                        let view = view_for_container_menu.clone();
+                        window.listener_for(&view, |this, _, _, cx| {
+                            this.select_all_tables(cx);
+                        })
+                    }))
+                    .item(PopupMenuItem::new("Deselect All").on_click({
+                        let view = view_for_container_menu.clone();
+                        window.listener_for(&view, |this, _, _, cx| {
+                            this.deselect_all_tables(cx);
+                        })
+                    }))
                 }
             })
             .child(
@@ -1443,6 +1440,7 @@ impl ExportWizard {
                     .child(
                         Button::new("select-all")
                             .child("Select All")
+                            .ghost()
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.select_all_columns(cx);
@@ -1451,6 +1449,7 @@ impl ExportWizard {
                     .child(
                         Button::new("deselect-all")
                             .child("Deselect All")
+                            .ghost()
                             .small()
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.deselect_all_columns(cx);
@@ -1533,18 +1532,15 @@ impl ExportWizard {
             .when(self.state.export_format != ExportFormat::Csv, |this| {
                 this.child(self.render_section_header("UDIF Options", cx))
                     .child(
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(
-                                Checkbox::new("schema-only")
-                                    // Checkbox is checked when data is *excluded* (schema-only)
-                                    .checked(!self.state.include_data)
-                                    .label("Schema only (no data)")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_include_data(cx);
-                                    })),
-                            ),
+                        v_flex().w_full().gap_2().child(
+                            Checkbox::new("schema-only")
+                                // Checkbox is checked when data is *excluded* (schema-only)
+                                .checked(!self.state.include_data)
+                                .label("Schema only (no data)")
+                                .on_click(cx.listener(|this, _, _, cx| {
+                                    this.toggle_include_data(cx);
+                                })),
+                        ),
                     )
             })
             // Append & Continue on error (CSV only)
@@ -1587,30 +1583,36 @@ impl ExportWizard {
                                         this.toggle_include_headers(cx);
                                     })),
                             )
-                            .child(self.render_format_row(
-                                "Record Delimiter:",
-                                Select::new(&self.record_delimiter_state)
-                                    .small()
-                                    .w(px(180.0))
-                                    .menu_width(px(180.0)),
-                                cx,
-                            ))
-                            .child(self.render_format_row(
-                                "Field Delimiter:",
-                                Select::new(&self.field_delimiter_state)
-                                    .small()
-                                    .w(px(180.0))
-                                    .menu_width(px(180.0)),
-                                cx,
-                            ))
-                            .child(self.render_format_row(
-                                "Text Qualifier:",
-                                Select::new(&self.text_qualifier_state)
-                                    .small()
-                                    .w(px(180.0))
-                                    .menu_width(px(180.0)),
-                                cx,
-                            )),
+                            .child(
+                                self.render_format_row(
+                                    "Record Delimiter:",
+                                    Select::new(&self.record_delimiter_state)
+                                        .small()
+                                        .w(px(180.0))
+                                        .menu_width(px(180.0)),
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                self.render_format_row(
+                                    "Field Delimiter:",
+                                    Select::new(&self.field_delimiter_state)
+                                        .small()
+                                        .w(px(180.0))
+                                        .menu_width(px(180.0)),
+                                    cx,
+                                ),
+                            )
+                            .child(
+                                self.render_format_row(
+                                    "Text Qualifier:",
+                                    Select::new(&self.text_qualifier_state)
+                                        .small()
+                                        .w(px(180.0))
+                                        .menu_width(px(180.0)),
+                                    cx,
+                                ),
+                            ),
                     )
                     // Data Formats section
                     .child(self.render_section_header("Data Formats", cx))
@@ -1631,14 +1633,16 @@ impl ExportWizard {
                                 Input::new(&self.decimal_input_state).small().w(px(80.0)),
                                 cx,
                             ))
-                            .child(self.render_format_row(
-                                "Binary Data Encoding:",
-                                Select::new(&self.binary_encoding_state)
-                                    .small()
-                                     .w(px(180.0))
-                                     .menu_width(px(180.0)),
-                                 cx,
-                             )),
+                            .child(
+                                self.render_format_row(
+                                    "Binary Data Encoding:",
+                                    Select::new(&self.binary_encoding_state)
+                                        .small()
+                                        .w(px(180.0))
+                                        .menu_width(px(180.0)),
+                                    cx,
+                                ),
+                            ),
                     )
             })
     }
@@ -1875,7 +1879,12 @@ impl Render for ExportWizard {
                         h_flex()
                             .gap_2()
                             .child(Button::new("help").child("?").ghost().small())
-                            .child(Button::new("save-profile").child("Save Profile").ghost().small()),
+                            .child(
+                                Button::new("save-profile")
+                                    .child("Save Profile")
+                                    .ghost()
+                                    .small(),
+                            ),
                     )
                     // Right side: Navigation buttons
                     .child(
@@ -1920,7 +1929,7 @@ impl Render for ExportWizard {
                             .child(
                                 Button::new("next")
                                     .child("Next")
-                                    .ghost()
+                                    .primary()
                                     .small()
                                     .disabled(!step.can_go_next() || is_exporting)
                                     .on_click(next_handler),

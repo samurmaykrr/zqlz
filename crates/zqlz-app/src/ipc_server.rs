@@ -314,20 +314,16 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             Response::Ok
         }
 
-        Request::TestConnection(name_or_id) => {
-            match find_saved(handle, &name_or_id) {
-                None => Response::Error(format!("no connection matching '{}'", name_or_id)),
-                Some(saved) => {
-                    match handle.connections.connect(&saved).await {
-                        Ok(conn_id) => {
-                            let _ = handle.connections.disconnect(conn_id).await;
-                            Response::Ok
-                        }
-                        Err(e) => Response::Error(e.to_string()),
-                    }
+        Request::TestConnection(name_or_id) => match find_saved(handle, &name_or_id) {
+            None => Response::Error(format!("no connection matching '{}'", name_or_id)),
+            Some(saved) => match handle.connections.connect(&saved).await {
+                Ok(conn_id) => {
+                    let _ = handle.connections.disconnect(conn_id).await;
+                    Response::Ok
                 }
-            }
-        }
+                Err(e) => Response::Error(e.to_string()),
+            },
+        },
 
         Request::ExecuteQuery {
             connection,
@@ -336,9 +332,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         } => {
             let saved = match find_saved(handle, &connection) {
                 Some(s) => s,
-                None => {
-                    return Response::Error(format!("no connection matching '{}'", connection))
-                }
+                None => return Response::Error(format!("no connection matching '{}'", connection)),
             };
 
             let mut patched = saved.clone();
@@ -409,9 +403,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         Request::ListDatabases(name_or_id) => {
             let saved = match find_saved(handle, &name_or_id) {
                 Some(s) => s,
-                None => {
-                    return Response::Error(format!("no connection matching '{}'", name_or_id))
-                }
+                None => return Response::Error(format!("no connection matching '{}'", name_or_id)),
             };
 
             match handle.connections.connect(&saved).await {
@@ -429,9 +421,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         } => {
             let saved = match find_saved(handle, &connection) {
                 Some(s) => s,
-                None => {
-                    return Response::Error(format!("no connection matching '{}'", connection))
-                }
+                None => return Response::Error(format!("no connection matching '{}'", connection)),
             };
 
             let mut patched = saved.clone();
@@ -449,7 +439,11 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
 
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
-                None => return Response::Error("driver does not support schema introspection".to_string()),
+                None => {
+                    return Response::Error(
+                        "driver does not support schema introspection".to_string(),
+                    );
+                }
             };
 
             match schema.list_tables(None).await {
@@ -465,9 +459,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         } => {
             let saved = match find_saved(handle, &connection) {
                 Some(s) => s,
-                None => {
-                    return Response::Error(format!("no connection matching '{}'", connection))
-                }
+                None => return Response::Error(format!("no connection matching '{}'", connection)),
             };
 
             let mut patched = saved.clone();
@@ -485,7 +477,11 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
 
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
-                None => return Response::Error("driver does not support schema introspection".to_string()),
+                None => {
+                    return Response::Error(
+                        "driver does not support schema introspection".to_string(),
+                    );
+                }
             };
 
             match schema.get_table(None, &table).await {

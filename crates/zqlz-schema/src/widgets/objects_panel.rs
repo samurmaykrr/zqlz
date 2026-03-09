@@ -8,6 +8,7 @@ use zqlz_core::{
     ObjectsPanelRow,
 };
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
@@ -15,7 +16,7 @@ use zqlz_ui::widgets::{
     menu::{PopupMenu, PopupMenuItem},
     table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState},
     typography::body_small,
-    v_flex, ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon,
+    v_flex,
 };
 
 // Keyboard actions for the objects panel
@@ -1651,10 +1652,11 @@ impl ObjectsPanel {
             }))
         });
 
-        self._empty_area_menu_subscription = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
-            this.empty_area_menu_open = false;
-            cx.notify();
-        }));
+        self._empty_area_menu_subscription =
+            Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+                this.empty_area_menu_open = false;
+                cx.notify();
+            }));
 
         if !menu.focus_handle(cx).contains_focused(window, cx) {
             menu.focus_handle(cx).focus(window, cx);
@@ -1836,7 +1838,9 @@ impl Render for ObjectsPanel {
                     }),
             )
             .when_some(
-                self.empty_area_menu.clone().filter(|_| self.empty_area_menu_open),
+                self.empty_area_menu
+                    .clone()
+                    .filter(|_| self.empty_area_menu_open),
                 |el, menu| {
                     el.child(
                         deferred(

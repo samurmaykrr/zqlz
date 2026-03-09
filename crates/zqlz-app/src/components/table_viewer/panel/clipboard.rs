@@ -6,43 +6,111 @@ impl TableViewerPanel {
             return;
         };
 
-        let (column_names, data_to_copy): (Vec<String>, Vec<Vec<String>>) =
-            table_state.read_with(cx, |table, _cx| {
-                let delegate = table.delegate();
-                let column_names: Vec<String> = delegate
-                    .column_meta
+        let selection_payload = table_state.read_with(cx, |table, _cx| {
+            let delegate = table.delegate();
+            let selected_cells = table.cell_selection().selected_cells();
+
+            if !selected_cells.is_empty() {
+                let selected_positions: std::collections::HashSet<(usize, usize)> = selected_cells
                     .iter()
-                    .map(|c| c.name.clone())
+                    .map(|cell| (cell.row, cell.col))
+                    .collect();
+                let min_row = selected_cells
+                    .iter()
+                    .map(|cell| cell.row)
+                    .min()
+                    .unwrap_or(0);
+                let max_row = selected_cells
+                    .iter()
+                    .map(|cell| cell.row)
+                    .max()
+                    .unwrap_or(0);
+                let min_col = selected_cells
+                    .iter()
+                    .map(|cell| cell.col)
+                    .min()
+                    .unwrap_or(0);
+                let max_col = selected_cells
+                    .iter()
+                    .map(|cell| cell.col)
+                    .max()
+                    .unwrap_or(0);
+
+                let rows: Vec<Vec<String>> = (min_row..=max_row)
+                    .map(|display_row| {
+                        let actual_row = delegate.get_actual_row_index(display_row);
+                        (min_col..=max_col)
+                            .map(|display_col| {
+                                if !selected_positions.contains(&(display_row, display_col)) {
+                                    return String::new();
+                                }
+
+                                if display_col == 0 {
+                                    return (delegate.row_offset + actual_row + 1).to_string();
+                                }
+
+                                delegate
+                                    .rows
+                                    .get(actual_row)
+                                    .and_then(|row| row.get(display_col - 1))
+                                    .map(|value| value.display_for_table())
+                                    .unwrap_or_default()
+                            })
+                            .collect()
+                    })
                     .collect();
 
-                let rows_to_copy: Vec<Vec<String>> = if !self.selected_rows.is_empty() {
-                    self.selected_rows
+                return (false, rows);
+            }
+
+            let selected_rows = self.selected_display_rows(_cx);
+            let rows_to_copy: Vec<Vec<String>> = if !selected_rows.is_empty() {
+                selected_rows
+                    .iter()
+                    .map(|&display_idx| delegate.get_actual_row_index(display_idx))
+                    .filter_map(|actual_idx| delegate.rows.get(actual_idx))
+                    .map(|row| row.iter().map(|value| value.display_for_table()).collect())
+                    .collect()
+            } else {
+                if delegate.is_filtering {
+                    delegate
+                        .filtered_row_indices
                         .iter()
-                        .map(|&display_idx| delegate.get_actual_row_index(display_idx))
-                        .filter_map(|actual_idx| delegate.rows.get(actual_idx).cloned())
+                        .filter_map(|&idx| delegate.rows.get(idx))
+                        .map(|row| row.iter().map(|v| v.display_for_table()).collect())
                         .collect()
                 } else {
-                    if delegate.is_filtering {
-                        delegate
-                            .filtered_row_indices
-                            .iter()
-                            .filter_map(|&idx| delegate.rows.get(idx).cloned())
-                            .collect()
-                    } else {
-                        delegate.rows.clone()
-                    }
-                };
+                    delegate
+                        .rows
+                        .iter()
+                        .map(|row| row.iter().map(|v| v.display_for_table()).collect())
+                        .collect()
+                }
+            };
 
-                (column_names, rows_to_copy)
-            });
+            (true, rows_to_copy)
+        });
+
+        let (include_header, data_to_copy) = selection_payload;
 
         if data_to_copy.is_empty() {
             return;
         }
 
-        let header = column_names.join("\t");
         let rows: Vec<String> = data_to_copy.iter().map(|row| row.join("\t")).collect();
-        let tsv = format!("{}\n{}", header, rows.join("\n"));
+        let tsv = if include_header {
+            let column_names: Vec<String> = table_state.read_with(cx, |table, _cx| {
+                table
+                    .delegate()
+                    .column_meta
+                    .iter()
+                    .map(|column| column.name.clone())
+                    .collect()
+            });
+            format!("{}\n{}", column_names.join("\t"), rows.join("\n"))
+        } else {
+            rows.join("\n")
+        };
 
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(tsv));
 
@@ -111,11 +179,13 @@ impl TableViewerPanel {
             return;
         }
 
-        let start_row = self.selected_rows.iter().min().copied().map(|display_idx| {
-            table_state.read_with(cx, |table, _cx| {
-                table.delegate().get_actual_row_index(display_idx)
-            })
-        });
+        let start_row = self
+            .selected_display_cell_anchor(cx)
+            .map(|(display_row, _display_col)| {
+                table_state.read_with(cx, |table, _cx| {
+                    table.delegate().get_actual_row_index(display_row)
+                })
+            });
 
         let current_row_count = table_state.read_with(cx, |table, _cx| table.delegate().rows.len());
 
@@ -136,7 +206,7 @@ impl TableViewerPanel {
                         .delegate()
                         .rows
                         .get(target_row)
-                        .cloned()
+                        .map(|r| r.iter().map(|v| v.display_for_table()).collect())
                         .unwrap_or_default()
                 });
 

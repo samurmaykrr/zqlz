@@ -1,6 +1,8 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
+use uuid::Uuid;
+use zqlz_core::Value;
 use zqlz_ui::widgets::select::SelectItem;
 
 /// Item for FK dropdown with value and display label
@@ -54,12 +56,43 @@ impl SelectItem for FkSelectItem {
 }
 
 /// Represents a pending cell change (not yet committed to database)
+/// Uses String values for compatibility with event emission boundaries.
 #[derive(Clone, Debug)]
 pub struct PendingCellChange {
-    /// Original value before editing
+    /// Original value before editing (display string)
     pub original_value: String,
-    /// New value after editing
+    /// New value after editing (display string)
     pub new_value: String,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct SaveCellRequest {
+    pub table_name: String,
+    pub connection_id: Uuid,
+    pub row: usize,
+    pub data_col: usize,
+    pub column_name: String,
+    pub new_value: String,
+    pub original_value: String,
+    pub all_row_values: Vec<String>,
+    pub all_column_names: Vec<String>,
+    pub all_column_types: Vec<String>,
+}
+
+/// A single undoable cell edit, storing enough info to reverse the change.
+#[derive(Clone, Debug)]
+pub struct UndoCellEdit {
+    pub row: usize,
+    pub data_col: usize,
+    pub old_value: Value,
+    pub new_value: Value,
+}
+
+/// An undo entry groups one or more cell edits that should be undone/redone atomically.
+/// For example, a bulk edit or paste produces a single entry with many cell edits.
+#[derive(Clone, Debug)]
+pub struct UndoEntry {
+    pub edits: Vec<UndoCellEdit>,
 }
 
 /// Tracks all pending changes in the table (not yet committed to database)
@@ -69,8 +102,8 @@ pub struct PendingChanges {
     pub modified_cells: HashMap<(usize, usize), PendingCellChange>,
     /// Rows marked for deletion (by row index)
     pub deleted_rows: HashSet<usize>,
-    /// New rows to be inserted (each Vec<String> is a row of values)
-    pub new_rows: Vec<Vec<String>>,
+    /// New rows to be inserted (each Vec<Value> is a row of values)
+    pub new_rows: Vec<Vec<Value>>,
 }
 
 impl PendingChanges {
@@ -114,7 +147,7 @@ impl PendingChanges {
     /// Check if a row index corresponds to a new (unsaved) row
     /// Returns Some(new_row_index) if it's a new row, None otherwise
     pub fn get_new_row_index(&self, row_index: usize, total_rows: usize) -> Option<usize> {
-        let original_row_count = total_rows - self.new_rows.len();
+        let original_row_count = total_rows.checked_sub(self.new_rows.len())?;
         if row_index >= original_row_count {
             Some(row_index - original_row_count)
         } else {
@@ -123,7 +156,13 @@ impl PendingChanges {
     }
 
     /// Update a cell value in a new row (not yet saved to database)
-    pub fn update_new_row_cell(&mut self, new_row_index: usize, col_index: usize, value: String) {
+    pub fn update_new_row_cell(
+        &mut self,
+        new_row_index: usize,
+        col_index: usize,
+        value: impl Into<Value>,
+    ) {
+        let value = value.into();
         if let Some(row) = self.new_rows.get_mut(new_row_index) {
             if let Some(cell) = row.get_mut(col_index) {
                 *cell = value;

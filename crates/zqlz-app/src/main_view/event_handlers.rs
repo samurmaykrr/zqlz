@@ -8,14 +8,11 @@ use crate::actions::*;
 use crate::app::AppState;
 use crate::components::{
     Command, CommandCategory, CommandPalette, CommandPaletteEvent, CommandUsagePersistence,
-    ConnectionEntry, ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent,
-    ResultsPanelEvent, SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
+    ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent, ResultsPanelEvent,
+    SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
 };
-use zqlz_ui::widgets::{
-    WindowExt,
-    button::Button,
-    dialog::DialogButtonProps,
-};
+use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use zqlz_ui::widgets::{WindowExt, button::Button, dialog::DialogButtonProps};
 use zqlz_versioning::DatabaseObjectType;
 
 use super::MainView;
@@ -73,46 +70,21 @@ impl MainView {
             }
             ConnectionSidebarEvent::RefreshConnections => {
                 tracing::debug!("Refreshing connections list (preserving active connections)");
-                if let Some(app_state) = cx.try_global::<AppState>() {
-                    let saved = app_state.saved_connections();
-
-                    // Get current connection entries to preserve their state
-                    let current_entries: std::collections::HashMap<uuid::Uuid, ConnectionEntry> =
-                        self.connection_sidebar
-                            .read(cx)
-                            .connections()
-                            .iter()
-                            .map(|c| (c.id, c.clone()))
-                            .collect();
-
-                    let entries: Vec<_> = saved
-                        .into_iter()
-                        .map(|s| {
-                            // If this connection already exists, preserve its full state
-                            // (connected status, schema data, expansion states, etc.)
-                            if let Some(existing) = current_entries.get(&s.id) {
-                                let mut entry = existing.clone();
-                                // Update name/driver in case they changed in saved config
-                                entry.name = s.name;
-                                entry.db_type = s.driver;
-                                entry
-                            } else {
-                                // New connection, create fresh entry
-                                ConnectionEntry::new(s.id, s.name, s.driver)
-                            }
-                        })
-                        .collect();
-                    self.connection_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.set_connections(entries, cx);
-                    });
-                }
+                self.refresh_connections_list_preserving_state(cx);
             }
             ConnectionSidebarEvent::OpenTable {
                 connection_id,
                 table_name,
                 database_name,
             } => {
-                self.open_table_viewer(connection_id, table_name, database_name.clone(), false, window, cx);
+                self.open_table_viewer(
+                    connection_id,
+                    table_name,
+                    database_name.clone(),
+                    false,
+                    window,
+                    cx,
+                );
             }
             ConnectionSidebarEvent::OpenView {
                 connection_id,
@@ -120,7 +92,14 @@ impl MainView {
                 database_name,
             } => {
                 // Views can be queried like tables, so we reuse the table viewer
-                self.open_table_viewer(connection_id, view_name, database_name.clone(), true, window, cx);
+                self.open_table_viewer(
+                    connection_id,
+                    view_name,
+                    database_name.clone(),
+                    true,
+                    window,
+                    cx,
+                );
             }
             ConnectionSidebarEvent::DesignView {
                 connection_id,
@@ -224,7 +203,11 @@ impl MainView {
                 self.copy_table_name(&table_name, cx);
             }
             ConnectionSidebarEvent::RefreshSchema { connection_id } => {
-                self.refresh_schema(connection_id, window, cx);
+                self.refresh_connection_surfaces(
+                    RefreshTarget::Connection(connection_id),
+                    SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                    cx,
+                );
             }
 
             // Saved queries events
@@ -560,48 +543,208 @@ impl MainView {
     fn build_static_commands() -> Vec<Command> {
         vec![
             // ── Application ─────────────────────────────────────────
-            Command::new_static("settings", "Open Settings", CommandCategory::Application, OpenSettings),
-            Command::new_static("command-palette", "Command Palette", CommandCategory::Application, OpenCommandPalette),
+            Command::new_static(
+                "settings",
+                "Open Settings",
+                CommandCategory::Application,
+                OpenSettings,
+            ),
+            Command::new_static(
+                "command-palette",
+                "Command Palette",
+                CommandCategory::Application,
+                OpenCommandPalette,
+            ),
             Command::new_static("refresh", "Refresh", CommandCategory::Application, Refresh),
             Command::new_static("quit", "Quit", CommandCategory::Application, Quit),
             // ── Connection ──────────────────────────────────────────
-            Command::new_static("new-connection", "New Connection", CommandCategory::Connection, NewConnection),
-            Command::new_static("refresh-connection", "Refresh Connection", CommandCategory::Connection, RefreshConnection),
-            Command::new_static("refresh-connections-list", "Refresh Connections List", CommandCategory::Connection, RefreshConnectionsList),
+            Command::new_static(
+                "new-connection",
+                "New Connection",
+                CommandCategory::Connection,
+                NewConnection,
+            ),
+            Command::new_static(
+                "refresh-connection",
+                "Refresh Connection",
+                CommandCategory::Connection,
+                RefreshConnection,
+            ),
+            Command::new_static(
+                "refresh-connections-list",
+                "Refresh Connections List",
+                CommandCategory::Connection,
+                RefreshConnectionsList,
+            ),
             // ── Query ───────────────────────────────────────────────
             Command::new_static("new-query", "New Query", CommandCategory::Query, NewQuery),
-            Command::new_static("execute-query", "Execute Query", CommandCategory::Query, ExecuteQuery),
-            Command::new_static("execute-selection", "Execute Selection", CommandCategory::Query, ExecuteSelection),
-            Command::new_static("execute-current-statement", "Execute Current Statement", CommandCategory::Query, ExecuteCurrentStatement),
-            Command::new_static("explain-query", "Explain Query", CommandCategory::Query, ExplainQuery),
-            Command::new_static("explain-selection", "Explain Selection", CommandCategory::Query, ExplainSelection),
-            Command::new_static("stop-query", "Stop Query", CommandCategory::Query, StopQuery),
-            Command::new_static("format-query", "Format Query", CommandCategory::Query, FormatQuery),
-            Command::new_static("save-query", "Save Query", CommandCategory::Query, SaveQuery),
-            Command::new_static("save-query-as", "Save Query As…", CommandCategory::Query, SaveQueryAs),
-            Command::new_static("toggle-problems-panel", "Toggle Problems Panel", CommandCategory::Query, ToggleProblemsPanel),
+            Command::new_static(
+                "execute-query",
+                "Execute Query",
+                CommandCategory::Query,
+                ExecuteQuery,
+            ),
+            Command::new_static(
+                "execute-selection",
+                "Execute Selection",
+                CommandCategory::Query,
+                ExecuteSelection,
+            ),
+            Command::new_static(
+                "execute-current-statement",
+                "Execute Current Statement",
+                CommandCategory::Query,
+                ExecuteCurrentStatement,
+            ),
+            Command::new_static(
+                "explain-query",
+                "Explain Query",
+                CommandCategory::Query,
+                ExplainQuery,
+            ),
+            Command::new_static(
+                "explain-selection",
+                "Explain Selection",
+                CommandCategory::Query,
+                ExplainSelection,
+            ),
+            Command::new_static(
+                "stop-query",
+                "Stop Query",
+                CommandCategory::Query,
+                StopQuery,
+            ),
+            Command::new_static(
+                "format-query",
+                "Format Query",
+                CommandCategory::Query,
+                FormatQuery,
+            ),
+            Command::new_static(
+                "save-query",
+                "Save Query",
+                CommandCategory::Query,
+                SaveQuery,
+            ),
+            Command::new_static(
+                "save-query-as",
+                "Save Query As…",
+                CommandCategory::Query,
+                SaveQueryAs,
+            ),
+            Command::new_static(
+                "toggle-problems-panel",
+                "Toggle Problems Panel",
+                CommandCategory::Query,
+                ToggleProblemsPanel,
+            ),
             // ── Editor ──────────────────────────────────────────────
-            Command::new_static("toggle-line-comment", "Toggle Line Comment", CommandCategory::Editor, ToggleLineComment),
-            Command::new_static("duplicate-line", "Duplicate Line", CommandCategory::Editor, DuplicateLine),
-            Command::new_static("delete-line", "Delete Line", CommandCategory::Editor, DeleteLine),
-            Command::new_static("move-line-up", "Move Line Up", CommandCategory::Editor, MoveLineUp),
-            Command::new_static("move-line-down", "Move Line Down", CommandCategory::Editor, MoveLineDown),
+            Command::new_static(
+                "toggle-line-comment",
+                "Toggle Line Comment",
+                CommandCategory::Editor,
+                ToggleLineComment,
+            ),
+            Command::new_static(
+                "duplicate-line",
+                "Duplicate Line",
+                CommandCategory::Editor,
+                DuplicateLine,
+            ),
+            Command::new_static(
+                "delete-line",
+                "Delete Line",
+                CommandCategory::Editor,
+                DeleteLine,
+            ),
+            Command::new_static(
+                "move-line-up",
+                "Move Line Up",
+                CommandCategory::Editor,
+                MoveLineUp,
+            ),
+            Command::new_static(
+                "move-line-down",
+                "Move Line Down",
+                CommandCategory::Editor,
+                MoveLineDown,
+            ),
             Command::new_static("find-next", "Find Next", CommandCategory::Editor, FindNext),
-            Command::new_static("find-previous", "Find Previous", CommandCategory::Editor, FindPrevious),
+            Command::new_static(
+                "find-previous",
+                "Find Previous",
+                CommandCategory::Editor,
+                FindPrevious,
+            ),
             // ── Layout ──────────────────────────────────────────────
-            Command::new_static("toggle-left-sidebar", "Toggle Left Sidebar", CommandCategory::Layout, ToggleLeftSidebar),
-            Command::new_static("toggle-right-sidebar", "Toggle Right Sidebar", CommandCategory::Layout, ToggleRightSidebar),
-            Command::new_static("toggle-bottom-panel", "Toggle Bottom Panel", CommandCategory::Layout, ToggleBottomPanel),
+            Command::new_static(
+                "toggle-left-sidebar",
+                "Toggle Left Sidebar",
+                CommandCategory::Layout,
+                ToggleLeftSidebar,
+            ),
+            Command::new_static(
+                "toggle-right-sidebar",
+                "Toggle Right Sidebar",
+                CommandCategory::Layout,
+                ToggleRightSidebar,
+            ),
+            Command::new_static(
+                "toggle-bottom-panel",
+                "Toggle Bottom Panel",
+                CommandCategory::Layout,
+                ToggleBottomPanel,
+            ),
             // ── Tab ─────────────────────────────────────────────────
-            Command::new_static("next-tab", "Next Tab", CommandCategory::Tab, ActivateNextTab),
-            Command::new_static("previous-tab", "Previous Tab", CommandCategory::Tab, ActivatePrevTab),
-            Command::new_static("close-tab", "Close Tab", CommandCategory::Tab, CloseActiveTab),
-            Command::new_static("close-other-tabs", "Close Other Tabs", CommandCategory::Tab, CloseOtherTabs),
-            Command::new_static("close-all-tabs", "Close All Tabs", CommandCategory::Tab, CloseAllTabs),
+            Command::new_static(
+                "next-tab",
+                "Next Tab",
+                CommandCategory::Tab,
+                ActivateNextTab,
+            ),
+            Command::new_static(
+                "previous-tab",
+                "Previous Tab",
+                CommandCategory::Tab,
+                ActivatePrevTab,
+            ),
+            Command::new_static(
+                "close-tab",
+                "Close Tab",
+                CommandCategory::Tab,
+                CloseActiveTab,
+            ),
+            Command::new_static(
+                "close-other-tabs",
+                "Close Other Tabs",
+                CommandCategory::Tab,
+                CloseOtherTabs,
+            ),
+            Command::new_static(
+                "close-all-tabs",
+                "Close All Tabs",
+                CommandCategory::Tab,
+                CloseAllTabs,
+            ),
             // ── Focus ───────────────────────────────────────────────
-            Command::new_static("focus-editor", "Focus Editor", CommandCategory::Focus, FocusEditor),
-            Command::new_static("focus-results", "Focus Results", CommandCategory::Focus, FocusResults),
-            Command::new_static("focus-sidebar", "Focus Sidebar", CommandCategory::Focus, FocusSidebar),
+            Command::new_static(
+                "focus-editor",
+                "Focus Editor",
+                CommandCategory::Focus,
+                FocusEditor,
+            ),
+            Command::new_static(
+                "focus-results",
+                "Focus Results",
+                CommandCategory::Focus,
+                FocusResults,
+            ),
+            Command::new_static(
+                "focus-sidebar",
+                "Focus Sidebar",
+                CommandCategory::Focus,
+                FocusSidebar,
+            ),
         ]
     }
 
@@ -710,17 +853,7 @@ impl MainView {
         cx: &mut Context<Self>,
     ) {
         tracing::info!("RefreshConnectionsList action received - refreshing sidebar");
-        if let Some(app_state) = cx.try_global::<AppState>() {
-            let saved = app_state.saved_connections();
-            tracing::info!("Found {} saved connections", saved.len());
-            let entries: Vec<_> = saved
-                .into_iter()
-                .map(|s| ConnectionEntry::new(s.id, s.name, s.driver))
-                .collect();
-            self.connection_sidebar.update(cx, |sidebar, cx| {
-                sidebar.set_connections(entries, cx);
-            });
-        }
+        self.refresh_connections_list_preserving_state(cx);
     }
 
     pub(super) fn handle_toggle_left_sidebar(
@@ -768,10 +901,15 @@ impl MainView {
         self.dock_area.update(cx, |area, cx| {
             area.toggle_dock(zqlz_ui::widgets::dock::DockPlacement::Bottom, window, cx);
         });
-        
+
         // Then activate the Problems panel
         self.dock_area.update(cx, |area, cx| {
-            area.activate_panel("Problems", zqlz_ui::widgets::dock::DockPlacement::Bottom, window, cx);
+            area.activate_panel(
+                "Problems",
+                zqlz_ui::widgets::dock::DockPlacement::Bottom,
+                window,
+                cx,
+            );
         });
     }
 
@@ -1148,15 +1286,19 @@ impl MainView {
                 }
                 "ConnectionSidebar" => {
                     // Refresh connections sidebar
-                    self.connection_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.refresh(cx);
-                    });
+                    self.refresh_connection_surfaces(
+                        RefreshTarget::ActiveConnection,
+                        SurfaceRefreshOptions::MANUAL,
+                        cx,
+                    );
                 }
                 "ObjectsPanel" => {
                     // Refresh objects panel
-                    self.objects_panel.update(cx, |panel, cx| {
-                        panel.refresh(cx);
-                    });
+                    self.refresh_connection_surfaces(
+                        RefreshTarget::ActiveConnection,
+                        SurfaceRefreshOptions::OBJECTS_ONLY,
+                        cx,
+                    );
                 }
                 _ => {
                     tracing::debug!("Refresh not implemented for panel: {}", panel_name);
@@ -1165,9 +1307,11 @@ impl MainView {
         } else {
             // No active panel - try connection sidebar if it has focus
             tracing::debug!("No active panel, checking connection sidebar");
-            self.connection_sidebar.update(cx, |sidebar, cx| {
-                sidebar.refresh(cx);
-            });
+            self.refresh_connection_surfaces(
+                RefreshTarget::ActiveConnection,
+                SurfaceRefreshOptions::MANUAL,
+                cx,
+            );
         }
     }
 
@@ -1176,22 +1320,29 @@ impl MainView {
         if self.settings_panel.is_none() {
             let settings_panel = cx.new(|cx| SettingsPanel::new(window, cx));
             self.settings_panel = Some(settings_panel.clone());
-            
+
             // Subscribe to settings changes
             let _settings_panel_for_sub = settings_panel.clone();
-            cx.subscribe(&settings_panel, move |_this, _, event: &SettingsPanelEvent, _cx| {
-                match event {
-                    SettingsPanelEvent::SettingsChanged => {
-                        tracing::debug!("Settings changed");
-                        // TODO: When we implement custom text editor, sync settings here
+            cx.subscribe(
+                &settings_panel,
+                move |_this, _, event: &SettingsPanelEvent, _cx| {
+                    match event {
+                        SettingsPanelEvent::SettingsChanged => {
+                            tracing::debug!("Settings changed");
+                            // TODO: When we implement custom text editor, sync settings here
+                        }
                     }
-                }
-            }).detach();
+                },
+            )
+            .detach();
         }
 
         // Get the settings panel entity
-        let settings_panel_entity = self.settings_panel.clone().expect("settings_panel should be set");
-        
+        let settings_panel_entity = self
+            .settings_panel
+            .clone()
+            .expect("settings_panel should be set");
+
         // Wrap in Arc for dock area
         let settings_panel: std::sync::Arc<dyn zqlz_ui::widgets::dock::PanelView> =
             std::sync::Arc::new(settings_panel_entity.clone());
@@ -1220,7 +1371,14 @@ impl MainView {
                 table_names,
                 database_name,
             } => {
-                self.open_tables(*connection_id, table_names.clone(), database_name.clone(), false, window, cx);
+                self.open_tables(
+                    *connection_id,
+                    table_names.clone(),
+                    database_name.clone(),
+                    false,
+                    window,
+                    cx,
+                );
             }
             ObjectsPanelEvent::DesignTables {
                 connection_id,
@@ -1229,7 +1387,10 @@ impl MainView {
             } => {
                 self.design_tables(*connection_id, table_names.clone(), window, cx);
             }
-            ObjectsPanelEvent::NewTable { connection_id, database_name: _ } => {
+            ObjectsPanelEvent::NewTable {
+                connection_id,
+                database_name: _,
+            } => {
                 self.new_table(*connection_id, window, cx);
             }
             ObjectsPanelEvent::DeleteTables {
@@ -1280,13 +1441,23 @@ impl MainView {
                 include_data,
                 database_name: _,
             } => {
-                self.dump_tables_sql(*connection_id, table_names.clone(), *include_data, window, cx);
+                self.dump_tables_sql(
+                    *connection_id,
+                    table_names.clone(),
+                    *include_data,
+                    window,
+                    cx,
+                );
             }
             ObjectsPanelEvent::CopyTableNames { table_names } => {
                 self.copy_table_names(table_names, cx);
             }
             ObjectsPanelEvent::Refresh => {
-                self.refresh_objects_panel(window, cx);
+                self.refresh_connection_surfaces(
+                    RefreshTarget::ActiveConnection,
+                    SurfaceRefreshOptions::OBJECTS_ONLY,
+                    cx,
+                );
             }
             // Redis-related events
             ObjectsPanelEvent::OpenRedisDatabase {
@@ -1310,7 +1481,14 @@ impl MainView {
                 view_names,
                 database_name,
             } => {
-                self.open_tables(*connection_id, view_names.clone(), database_name.clone(), true, window, cx);
+                self.open_tables(
+                    *connection_id,
+                    view_names.clone(),
+                    database_name.clone(),
+                    true,
+                    window,
+                    cx,
+                );
             }
             ObjectsPanelEvent::DesignViews {
                 connection_id,
@@ -1319,7 +1497,10 @@ impl MainView {
             } => {
                 self.design_views(*connection_id, view_names.clone(), window, cx);
             }
-            ObjectsPanelEvent::NewView { connection_id, database_name: _ } => {
+            ObjectsPanelEvent::NewView {
+                connection_id,
+                database_name: _,
+            } => {
                 self.new_view(*connection_id, window, cx);
             }
             ObjectsPanelEvent::DeleteViews {
@@ -1387,7 +1568,15 @@ impl MainView {
                 is_new,
                 original_design,
             } => {
-                self.save_table_design(connection_id, design, is_new, original_design, panel, window, cx);
+                self.save_table_design(
+                    connection_id,
+                    design,
+                    is_new,
+                    original_design,
+                    panel,
+                    window,
+                    cx,
+                );
             }
             zqlz_table_designer::TableDesignerEvent::Cancel => {
                 self.close_table_designer_panel(panel, window, cx);
@@ -1624,12 +1813,8 @@ impl MainView {
                 zqlz_ui::widgets::highlighter::DiagnosticSeverity::Warning => {
                     DiagnosticSeverity::Warning
                 }
-                zqlz_ui::widgets::highlighter::DiagnosticSeverity::Info => {
-                    DiagnosticSeverity::Info
-                }
-                zqlz_ui::widgets::highlighter::DiagnosticSeverity::Hint => {
-                    DiagnosticSeverity::Hint
-                }
+                zqlz_ui::widgets::highlighter::DiagnosticSeverity::Info => DiagnosticSeverity::Info,
+                zqlz_ui::widgets::highlighter::DiagnosticSeverity::Hint => DiagnosticSeverity::Hint,
             },
             source: diag.source.as_ref().map(|s| s.to_string()),
         }
@@ -1719,8 +1904,7 @@ impl MainView {
                                                 editor.update(cx, |editor, cx| {
                                                     editor.set_text(&sql, window, cx);
                                                 });
-                                                let focus_handle =
-                                                    editor.read(cx).focus_handle(cx);
+                                                let focus_handle = editor.read(cx).focus_handle(cx);
                                                 window.focus(&focus_handle, cx);
                                             }
                                         }
@@ -1738,7 +1922,7 @@ impl MainView {
                     app_state.clear_query_history();
                     tracing::info!("Query history cleared");
                 }
-                
+
                 // Update the history panel to reflect the cleared state
                 self.inspector_panel.update(cx, |panel, cx| {
                     panel.query_history_panel().update(cx, |history_panel, cx| {

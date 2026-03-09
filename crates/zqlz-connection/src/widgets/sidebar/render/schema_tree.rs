@@ -8,7 +8,7 @@ use gpui::*;
 use uuid::Uuid;
 
 use crate::widgets::sidebar::{ConnectionSidebar, SavedQueryInfo, SidebarDatabaseInfo};
-use zqlz_ui::widgets::{caption, h_flex, v_flex, ActiveTheme, Icon, IconName, ZqlzIcon};
+use zqlz_ui::widgets::{ActiveTheme, Icon, IconName, ZqlzIcon, caption, h_flex, v_flex};
 
 impl ConnectionSidebar {
     /// Render the schema tree for SQL database connections.

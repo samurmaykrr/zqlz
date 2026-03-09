@@ -75,7 +75,9 @@ impl DdlGenerator {
 
         // Add check constraints
         for cc in &design.check_constraints {
-            let name_part = cc.name.as_ref()
+            let name_part = cc
+                .name
+                .as_ref()
                 .map(|n| format!("CONSTRAINT {} ", Self::quote_ident(n, q)))
                 .unwrap_or_default();
             ddl.push_str(&format!(",\n    {}CHECK ({})", name_part, cc.expression));
@@ -155,7 +157,11 @@ impl DdlGenerator {
 
         // --- Column renames (only works when column_id matches) ---
         for new_col in &modified.columns {
-            if let Some(old_col) = original.columns.iter().find(|c| c.column_id == new_col.column_id) {
+            if let Some(old_col) = original
+                .columns
+                .iter()
+                .find(|c| c.column_id == new_col.column_id)
+            {
                 if old_col.name != new_col.name {
                     statements.push(format!(
                         "ALTER TABLE {} RENAME COLUMN {} TO {};",

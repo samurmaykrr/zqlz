@@ -33,7 +33,7 @@ impl TableService {
     /// essentially free. For MySQL/PostgreSQL/MSSQL/ClickHouse the
     /// count requires a full table scan and can take seconds on large
     /// tables, so we skip it and use heuristic "has more" pagination.
-    fn supports_fast_count(driver: &str) -> bool {
+    pub fn supports_fast_count(driver: &str) -> bool {
         matches!(driver, "sqlite" | "duckdb")
     }
 
@@ -102,12 +102,7 @@ impl TableService {
         // Build safe SQL
         let data_sql = format!(
             "SELECT {} FROM {}{}{} LIMIT {} OFFSET {}",
-            columns,
-            qualified,
-            where_clause,
-            order_by_clause,
-            limit,
-            offset
+            columns, qualified, where_clause, order_by_clause, limit, offset
         );
 
         tracing::debug!("Browsing table with filters, SQL: {}", data_sql);
@@ -123,19 +118,18 @@ impl TableService {
         let has_filters = !where_clauses.is_empty();
 
         let (mut result, total_rows, is_estimated) = if cached_total.is_some() {
-            tracing::debug!("Using cached total_rows={}, skipping COUNT(*)", cached_total.unwrap_or(0));
+            tracing::debug!(
+                "Using cached total_rows={}, skipping COUNT(*)",
+                cached_total.unwrap_or(0)
+            );
             let data_result = connection.query(&data_sql, &[]).await;
-            let result = data_result
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
             (result, cached_total, false)
         } else if Self::supports_fast_count(driver) {
             // Run the data query and COUNT(*) concurrently so the user doesn't wait
             // for a potentially slow full-table count before seeing rows.
-            let count_sql = format!(
-                "SELECT COUNT(*) FROM {}{}",
-                qualified,
-                where_clause
-            );
+            let count_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
             tracing::debug!("Counting rows with SQL: {}", count_sql);
 
             let count_conn = connection.clone();
@@ -144,16 +138,14 @@ impl TableService {
 
             let (data_result, count_result) = tokio::join!(data_future, count_future);
 
-            let result = data_result
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
             // Extract total count — non-critical, so log and continue if it fails
             let total_rows = match count_result {
                 Ok(count_res) => {
                     if !count_res.rows.is_empty() && !count_res.rows[0].values.is_empty() {
-                        count_res.rows[0].values[0]
-                            .as_i64()
-                            .map(|i| i as u64)
+                        count_res.rows[0].values[0].as_i64().map(|i| i as u64)
                     } else {
                         None
                     }
@@ -169,40 +161,22 @@ impl TableService {
             // Metadata estimates don't reflect WHERE filters, so skip counting
             tracing::debug!("Driver '{}' with active filters: skipping count (estimates don't apply to filtered queries)", driver);
             let data_result = connection.query(&data_sql, &[]).await;
-            let result = data_result
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
             (result, None, false)
         } else {
-            // Slow-count driver, no filters: use estimated count from metadata.
-            // Sequential execution is required — concurrent futures on the same
-            // async-mutex-guarded connection cause waker contention on GPUI's
-            // executor, producing spurious "connection closed" errors.
-            tracing::debug!("Driver '{}': using estimated row count from metadata", driver);
-            let estimate_sql = Self::estimate_row_count_sql(driver, table_name, schema);
+            // Slow-count driver, no filters: return data immediately without
+            // waiting for the estimated row count. The count will be fetched as
+            // a separate background task by the UI layer so the user sees rows
+            // as fast as possible.
+            tracing::debug!("Driver '{}': skipping row count in browse_table_with_filters, will be fetched in background", driver);
 
             let result = connection
                 .query(&data_sql, &[])
                 .await
                 .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
-            let estimated_total = match connection.query(&estimate_sql, &[]).await {
-                Ok(est_res) => est_res
-                    .rows
-                    .first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|v| v.as_i64())
-                    // pg_class.reltuples returns -1 for unanalyzed tables; clamp
-                    // on i64 *before* the cast so the sign bit isn't reinterpreted
-                    // as u64::MAX via two's-complement wrap-around.
-                    .filter(|&i| i >= 0)
-                    .map(|i| i as u64),
-                Err(e) => {
-                    tracing::warn!("Estimated row count query failed: {}", e);
-                    None
-                }
-            };
-
-            (result, estimated_total, estimated_total.is_some())
+            (result, None, false)
         };
 
         result.total_rows = total_rows;
@@ -257,9 +231,7 @@ impl TableService {
             .and_then(|v| v.as_i64())
             .map(|i| i as u64)
             .ok_or_else(|| {
-                ServiceError::TableOperationFailed(
-                    "COUNT(*) query returned no result".to_string(),
-                )
+                ServiceError::TableOperationFailed("COUNT(*) query returned no result".to_string())
             })?;
 
         tracing::info!(table_name = %table_name, total = total, "On-demand row count complete");
@@ -500,18 +472,17 @@ impl TableService {
 
         // Peel off any trailing NULLS FIRST / NULLS LAST qualifier so we
         // can examine just the direction keyword.
-        let (core, nulls_suffix) =
-            if let Some(prefix) = trimmed.strip_suffix(" NULLS FIRST") {
-                (prefix, " NULLS FIRST")
-            } else if let Some(prefix) = trimmed.strip_suffix(" NULLS LAST") {
-                (prefix, " NULLS LAST")
-            } else if let Some(prefix) = trimmed.strip_suffix(" nulls first") {
-                (prefix, " NULLS FIRST")
-            } else if let Some(prefix) = trimmed.strip_suffix(" nulls last") {
-                (prefix, " NULLS LAST")
-            } else {
-                (trimmed, "")
-            };
+        let (core, nulls_suffix) = if let Some(prefix) = trimmed.strip_suffix(" NULLS FIRST") {
+            (prefix, " NULLS FIRST")
+        } else if let Some(prefix) = trimmed.strip_suffix(" NULLS LAST") {
+            (prefix, " NULLS LAST")
+        } else if let Some(prefix) = trimmed.strip_suffix(" nulls first") {
+            (prefix, " NULLS FIRST")
+        } else if let Some(prefix) = trimmed.strip_suffix(" nulls last") {
+            (prefix, " NULLS LAST")
+        } else {
+            (trimmed, "")
+        };
 
         let reversed_core = if let Some(prefix) = core.strip_suffix(" ASC") {
             format!("{} DESC", prefix)
@@ -682,19 +653,14 @@ impl TableService {
         // Build safe SQL with proper identifier escaping
         let data_sql = format!(
             "SELECT * FROM {} LIMIT {} OFFSET {}",
-            qualified,
-            limit,
-            offset
+            qualified, limit, offset
         );
 
         tracing::debug!("Browsing table with SQL: {}", data_sql);
 
         let (mut result, total_rows, is_estimated) = if Self::supports_fast_count(driver) {
             // SQLite/DuckDB: COUNT(*) is essentially free, run concurrently.
-            let count_sql = format!(
-                "SELECT COUNT(*) FROM {}",
-                qualified
-            );
+            let count_sql = format!("SELECT COUNT(*) FROM {}", qualified);
             tracing::debug!("Counting rows with SQL: {}", count_sql);
 
             let count_conn = connection.clone();
@@ -703,15 +669,13 @@ impl TableService {
 
             let (data_result, count_result) = tokio::join!(data_future, count_future);
 
-            let result = data_result
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
             let total_rows = match count_result {
                 Ok(count_res) => {
                     if !count_res.rows.is_empty() && !count_res.rows[0].values.is_empty() {
-                        count_res.rows[0].values[0]
-                            .as_i64()
-                            .map(|i| i as u64)
+                        count_res.rows[0].values[0].as_i64().map(|i| i as u64)
                     } else {
                         None
                     }
@@ -724,38 +688,21 @@ impl TableService {
 
             (result, total_rows, false)
         } else {
-            // MySQL/PostgreSQL/MSSQL/ClickHouse: fetch data first, then the estimated
-            // row count. These drivers share a single underlying connection protected by
-            // an async mutex, so running two futures concurrently on the same connection
-            // causes pathological waker contention that results in "connection closed"
-            // errors. Sequential execution is correct because the mutex serializes them
-            // anyway — there is no real parallelism to be gained.
-            tracing::debug!("Driver '{}': using estimated row count from metadata", driver);
-            let estimate_sql = Self::estimate_row_count_sql(driver, table_name, schema);
+            // MySQL/PostgreSQL/MSSQL/ClickHouse: return data immediately without
+            // waiting for the row count. The count will be fetched as a separate
+            // background task by the UI layer (via `estimate_row_count`) so the
+            // user sees rows as fast as possible.
+            tracing::debug!(
+                "Driver '{}': skipping row count in browse_table, will be fetched in background",
+                driver
+            );
 
             let result = connection
                 .query(&data_sql, &[])
                 .await
                 .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
-            let estimated_total = match connection.query(&estimate_sql, &[]).await {
-                Ok(est_res) => est_res
-                    .rows
-                    .first()
-                    .and_then(|row| row.values.first())
-                    .and_then(|v| v.as_i64())
-                    // pg_class.reltuples returns -1 for unanalyzed tables; clamp
-                    // on i64 *before* the cast so the sign bit isn't reinterpreted
-                    // as u64::MAX via two's-complement wrap-around.
-                    .filter(|&i| i >= 0)
-                    .map(|i| i as u64),
-                Err(e) => {
-                    tracing::warn!("Estimated row count query failed: {}", e);
-                    None
-                }
-            };
-
-            (result, estimated_total, estimated_total.is_some())
+            (result, None, false)
         };
 
         result.total_rows = total_rows;
@@ -1323,25 +1270,24 @@ impl TableService {
             ));
         }
 
-        let schema_columns = if let Some(schema_introspection) =
-            connection.as_schema_introspection()
-        {
-            schema_introspection
-                .get_columns(schema, table_name)
-                .await
-                .map(|columns| {
-                    columns
-                        .into_iter()
-                        .map(|col| {
-                            let name = col.name.clone();
-                            (name, col)
-                        })
-                        .collect::<std::collections::HashMap<_, _>>()
-                })
-                .ok()
-        } else {
-            None
-        };
+        let schema_columns =
+            if let Some(schema_introspection) = connection.as_schema_introspection() {
+                schema_introspection
+                    .get_columns(schema, table_name)
+                    .await
+                    .map(|columns| {
+                        columns
+                            .into_iter()
+                            .map(|col| {
+                                let name = col.name.clone();
+                                (name, col)
+                            })
+                            .collect::<std::collections::HashMap<_, _>>()
+                    })
+                    .ok()
+            } else {
+                None
+            };
 
         let mut column_types = if !row_data.column_types.is_empty() {
             row_data
@@ -1369,7 +1315,9 @@ impl TableService {
         let mut param_index = 1;
 
         for (column_name, value) in row_data.column_names.iter().zip(row_data.values.iter()) {
-            let column_info = schema_columns.as_ref().and_then(|cols| cols.get(column_name));
+            let column_info = schema_columns
+                .as_ref()
+                .and_then(|cols| cols.get(column_name));
             let has_default = column_info
                 .and_then(|info| info.default_value.as_ref())
                 .map(|default| !default.trim().is_empty())
@@ -1559,7 +1507,9 @@ impl TableService {
             RowIdentifier::PrimaryKey(pk_values) => {
                 let conditions: Vec<String> = pk_values
                     .iter()
-                    .map(|(col, _)| format!("{} = ?", Self::escape_identifier_for(col, driver_name)))
+                    .map(|(col, _)| {
+                        format!("{} = ?", Self::escape_identifier_for(col, driver_name))
+                    })
                     .collect();
                 let params: Vec<Value> = pk_values.iter().map(|(_, v)| v.clone()).collect();
                 Ok((conditions.join(" AND "), params))
@@ -1699,9 +1649,18 @@ mod tests {
             service.parse_value("123.45", None).unwrap(),
             Value::Float64(123.45)
         );
-        assert_eq!(service.parse_value("true", None).unwrap(), Value::Bool(true));
-        assert_eq!(service.parse_value("false", None).unwrap(), Value::Bool(false));
-        assert_eq!(service.parse_value("TRUE", None).unwrap(), Value::Bool(true));
+        assert_eq!(
+            service.parse_value("true", None).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            service.parse_value("false", None).unwrap(),
+            Value::Bool(false)
+        );
+        assert_eq!(
+            service.parse_value("TRUE", None).unwrap(),
+            Value::Bool(true)
+        );
         assert_eq!(
             service.parse_value("hello", None).unwrap(),
             Value::String("hello".to_string())

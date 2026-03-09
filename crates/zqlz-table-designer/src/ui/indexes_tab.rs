@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_ui::widgets::{v_flex, ActiveTheme};
+use zqlz_ui::widgets::{ActiveTheme, v_flex};
 
 use crate::panel::TableDesignerPanel;
 
@@ -39,9 +39,35 @@ pub(in crate::panel) fn render_indexes_tab(
 
     // Now build elements using a for loop - convert to AnyElement to avoid lifetime capture issues
     let mut index_row_elements: Vec<AnyElement> = Vec::with_capacity(index_data.len());
-    for (idx, is_selected, name, columns, index_type, is_unique, name_input, columns_input, type_input, where_input, include_input) in index_data {
+    for (
+        idx,
+        is_selected,
+        name,
+        columns,
+        index_type,
+        is_unique,
+        name_input,
+        columns_input,
+        type_input,
+        where_input,
+        include_input,
+    ) in index_data
+    {
         let element = this
-            .build_index_row_element(idx, is_selected, name, columns, index_type, is_unique, name_input, columns_input, type_input, where_input, include_input, cx)
+            .build_index_row_element(
+                idx,
+                is_selected,
+                name,
+                columns,
+                index_type,
+                is_unique,
+                name_input,
+                columns_input,
+                type_input,
+                where_input,
+                include_input,
+                cx,
+            )
             .into_any_element();
         index_row_elements.push(element);
     }

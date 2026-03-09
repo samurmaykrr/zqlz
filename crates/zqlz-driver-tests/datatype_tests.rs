@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod numeric_type_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -83,17 +83,17 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_id = row
             .get_by_name("actor_id")
             .context("Missing actor_id column")?
             .as_i64()
             .context("actor_id should be Int64")?;
 
-        assert_eq!(retrieved_id, test_id, "actor_id should round-trip correctly");
+        assert_eq!(
+            retrieved_id, test_id,
+            "actor_id should round-trip correctly"
+        );
 
         // Cleanup
         execute_sql(
@@ -152,10 +152,7 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_rate = row
             .get_by_name("rental_rate")
             .context("Missing rental_rate column")?;
@@ -232,10 +229,7 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_cost = row
             .get_by_name("replacement_cost")
             .context("Missing replacement_cost column")?;
@@ -275,13 +269,15 @@ mod numeric_type_tests {
         let conn = test_connection(driver).await?;
 
         // Query average film length (returns float)
-        let result = query_sql(driver, &conn, "SELECT AVG(length) as avg_length FROM film", &[])
-            .await?;
+        let result = query_sql(
+            driver,
+            &conn,
+            "SELECT AVG(length) as avg_length FROM film",
+            &[],
+        )
+        .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let avg_length = row
             .get_by_name("avg_length")
             .context("Missing avg_length column")?;
@@ -290,21 +286,35 @@ mod numeric_type_tests {
         match avg_length {
             Value::Float64(f) => {
                 assert!(f > &0.0, "Average length should be positive");
-                assert!(f < &300.0, "Average length should be reasonable (< 300 minutes)");
+                assert!(
+                    f < &300.0,
+                    "Average length should be reasonable (< 300 minutes)"
+                );
             }
             Value::Float32(f) => {
                 assert!(f > &0.0, "Average length should be positive");
-                assert!(f < &300.0, "Average length should be reasonable (< 300 minutes)");
+                assert!(
+                    f < &300.0,
+                    "Average length should be reasonable (< 300 minutes)"
+                );
             }
             Value::String(s) => {
                 let f: f64 = s.parse().context("Failed to parse avg_length as float")?;
                 assert!(f > 0.0, "Average length should be positive");
-                assert!(f < 300.0, "Average length should be reasonable (< 300 minutes)");
+                assert!(
+                    f < 300.0,
+                    "Average length should be reasonable (< 300 minutes)"
+                );
             }
             Value::Decimal(s) => {
-                let f: f64 = s.parse().context("Failed to parse avg_length decimal as float")?;
+                let f: f64 = s
+                    .parse()
+                    .context("Failed to parse avg_length decimal as float")?;
                 assert!(f > 0.0, "Average length should be positive");
-                assert!(f < 300.0, "Average length should be reasonable (< 300 minutes)");
+                assert!(
+                    f < 300.0,
+                    "Average length should be reasonable (< 300 minutes)"
+                );
             }
             _ => anyhow::bail!("Unexpected type for avg_length: {:?}", avg_length),
         }
@@ -330,10 +340,7 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let total_amount = row
             .get_by_name("total_amount")
             .context("Missing total_amount column")?;
@@ -351,7 +358,9 @@ mod numeric_type_tests {
                 assert!(f > 0.0, "Total payment amount should be positive");
             }
             Value::Decimal(s) => {
-                let f: f64 = s.parse().context("Failed to parse total_amount decimal as float")?;
+                let f: f64 = s
+                    .parse()
+                    .context("Failed to parse total_amount decimal as float")?;
                 assert!(f > 0.0, "Total payment amount should be positive");
             }
             _ => anyhow::bail!("Unexpected type for total_amount: {:?}", total_amount),
@@ -392,10 +401,7 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let zero_result = row
             .get_by_name("zero_result")
             .context("Missing zero_result column")?
@@ -434,17 +440,14 @@ mod numeric_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let min_length = row
             .get_by_name("min_length")
             .context("Missing min_length column")?
             .as_i64()
             .context("min_length should be Int64")?;
-        
+
         let max_length = row
             .get_by_name("max_length")
             .context("Missing max_length column")?
@@ -452,8 +455,14 @@ mod numeric_type_tests {
             .context("max_length should be Int64")?;
 
         assert!(min_length > 0, "Min length should be positive");
-        assert!(max_length > min_length, "Max length should be greater than min length");
-        assert!(max_length < 300, "Max length should be reasonable (< 300 minutes)");
+        assert!(
+            max_length > min_length,
+            "Max length should be greater than min length"
+        );
+        assert!(
+            max_length < 300,
+            "Max length should be reasonable (< 300 minutes)"
+        );
 
         Ok(())
     }
@@ -492,14 +501,14 @@ mod numeric_type_tests {
 
         // Query back
         let result = conn
-            .query("SELECT * FROM test_numerics WHERE id = ?", &[Value::Int64(1)])
+            .query(
+                "SELECT * FROM test_numerics WHERE id = ?",
+                &[Value::Int64(1)],
+            )
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
 
         let int_val = row
             .get_by_name("int_val")
@@ -528,7 +537,7 @@ mod numeric_type_tests {
 
 #[cfg(test)]
 mod string_type_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -616,7 +625,9 @@ mod string_type_tests {
             Value::Time(time) => format!("'{}'", time),
             Value::DateTime(datetime) => format!("'{}'", datetime),
             Value::DateTimeUtc(datetime) => format!("'{}'", datetime),
-            unsupported => anyhow::bail!("Unsupported value type for SQL literal fallback: {unsupported:?}"),
+            unsupported => {
+                anyhow::bail!("Unsupported value type for SQL literal fallback: {unsupported:?}")
+            }
         };
 
         Ok(literal)
@@ -669,10 +680,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_title = row
             .get_by_name("title")
             .context("Missing title column")?
@@ -732,10 +740,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_desc = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -795,10 +800,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -855,10 +857,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -918,10 +917,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -992,10 +988,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -1053,18 +1046,22 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
             .as_str()
             .context("description should be String")?;
 
-        assert_eq!(retrieved.len(), long_text.len(), "Long string length should match");
-        assert_eq!(retrieved, long_text, "Long string should be preserved completely");
+        assert_eq!(
+            retrieved.len(),
+            long_text.len(),
+            "Long string length should match"
+        );
+        assert_eq!(
+            retrieved, long_text,
+            "Long string should be preserved completely"
+        );
 
         // Cleanup
         execute_sql(
@@ -1114,10 +1111,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -1177,10 +1171,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved = row
             .get_by_name("description")
             .context("Missing description column")?
@@ -1250,10 +1241,7 @@ mod string_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
 
         let varchar_val = row
             .get_by_name("varchar_col")
@@ -1276,7 +1264,7 @@ mod string_type_tests {
 /// Date and time type tests using Sakila/Pagila database
 #[cfg(test)]
 mod datetime_type_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -1328,7 +1316,11 @@ mod datetime_type_tests {
     fn is_temporal_value(value: &Value) -> bool {
         matches!(
             value,
-            Value::String(_) | Value::Date(_) | Value::Time(_) | Value::DateTime(_) | Value::DateTimeUtc(_)
+            Value::String(_)
+                | Value::Date(_)
+                | Value::Time(_)
+                | Value::DateTime(_)
+                | Value::DateTimeUtc(_)
         )
     }
 
@@ -1361,16 +1353,16 @@ mod datetime_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let create_date = row
             .get_by_name("create_date")
             .context("Missing create_date column")?;
 
-        assert!(is_temporal_value(create_date), "create_date should be a valid date value");
+        assert!(
+            is_temporal_value(create_date),
+            "create_date should be a valid date value"
+        );
 
         Ok(())
     }
@@ -1393,11 +1385,8 @@ mod datetime_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let rental_date = row
             .get_by_name("rental_date")
             .context("Missing rental_date column")?;
@@ -1520,11 +1509,8 @@ mod datetime_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let created_at = row
             .get_by_name("created_at")
             .context("Missing created_at column")?;
@@ -1560,11 +1546,8 @@ mod datetime_type_tests {
 
         let result = query_sql(driver, &conn, sql, &[Value::Int64(1)]).await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let rental_date = row
             .get_by_name("rental_date")
             .context("Missing rental_date column")?;
@@ -1572,8 +1555,14 @@ mod datetime_type_tests {
             .get_by_name("week_later")
             .context("Missing week_later column")?;
 
-        assert!(is_temporal_value(rental_date), "rental_date should be a valid timestamp");
-        assert!(is_temporal_value(week_later), "week_later should be a valid timestamp");
+        assert!(
+            is_temporal_value(rental_date),
+            "rental_date should be a valid timestamp"
+        );
+        assert!(
+            is_temporal_value(week_later),
+            "week_later should be a valid timestamp"
+        );
 
         Ok(())
     }
@@ -1601,11 +1590,8 @@ mod datetime_type_tests {
 
         let result = query_sql(driver, &conn, sql, &[Value::Int64(1)]).await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let formatted = row
             .get_by_name("formatted")
             .context("Missing formatted column")?
@@ -1614,7 +1600,9 @@ mod datetime_type_tests {
 
         // Should match YYYY-MM-DD format (e.g., "2005-05-24")
         assert!(
-            formatted.len() == 10 && formatted.chars().nth(4) == Some('-') && formatted.chars().nth(7) == Some('-'),
+            formatted.len() == 10
+                && formatted.chars().nth(4) == Some('-')
+                && formatted.chars().nth(7) == Some('-'),
             "formatted date should match YYYY-MM-DD format, got: {}",
             formatted
         );
@@ -1647,16 +1635,10 @@ mod datetime_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
-        let count = value_to_i64(
-            row.get_by_name("count")
-                .context("Missing count column")?,
-        )
-        .context("count should be numeric")?;
+        let row = result.rows.first().context("Expected at least one row")?;
+
+        let count = value_to_i64(row.get_by_name("count").context("Missing count column")?)
+            .context("count should be numeric")?;
 
         // Use a far-future cutoff to avoid assumptions about sample dataset year ranges.
         assert!(count > 0, "Should find rentals before {}", cutoff_date);
@@ -1699,11 +1681,8 @@ mod datetime_type_tests {
 
         let result = query_sql(driver, &conn, sql, &[Value::Int64(1)]).await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let year = value_to_i64(row.get_by_name("year").context("Missing year column")?)
             .context("year should be numeric")?;
         let month = value_to_i64(row.get_by_name("month").context("Missing month column")?)
@@ -1712,7 +1691,11 @@ mod datetime_type_tests {
             .context("day should be numeric")?;
 
         // Validate extracted values are reasonable
-        assert!(year >= 2000 && year <= 2030, "year should be reasonable: {}", year);
+        assert!(
+            year >= 2000 && year <= 2030,
+            "year should be reasonable: {}",
+            year
+        );
         assert!(month >= 1 && month <= 12, "month should be 1-12: {}", month);
         assert!(day >= 1 && day <= 31, "day should be 1-31: {}", day);
 
@@ -1792,22 +1775,21 @@ mod datetime_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
 
         // Verify date
-        let date_val = row
-            .get_by_name("date_col")
-            .context("Missing date_col")?;
-        assert!(is_temporal_value(date_val), "date_col should be a valid date");
+        let date_val = row.get_by_name("date_col").context("Missing date_col")?;
+        assert!(
+            is_temporal_value(date_val),
+            "date_col should be a valid date"
+        );
 
         // Verify time
-        let time_val = row
-            .get_by_name("time_col")
-            .context("Missing time_col")?;
-        assert!(is_temporal_value(time_val), "time_col should be a valid time");
+        let time_val = row.get_by_name("time_col").context("Missing time_col")?;
+        assert!(
+            is_temporal_value(time_val),
+            "time_col should be a valid time"
+        );
 
         // Verify timestamp
         let timestamp_val = row
@@ -1822,7 +1804,10 @@ mod datetime_type_tests {
         let created_at = row
             .get_by_name("created_at")
             .context("Missing created_at")?;
-        assert!(is_temporal_value(created_at), "created_at should be automatically set");
+        assert!(
+            is_temporal_value(created_at),
+            "created_at should be automatically set"
+        );
 
         Ok(())
     }
@@ -1830,7 +1815,7 @@ mod datetime_type_tests {
 
 #[cfg(test)]
 mod boolean_and_null_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -1897,16 +1882,11 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        assert!(
-            !result.rows.is_empty(),
-            "Should find active customers"
-        );
+        assert!(!result.rows.is_empty(), "Should find active customers");
 
         for row in &result.rows {
-            let active = row
-                .get_by_name("active")
-                .context("Missing active column")?;
-            
+            let active = row.get_by_name("active").context("Missing active column")?;
+
             // Boolean may be returned as Bool, Int64 (1), or String ("1"/"true")
             let is_active = match active {
                 Value::Bool(b) => *b,
@@ -1914,7 +1894,7 @@ mod boolean_and_null_tests {
                 Value::String(s) => s == "1" || s.to_lowercase() == "true",
                 _ => false,
             };
-            
+
             assert!(is_active, "active should be true");
         }
 
@@ -1931,25 +1911,14 @@ mod boolean_and_null_tests {
         let conn = test_connection(driver).await?;
 
         // Query all staff members
-        let result = query_sql(
-            driver,
-            &conn,
-            "SELECT staff_id, active FROM staff",
-            &[],
-        )
-        .await?;
+        let result = query_sql(driver, &conn, "SELECT staff_id, active FROM staff", &[]).await?;
 
-        assert!(
-            !result.rows.is_empty(),
-            "Should find staff members"
-        );
+        assert!(!result.rows.is_empty(), "Should find staff members");
 
         // Verify boolean values exist
         for row in &result.rows {
-            let active = row
-                .get_by_name("active")
-                .context("Missing active column")?;
-            
+            let active = row.get_by_name("active").context("Missing active column")?;
+
             // Boolean should be one of these types
             assert!(
                 matches!(active, Value::Bool(_) | Value::Int64(_) | Value::String(_)),
@@ -1978,10 +1947,7 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let count = row
             .get_by_name("null_count")
             .context("Missing null_count column")?
@@ -1989,7 +1955,10 @@ mod boolean_and_null_tests {
             .context("null_count should be Int64")?;
 
         // Count should be >= 0 (may be 0 if all rentals are returned)
-        assert!(count >= 0, "Count of NULL return_date should be non-negative");
+        assert!(
+            count >= 0,
+            "Count of NULL return_date should be non-negative"
+        );
 
         Ok(())
     }
@@ -2017,7 +1986,7 @@ mod boolean_and_null_tests {
             let return_date = row
                 .get_by_name("return_date")
                 .context("Missing return_date column")?;
-            
+
             assert!(
                 matches!(return_date, Value::Null),
                 "return_date should be NULL when IS NULL matches"
@@ -2050,7 +2019,7 @@ mod boolean_and_null_tests {
             let return_date = row
                 .get_by_name("return_date")
                 .context("Missing return_date column")?;
-            
+
             assert!(
                 !matches!(return_date, Value::Null),
                 "return_date should NOT be NULL when IS NOT NULL matches"
@@ -2078,17 +2047,14 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        assert!(
-            !result.rows.is_empty(),
-            "Should find rental records"
-        );
+        assert!(!result.rows.is_empty(), "Should find rental records");
 
         // All rows should have a non-NULL effective_date
         for row in &result.rows {
             let effective_date = row
                 .get_by_name("effective_date")
                 .context("Missing effective_date column")?;
-            
+
             assert!(
                 !matches!(effective_date, Value::Null),
                 "COALESCE should never return NULL when fallback is non-NULL"
@@ -2116,17 +2082,14 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        
+        let row = result.rows.first().context("Expected at least one row")?;
+
         let total = row
             .get_by_name("total")
             .context("Missing total column")?
             .as_i64()
             .context("total should be Int64")?;
-        
+
         let returned = row
             .get_by_name("returned")
             .context("Missing returned column")?
@@ -2176,10 +2139,7 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        let row = result2
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result2.rows.first().context("Expected at least one row")?;
         let _null_count = row
             .get_by_name("null_count")
             .context("Missing null_count column")?
@@ -2190,7 +2150,7 @@ mod boolean_and_null_tests {
     }
 
     /// Integration test for boolean and NULL handling
-    /// 
+    ///
     /// This test only runs against SQLite to avoid Docker container dependencies.
     /// It validates that boolean and NULL operations work correctly.
     #[tokio::test]
@@ -2216,7 +2176,10 @@ mod boolean_and_null_tests {
             driver,
             &conn,
             "INSERT INTO test_bool_null (is_active, notes) VALUES ($1, $2)",
-            &[Value::Bool(false), Value::String("Inactive item".to_string())],
+            &[
+                Value::Bool(false),
+                Value::String("Inactive item".to_string()),
+            ],
         )
         .await?;
 
@@ -2248,7 +2211,11 @@ mod boolean_and_null_tests {
         )
         .await?;
 
-        assert_eq!(result_null.rows.len(), 1, "Should find 1 item with NULL notes");
+        assert_eq!(
+            result_null.rows.len(),
+            1,
+            "Should find 1 item with NULL notes"
+        );
 
         // Test COALESCE
         let result_coalesce = query_sql(
@@ -2266,7 +2233,7 @@ mod boolean_and_null_tests {
             let notes_with_default = row
                 .get_by_name("notes_with_default")
                 .context("Missing notes_with_default column")?;
-            
+
             assert!(
                 !matches!(notes_with_default, Value::Null),
                 "COALESCE should replace NULL values"
@@ -2280,7 +2247,7 @@ mod boolean_and_null_tests {
 /// Binary data type tests using temporary tables
 #[cfg(test)]
 mod binary_type_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -2393,13 +2360,8 @@ mod binary_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
-        let retrieved_data = row
-            .get_by_name("data")
-            .context("Missing data column")?;
+        let row = result.rows.first().context("Expected at least one row")?;
+        let retrieved_data = row.get_by_name("data").context("Missing data column")?;
 
         match retrieved_data {
             Value::Bytes(bytes) => {
@@ -2408,7 +2370,10 @@ mod binary_type_tests {
                     binary_data.len(),
                     "Binary data length should match"
                 );
-                assert_eq!(bytes, &binary_data, "Binary data should round-trip correctly");
+                assert_eq!(
+                    bytes, &binary_data,
+                    "Binary data should round-trip correctly"
+                );
             }
             _ => anyhow::bail!("Expected Bytes value, got: {:?}", retrieved_data),
         }
@@ -2517,10 +2482,7 @@ mod binary_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
         let retrieved_data = row.get_by_name("data").context("Missing data column")?;
 
         // Empty binary data may be represented as empty Bytes or NULL depending on driver
@@ -2653,10 +2615,7 @@ mod binary_type_tests {
         )
         .await?;
 
-        let row = result
-            .rows
-            .first()
-            .context("Expected at least one row")?;
+        let row = result.rows.first().context("Expected at least one row")?;
 
         let retrieved_data = row.get_by_name("data").context("Missing data column")?;
         let retrieved_desc = row

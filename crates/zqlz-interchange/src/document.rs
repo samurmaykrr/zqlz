@@ -31,7 +31,10 @@ pub enum UdifVersionError {
 impl std::fmt::Display for UdifVersionError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::TooNew { document_version, max_supported } => write!(
+            Self::TooNew {
+                document_version,
+                max_supported,
+            } => write!(
                 f,
                 "UDIF document version '{document_version}' was created by a newer version of \
                  ZQLZ (maximum supported: '{max_supported}'). Please upgrade ZQLZ to open this file."

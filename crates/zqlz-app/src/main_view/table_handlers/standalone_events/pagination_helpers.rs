@@ -8,8 +8,22 @@ use uuid::Uuid;
 use zqlz_core::DriverCategory;
 
 use crate::app::AppState;
+use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+
+fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
+    viewer_entity.update(cx, |viewer, cx| {
+        let request_generation = viewer.begin_data_request(cx);
+        if let Some(pag_state) = &viewer.pagination_state {
+            pag_state.update(cx, |state, cx| {
+                state.is_loading = true;
+                cx.notify();
+            });
+        }
+        request_generation
+    })
+}
 
 /// Shared helper to reload table with specific limit/offset for pagination.
 ///
@@ -25,6 +39,7 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     limit: Option<usize>,
     offset: Option<usize>,
     cached_total: Option<u64>,
+    request_generation: Option<u64>,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -36,10 +51,10 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
 
     let database_name = viewer_entity.read(cx).database_name();
 
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        database_name.as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connections
+        .get_for_database_cached(connection_id, database_name.as_deref())
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -55,6 +70,12 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
 
     let is_view = viewer_entity.read(cx).is_view();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let driver_name = connection.driver_name().to_string();
+
+    // Determine if we'll need a background count task after data is loaded.
+    // This is needed when: no cached total provided, and the driver is slow-count.
+    let needs_background_count =
+        cached_total.is_none() && !zqlz_services::TableService::supports_fast_count(&driver_name);
 
     // Extract the viewer's current filter/sort/search state so pagination preserves it
     let (where_clauses, order_by_clauses, visible_columns) =
@@ -72,22 +93,19 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
 
             // Add search text as WHERE clause (same logic as handle_apply_filters_event)
             if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> = viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
+                let all_column_names: Vec<String> =
+                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
 
                 if !all_column_names.is_empty() {
-                    let escaped_search = viewer.search_text
+                    let escaped_search = viewer
+                        .search_text
                         .replace("'", "''")
                         .replace('%', "\\%")
                         .replace('_', "\\_");
                     let column_conditions: Vec<String> = all_column_names
                         .iter()
                         .map(|col_name| {
-                            let escaped_col =
-                                format!("\"{}\"", col_name.replace('"', "\"\""));
+                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
                             format!(
                                 "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
                                 escaped_col, escaped_search
@@ -107,19 +125,19 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
             (where_clauses, order_by_clauses, visible_columns)
         });
 
-    // Set loading state and update pagination state
-    _ = viewer_entity.update(cx, |viewer, cx| {
-        viewer.set_loading(true, cx);
-        if let Some(pag_state) = &viewer.pagination_state {
-            pag_state.update(cx, |state, cx| {
-                state.is_loading = true;
-                cx.notify();
-            });
-        }
-    });
+    let request_generation =
+        request_generation.unwrap_or_else(|| begin_viewer_request(&viewer_entity, cx));
 
     window
         .spawn(cx, async move |cx| {
+            // Clone the connection before the browse call consumes the Arc,
+            // so it remains available for the background count task below.
+            let connection_for_count = if needs_background_count {
+                Some(connection.clone())
+            } else {
+                None
+            };
+
             match table_service
                 .browse_table_with_filters(
                     connection,
@@ -146,6 +164,16 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                     );
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if !viewer.is_current_request(request_generation) {
+                            tracing::debug!(
+                                "Discarding stale paginated reload for '{}' (generation={}, current={})",
+                                table_name,
+                                request_generation,
+                                viewer.current_request_generation()
+                            );
+                            return;
+                        }
+
                         viewer.load_table(
                             connection_id,
                             connection_name.clone(),
@@ -165,17 +193,58 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                             });
                         }
                     });
+
+                    // For slow-count drivers, fetch the row count in the
+                    // background now that data is displayed to the user.
+                    if let Some(count_conn) = connection_for_count {
+                        let count_table = table_name.clone();
+                        let count_schema = schema_qualifier.clone();
+                        let count_service = table_service.clone();
+                        let count_result = cx
+                            .background_spawn(async move {
+                                count_service
+                                    .estimate_row_count(
+                                        count_conn,
+                                        &count_table,
+                                        count_schema.as_deref(),
+                                    )
+                                    .await
+                            })
+                            .await;
+                        match count_result {
+                            Ok((total, is_estimated)) => {
+                                _ = viewer_entity.update(cx, |_viewer, cx| {
+                                    cx.emit(TableViewerEvent::CountCompleted {
+                                        connection_id,
+                                        table_name: table_name.clone(),
+                                        request_generation,
+                                        total_rows: total,
+                                        is_estimated,
+                                    });
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Background row count failed for {}: {}",
+                                    table_name,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to reload table with pagination: {}", e);
 
                     _ = viewer_entity.update(cx, |viewer, cx| {
-                        viewer.set_loading(false, cx);
-                        if let Some(pag_state) = &viewer.pagination_state {
-                            pag_state.update(cx, |state, cx| {
-                                state.is_loading = false;
-                                cx.notify();
-                            });
+                        if viewer.is_current_request(request_generation) {
+                            viewer.set_loading(false, cx);
+                            if let Some(pag_state) = &viewer.pagination_state {
+                                pag_state.update(cx, |state, cx| {
+                                    state.is_loading = false;
+                                    cx.notify();
+                                });
+                            }
                         }
                     });
                 }
@@ -200,6 +269,7 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     total_rows: u64,
     is_estimated: bool,
     pk_columns: Vec<String>,
+    request_generation: Option<u64>,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -211,10 +281,10 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
 
     let database_name = viewer_entity.read(cx).database_name();
 
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        database_name.as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connections
+        .get_for_database_cached(connection_id, database_name.as_deref())
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -245,11 +315,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
             }
 
             if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> = viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect();
+                let all_column_names: Vec<String> =
+                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
 
                 if !all_column_names.is_empty() {
                     let escaped_search = viewer
@@ -260,8 +327,7 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
                     let column_conditions: Vec<String> = all_column_names
                         .iter()
                         .map(|col_name| {
-                            let escaped_col =
-                                format!("\"{}\"", col_name.replace('"', "\"\""));
+                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
                             format!(
                                 "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
                                 escaped_col, escaped_search
@@ -281,16 +347,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
             (where_clauses, order_by_clauses, visible_columns)
         });
 
-    // Set loading state
-    _ = viewer_entity.update(cx, |viewer, cx| {
-        viewer.set_loading(true, cx);
-        if let Some(pag_state) = &viewer.pagination_state {
-            pag_state.update(cx, |state, cx| {
-                state.is_loading = true;
-                cx.notify();
-            });
-        }
-    });
+    let request_generation =
+        request_generation.unwrap_or_else(|| begin_viewer_request(&viewer_entity, cx));
 
     window
         .spawn(cx, async move |cx| {
@@ -320,6 +378,16 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
                     );
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if !viewer.is_current_request(request_generation) {
+                            tracing::debug!(
+                                "Discarding stale reversed pagination reload for '{}' (generation={}, current={})",
+                                table_name,
+                                request_generation,
+                                viewer.current_request_generation()
+                            );
+                            return;
+                        }
+
                         viewer.load_table(
                             connection_id,
                             connection_name.clone(),
@@ -343,12 +411,14 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
                     tracing::error!("Failed to reload table with reversed pagination: {}", e);
 
                     _ = viewer_entity.update(cx, |viewer, cx| {
-                        viewer.set_loading(false, cx);
-                        if let Some(pag_state) = &viewer.pagination_state {
-                            pag_state.update(cx, |state, cx| {
-                                state.is_loading = false;
-                                cx.notify();
-                            });
+                        if viewer.is_current_request(request_generation) {
+                            viewer.set_loading(false, cx);
+                            if let Some(pag_state) = &viewer.pagination_state {
+                                pag_state.update(cx, |state, cx| {
+                                    state.is_loading = false;
+                                    cx.notify();
+                                });
+                            }
                         }
                     });
                 }

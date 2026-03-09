@@ -1,5 +1,5 @@
 use super::*;
-use zqlz_ui::widgets::{button::ButtonVariant, dialog::DialogButtonProps, WindowExt as _};
+use zqlz_ui::widgets::{WindowExt as _, button::ButtonVariant, dialog::DialogButtonProps};
 
 impl TableViewerPanel {
     pub fn emit_add_row(&mut self, cx: &mut Context<Self>) {
@@ -66,7 +66,7 @@ impl TableViewerPanel {
 
     /// Show confirmation dialog before deleting selected rows
     pub(crate) fn show_delete_confirmation(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let selected_count = self.selected_rows.len();
+        let selected_count = self.selected_display_rows(cx).len();
         if selected_count == 0 {
             return;
         }
@@ -99,9 +99,11 @@ impl TableViewerPanel {
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _, cx| {
-                    _ = panel.update(cx, |panel, cx| {
+                    if let Err(e) = panel.update(cx, |panel, cx| {
                         panel.emit_delete_rows(cx);
-                    });
+                    }) {
+                        tracing::error!("Failed to emit delete rows from dialog: {:?}", e);
+                    }
                     true
                 })
                 .confirm()
@@ -113,11 +115,10 @@ impl TableViewerPanel {
             return;
         };
 
-        if self.selected_rows.is_empty() {
+        let selected_rows = self.selected_display_rows(cx);
+        if selected_rows.is_empty() {
             return;
         }
-
-        let selected_rows: Vec<usize> = self.selected_rows.iter().copied().collect();
 
         if self.auto_commit_mode {
             let Some(connection_id) = self.connection_id else {
@@ -137,13 +138,11 @@ impl TableViewerPanel {
                 let rows_to_delete: Vec<Vec<String>> = selected_rows
                     .iter()
                     .map(|&display_idx| delegate.get_actual_row_index(display_idx))
-                    .filter_map(|actual_idx| delegate.rows.get(actual_idx).cloned())
+                    .filter_map(|actual_idx| delegate.rows.get(actual_idx))
+                    .map(|row| row.iter().map(|v| v.display_for_table()).collect())
                     .collect();
                 (all_column_names, rows_to_delete)
             });
-
-            self.selected_rows.clear();
-            cx.notify();
 
             cx.emit(TableViewerEvent::DeleteRows {
                 connection_id,
@@ -159,9 +158,6 @@ impl TableViewerPanel {
                 }
                 cx.notify();
             });
-
-            self.selected_rows.clear();
-            cx.notify();
         }
     }
 
@@ -203,6 +199,28 @@ impl TableViewerPanel {
                 cx.notify();
             });
         }
+        cx.notify();
+    }
+
+    pub fn undo_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(table_state) = &self.table_state else {
+            return;
+        };
+        table_state.update(cx, |table, cx| {
+            table.delegate_mut().undo();
+            cx.notify();
+        });
+        cx.notify();
+    }
+
+    pub fn redo_edit(&mut self, cx: &mut Context<Self>) {
+        let Some(table_state) = &self.table_state else {
+            return;
+        };
+        table_state.update(cx, |table, cx| {
+            table.delegate_mut().redo();
+            cx.notify();
+        });
         cx.notify();
     }
 
@@ -267,7 +285,11 @@ impl TableViewerPanel {
                 let delegate = table.delegate();
                 let actual_idx = delegate.get_actual_row_index(row_index);
 
-                let row_values = delegate.rows.get(actual_idx).cloned().unwrap_or_default();
+                let row_values: Vec<String> = delegate
+                    .rows
+                    .get(actual_idx)
+                    .map(|r| r.iter().map(|v| v.display_for_table()).collect())
+                    .unwrap_or_default();
 
                 let column_meta = delegate.column_meta.clone();
                 let all_column_names: Vec<String> =

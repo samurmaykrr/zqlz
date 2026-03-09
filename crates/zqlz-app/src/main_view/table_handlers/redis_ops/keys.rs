@@ -25,23 +25,29 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
+        let database_name = format!("db{}", database_index);
 
-        let connection = connection.clone();
+        let connections = app_state.connections.clone();
         let connection_sidebar = self.connection_sidebar.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            // First, SELECT the database
-            let select_cmd = format!("SELECT {}", database_index);
-            if let Err(e) = connection.execute(&select_cmd, &[]).await {
-                tracing::error!("Failed to select Redis database {}: {}", database_index, e);
-                return anyhow::Ok(());
-            }
+            let connection = match connections
+                .get_for_database(connection_id, &database_name)
+                .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database = %database_name,
+                        error = %error,
+                        "Failed to get Redis database-specific connection"
+                    );
+                    return anyhow::Ok(());
+                }
+            };
 
-            // Then, list keys using SCAN
+            // List keys using the database-scoped Redis connection.
             let mut keys = Vec::new();
             let mut cursor = 0u64;
             let limit = 1000usize; // Limit to prevent overwhelming large databases

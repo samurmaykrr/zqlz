@@ -4,7 +4,7 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{params, Connection};
+use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -36,11 +36,11 @@ impl From<&FilterCondition> for StoredFilterCondition {
             id: fc.id,
             enabled: fc.enabled,
             column: fc.column.clone(),
-            operator: format!("{:?}", fc.operator),
+            operator: filter_operator_to_str(fc.operator).to_string(),
             value: fc.value.clone(),
             value2: fc.value2.clone(),
             custom_sql: fc.custom_sql.clone(),
-            logical_operator: format!("{:?}", fc.logical_operator),
+            logical_operator: logical_operator_to_str(fc.logical_operator).to_string(),
         }
     }
 }
@@ -75,7 +75,7 @@ impl From<&SortCriterion> for StoredSortCriterion {
         Self {
             id: sc.id,
             column: sc.column.clone(),
-            direction: format!("{:?}", sc.direction),
+            direction: sort_direction_to_str(sc.direction).to_string(),
         }
     }
 }
@@ -158,6 +158,46 @@ fn parse_logical_operator(s: &str) -> LogicalOperator {
     match s {
         "Or" => LogicalOperator::Or,
         _ => LogicalOperator::And,
+    }
+}
+
+fn filter_operator_to_str(op: FilterOperator) -> &'static str {
+    match op {
+        FilterOperator::Equal => "Equal",
+        FilterOperator::NotEqual => "NotEqual",
+        FilterOperator::LessThan => "LessThan",
+        FilterOperator::LessThanOrEqual => "LessThanOrEqual",
+        FilterOperator::GreaterThan => "GreaterThan",
+        FilterOperator::GreaterThanOrEqual => "GreaterThanOrEqual",
+        FilterOperator::Contains => "Contains",
+        FilterOperator::DoesNotContain => "DoesNotContain",
+        FilterOperator::BeginsWith => "BeginsWith",
+        FilterOperator::DoesNotBeginWith => "DoesNotBeginWith",
+        FilterOperator::EndsWith => "EndsWith",
+        FilterOperator::DoesNotEndWith => "DoesNotEndWith",
+        FilterOperator::IsNull => "IsNull",
+        FilterOperator::IsNotNull => "IsNotNull",
+        FilterOperator::IsEmpty => "IsEmpty",
+        FilterOperator::IsNotEmpty => "IsNotEmpty",
+        FilterOperator::IsBetween => "IsBetween",
+        FilterOperator::IsNotBetween => "IsNotBetween",
+        FilterOperator::IsInList => "IsInList",
+        FilterOperator::IsNotInList => "IsNotInList",
+        FilterOperator::Custom => "Custom",
+    }
+}
+
+fn logical_operator_to_str(op: LogicalOperator) -> &'static str {
+    match op {
+        LogicalOperator::And => "And",
+        LogicalOperator::Or => "Or",
+    }
+}
+
+fn sort_direction_to_str(dir: SortDirection) -> &'static str {
+    match dir {
+        SortDirection::Ascending => "Ascending",
+        SortDirection::Descending => "Descending",
     }
 }
 
@@ -278,10 +318,12 @@ impl FilterPresetStorage {
         let visibility_json = serde_json::to_string(&visibility)?;
 
         handle.with_conn(|conn| {
+            // INSERT OR IGNORE preserves the original created_at on conflict;
+            // the separate UPDATE then refreshes all mutable fields.
             conn.execute(
-                "INSERT OR REPLACE INTO filter_presets 
+                "INSERT OR IGNORE INTO filter_presets 
                  (id, name, description, table_name, connection_id, is_default, filters_json, sorts_json, visibility_json, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?10)",
                 params![
                     id.to_string(),
                     preset.name,
@@ -293,6 +335,24 @@ impl FilterPresetStorage {
                     sorts_json,
                     visibility_json,
                     now,
+                ],
+            )?;
+            conn.execute(
+                "UPDATE filter_presets
+                 SET name = ?2, description = ?3, table_name = ?4, connection_id = ?5,
+                     is_default = ?6, filters_json = ?7, sorts_json = ?8,
+                     visibility_json = ?9, updated_at = ?10
+                 WHERE id = ?1",
+                params![
+                    id.to_string(),
+                    preset.name,
+                    preset.description,
+                    preset.table_name,
+                    preset.connection_id,
+                    if preset.is_default { 1 } else { 0 },
+                    filters_json,
+                    sorts_json,
+                    visibility_json,
                     now,
                 ],
             )?;
@@ -344,11 +404,20 @@ impl FilterPresetStorage {
                     visibility_json,
                 )) => {
                     let stored_filters: Vec<StoredFilterCondition> =
-                        serde_json::from_str(&filters_json).unwrap_or_default();
+                        serde_json::from_str(&filters_json).unwrap_or_else(|e| {
+                            tracing::error!("Failed to deserialize filters_json: {}", e);
+                            Vec::new()
+                        });
                     let stored_sorts: Vec<StoredSortCriterion> =
-                        serde_json::from_str(&sorts_json).unwrap_or_default();
+                        serde_json::from_str(&sorts_json).unwrap_or_else(|e| {
+                            tracing::error!("Failed to deserialize sorts_json: {}", e);
+                            Vec::new()
+                        });
                     let stored_visibility: Vec<StoredColumnVisibility> =
-                        serde_json::from_str(&visibility_json).unwrap_or_default();
+                        serde_json::from_str(&visibility_json).unwrap_or_else(|e| {
+                            tracing::error!("Failed to deserialize visibility_json: {}", e);
+                            Vec::new()
+                        });
 
                     Ok(Some(FilterProfile {
                         name,
@@ -423,11 +492,20 @@ impl FilterPresetStorage {
                 let id = Uuid::parse_str(&id_str)?;
 
                 let stored_filters: Vec<StoredFilterCondition> =
-                    serde_json::from_str(&filters_json).unwrap_or_default();
+                    serde_json::from_str(&filters_json).unwrap_or_else(|e| {
+                        tracing::error!("Failed to deserialize filters_json: {}", e);
+                        Vec::new()
+                    });
                 let stored_sorts: Vec<StoredSortCriterion> =
-                    serde_json::from_str(&sorts_json).unwrap_or_default();
+                    serde_json::from_str(&sorts_json).unwrap_or_else(|e| {
+                        tracing::error!("Failed to deserialize sorts_json: {}", e);
+                        Vec::new()
+                    });
                 let stored_visibility: Vec<StoredColumnVisibility> =
-                    serde_json::from_str(&visibility_json).unwrap_or_default();
+                    serde_json::from_str(&visibility_json).unwrap_or_else(|e| {
+                        tracing::error!("Failed to deserialize visibility_json: {}", e);
+                        Vec::new()
+                    });
 
                 result.push((
                     id,

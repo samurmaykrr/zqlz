@@ -5,7 +5,7 @@
 
 use zqlz_core::{ColumnMeta, Value};
 
-use super::duplicate::{duplicate_row, DuplicateOptions, DuplicatedRow};
+use super::duplicate::{DuplicateOptions, DuplicatedRow, duplicate_row};
 
 /// An operation to perform on multiple rows
 #[derive(Debug, Clone)]

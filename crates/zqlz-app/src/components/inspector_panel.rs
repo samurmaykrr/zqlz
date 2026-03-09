@@ -6,8 +6,9 @@
 use gpui::*;
 use zqlz_query::widgets::{QueryHistoryPanel, QueryHistoryPanelEvent};
 use zqlz_ui::widgets::{
+    ActiveTheme,
     dock::{Panel, PanelEvent, TitleStyle},
-    v_flex, ActiveTheme,
+    v_flex,
 };
 
 use crate::components::RowEditorMode;

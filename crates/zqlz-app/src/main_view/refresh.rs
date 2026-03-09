@@ -1,0 +1,242 @@
+use std::collections::HashMap;
+
+use gpui::*;
+use uuid::Uuid;
+use zqlz_connection::ConnectionEntry;
+use zqlz_core::ObjectsPanelData;
+use zqlz_services::{ConnectionRefreshPayload, RefreshRequest};
+
+use crate::app::AppState;
+use crate::main_view::MainView;
+
+#[derive(Clone, Copy, Debug)]
+pub(super) enum RefreshTarget {
+    ActiveConnection,
+    Connection(Uuid),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(super) struct SurfaceRefreshOptions {
+    pub invalidate_schema_cache: bool,
+    pub refresh_sidebar: bool,
+    pub refresh_objects_panel: bool,
+}
+
+impl SurfaceRefreshOptions {
+    pub const MANUAL: Self = Self {
+        invalidate_schema_cache: true,
+        refresh_sidebar: true,
+        refresh_objects_panel: true,
+    };
+
+    pub const OBJECTS_ONLY: Self = Self {
+        invalidate_schema_cache: true,
+        refresh_sidebar: false,
+        refresh_objects_panel: true,
+    };
+
+    pub const SIDEBAR_AND_OBJECTS: Self = Self {
+        invalidate_schema_cache: true,
+        refresh_sidebar: true,
+        refresh_objects_panel: true,
+    };
+}
+
+impl MainView {
+    pub(super) fn refresh_connection_surfaces(
+        &mut self,
+        target: RefreshTarget,
+        options: SurfaceRefreshOptions,
+        cx: &mut Context<Self>,
+    ) {
+        let connection_id = match target {
+            RefreshTarget::ActiveConnection => self.workspace_state.read(cx).active_connection_id(),
+            RefreshTarget::Connection(connection_id) => Some(connection_id),
+        };
+
+        let Some(connection_id) = connection_id else {
+            tracing::debug!("refresh_connection_surfaces: no connection selected");
+            if options.refresh_objects_panel {
+                self.objects_panel.update(cx, |panel, cx| panel.clear(cx));
+            }
+            return;
+        };
+
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("refresh_connection_surfaces: no AppState available");
+            return;
+        };
+
+        let refresh_service = app_state.refresh_service.clone();
+        let connection_name = app_state
+            .connection_manager()
+            .get_saved(connection_id)
+            .map(|saved| saved.name)
+            .unwrap_or_else(|| "Unknown".to_string());
+        let workspace_state = self.workspace_state.downgrade();
+        let sidebar = self.connection_sidebar.clone();
+        let objects_panel = self.objects_panel.clone();
+
+        cx.spawn(async move |_this, cx| {
+            let refresh = refresh_service
+                .refresh_connection(RefreshRequest {
+                    connection_id,
+                    invalidate_schema_cache: options.invalidate_schema_cache,
+                })
+                .await;
+
+            match refresh {
+                Ok(refresh) => match refresh.payload {
+                    ConnectionRefreshPayload::Relational(payload) => {
+                        let zqlz_services::RelationalConnectionRefresh {
+                            schema,
+                            databases,
+                            driver_category,
+                        } = payload;
+
+                        if options.refresh_sidebar {
+                            _ = sidebar.update(cx, |sidebar, cx| {
+                                sidebar.set_schema(
+                                    connection_id,
+                                    schema.tables.clone(),
+                                    schema.views.clone(),
+                                    schema.materialized_views.clone(),
+                                    schema.triggers.clone(),
+                                    schema.functions.clone(),
+                                    schema.procedures.clone(),
+                                    schema.schema_name.clone(),
+                                    cx,
+                                );
+
+                                if let Some(databases) = &databases {
+                                    sidebar.merge_databases(
+                                        connection_id,
+                                        databases.clone(),
+                                        schema.database_name.as_deref(),
+                                        cx,
+                                    );
+
+                                    if let Some(active_database) = schema.database_name.as_deref() {
+                                        sidebar.set_database_schema(
+                                            connection_id,
+                                            active_database,
+                                            schema.tables.clone(),
+                                            schema.views.clone(),
+                                            schema.materialized_views.clone(),
+                                            schema.triggers.clone(),
+                                            schema.functions.clone(),
+                                            schema.procedures.clone(),
+                                            schema.schema_name.clone(),
+                                            cx,
+                                        );
+                                    }
+                                }
+                            });
+                        }
+
+                        let should_update_objects = options.refresh_objects_panel
+                            && workspace_state
+                                .read_with(cx, |state, _cx| state.active_connection_id())
+                                .ok()
+                                .flatten()
+                                == Some(connection_id);
+
+                        if should_update_objects {
+                            let objects_data = schema.objects_panel_data.unwrap_or_else(|| {
+                                ObjectsPanelData::from_table_infos(schema.table_infos)
+                            });
+                            _ = objects_panel.update(cx, |panel, cx| {
+                                let database_name =
+                                    panel.database_name().or(schema.database_name.clone());
+                                panel.load_objects(
+                                    connection_id,
+                                    connection_name.clone(),
+                                    database_name,
+                                    objects_data,
+                                    driver_category,
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                    ConnectionRefreshPayload::Redis(payload) => {
+                        if options.refresh_sidebar {
+                            _ = sidebar.update(cx, |sidebar, cx| {
+                                sidebar.set_redis_databases(
+                                    connection_id,
+                                    payload.databases.clone(),
+                                    cx,
+                                );
+                            });
+                        }
+
+                        let should_update_objects = options.refresh_objects_panel
+                            && workspace_state
+                                .read_with(cx, |state, _cx| state.active_connection_id())
+                                .ok()
+                                .flatten()
+                                == Some(connection_id);
+
+                        if should_update_objects {
+                            _ = objects_panel.update(cx, |panel, cx| {
+                                panel.load_redis_databases(
+                                    connection_id,
+                                    connection_name.clone(),
+                                    payload.databases.clone(),
+                                    cx,
+                                );
+                            });
+                        }
+                    }
+                },
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        %error,
+                        "Failed to refresh connection surfaces"
+                    );
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    pub(super) fn refresh_connections_list_preserving_state(&mut self, cx: &mut Context<Self>) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+
+        let saved = app_state.saved_connections();
+        let current_entries: HashMap<Uuid, ConnectionEntry> = self
+            .connection_sidebar
+            .read(cx)
+            .connections()
+            .iter()
+            .map(|connection| (connection.id, connection.clone()))
+            .collect();
+
+        let entries: Vec<_> = saved
+            .into_iter()
+            .map(|saved_connection| {
+                if let Some(existing) = current_entries.get(&saved_connection.id) {
+                    let mut entry = existing.clone();
+                    entry.name = saved_connection.name;
+                    entry.db_type = saved_connection.driver;
+                    entry
+                } else {
+                    ConnectionEntry::new(
+                        saved_connection.id,
+                        saved_connection.name,
+                        saved_connection.driver,
+                    )
+                }
+            })
+            .collect();
+
+        self.connection_sidebar.update(cx, |sidebar, cx| {
+            sidebar.set_connections(entries, cx);
+        });
+    }
+}

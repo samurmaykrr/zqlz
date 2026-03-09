@@ -25,7 +25,7 @@ pub use zqlz_driver_redis as redis;
 
 mod registry;
 
-pub use registry::{get_dialect_bundle, get_dialect_info, DriverRegistry};
+pub use registry::{DriverRegistry, get_dialect_bundle, get_dialect_info};
 
 /// Re-export commonly used types from zqlz-core
 pub use zqlz_core::{

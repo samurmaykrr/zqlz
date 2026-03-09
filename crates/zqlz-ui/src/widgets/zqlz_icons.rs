@@ -4,7 +4,7 @@
 //! They implement `IconNamed` so they can be used with the `Icon` component.
 
 use gpui::{
-    img, px, App, IntoElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window,
+    App, IntoElement, Pixels, RenderOnce, SharedString, StyleRefinement, Styled, Window, img, px,
 };
 
 use crate::widgets::IconNamed;
@@ -160,6 +160,8 @@ pub enum ZqlzIcon {
     Trash,
     Pencil,
     Ellipsis,
+    Undo,
+    Redo,
 
     // Status indicators
     Warning,
@@ -259,6 +261,8 @@ impl IconNamed for ZqlzIcon {
             Self::Trash => "icons/trash.svg",
             Self::Pencil => "icons/pencil.svg",
             Self::Ellipsis => "icons/ellipsis.svg",
+            Self::Undo => "icons/undo.svg",
+            Self::Redo => "icons/redo.svg",
 
             // Status indicators
             Self::Warning => "icons/warning.svg",

@@ -3,8 +3,8 @@
 use gpui::Context;
 use uuid::Uuid;
 
-use crate::widgets::sidebar::types::*;
 use crate::widgets::sidebar::ConnectionSidebar;
+use crate::widgets::sidebar::types::*;
 
 impl ConnectionSidebar {
     /// Set connections from external source (e.g., AppState)

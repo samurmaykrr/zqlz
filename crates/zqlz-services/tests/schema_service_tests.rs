@@ -11,9 +11,7 @@ use uuid::Uuid;
 use zqlz_core::{Connection, ObjectType, Value};
 use zqlz_services::SchemaService;
 
-use common::{
-    mock_single_value_result, mysql_connection, postgres_connection, MockConnection,
-};
+use common::{mock_single_value_result, mysql_connection, postgres_connection, MockConnection};
 
 // ============ MySQL Driver Path Tests ============
 
@@ -140,9 +138,9 @@ async fn sqlite_uses_main_as_database_name() {
 
 #[tokio::test]
 async fn mssql_resolves_database_and_schema_name() {
-    let db_result = mock_single_value_result("DB_NAME()", Value::String("AdventureWorks".to_string()));
-    let schema_result =
-        mock_single_value_result("SCHEMA_NAME()", Value::String("dbo".to_string()));
+    let db_result =
+        mock_single_value_result("DB_NAME()", Value::String("AdventureWorks".to_string()));
+    let schema_result = mock_single_value_result("SCHEMA_NAME()", Value::String("dbo".to_string()));
     let conn = Arc::new(
         MockConnection::new("AdventureWorks")
             .with_driver("mssql")
@@ -164,8 +162,7 @@ async fn mssql_resolves_database_and_schema_name() {
 #[tokio::test]
 async fn mssql_queries_db_name_and_schema_name() {
     let db_result = mock_single_value_result("DB_NAME()", Value::String("master".to_string()));
-    let schema_result =
-        mock_single_value_result("SCHEMA_NAME()", Value::String("dbo".to_string()));
+    let schema_result = mock_single_value_result("SCHEMA_NAME()", Value::String("dbo".to_string()));
     let conn = Arc::new(
         MockConnection::new("master")
             .with_driver("mssql")
@@ -352,7 +349,11 @@ impl Connection for NoSchemaConnection {
         "no_schema"
     }
 
-    async fn execute(&self, _sql: &str, _params: &[Value]) -> zqlz_core::Result<zqlz_core::StatementResult> {
+    async fn execute(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::StatementResult> {
         Ok(zqlz_core::StatementResult {
             is_query: false,
             result: None,
@@ -361,7 +362,11 @@ impl Connection for NoSchemaConnection {
         })
     }
 
-    async fn query(&self, _sql: &str, _params: &[Value]) -> zqlz_core::Result<zqlz_core::QueryResult> {
+    async fn query(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::QueryResult> {
         Ok(zqlz_core::QueryResult::empty())
     }
 
@@ -403,11 +408,19 @@ async fn get_table_details_returns_columns_with_pk() {
     assert_eq!(details.columns.len(), 3);
 
     // "id" should be marked as primary key
-    let id_col = details.columns.iter().find(|c| c.name == "id").expect("should have id column");
+    let id_col = details
+        .columns
+        .iter()
+        .find(|c| c.name == "id")
+        .expect("should have id column");
     assert!(id_col.is_primary_key);
 
     // "name" should NOT be marked as primary key
-    let name_col = details.columns.iter().find(|c| c.name == "name").expect("should have name column");
+    let name_col = details
+        .columns
+        .iter()
+        .find(|c| c.name == "name")
+        .expect("should have name column");
     assert!(!name_col.is_primary_key);
 
     assert_eq!(details.primary_key_columns, vec!["id".to_string()]);
@@ -450,7 +463,10 @@ async fn get_table_details_caches_columns() {
 
     // Verify columns are now cached
     let cached = service.cache().get_columns(conn_id, "users");
-    assert!(cached.is_some(), "columns should be cached after first load");
+    assert!(
+        cached.is_some(),
+        "columns should be cached after first load"
+    );
     assert_eq!(cached.unwrap().len(), 3);
 }
 
@@ -608,7 +624,11 @@ impl Connection for EmptyDatabaseConnection {
         &self.driver
     }
 
-    async fn execute(&self, _sql: &str, _params: &[Value]) -> zqlz_core::Result<zqlz_core::StatementResult> {
+    async fn execute(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::StatementResult> {
         Ok(zqlz_core::StatementResult {
             is_query: false,
             result: None,
@@ -617,7 +637,11 @@ impl Connection for EmptyDatabaseConnection {
         })
     }
 
-    async fn query(&self, sql: &str, _params: &[Value]) -> zqlz_core::Result<zqlz_core::QueryResult> {
+    async fn query(
+        &self,
+        sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::QueryResult> {
         if sql.contains("DATABASE()") {
             return Ok(self.db_result.clone());
         }
@@ -655,55 +679,101 @@ impl zqlz_core::SchemaIntrospection for EmptyDatabaseConnection {
         Ok(vec![])
     }
 
-    async fn list_tables(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::TableInfo>> {
+    async fn list_tables(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TableInfo>> {
         Ok(vec![])
     }
 
-    async fn list_views(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::ViewInfo>> {
+    async fn list_views(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ViewInfo>> {
         Ok(vec![])
     }
 
-    async fn get_table(&self, _schema: Option<&str>, _name: &str) -> zqlz_core::Result<zqlz_core::TableDetails> {
+    async fn get_table(
+        &self,
+        _schema: Option<&str>,
+        _name: &str,
+    ) -> zqlz_core::Result<zqlz_core::TableDetails> {
         Err(zqlz_core::ZqlzError::NotImplemented("empty".into()))
     }
 
-    async fn get_columns(&self, _schema: Option<&str>, _table: &str) -> zqlz_core::Result<Vec<zqlz_core::ColumnInfo>> {
+    async fn get_columns(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ColumnInfo>> {
         Ok(vec![])
     }
 
-    async fn get_indexes(&self, _schema: Option<&str>, _table: &str) -> zqlz_core::Result<Vec<zqlz_core::IndexInfo>> {
+    async fn get_indexes(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::IndexInfo>> {
         Ok(vec![])
     }
 
-    async fn get_foreign_keys(&self, _schema: Option<&str>, _table: &str) -> zqlz_core::Result<Vec<zqlz_core::ForeignKeyInfo>> {
+    async fn get_foreign_keys(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ForeignKeyInfo>> {
         Ok(vec![])
     }
 
-    async fn get_primary_key(&self, _schema: Option<&str>, _table: &str) -> zqlz_core::Result<Option<zqlz_core::PrimaryKeyInfo>> {
+    async fn get_primary_key(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Option<zqlz_core::PrimaryKeyInfo>> {
         Ok(None)
     }
 
-    async fn get_constraints(&self, _schema: Option<&str>, _table: &str) -> zqlz_core::Result<Vec<zqlz_core::ConstraintInfo>> {
+    async fn get_constraints(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ConstraintInfo>> {
         Ok(vec![])
     }
 
-    async fn list_functions(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::FunctionInfo>> {
+    async fn list_functions(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::FunctionInfo>> {
         Ok(vec![])
     }
 
-    async fn list_procedures(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::ProcedureInfo>> {
+    async fn list_procedures(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ProcedureInfo>> {
         Ok(vec![])
     }
 
-    async fn list_triggers(&self, _schema: Option<&str>, _table: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::TriggerInfo>> {
+    async fn list_triggers(
+        &self,
+        _schema: Option<&str>,
+        _table: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TriggerInfo>> {
         Ok(vec![])
     }
 
-    async fn list_sequences(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::SequenceInfo>> {
+    async fn list_sequences(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::SequenceInfo>> {
         Ok(vec![])
     }
 
-    async fn list_types(&self, _schema: Option<&str>) -> zqlz_core::Result<Vec<zqlz_core::TypeInfo>> {
+    async fn list_types(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TypeInfo>> {
         Ok(vec![])
     }
 
@@ -711,7 +781,10 @@ impl zqlz_core::SchemaIntrospection for EmptyDatabaseConnection {
         Ok(String::new())
     }
 
-    async fn get_dependencies(&self, _object: &zqlz_core::DatabaseObject) -> zqlz_core::Result<Vec<zqlz_core::Dependency>> {
+    async fn get_dependencies(
+        &self,
+        _object: &zqlz_core::DatabaseObject,
+    ) -> zqlz_core::Result<Vec<zqlz_core::Dependency>> {
         Ok(vec![])
     }
 }

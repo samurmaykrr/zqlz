@@ -1,11 +1,11 @@
 #[cfg(test)]
 mod error_tests {
-    use crate::fixtures::{sql_drivers, test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, sql_drivers, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
 
     /// Tests that syntax errors are properly caught and reported with descriptive error messages.
-    /// 
+    ///
     /// This test verifies that the driver correctly identifies invalid SQL syntax and returns
     /// appropriate error information rather than panicking or allowing invalid queries to execute.
     #[rstest]
@@ -50,7 +50,9 @@ mod error_tests {
 
         // Note: "SELECT 1" is valid in most databases as it doesn't require FROM
         // So we test a case that requires FROM but doesn't have it
-        let result = conn.execute("SELECT actor_id WHERE actor_id = 1", &[]).await;
+        let result = conn
+            .execute("SELECT actor_id WHERE actor_id = 1", &[])
+            .await;
 
         assert!(
             result.is_err(),
@@ -125,7 +127,7 @@ mod error_tests {
     }
 
     /// Tests that error messages provide meaningful information to help debug syntax issues.
-    /// 
+    ///
     /// This verifies that error messages are descriptive enough to be useful for developers,
     /// not just generic "syntax error" messages.
     #[rstest]
@@ -433,16 +435,18 @@ mod error_tests {
     #[case::mysql(TestDriver::Mysql)]
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
-    async fn test_constraint_unique_violation_staff_username(#[case] driver: TestDriver) -> Result<()> {
+    async fn test_constraint_unique_violation_staff_username(
+        #[case] driver: TestDriver,
+    ) -> Result<()> {
         use zqlz_core::Value;
         let conn = test_connection(driver).await?;
 
         // This test is conditional - if the staff table doesn't have a UNIQUE constraint
         // on username, we create a temporary table to test the concept
-        
+
         // Try to query staff table first to see if it exists
         let table_check = conn.query("SELECT 1 FROM staff LIMIT 1", &[]).await;
-        
+
         if table_check.is_err() {
             // Staff table doesn't exist, create a temporary test table
             let create_sql = "CREATE TEMPORARY TABLE test_unique (
@@ -848,25 +852,19 @@ mod error_tests {
         conn.execute(create_temp, &[]).await?;
 
         let insert_sql = "INSERT INTO test_dates (id, created_at) VALUES ($1, $2)";
-        
+
         // "not-a-date" is clearly not a valid date format
         let result = execute_sql(
             &conn,
             driver,
             insert_sql,
-            &[
-                Value::Int64(1),
-                Value::String("not-a-date".into()),
-            ],
+            &[Value::Int64(1), Value::String("not-a-date".into())],
         )
         .await;
 
         // Most databases should reject this, but SQLite might be more permissive
         if driver != TestDriver::Sqlite {
-            assert!(
-                result.is_err(),
-                "Expected error for invalid date format"
-            );
+            assert!(result.is_err(), "Expected error for invalid date format");
 
             let err = result.unwrap_err();
             let err_msg = format!("{}", err);
@@ -905,9 +903,9 @@ mod error_tests {
             id INTEGER PRIMARY KEY,
             small_val SMALLINT
         )";
-        
+
         let create_result = conn.execute(create_temp, &[]).await;
-        
+
         // SQLite doesn't have true SMALLINT, it treats all integers as INTEGER
         if create_result.is_err() || driver == TestDriver::Sqlite {
             // Skip test if SMALLINT not supported
@@ -955,7 +953,7 @@ mod error_tests {
         // Try to compare a text field with a numeric value in a nonsensical way
         // This tests how the database handles type mismatches in WHERE clauses
         let sql = "SELECT * FROM actor WHERE first_name = 12345";
-        
+
         let result = conn.query(sql, &[]).await;
 
         // Different databases handle this differently:
@@ -1224,7 +1222,10 @@ mod error_tests {
         };
 
         // Insert NULL values
-        let insert_sql = format!("INSERT INTO {} (id, int_val, text_val) VALUES ($1, $2, $3)", table_name);
+        let insert_sql = format!(
+            "INSERT INTO {} (id, int_val, text_val) VALUES ($1, $2, $3)",
+            table_name
+        );
         execute_sql(
             &conn,
             driver,
@@ -1262,7 +1263,9 @@ mod error_tests {
 
         // Cleanup for MySQL
         if driver == TestDriver::Mysql {
-            let _ = conn.execute("DROP TABLE IF EXISTS test_nulls_temp", &[]).await;
+            let _ = conn
+                .execute("DROP TABLE IF EXISTS test_nulls_temp", &[])
+                .await;
         }
 
         Ok(())
@@ -1281,37 +1284,42 @@ mod error_tests {
     #[tokio::test]
     async fn test_connection_refused(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::{ConnectionConfig, DatabaseDriver};
-        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_mysql::MySqlDriver;
+        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_redis::RedisDriver;
 
         // Use a host that should refuse connections (non-existent port)
         let result = match driver {
             TestDriver::Postgres => {
-                let mut config = ConnectionConfig::new_postgres("localhost", 54321, "pagila", "test_user");
+                let mut config =
+                    ConnectionConfig::new_postgres("localhost", 54321, "pagila", "test_user");
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    PostgresDriver::new().connect(&config)
-                ).await
-            },
+                    PostgresDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Mysql => {
-                let mut config = ConnectionConfig::new_mysql("localhost", 33061, "sakila", "test_user");
+                let mut config =
+                    ConnectionConfig::new_mysql("localhost", 33061, "sakila", "test_user");
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    MySqlDriver::new().connect(&config)
-                ).await
-            },
+                    MySqlDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Redis => {
                 let mut config = ConnectionConfig::new("redis", "Redis Test");
                 config.host = "localhost".to_string();
                 config.port = 63791;
                 tokio::time::timeout(
                     std::time::Duration::from_secs(5),
-                    RedisDriver::new().connect(&config)
-                ).await
-            },
+                    RedisDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Sqlite => {
                 // SQLite doesn't have network connections, skip this test
                 return Ok(());
@@ -1338,33 +1346,37 @@ mod error_tests {
     #[tokio::test]
     async fn test_connection_invalid_credentials(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::{ConnectionConfig, DatabaseDriver};
-        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_mysql::MySqlDriver;
+        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_redis::RedisDriver;
 
         // Use invalid credentials
         let result = match driver {
             TestDriver::Postgres => {
-                let mut config = ConnectionConfig::new_postgres("localhost", 5433, "pagila", "invalid_user_xyz");
+                let mut config =
+                    ConnectionConfig::new_postgres("localhost", 5433, "pagila", "invalid_user_xyz");
                 config.password = Some("wrong_password_xyz".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    PostgresDriver::new().connect(&config)
-                ).await
-            },
+                    PostgresDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Mysql => {
-                let mut config = ConnectionConfig::new_mysql("localhost", 3307, "sakila", "invalid_user_xyz");
+                let mut config =
+                    ConnectionConfig::new_mysql("localhost", 3307, "sakila", "invalid_user_xyz");
                 config.password = Some("wrong_password_xyz".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    MySqlDriver::new().connect(&config)
-                ).await
-            },
+                    MySqlDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Redis => {
                 // Redis might not have authentication enabled in test environment
                 // This test is optional for Redis
                 return Ok(());
-            },
+            }
             TestDriver::Sqlite => {
                 // SQLite doesn't have authentication, skip this test
                 return Ok(());
@@ -1406,27 +1418,39 @@ mod error_tests {
     #[tokio::test]
     async fn test_connection_database_not_found(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::{ConnectionConfig, DatabaseDriver};
-        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_mysql::MySqlDriver;
+        use zqlz_driver_postgres::PostgresDriver;
 
         // Use valid credentials but non-existent database
         let result = match driver {
             TestDriver::Postgres => {
-                let mut config = ConnectionConfig::new_postgres("localhost", 5433, "nonexistent_database_xyz_123", "test_user");
+                let mut config = ConnectionConfig::new_postgres(
+                    "localhost",
+                    5433,
+                    "nonexistent_database_xyz_123",
+                    "test_user",
+                );
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    PostgresDriver::new().connect(&config)
-                ).await
-            },
+                    PostgresDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Mysql => {
-                let mut config = ConnectionConfig::new_mysql("localhost", 3307, "nonexistent_database_xyz_123", "test_user");
+                let mut config = ConnectionConfig::new_mysql(
+                    "localhost",
+                    3307,
+                    "nonexistent_database_xyz_123",
+                    "test_user",
+                );
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    MySqlDriver::new().connect(&config)
-                ).await
-            },
+                    MySqlDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Sqlite => {
                 // SQLite creates database if it doesn't exist, skip this test
                 return Ok(());
@@ -1472,39 +1496,44 @@ mod error_tests {
     #[tokio::test]
     async fn test_connection_timeout(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::{ConnectionConfig, DatabaseDriver};
-        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_mysql::MySqlDriver;
+        use zqlz_driver_postgres::PostgresDriver;
         use zqlz_driver_redis::RedisDriver;
 
         let start = std::time::Instant::now();
-        
+
         // Use an unreachable IP address (10.255.255.255 is typically unreachable)
         let result = match driver {
             TestDriver::Postgres => {
-                let mut config = ConnectionConfig::new_postgres("10.255.255.255", 5432, "test", "test_user");
+                let mut config =
+                    ConnectionConfig::new_postgres("10.255.255.255", 5432, "test", "test_user");
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    PostgresDriver::new().connect(&config)
-                ).await
-            },
+                    PostgresDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Mysql => {
-                let mut config = ConnectionConfig::new_mysql("10.255.255.255", 3306, "test", "test_user");
+                let mut config =
+                    ConnectionConfig::new_mysql("10.255.255.255", 3306, "test", "test_user");
                 config.password = Some("test_password".to_string());
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    MySqlDriver::new().connect(&config)
-                ).await
-            },
+                    MySqlDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Redis => {
                 let mut config = ConnectionConfig::new("redis", "Redis Test");
                 config.host = "10.255.255.255".to_string();
                 config.port = 6379;
                 tokio::time::timeout(
                     std::time::Duration::from_secs(10),
-                    RedisDriver::new().connect(&config)
-                ).await
-            },
+                    RedisDriver::new().connect(&config),
+                )
+                .await
+            }
             TestDriver::Sqlite => {
                 // SQLite doesn't have network connections, skip this test
                 return Ok(());
@@ -1546,22 +1575,23 @@ mod error_tests {
         // Create a temporary table
         conn.execute(
             "CREATE TEMPORARY TABLE test_conn_loss (id INTEGER PRIMARY KEY, value TEXT)",
-            &[]
-        ).await?;
+            &[],
+        )
+        .await?;
 
         // Insert some data
         conn.execute(
             "INSERT INTO test_conn_loss (id, value) VALUES (1, 'test')",
-            &[]
-        ).await?;
+            &[],
+        )
+        .await?;
 
         // For SQLite, we can't easily simulate connection loss mid-query
         // since it's file-based. We verify that basic error handling works
         // by attempting an invalid operation.
-        let result = conn.execute(
-            "SELECT * FROM nonexistent_table_to_trigger_error",
-            &[]
-        ).await;
+        let result = conn
+            .execute("SELECT * FROM nonexistent_table_to_trigger_error", &[])
+            .await;
 
         assert!(
             result.is_err(),
@@ -1604,10 +1634,7 @@ mod error_tests {
         // Verify all connections work
         for conn in &connections {
             let result = conn.query("SELECT 1", &[]).await;
-            assert!(
-                result.is_ok(),
-                "All connections should work properly"
-            );
+            assert!(result.is_ok(), "All connections should work properly");
         }
 
         // Explicitly drop connections to test cleanup
@@ -1639,8 +1666,9 @@ mod error_tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            PostgresDriver::new().connect(&config)
-        ).await;
+            PostgresDriver::new().connect(&config),
+        )
+        .await;
 
         // Should fail or timeout
         assert!(

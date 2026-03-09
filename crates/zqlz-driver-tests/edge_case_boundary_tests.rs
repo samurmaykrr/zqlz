@@ -4,7 +4,7 @@
 //! maximum and minimum values, precision limits, and overflow/underflow detection.
 //! These tests ensure that drivers properly handle extreme values within type limits.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 use zqlz_core::{Connection, Value};
@@ -105,8 +105,7 @@ async fn test_boundary_max_integer(#[case] driver: TestDriver) -> Result<()> {
 
     assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-    let retrieved_value = result
-        .rows[0]
+    let retrieved_value = result.rows[0]
         .get_by_name("value")
         .and_then(|v| v.as_i64())
         .context("Failed to get value as i64")?;
@@ -168,8 +167,7 @@ async fn test_boundary_min_integer(#[case] driver: TestDriver) -> Result<()> {
 
     assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-    let retrieved_value = result
-        .rows[0]
+    let retrieved_value = result.rows[0]
         .get_by_name("value")
         .and_then(|v| v.as_i64())
         .context("Failed to get value as i64")?;
@@ -231,8 +229,7 @@ async fn test_boundary_max_bigint(#[case] driver: TestDriver) -> Result<()> {
 
     assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-    let retrieved_value = result
-        .rows[0]
+    let retrieved_value = result.rows[0]
         .get_by_name("value")
         .and_then(|v| v.as_i64())
         .context("Failed to get value as i64")?;
@@ -294,8 +291,7 @@ async fn test_boundary_min_bigint(#[case] driver: TestDriver) -> Result<()> {
 
     assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-    let retrieved_value = result
-        .rows[0]
+    let retrieved_value = result.rows[0]
         .get_by_name("value")
         .and_then(|v| v.as_i64())
         .context("Failed to get value as i64")?;
@@ -752,13 +748,7 @@ mod integration_tests {
             timestamp_value TEXT
         )";
 
-        execute_sql(
-            conn.as_ref(),
-            TestDriver::Sqlite,
-            create_table_sql,
-            &[],
-        )
-        .await?;
+        execute_sql(conn.as_ref(), TestDriver::Sqlite, create_table_sql, &[]).await?;
 
         let insert_sql = "INSERT INTO boundary_integration 
             (id, max_int, min_int, max_bigint, small_decimal, date_value, timestamp_value) 
@@ -791,29 +781,25 @@ mod integration_tests {
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let max_int = result
-            .rows[0]
+        let max_int = result.rows[0]
             .get_by_name("max_int")
             .and_then(|v| v.as_i64())
             .context("Failed to get max_int")?;
         assert_eq!(max_int, 2147483647);
 
-        let min_int = result
-            .rows[0]
+        let min_int = result.rows[0]
             .get_by_name("min_int")
             .and_then(|v| v.as_i64())
             .context("Failed to get min_int")?;
         assert_eq!(min_int, -2147483648);
 
-        let max_bigint = result
-            .rows[0]
+        let max_bigint = result.rows[0]
             .get_by_name("max_bigint")
             .and_then(|v| v.as_i64())
             .context("Failed to get max_bigint")?;
         assert_eq!(max_bigint, i64::MAX);
 
-        let date_value = result
-            .rows[0]
+        let date_value = result.rows[0]
             .get_by_name("date_value")
             .and_then(|v| v.as_str())
             .context("Failed to get date_value")?;

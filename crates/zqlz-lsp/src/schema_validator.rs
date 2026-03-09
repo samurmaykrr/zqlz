@@ -658,7 +658,7 @@ mod tests {
     fn test_empty_schema_skips_validation() {
         let validator = SchemaValidator::new();
         let schema = SchemaCache::default(); // empty
-                                             // Should produce no issues, not a flood of "table not found" errors
+        // Should produce no issues, not a flood of "table not found" errors
         let issues = validator.validate("SELECT * FROM any_table", &schema);
         assert!(issues.is_empty());
     }

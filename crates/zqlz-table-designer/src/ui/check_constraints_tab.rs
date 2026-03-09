@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_ui::widgets::{v_flex, ActiveTheme};
+use zqlz_ui::widgets::{ActiveTheme, v_flex};
 
 use crate::panel::TableDesignerPanel;
 
@@ -60,9 +60,7 @@ pub(in crate::panel) fn render_check_constraints_tab(
                                 .text_center()
                                 .text_sm()
                                 .text_color(muted_fg)
-                                .child(
-                                    "No check constraints defined. Click + to add one.",
-                                ),
+                                .child("No check constraints defined. Click + to add one."),
                         )
                     }),
             ),

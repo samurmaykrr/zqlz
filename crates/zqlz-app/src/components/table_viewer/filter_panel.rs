@@ -188,12 +188,14 @@ impl FilterPanelState {
         cx.notify();
     }
 
-    /// Add a new filter row with a pre-populated column and value (equals comparison)
+    /// Add a new filter row with a pre-populated column, operator, and value.
     ///
     /// Used by the "Filter" context menu to quickly filter by a cell's value.
+    /// Pass `FilterOperator::IsNull` for NULL cells (value will be ignored).
     pub fn add_quick_filter(
         &mut self,
         column_name: String,
+        operator: FilterOperator,
         value: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -212,16 +214,18 @@ impl FilterPanelState {
             });
         }
 
-        // Set the condition's column
+        // Set the condition's column and operator
         let mut condition = FilterCondition::new(id);
         condition.column = Some(column_name);
-        condition.operator = FilterOperator::Equal;
+        condition.operator = operator;
         condition.value = value.clone();
 
-        // Set the value in the input
-        row_state.value_input.update(cx, |state, cx| {
-            state.set_value(&value, window, cx);
-        });
+        // Only populate the value input for operators that take a value
+        if operator.requires_value() {
+            row_state.value_input.update(cx, |state, cx| {
+                state.set_value(&value, window, cx);
+            });
+        }
 
         // Subscribe to column select changes
         let filter_id = id;

@@ -359,8 +359,7 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         ColumnData::DateTime(None) => Ok(Value::Null),
         ColumnData::DateTime(Some(v)) => {
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                    .expect("1900-01-01 is a valid date")
+                chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("1900-01-01 is a valid date")
                     + chrono::Duration::days(v.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (v.seconds_fragments() as f64 / 300.0) as u32,
@@ -373,8 +372,7 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
         ColumnData::SmallDateTime(None) => Ok(Value::Null),
         ColumnData::SmallDateTime(Some(v)) => {
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1900, 1, 1)
-                    .expect("1900-01-01 is a valid date")
+                chrono::NaiveDate::from_ymd_opt(1900, 1, 1).expect("1900-01-01 is a valid date")
                     + chrono::Duration::days(v.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (v.seconds_fragments() as u32) * 60,
@@ -389,8 +387,7 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
             let date = v.date();
             let time = v.time();
             let dt = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1, 1, 1)
-                    .expect("0001-01-01 is a valid date")
+                chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("0001-01-01 is a valid date")
                     + chrono::Duration::days(date.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (time.increments() / 10_000_000) as u32,
@@ -406,8 +403,7 @@ pub(crate) fn column_data_to_value(col_data: ColumnData<'static>) -> Result<Valu
             let date = dt2.date();
             let time = dt2.time();
             let naive = chrono::NaiveDateTime::new(
-                chrono::NaiveDate::from_ymd_opt(1, 1, 1)
-                    .expect("0001-01-01 is a valid date")
+                chrono::NaiveDate::from_ymd_opt(1, 1, 1).expect("0001-01-01 is a valid date")
                     + chrono::Duration::days(date.days() as i64),
                 chrono::NaiveTime::from_num_seconds_from_midnight_opt(
                     (time.increments() / 10_000_000) as u32,

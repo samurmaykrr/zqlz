@@ -123,7 +123,7 @@ fn get_sqlite_path() -> Result<String> {
     }
 
     tracing::info!("creating SQLite test database from template");
-    
+
     let current_dir = std::env::current_dir().unwrap();
     let template_path = if current_dir.ends_with("zqlz-driver-tests") {
         // Running from crate directory
@@ -146,13 +146,10 @@ fn get_sqlite_path() -> Result<String> {
              Run: cd crates/zqlz-driver-tests && docker/sqlite/init-sakila.sh",
             template_path
         );
-        
+
         let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
         let db_path = temp_dir.path().join("sakila.db");
-        let db_path_str = db_path
-            .to_str()
-            .context("invalid SQLite path")?
-            .to_string();
+        let db_path_str = db_path.to_str().context("invalid SQLite path")?.to_string();
 
         *path_guard = Some(db_path_str.clone());
         std::mem::forget(temp_dir);
@@ -163,14 +160,10 @@ fn get_sqlite_path() -> Result<String> {
 
     let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
     let db_path = temp_dir.path().join("sakila.db");
-    
-    std::fs::copy(&template_path, &db_path)
-        .context("failed to copy SQLite template database")?;
 
-    let db_path_str = db_path
-        .to_str()
-        .context("invalid SQLite path")?
-        .to_string();
+    std::fs::copy(&template_path, &db_path).context("failed to copy SQLite template database")?;
+
+    let db_path_str = db_path.to_str().context("invalid SQLite path")?.to_string();
 
     *path_guard = Some(db_path_str.clone());
     std::mem::forget(temp_dir);
@@ -212,10 +205,7 @@ async fn verify_test_data(conn: &Arc<dyn Connection>, driver: TestDriver) -> Res
         ));
     }
 
-    let count = result.rows[0]
-        .get(0)
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
+    let count = result.rows[0].get(0).and_then(|v| v.as_i64()).unwrap_or(0);
 
     if count == 0 {
         return Err(anyhow::anyhow!(
@@ -302,9 +292,9 @@ async fn connect_without_verification(driver: TestDriver) -> Result<Arc<dyn Conn
                     "test_password".to_string(),
                 )
             } else {
-                let container_info = postgres_container().await.context(
-                    "failed to start PostgreSQL container - is Docker running?",
-                )?;
+                let container_info = postgres_container()
+                    .await
+                    .context("failed to start PostgreSQL container - is Docker running?")?;
                 (
                     container_info.host,
                     container_info.port,
@@ -339,10 +329,9 @@ async fn connect_without_verification(driver: TestDriver) -> Result<Arc<dyn Conn
                     "test_password".to_string(),
                 )
             } else {
-                let container_info =
-                    mysql_container()
-                        .await
-                        .context("failed to start MySQL container - is Docker running?")?;
+                let container_info = mysql_container()
+                    .await
+                    .context("failed to start MySQL container - is Docker running?")?;
                 (
                     container_info.host,
                     container_info.port,
@@ -362,7 +351,10 @@ async fn connect_without_verification(driver: TestDriver) -> Result<Arc<dyn Conn
             config.password = Some(password);
 
             let driver = MySqlDriver::new();
-            driver.connect(&config).await.context("failed to connect to MySQL")
+            driver
+                .connect(&config)
+                .await
+                .context("failed to connect to MySQL")
         }
         TestDriver::Sqlite => {
             let db_path = get_sqlite_path()?;
@@ -378,10 +370,9 @@ async fn connect_without_verification(driver: TestDriver) -> Result<Arc<dyn Conn
             let (host, port) = if use_manual_containers() {
                 ("127.0.0.1".to_string(), 6380)
             } else {
-                let container_info =
-                    redis_container()
-                        .await
-                        .context("failed to start Redis container - is Docker running?")?;
+                let container_info = redis_container()
+                    .await
+                    .context("failed to start Redis container - is Docker running?")?;
                 (container_info.host, container_info.port)
             };
 
@@ -390,7 +381,10 @@ async fn connect_without_verification(driver: TestDriver) -> Result<Arc<dyn Conn
             config.port = port;
 
             let driver = RedisDriver::new();
-            driver.connect(&config).await.context("failed to connect to Redis")
+            driver
+                .connect(&config)
+                .await
+                .context("failed to connect to Redis")
         }
     }
 }
@@ -491,11 +485,7 @@ pub fn all_drivers() -> Vec<TestDriver> {
 /// Use this for tests that require SQL functionality. This is the most
 /// common case for CRUD and query tests.
 pub fn sql_drivers() -> Vec<TestDriver> {
-    vec![
-        TestDriver::Postgres,
-        TestDriver::Mysql,
-        TestDriver::Sqlite,
-    ]
+    vec![TestDriver::Postgres, TestDriver::Mysql, TestDriver::Sqlite]
 }
 
 /// Returns only relational database drivers
@@ -600,7 +590,11 @@ mod tests {
         assert!(
             result.is_ok(),
             "SQLite should always work: {}",
-            result.as_ref().err().map(|e| e.to_string()).unwrap_or_default()
+            result
+                .as_ref()
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default()
         );
         if let Ok(conn) = result {
             assert_eq!(conn.driver_name(), "sqlite");

@@ -4,7 +4,7 @@
 //! - Simple literal replacement
 //! - Regex replacement with capture groups ($1, $2, etc.)
 
-use super::find::{build_regex, FindError, FindOptions};
+use super::find::{FindError, FindOptions, build_regex};
 
 /// Result of a replace operation.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -93,11 +93,11 @@ impl TableViewerDelegate {
         }
 
         let data_col_ix = col_ix - 1;
-        let value = self
+        let display_text = self
             .rows
             .get(actual_row_ix)
             .and_then(|row| row.get(data_col_ix))
-            .cloned()
+            .map(|v| v.display_for_table())
             .unwrap_or_default();
         div()
             .h_full()
@@ -107,7 +107,7 @@ impl TableViewerDelegate {
             .text_sm()
             .overflow_hidden()
             .text_ellipsis()
-            .child(value)
+            .child(display_text)
             .into_any_element()
     }
 
@@ -120,14 +120,17 @@ impl TableViewerDelegate {
 
         let data_col_ix = col_ix - 1;
 
-        if let Some(change) = self.pending_changes.get_cell_change(actual_row_ix, col_ix) {
+        if let Some(change) = self
+            .pending_changes
+            .get_cell_change(actual_row_ix, data_col_ix)
+        {
             return change.new_value.clone();
         }
 
         self.rows
             .get(actual_row_ix)
             .and_then(|row| row.get(data_col_ix))
-            .cloned()
+            .map(|v| v.display_for_table())
             .unwrap_or_default()
     }
 }

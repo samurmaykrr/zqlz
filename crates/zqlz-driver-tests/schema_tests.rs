@@ -43,13 +43,11 @@ mod tests {
     /// SchemaIntrospection, we need to create connections using the direct connection
     /// methods rather than going through the DatabaseDriver trait which returns
     /// Arc<dyn Connection> (which doesn't implement SchemaIntrospection).
-    async fn get_schema_introspection(
-        driver: TestDriver,
-    ) -> Result<Box<dyn SchemaIntrospection>> {
+    async fn get_schema_introspection(driver: TestDriver) -> Result<Box<dyn SchemaIntrospection>> {
         match driver {
             TestDriver::Postgres => {
                 use zqlz_driver_postgres::PostgresConnection;
-                
+
                 let conn = PostgresConnection::connect(
                     "localhost",
                     5433,
@@ -66,7 +64,7 @@ mod tests {
             }
             TestDriver::Mysql => {
                 use zqlz_driver_mysql::MySqlConnection;
-                
+
                 let conn = MySqlConnection::connect(
                     "localhost",
                     3307,
@@ -83,8 +81,9 @@ mod tests {
                 let template = sqlite_template_path()?;
                 let temp_dir = tempfile::tempdir().context("failed to create temp directory")?;
                 let database_path = temp_dir.path().join("sakila.db");
-                std::fs::copy(&template, &database_path)
-                    .with_context(|| format!("failed to copy SQLite template from {}", template.display()))?;
+                std::fs::copy(&template, &database_path).with_context(|| {
+                    format!("failed to copy SQLite template from {}", template.display())
+                })?;
                 let database_path = database_path
                     .to_str()
                     .context("invalid SQLite temp database path")?;
@@ -113,9 +112,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_list_databases(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let databases = schema_intr
             .list_databases()
@@ -143,9 +142,9 @@ mod tests {
     #[case::postgres(TestDriver::Postgres)]
     #[tokio::test]
     async fn test_database_exists_pagila(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let databases = schema_intr
             .list_databases()
@@ -168,9 +167,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_database_exists_sakila(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let databases = schema_intr
             .list_databases()
@@ -194,9 +193,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_database_not_exists(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let databases = schema_intr
             .list_databases()
@@ -224,9 +223,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_filter_system_databases(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let databases = schema_intr
             .list_databases()
@@ -270,9 +269,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_list_all_tables(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -310,9 +309,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_table_exists_actor(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -345,9 +344,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_table_exists_film(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -379,9 +378,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_table_not_exists(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -413,9 +412,9 @@ mod tests {
     #[case::postgres(TestDriver::Postgres)]
     #[tokio::test]
     async fn test_filter_by_schema_postgres_only(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // Query public schema
         let public_tables = schema_intr
@@ -470,9 +469,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_table_count_matches_expected_minimum(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -511,9 +510,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_system_tables_excluded(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -531,8 +530,8 @@ mod tests {
         let system_table_patterns = [
             "pg_", // PostgreSQL system tables
             "information_schema",
-            "mysql", // MySQL system database
-            "sys",   // MySQL system database
+            "mysql",   // MySQL system database
+            "sys",     // MySQL system database
             "sqlite_", // SQLite internal tables
         ];
 
@@ -575,7 +574,11 @@ mod tests {
 
         // Should succeed even on empty database
         // SQLite :memory: database starts with no user tables
-        assert_eq!(tables.len(), 0, "Expected empty table list for :memory: database");
+        assert_eq!(
+            tables.len(),
+            0,
+            "Expected empty table list for :memory: database"
+        );
 
         Ok(())
     }
@@ -593,9 +596,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_actor_list(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -639,9 +642,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_actor_types(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -678,7 +681,7 @@ mod tests {
         // first_name should be a string type (varchar, text, char, etc.)
         let first_name_type_lower = first_name_col.data_type.to_lowercase();
         assert!(
-            first_name_type_lower.contains("char") 
+            first_name_type_lower.contains("char")
                 || first_name_type_lower.contains("text")
                 || first_name_type_lower.contains("string"),
             "Expected first_name to be string type, got {}",
@@ -697,9 +700,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_actor_nullability(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -719,10 +722,7 @@ mod tests {
             .find(|c| c.name == "actor_id")
             .context("actor_id column not found")?;
 
-        assert!(
-            !actor_id_col.nullable,
-            "Expected actor_id to be NOT NULL"
-        );
+        assert!(!actor_id_col.nullable, "Expected actor_id to be NOT NULL");
 
         // first_name and last_name should be NOT NULL in Sakila/Pagila
         let first_name_col = columns
@@ -747,9 +747,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_actor_order(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -784,9 +784,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_film_list(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -808,7 +808,13 @@ mod tests {
         );
 
         // Verify some key columns exist
-        let key_columns = ["film_id", "title", "description", "release_year", "language_id"];
+        let key_columns = [
+            "film_id",
+            "title",
+            "description",
+            "release_year",
+            "language_id",
+        ];
         for expected_col in &key_columns {
             let found = columns.iter().any(|c| c.name == *expected_col);
             assert!(
@@ -830,9 +836,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_primary_key_actor(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -876,9 +882,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_columns_autoincrement_actor(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -915,8 +921,8 @@ mod tests {
         use zqlz_core::Connection;
         use zqlz_driver_sqlite::SqliteConnection;
 
-        let conn = SqliteConnection::open(":memory:")
-            .context("Failed to open SQLite connection")?;
+        let conn =
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?;
 
         // Create a test table
         let create_sql = "CREATE TABLE test_table (
@@ -925,7 +931,7 @@ mod tests {
             age INTEGER,
             created_at TEXT DEFAULT CURRENT_TIMESTAMP
         )";
-        
+
         conn.execute(create_sql, &[])
             .await
             .context("Failed to create test table")?;
@@ -985,7 +991,7 @@ mod tests {
     #[tokio::test]
     async fn test_pk_actor_single(#[case] driver: TestDriver) -> Result<()> {
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -998,10 +1004,17 @@ mod tests {
             .context("Failed to get primary key for actor table")?;
 
         assert!(pk.is_some(), "Expected actor table to have a primary key");
-        
+
         let pk = pk.unwrap();
-        assert_eq!(pk.columns.len(), 1, "Expected actor to have single-column primary key");
-        assert_eq!(pk.columns[0], "actor_id", "Expected primary key on actor_id column");
+        assert_eq!(
+            pk.columns.len(),
+            1,
+            "Expected actor to have single-column primary key"
+        );
+        assert_eq!(
+            pk.columns[0], "actor_id",
+            "Expected primary key on actor_id column"
+        );
 
         Ok(())
     }
@@ -1016,7 +1029,7 @@ mod tests {
     #[tokio::test]
     async fn test_pk_film_single(#[case] driver: TestDriver) -> Result<()> {
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -1029,10 +1042,17 @@ mod tests {
             .context("Failed to get primary key for film table")?;
 
         assert!(pk.is_some(), "Expected film table to have a primary key");
-        
+
         let pk = pk.unwrap();
-        assert_eq!(pk.columns.len(), 1, "Expected film to have single-column primary key");
-        assert_eq!(pk.columns[0], "film_id", "Expected primary key on film_id column");
+        assert_eq!(
+            pk.columns.len(),
+            1,
+            "Expected film to have single-column primary key"
+        );
+        assert_eq!(
+            pk.columns[0], "film_id",
+            "Expected primary key on film_id column"
+        );
 
         Ok(())
     }
@@ -1047,7 +1067,7 @@ mod tests {
     #[tokio::test]
     async fn test_pk_film_actor_composite(#[case] driver: TestDriver) -> Result<()> {
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -1059,11 +1079,18 @@ mod tests {
             .await
             .context("Failed to get primary key for film_actor table")?;
 
-        assert!(pk.is_some(), "Expected film_actor table to have a primary key");
-        
+        assert!(
+            pk.is_some(),
+            "Expected film_actor table to have a primary key"
+        );
+
         let pk = pk.unwrap();
-        assert_eq!(pk.columns.len(), 2, "Expected film_actor to have composite primary key");
-        
+        assert_eq!(
+            pk.columns.len(),
+            2,
+            "Expected film_actor to have composite primary key"
+        );
+
         // Verify both columns are present (order may vary by driver)
         assert!(
             pk.columns.contains(&"actor_id".to_string()),
@@ -1087,7 +1114,7 @@ mod tests {
     #[tokio::test]
     async fn test_pk_film_category_composite(#[case] driver: TestDriver) -> Result<()> {
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -1099,11 +1126,18 @@ mod tests {
             .await
             .context("Failed to get primary key for film_category table")?;
 
-        assert!(pk.is_some(), "Expected film_category table to have a primary key");
-        
+        assert!(
+            pk.is_some(),
+            "Expected film_category table to have a primary key"
+        );
+
         let pk = pk.unwrap();
-        assert_eq!(pk.columns.len(), 2, "Expected film_category to have composite primary key");
-        
+        assert_eq!(
+            pk.columns.len(),
+            2,
+            "Expected film_category to have composite primary key"
+        );
+
         // Verify both columns are present
         assert!(
             pk.columns.contains(&"film_id".to_string()),
@@ -1127,7 +1161,7 @@ mod tests {
     #[tokio::test]
     async fn test_pk_constraint_name(#[case] driver: TestDriver) -> Result<()> {
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -1140,18 +1174,21 @@ mod tests {
             .context("Failed to get primary key for actor table")?;
 
         assert!(pk.is_some(), "Expected actor table to have a primary key");
-        
+
         let pk = pk.unwrap();
-        
+
         // Primary key constraint name may or may not be available depending on driver
         // Just verify that we can access the field - it might be None for some drivers
         if let Some(name) = &pk.name {
-            assert!(!name.is_empty(), "Primary key constraint name should not be empty string");
-            
+            assert!(
+                !name.is_empty(),
+                "Primary key constraint name should not be empty string"
+            );
+
             // PostgreSQL typically names constraints like "actor_pkey"
             // MySQL might use "PRIMARY"
             // SQLite often doesn't provide constraint names
-            
+
             // For now, just ensure if a name is provided, it's reasonable
             match driver {
                 TestDriver::Postgres => {
@@ -1182,9 +1219,9 @@ mod tests {
     #[tokio::test]
     async fn test_pk_no_primary_key(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::Connection;
-        
+
         let introspection = get_schema_introspection(driver).await?;
-        
+
         let schema = if driver == TestDriver::Postgres {
             Some("public")
         } else {
@@ -1193,18 +1230,21 @@ mod tests {
 
         // Create a temporary table without primary key
         let create_sql = "CREATE TEMPORARY TABLE temp_no_pk (id INTEGER, name TEXT)";
-        
+
         // We need to execute on the connection, but introspection is Box<dyn SchemaIntrospection>
         // For this test, we'll try to query for a view which typically doesn't have a PK
         // Views in Sakila: actor_info, film_list, customer_list, etc.
-        
+
         // Actually, views don't have primary keys, so we can test with actor_info view
         let pk = introspection
             .get_primary_key(schema, "actor_info")
             .await
             .context("Failed to get primary key for actor_info view")?;
 
-        assert!(pk.is_none(), "Expected actor_info view to have no primary key");
+        assert!(
+            pk.is_none(),
+            "Expected actor_info view to have no primary key"
+        );
 
         Ok(())
     }
@@ -1218,15 +1258,15 @@ mod tests {
         use zqlz_core::Connection;
         use zqlz_driver_sqlite::SqliteConnection;
 
-        let conn = SqliteConnection::open(":memory:")
-            .context("Failed to open SQLite connection")?;
+        let conn =
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?;
 
         // Create a test table with single-column PK
         let create_sql = "CREATE TABLE test_pk_single (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL
         )";
-        
+
         conn.execute(create_sql, &[])
             .await
             .context("Failed to create test table")?;
@@ -1237,8 +1277,11 @@ mod tests {
             .await
             .context("Failed to get primary key")?;
 
-        assert!(pk.is_some(), "Expected test_pk_single to have a primary key");
-        
+        assert!(
+            pk.is_some(),
+            "Expected test_pk_single to have a primary key"
+        );
+
         let pk = pk.unwrap();
         assert_eq!(pk.columns.len(), 1, "Expected single-column primary key");
         assert_eq!(pk.columns[0], "id", "Expected primary key on id column");
@@ -1250,7 +1293,7 @@ mod tests {
             assigned_at TEXT,
             PRIMARY KEY (user_id, role_id)
         )";
-        
+
         conn.execute(create_composite_sql, &[])
             .await
             .context("Failed to create composite PK table")?;
@@ -1261,16 +1304,29 @@ mod tests {
             .await
             .context("Failed to get composite primary key")?;
 
-        assert!(pk.is_some(), "Expected test_pk_composite to have a primary key");
-        
+        assert!(
+            pk.is_some(),
+            "Expected test_pk_composite to have a primary key"
+        );
+
         let pk = pk.unwrap();
-        assert_eq!(pk.columns.len(), 2, "Expected composite primary key with 2 columns");
-        assert!(pk.columns.contains(&"user_id".to_string()), "Expected user_id in PK");
-        assert!(pk.columns.contains(&"role_id".to_string()), "Expected role_id in PK");
+        assert_eq!(
+            pk.columns.len(),
+            2,
+            "Expected composite primary key with 2 columns"
+        );
+        assert!(
+            pk.columns.contains(&"user_id".to_string()),
+            "Expected user_id in PK"
+        );
+        assert!(
+            pk.columns.contains(&"role_id".to_string()),
+            "Expected role_id in PK"
+        );
 
         // Create a table without PK
         let create_no_pk_sql = "CREATE TABLE test_no_pk (id INTEGER, name TEXT)";
-        
+
         conn.execute(create_no_pk_sql, &[])
             .await
             .context("Failed to create no-PK table")?;
@@ -1344,7 +1400,11 @@ mod tests {
             .find(|fk| fk.referenced_table == "film")
             .context("Expected foreign key to film table")?;
 
-        assert_eq!(film_fk.columns.len(), 1, "Expected single column FK to film");
+        assert_eq!(
+            film_fk.columns.len(),
+            1,
+            "Expected single column FK to film"
+        );
         assert_eq!(film_fk.columns[0], "film_id");
         assert_eq!(film_fk.referenced_columns.len(), 1);
         assert_eq!(film_fk.referenced_columns[0], "film_id");
@@ -1673,7 +1733,7 @@ mod tests {
             // Just verify that these fields exist and have valid values
             // The actual values depend on the Sakila/Pagila schema definition
             // which may vary across databases
-            
+
             // on_delete should be one of the valid actions
             let valid_on_delete = matches!(
                 fk.on_delete,
@@ -1785,8 +1845,8 @@ mod tests {
         use zqlz_core::Connection;
         use zqlz_driver_sqlite::SqliteConnection;
 
-        let conn = SqliteConnection::open(":memory:")
-            .context("Failed to open SQLite connection")?;
+        let conn =
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?;
 
         // Enable foreign key support in SQLite
         conn.execute("PRAGMA foreign_keys = ON", &[])
@@ -1798,7 +1858,7 @@ mod tests {
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             name TEXT NOT NULL
         )";
-        
+
         conn.execute(create_parent_sql, &[])
             .await
             .context("Failed to create parent table")?;
@@ -1810,7 +1870,7 @@ mod tests {
             value TEXT,
             FOREIGN KEY (parent_id) REFERENCES parent(id) ON DELETE CASCADE ON UPDATE CASCADE
         )";
-        
+
         conn.execute(create_child_sql, &[])
             .await
             .context("Failed to create child table")?;
@@ -1822,14 +1882,14 @@ mod tests {
             .context("Failed to get foreign keys")?;
 
         assert_eq!(fks.len(), 1, "Expected 1 foreign key on child table");
-        
+
         let fk = &fks[0];
         assert_eq!(fk.columns.len(), 1);
         assert_eq!(fk.columns[0], "parent_id");
         assert_eq!(fk.referenced_table, "parent");
         assert_eq!(fk.referenced_columns.len(), 1);
         assert_eq!(fk.referenced_columns[0], "id");
-        
+
         // Verify ON DELETE and ON UPDATE actions
         assert_eq!(fk.on_delete, zqlz_core::ForeignKeyAction::Cascade);
         assert_eq!(fk.on_update, zqlz_core::ForeignKeyAction::Cascade);
@@ -1840,7 +1900,11 @@ mod tests {
             .await
             .context("Failed to get foreign keys for parent")?;
 
-        assert_eq!(parent_fks.len(), 0, "Expected parent table to have no foreign keys");
+        assert_eq!(
+            parent_fks.len(),
+            0,
+            "Expected parent table to have no foreign keys"
+        );
 
         Ok(())
     }
@@ -1859,9 +1923,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_indexes_list_for_film(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -1906,9 +1970,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_index_unique_actor_primary_key(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -1950,9 +2014,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_index_composite_film_actor_primary_key(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -2009,9 +2073,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_index_columns_payment_foreign_keys(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -2053,9 +2117,7 @@ mod tests {
                 // Note: Some drivers might use lowercase, some uppercase
                 let col_lower = col.to_lowercase();
                 assert!(
-                    valid_columns
-                        .iter()
-                        .any(|v| v.to_lowercase() == col_lower),
+                    valid_columns.iter().any(|v| v.to_lowercase() == col_lower),
                     "Index column {} not found in payment table",
                     col
                 );
@@ -2074,9 +2136,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_index_type_reported(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -2123,9 +2185,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_index_non_unique_idx_last_name(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let schema = match driver {
             TestDriver::Postgres => Some("public"),
@@ -2210,10 +2272,7 @@ mod tests {
             .find(|idx| idx.name == "idx_name")
             .context("idx_name index not found")?;
 
-        assert!(
-            !name_index.is_unique,
-            "idx_name should be non-unique index"
-        );
+        assert!(!name_index.is_unique, "idx_name should be non-unique index");
         assert_eq!(name_index.columns.len(), 1);
         assert_eq!(name_index.columns[0], "name");
 
@@ -2254,9 +2313,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_views_list(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let views = schema_intr
             .list_views(None)
@@ -2280,16 +2339,17 @@ mod tests {
 
         // Common views that should exist in Sakila/Pagila
         let view_names: Vec<&str> = views.iter().map(|v| v.name.as_str()).collect();
-        
+
         // Check for at least one expected view
         let expected_views = ["actor_info", "film_list", "customer_list"];
-        let found = expected_views.iter().any(|expected| view_names.contains(expected));
-        
+        let found = expected_views
+            .iter()
+            .any(|expected| view_names.contains(expected));
+
         assert!(
             found,
             "Expected to find at least one of {:?} in views list: {:?}",
-            expected_views,
-            view_names
+            expected_views, view_names
         );
 
         Ok(())
@@ -2305,9 +2365,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_view_definition_actor_info(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         let views = schema_intr
             .list_views(None)
@@ -2322,7 +2382,10 @@ mod tests {
 
         // Check that definition exists (may be None for some drivers)
         if let Some(definition) = &actor_info.definition {
-            assert!(!definition.is_empty(), "View definition should not be empty");
+            assert!(
+                !definition.is_empty(),
+                "View definition should not be empty"
+            );
             // Definition should contain SQL keywords
             let def_lower = definition.to_lowercase();
             assert!(
@@ -2353,9 +2416,9 @@ mod tests {
         use zqlz_core::Connection;
 
         // Get connection (not schema introspection) to run queries
-        let conn = crate::fixtures::test_connection(driver).await.context(
-            "Failed to get connection. Run: ./manage-test-env.sh up",
-        )?;
+        let conn = crate::fixtures::test_connection(driver)
+            .await
+            .context("Failed to get connection. Run: ./manage-test-env.sh up")?;
 
         // Query the actor_info view
         let result = conn
@@ -2371,7 +2434,7 @@ mod tests {
 
         // Verify columns exist
         let column_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-        
+
         // actor_info view should have these columns (common across Sakila/Pagila)
         assert!(
             column_names.contains(&"actor_id"),
@@ -2401,9 +2464,9 @@ mod tests {
     async fn test_view_query_film_list(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::Connection;
 
-        let conn = crate::fixtures::test_connection(driver).await.context(
-            "Failed to get connection. Run: ./manage-test-env.sh up",
-        )?;
+        let conn = crate::fixtures::test_connection(driver)
+            .await
+            .context("Failed to get connection. Run: ./manage-test-env.sh up")?;
 
         // Query the film_list view with WHERE clause
         let result = conn
@@ -2420,7 +2483,7 @@ mod tests {
 
         // Verify columns exist
         let column_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-        
+
         // film_list view should have these columns
         assert!(
             column_names.contains(&"title"),
@@ -2444,9 +2507,9 @@ mod tests {
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
     async fn test_view_columns_customer_list(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // Get columns for customer_list view
         let columns = schema_intr
@@ -2462,7 +2525,7 @@ mod tests {
 
         // customer_list view should have these columns (common across Sakila/Pagila)
         let column_names: Vec<&str> = columns.iter().map(|c| c.name.as_str()).collect();
-        
+
         assert!(
             column_names.contains(&"id"),
             "customer_list should have id column"
@@ -2496,9 +2559,9 @@ mod tests {
     async fn test_view_query_sales_by_store(#[case] driver: TestDriver) -> Result<()> {
         use zqlz_core::Connection;
 
-        let conn = crate::fixtures::test_connection(driver).await.context(
-            "Failed to get connection. Run: ./manage-test-env.sh up",
-        )?;
+        let conn = crate::fixtures::test_connection(driver)
+            .await
+            .context("Failed to get connection. Run: ./manage-test-env.sh up")?;
 
         // Query the sales_by_store view
         let result = conn
@@ -2512,7 +2575,7 @@ mod tests {
 
         // Verify columns exist
         let column_names: Vec<&str> = result.columns.iter().map(|c| c.name.as_str()).collect();
-        
+
         // sales_by_store view should have store and total_sales columns
         assert!(
             column_names.contains(&"store"),
@@ -2536,8 +2599,8 @@ mod tests {
         use zqlz_driver_sqlite::SqliteConnection;
 
         // Create in-memory SQLite connection
-        let conn = SqliteConnection::open(":memory:")
-            .context("Failed to open SQLite connection")?;
+        let conn =
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?;
 
         // Create a test table
         conn.execute(
@@ -2548,9 +2611,12 @@ mod tests {
         .context("Failed to create test table")?;
 
         // Create a test view
-        conn.execute("CREATE VIEW test_view AS SELECT id, name FROM test_table", &[])
-            .await
-            .context("Failed to create test view")?;
+        conn.execute(
+            "CREATE VIEW test_view AS SELECT id, name FROM test_table",
+            &[],
+        )
+        .await
+        .context("Failed to create test view")?;
 
         // List views
         let views = conn
@@ -2572,11 +2638,7 @@ mod tests {
             .await
             .context("Failed to query test view")?;
 
-        assert_eq!(
-            result.columns.len(),
-            2,
-            "test_view should have 2 columns"
-        );
+        assert_eq!(result.columns.len(), 2, "test_view should have 2 columns");
 
         Ok(())
     }
@@ -2594,16 +2656,16 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_proc_list(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // List procedures before creating test procedure
         let procedures_before = schema_intr
             .list_procedures(None)
             .await
             .context("Failed to list procedures")?;
-        
+
         let initial_count = procedures_before.len();
 
         Ok(())
@@ -2618,9 +2680,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_proc_create_and_call(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // Get the underlying connection for executing SQL
         let conn: &dyn zqlz_core::Connection = match driver {
@@ -2692,8 +2754,10 @@ mod tests {
             .context("Failed to list procedures after creation")?;
 
         let proc_name = "test_proc_add";
-        let has_proc = procedures.iter().any(|p| p.name.to_lowercase() == proc_name);
-        
+        let has_proc = procedures
+            .iter()
+            .any(|p| p.name.to_lowercase() == proc_name);
+
         // Note: We don't assert here because some drivers might not immediately
         // reflect the procedure in the list, or the test might run in a different schema
         if !has_proc {
@@ -2723,7 +2787,10 @@ mod tests {
         // For PostgreSQL, verify the result
         if matches!(driver, TestDriver::Postgres) {
             let result = call_result?;
-            assert!(!result.rows.is_empty(), "Expected result from function call");
+            assert!(
+                !result.rows.is_empty(),
+                "Expected result from function call"
+            );
             let first_row = &result.rows[0];
             let value = first_row
                 .get_by_name("result")
@@ -2758,9 +2825,9 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[tokio::test]
     async fn test_proc_drop_cleanup(#[case] driver: TestDriver) -> Result<()> {
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // Get the underlying connection for executing SQL
         let conn: &dyn zqlz_core::Connection = match driver {
@@ -2854,8 +2921,7 @@ mod tests {
 
         // Create in-memory SQLite connection
         let conn: Box<dyn Connection> = Box::new(
-            SqliteConnection::open(":memory:")
-                .context("Failed to open SQLite connection")?,
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?,
         );
 
         // SQLite doesn't support stored procedures, but we can verify the connection works
@@ -2865,11 +2931,7 @@ mod tests {
             .context("Failed to execute basic query")?;
 
         assert_eq!(result.rows.len(), 1, "Expected one row from SELECT 1");
-        assert_eq!(
-            result.columns.len(),
-            1,
-            "Expected one column from SELECT 1"
-        );
+        assert_eq!(result.columns.len(), 1, "Expected one column from SELECT 1");
 
         Ok(())
     }
@@ -2891,14 +2953,14 @@ mod tests {
             return Ok(());
         }
 
-        let schema_intr = get_schema_introspection(driver).await.context(
-            "Failed to get schema introspection. Run: ./manage-test-env.sh up",
-        )?;
+        let schema_intr = get_schema_introspection(driver)
+            .await
+            .context("Failed to get schema introspection. Run: ./manage-test-env.sh up")?;
 
         // Get connection for executing SQL
         use zqlz_core::Connection;
         use zqlz_driver_postgres::PostgresConnection;
-        
+
         let conn = PostgresConnection::connect(
             "localhost",
             5433,
@@ -2963,7 +3025,7 @@ mod tests {
 
         use zqlz_core::Connection;
         use zqlz_driver_postgres::PostgresConnection;
-        
+
         let conn = PostgresConnection::connect(
             "localhost",
             5433,
@@ -3034,7 +3096,7 @@ mod tests {
 
         use zqlz_core::Connection;
         use zqlz_driver_postgres::PostgresConnection;
-        
+
         let conn = PostgresConnection::connect(
             "localhost",
             5433,
@@ -3064,11 +3126,7 @@ mod tests {
             .await
             .context("Failed to query materialized view before insert")?;
 
-        assert_eq!(
-            result_before.rows.len(),
-            0,
-            "Expected 0 rows initially"
-        );
+        assert_eq!(result_before.rows.len(), 0, "Expected 0 rows initially");
 
         // Insert a test actor
         conn.execute(
@@ -3119,9 +3177,12 @@ mod tests {
         assert_eq!(first_name, "TEST_REFRESH", "Expected first_name to match");
 
         // Cleanup: Drop materialized view and delete test actor
-        conn.execute("DROP MATERIALIZED VIEW IF EXISTS test_mat_view_refresh", &[])
-            .await
-            .context("Failed to drop materialized view")?;
+        conn.execute(
+            "DROP MATERIALIZED VIEW IF EXISTS test_mat_view_refresh",
+            &[],
+        )
+        .await
+        .context("Failed to drop materialized view")?;
 
         conn.execute("DELETE FROM actor WHERE actor_id = 99991", &[])
             .await
@@ -3145,7 +3206,7 @@ mod tests {
 
         use zqlz_core::Connection;
         use zqlz_driver_postgres::PostgresConnection;
-        
+
         let conn = PostgresConnection::connect(
             "localhost",
             5433,
@@ -3177,7 +3238,10 @@ mod tests {
 
         // Drop the materialized view
         let drop_result = conn
-            .execute("DROP MATERIALIZED VIEW IF EXISTS test_mat_view_cleanup", &[])
+            .execute(
+                "DROP MATERIALIZED VIEW IF EXISTS test_mat_view_cleanup",
+                &[],
+            )
             .await;
 
         // Should succeed without error
@@ -3202,8 +3266,7 @@ mod tests {
         use zqlz_driver_sqlite::SqliteConnection;
 
         let conn: Box<dyn Connection> = Box::new(
-            SqliteConnection::open(":memory:")
-                .context("Failed to open SQLite connection")?,
+            SqliteConnection::open(":memory:").context("Failed to open SQLite connection")?,
         );
 
         // SQLite doesn't support materialized views, but we can verify connection works
@@ -3213,11 +3276,7 @@ mod tests {
             .context("Failed to execute basic query")?;
 
         assert_eq!(result.rows.len(), 1, "Expected one row from SELECT 1");
-        assert_eq!(
-            result.columns.len(),
-            1,
-            "Expected one column from SELECT 1"
-        );
+        assert_eq!(result.columns.len(), 1, "Expected one column from SELECT 1");
 
         Ok(())
     }

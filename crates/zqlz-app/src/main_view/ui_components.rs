@@ -5,11 +5,11 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, Sizable, TitleBar, ZqlzIcon,
     animation::cubic_bezier,
     button::{Button, ButtonVariants},
     caption, h_flex,
     tooltip::Tooltip,
-    ActiveTheme, Icon, Sizable, TitleBar, ZqlzIcon,
 };
 
 use crate::actions::NewQuery;

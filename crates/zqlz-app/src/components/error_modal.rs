@@ -6,8 +6,9 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, IconName, Sizable, StyledExt,
     button::{Button, ButtonVariants},
-    h_flex, v_flex, ActiveTheme, Icon, IconName, Sizable, StyledExt,
+    h_flex, v_flex,
 };
 
 /// Data for displaying in the error modal

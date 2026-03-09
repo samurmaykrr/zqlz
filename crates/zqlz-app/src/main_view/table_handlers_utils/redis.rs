@@ -3,8 +3,8 @@
 //! This module provides functions for working with Redis data types,
 //! parsing TTL values, and fetching Redis key values.
 
-use std::sync::Arc;
 use crate::components::RedisValueType;
+use std::sync::Arc;
 
 /// Parse human-readable TTL string (e.g., "30s", "5m 30s", "1h 15m") into seconds
 pub(in crate::main_view) fn parse_human_readable_ttl(ttl_str: &str) -> Option<i64> {

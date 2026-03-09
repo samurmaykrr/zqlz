@@ -49,19 +49,9 @@ pub use dialect_config::{
 };
 // Re-export dialects module
 pub use dialects::{
-    BracketCapability,
-    DialectProfile,
-    DialectRegistry,
-    FoldingCapability,
-    FormatterCapability,
-    ParserCapability,
-    SqlDialect,
-    TreeSitterGrammar,
-    ValidationError,
-    get_dialect_profile,
-    get_sql_dialect,
-    is_sql_driver,
-    DIALECT_REGISTRY,
+    BracketCapability, DIALECT_REGISTRY, DialectProfile, DialectRegistry, FoldingCapability,
+    FormatterCapability, ParserCapability, SqlDialect, TreeSitterGrammar, ValidationError,
+    get_dialect_profile, get_sql_dialect, is_sql_driver,
 };
 pub use driver::*;
 pub use error::*;

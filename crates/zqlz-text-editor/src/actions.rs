@@ -1,4 +1,4 @@
-use gpui::{actions, App, KeyBinding};
+use gpui::{App, KeyBinding, actions};
 
 actions!(
     editor,

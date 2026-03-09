@@ -13,7 +13,7 @@
 //! - Multiple concurrent connections
 //! - Connection reuse
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::Result;
 use rstest::rstest;
 use std::time::Duration;
@@ -59,8 +59,7 @@ async fn test_connect_with_invalid_credentials(#[case] driver: TestDriver) -> Re
             PostgresDriver::new().connect(&config).await
         }
         TestDriver::Mysql => {
-            let mut config =
-                ConnectionConfig::new_mysql("127.0.0.1", 3307, "sakila", "wrong_user");
+            let mut config = ConnectionConfig::new_mysql("127.0.0.1", 3307, "sakila", "wrong_user");
             config.password = Some("wrong_password".to_string());
             MySqlDriver::new().connect(&config).await
         }
@@ -173,12 +172,8 @@ async fn test_connect_with_invalid_port(#[case] driver: TestDriver) -> Result<()
 async fn test_connect_with_invalid_database(#[case] driver: TestDriver) -> Result<()> {
     let result = match driver {
         TestDriver::Postgres => {
-            let mut config = ConnectionConfig::new_postgres(
-                "127.0.0.1",
-                5433,
-                "nonexistent_db",
-                "test_user",
-            );
+            let mut config =
+                ConnectionConfig::new_postgres("127.0.0.1", 5433, "nonexistent_db", "test_user");
             config.password = Some("test_password".to_string());
             PostgresDriver::new().connect(&config).await
         }

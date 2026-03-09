@@ -4,7 +4,7 @@
 //! and reserved keywords. These tests ensure that drivers properly escape
 //! and handle potentially problematic characters in data and identifiers.
 
-use crate::fixtures::{test_connection, TestDriver};
+use crate::fixtures::{TestDriver, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 use zqlz_core::{Connection, Value};
@@ -90,13 +90,13 @@ async fn test_special_quotes_in_string(#[case] driver: TestDriver) -> Result<()>
 
     // Test various quote scenarios
     let test_strings = vec![
-        "It's a test",                           // Single quote
-        r#"He said "hello""#,                   // Double quotes
-        r#"It's "complex" text"#,               // Both quotes
-        "Multiple '' single quotes",            // Escaped singles
-        r#"Multiple "" double quotes"#,         // Double doubles
-        "'Start and end with single'",          // Quotes at edges
-        r#""Start and end with double""#,       // Double at edges
+        "It's a test",                    // Single quote
+        r#"He said "hello""#,             // Double quotes
+        r#"It's "complex" text"#,         // Both quotes
+        "Multiple '' single quotes",      // Escaped singles
+        r#"Multiple "" double quotes"#,   // Double doubles
+        "'Start and end with single'",    // Quotes at edges
+        r#""Start and end with double""#, // Double at edges
     ];
 
     for (idx, test_str) in test_strings.iter().enumerate() {
@@ -105,7 +105,10 @@ async fn test_special_quotes_in_string(#[case] driver: TestDriver) -> Result<()>
             conn.as_ref(),
             driver,
             insert_sql,
-            &[Value::Int64((idx + 1) as i64), Value::String(test_str.to_string())],
+            &[
+                Value::Int64((idx + 1) as i64),
+                Value::String(test_str.to_string()),
+            ],
         )
         .await?;
 
@@ -120,8 +123,7 @@ async fn test_special_quotes_in_string(#[case] driver: TestDriver) -> Result<()>
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("data")
             .and_then(|v| v.as_str())
             .context("Failed to get data as string")?;
@@ -166,13 +168,13 @@ async fn test_special_backslash_in_string(#[case] driver: TestDriver) -> Result<
 
     // Test backslash scenarios
     let test_strings = vec![
-        r"C:\Windows\System32",              // Windows path
-        r"C:\Users\John's Folder",          // Path with quote
-        r"Line with \ backslash",           // Mid-string backslash
-        r"\\network\share",                 // UNC path
-        r"\t\n\r",                         // Escape sequences as literals
-        r"End with backslash\",            // Trailing backslash
-        r"\Start with backslash",          // Leading backslash
+        r"C:\Windows\System32",    // Windows path
+        r"C:\Users\John's Folder", // Path with quote
+        r"Line with \ backslash",  // Mid-string backslash
+        r"\\network\share",        // UNC path
+        r"\t\n\r",                 // Escape sequences as literals
+        r"End with backslash\",    // Trailing backslash
+        r"\Start with backslash",  // Leading backslash
     ];
 
     for (idx, test_str) in test_strings.iter().enumerate() {
@@ -181,7 +183,10 @@ async fn test_special_backslash_in_string(#[case] driver: TestDriver) -> Result<
             conn.as_ref(),
             driver,
             insert_sql,
-            &[Value::Int64((idx + 1) as i64), Value::String(test_str.to_string())],
+            &[
+                Value::Int64((idx + 1) as i64),
+                Value::String(test_str.to_string()),
+            ],
         )
         .await?;
 
@@ -196,13 +201,15 @@ async fn test_special_backslash_in_string(#[case] driver: TestDriver) -> Result<
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("data")
             .and_then(|v| v.as_str())
             .context("Failed to get data as string")?;
 
-        assert_eq!(retrieved, *test_str, "Backslash string should match exactly");
+        assert_eq!(
+            retrieved, *test_str,
+            "Backslash string should match exactly"
+        );
     }
 
     Ok(())
@@ -242,16 +249,16 @@ async fn test_special_unicode_string(#[case] driver: TestDriver) -> Result<()> {
 
     // Test various Unicode scenarios
     let test_strings = vec![
-        "Hello 世界",                          // Chinese characters
-        "Привет мир",                         // Cyrillic
-        "مرحبا بالعالم",                      // Arabic (RTL)
-        "こんにちは世界",                      // Japanese
-        "🎉🚀💯",                              // Emojis
-        "Café résumé naïve",                 // Accented Latin
-        "Greek: Ω α β γ",                    // Greek letters
-        "Math: ∑∫∂√∞",                       // Mathematical symbols
-        "Currency: €£¥₹",                    // Currency symbols
-        "Mixed: Hello世界🚀Привет",           // Mixed scripts
+        "Hello 世界",               // Chinese characters
+        "Привет мир",               // Cyrillic
+        "مرحبا بالعالم",            // Arabic (RTL)
+        "こんにちは世界",           // Japanese
+        "🎉🚀💯",                   // Emojis
+        "Café résumé naïve",        // Accented Latin
+        "Greek: Ω α β γ",           // Greek letters
+        "Math: ∑∫∂√∞",              // Mathematical symbols
+        "Currency: €£¥₹",           // Currency symbols
+        "Mixed: Hello世界🚀Привет", // Mixed scripts
     ];
 
     for (idx, test_str) in test_strings.iter().enumerate() {
@@ -260,7 +267,10 @@ async fn test_special_unicode_string(#[case] driver: TestDriver) -> Result<()> {
             conn.as_ref(),
             driver,
             insert_sql,
-            &[Value::Int64((idx + 1) as i64), Value::String(test_str.to_string())],
+            &[
+                Value::Int64((idx + 1) as i64),
+                Value::String(test_str.to_string()),
+            ],
         )
         .await?;
 
@@ -275,8 +285,7 @@ async fn test_special_unicode_string(#[case] driver: TestDriver) -> Result<()> {
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("data")
             .and_then(|v| v.as_str())
             .context("Failed to get data as string")?;
@@ -321,15 +330,15 @@ async fn test_special_newlines_tabs(#[case] driver: TestDriver) -> Result<()> {
 
     // Test whitespace scenarios
     let test_strings = vec![
-        "Line 1\nLine 2",                   // Newline
-        "Line 1\r\nLine 2",                 // Windows CRLF
-        "Tab\there",                        // Tab character
-        "Multiple\n\nNewlines",             // Multiple newlines
-        "  Leading spaces",                 // Leading spaces
-        "Trailing spaces  ",                // Trailing spaces
-        "\tTab start",                      // Leading tab
-        "Tab end\t",                        // Trailing tab
-        "Mixed\t\n\r spaces",               // Multiple whitespace types
+        "Line 1\nLine 2",       // Newline
+        "Line 1\r\nLine 2",     // Windows CRLF
+        "Tab\there",            // Tab character
+        "Multiple\n\nNewlines", // Multiple newlines
+        "  Leading spaces",     // Leading spaces
+        "Trailing spaces  ",    // Trailing spaces
+        "\tTab start",          // Leading tab
+        "Tab end\t",            // Trailing tab
+        "Mixed\t\n\r spaces",   // Multiple whitespace types
     ];
 
     for (idx, test_str) in test_strings.iter().enumerate() {
@@ -338,7 +347,10 @@ async fn test_special_newlines_tabs(#[case] driver: TestDriver) -> Result<()> {
             conn.as_ref(),
             driver,
             insert_sql,
-            &[Value::Int64((idx + 1) as i64), Value::String(test_str.to_string())],
+            &[
+                Value::Int64((idx + 1) as i64),
+                Value::String(test_str.to_string()),
+            ],
         )
         .await?;
 
@@ -353,8 +365,7 @@ async fn test_special_newlines_tabs(#[case] driver: TestDriver) -> Result<()> {
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("data")
             .and_then(|v| v.as_str())
             .context("Failed to get data as string")?;
@@ -419,13 +430,13 @@ async fn test_special_sql_injection_attempt(#[case] driver: TestDriver) -> Resul
 
     // Attempt various SQL injection patterns (these should be treated as literal strings)
     let injection_attempts = vec![
-        "' OR '1'='1",                                    // Classic injection
-        "'; DROP TABLE injection_test; --",              // Table drop
-        "admin'--",                                       // Comment out rest
-        "1' UNION SELECT * FROM injection_test--",       // Union attack
-        "' OR 1=1--",                                     // Boolean bypass
-        "'; DELETE FROM injection_test WHERE '1'='1",    // Delete attack
-        "\\'; DROP TABLE injection_test;--",             // Escaped quote
+        "' OR '1'='1",                                // Classic injection
+        "'; DROP TABLE injection_test; --",           // Table drop
+        "admin'--",                                   // Comment out rest
+        "1' UNION SELECT * FROM injection_test--",    // Union attack
+        "' OR 1=1--",                                 // Boolean bypass
+        "'; DELETE FROM injection_test WHERE '1'='1", // Delete attack
+        "\\'; DROP TABLE injection_test;--",          // Escaped quote
     ];
 
     for (idx, injection_str) in injection_attempts.iter().enumerate() {
@@ -445,18 +456,11 @@ async fn test_special_sql_injection_attempt(#[case] driver: TestDriver) -> Resul
 
         // Verify the injection string is stored as literal text
         let select_sql = "SELECT username FROM injection_test WHERE id = $1";
-        let result = query_sql(
-            conn.as_ref(),
-            driver,
-            select_sql,
-            &[Value::Int64(id)],
-        )
-        .await?;
+        let result = query_sql(conn.as_ref(), driver, select_sql, &[Value::Int64(id)]).await?;
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("username")
             .and_then(|v| v.as_str())
             .context("Failed to get username as string")?;
@@ -471,8 +475,7 @@ async fn test_special_sql_injection_attempt(#[case] driver: TestDriver) -> Resul
     let count_sql = "SELECT COUNT(*) as cnt FROM injection_test";
     let result = query_sql(conn.as_ref(), driver, count_sql, &[]).await?;
 
-    let count = result
-        .rows[0]
+    let count = result.rows[0]
         .get_by_name("cnt")
         .and_then(|v| v.as_i64())
         .context("Failed to get count")?;
@@ -527,9 +530,7 @@ async fn test_special_reserved_keyword_identifier(#[case] driver: TestDriver) ->
         TestDriver::Postgres => {
             r#"INSERT INTO "select" ("order", "where", "group") VALUES ($1, $2, $3)"#
         }
-        TestDriver::Mysql => {
-            r#"INSERT INTO `select` (`order`, `where`, `group`) VALUES (?, ?, ?)"#
-        }
+        TestDriver::Mysql => r#"INSERT INTO `select` (`order`, `where`, `group`) VALUES (?, ?, ?)"#,
         TestDriver::Sqlite => {
             r#"INSERT INTO "select" ("order", "where", "group") VALUES (?, ?, ?)"#
         }
@@ -551,7 +552,9 @@ async fn test_special_reserved_keyword_identifier(#[case] driver: TestDriver) ->
 
     // Query using reserved keyword identifiers
     let select_sql = match driver {
-        TestDriver::Postgres => r#"SELECT "order", "where", "group" FROM "select" WHERE "order" = $1"#,
+        TestDriver::Postgres => {
+            r#"SELECT "order", "where", "group" FROM "select" WHERE "order" = $1"#
+        }
         TestDriver::Mysql => r#"SELECT `order`, `where`, `group` FROM `select` WHERE `order` = ?"#,
         TestDriver::Sqlite => r#"SELECT "order", "where", "group" FROM "select" WHERE "order" = ?"#,
         _ => unreachable!(),
@@ -564,20 +567,17 @@ async fn test_special_reserved_keyword_identifier(#[case] driver: TestDriver) ->
 
     assert_eq!(query_result.rows.len(), 1, "Should retrieve one row");
 
-    let order_val = query_result
-        .rows[0]
+    let order_val = query_result.rows[0]
         .get_by_name("order")
         .and_then(|v| v.as_i64())
         .context("Failed to get order value")?;
 
-    let where_val = query_result
-        .rows[0]
+    let where_val = query_result.rows[0]
         .get_by_name("where")
         .and_then(|v| v.as_str())
         .context("Failed to get where value")?;
 
-    let group_val = query_result
-        .rows[0]
+    let group_val = query_result.rows[0]
         .get_by_name("group")
         .and_then(|v| v.as_str())
         .context("Failed to get group value")?;
@@ -630,8 +630,7 @@ And SQL: '; DROP TABLE--"#;
 
         assert_eq!(result.rows.len(), 1, "Should retrieve one row");
 
-        let retrieved = result
-            .rows[0]
+        let retrieved = result.rows[0]
             .get_by_name("data")
             .and_then(|v| v.as_str())
             .context("Failed to get data as string")?;

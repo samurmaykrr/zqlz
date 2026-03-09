@@ -33,8 +33,8 @@ pub mod find_replace_panel;
 pub mod folding;
 pub mod formatter;
 
-use gpui::*;
 use gpui::prelude::FluentBuilder as _;
+use gpui::*;
 use std::sync::Arc;
 
 const DEFAULT_LARGE_FILE_LINE_THRESHOLD: usize = 20_000;
@@ -955,7 +955,9 @@ impl TextEditor {
 
             // Also delete the matching closer if we were between a bracket pair.
             if delete_closer {
-                let closer = opener.and_then(|ch| Self::bracket_closer(ch)).expect("checked above");
+                let closer = opener
+                    .and_then(|ch| Self::bracket_closer(ch))
+                    .expect("checked above");
                 let closer_end = prev_offset + closer.len_utf8();
                 if self.buffer.delete(prev_offset..closer_end).is_ok() {
                     if let Some(change) = self.buffer.changes().last() {
@@ -2765,11 +2767,19 @@ impl TextEditor {
             let remove_count = if line_text.starts_with('\t') {
                 1
             } else {
-                line_text.chars().take(indent_size).take_while(|&c| c == ' ').count()
+                line_text
+                    .chars()
+                    .take(indent_size)
+                    .take_while(|&c| c == ' ')
+                    .count()
             };
 
             if remove_count > 0 {
-                if self.buffer.delete(line_start..line_start + remove_count).is_ok() {
+                if self
+                    .buffer
+                    .delete(line_start..line_start + remove_count)
+                    .is_ok()
+                {
                     if let Some(change) = self.buffer.changes().last().cloned() {
                         self.push_undo(change);
                     }
@@ -2872,14 +2882,19 @@ impl TextEditor {
         // Increase indent after SQL block-opening keywords.
         let extra_indent = if let Some(line_text) = self.buffer.line(line) {
             let trimmed = line_text.trim_end().to_uppercase();
-            let last_word = trimmed.rsplit_once(char::is_whitespace)
+            let last_word = trimmed
+                .rsplit_once(char::is_whitespace)
                 .map(|(_, w)| w)
                 .unwrap_or(&trimmed);
             if matches!(
                 last_word,
                 "BEGIN" | "THEN" | "ELSE" | "LOOP" | "AS" | "DECLARE" | "("
             ) {
-                if self.use_tabs { "\t".to_string() } else { " ".repeat(self.indent_size) }
+                if self.use_tabs {
+                    "\t".to_string()
+                } else {
+                    " ".repeat(self.indent_size)
+                }
             } else {
                 String::new()
             }
@@ -3696,12 +3711,17 @@ impl TextEditor {
             .unwrap_or(cursor_offset);
 
         // Try to reuse cached completion results for local prefix filtering.
-        let current_prefix = self.buffer.text().get(word_start..cursor_offset)
+        let current_prefix = self
+            .buffer
+            .text()
+            .get(word_start..cursor_offset)
             .unwrap_or("")
             .to_string();
         if let Some(ref cache) = self.completion_cache {
             if cache.trigger_offset == word_start
-                && current_prefix.to_lowercase().starts_with(&cache.trigger_prefix.to_lowercase())
+                && current_prefix
+                    .to_lowercase()
+                    .starts_with(&cache.trigger_prefix.to_lowercase())
             {
                 let prefix_lower = current_prefix.to_lowercase();
                 let filtered: Vec<CompletionItem> = cache
@@ -4178,10 +4198,13 @@ impl TextEditor {
     /// Get definition at cursor.
     pub fn get_definition(&self, _cx: &App) -> Option<lsp_types::GotoDefinitionResponse> {
         let provider = self.lsp.definition_provider.clone()?;
-        let target_offset = provider.definition(&self.buffer.rope(), self.cursor.offset(&self.buffer))?;
+        let target_offset =
+            provider.definition(&self.buffer.rope(), self.cursor.offset(&self.buffer))?;
         let range = self.lsp_range_for_offsets(target_offset, target_offset)?;
         let uri = "file:///zqlz/current.sql".parse::<lsp_types::Uri>().ok()?;
-        Some(lsp_types::GotoDefinitionResponse::Scalar(lsp_types::Location { uri, range }))
+        Some(lsp_types::GotoDefinitionResponse::Scalar(
+            lsp_types::Location { uri, range },
+        ))
     }
 
     /// Get references at cursor.
@@ -4379,12 +4402,7 @@ impl TextEditor {
         self.open_find_panel(true, window, cx);
     }
 
-    fn open_find_panel(
-        &mut self,
-        show_replace: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    fn open_find_panel(&mut self, show_replace: bool, window: &mut Window, cx: &mut Context<Self>) {
         let initial_query = self.get_selected_text(cx).map(|s| s.to_string());
 
         if self.find_state.is_none() {
@@ -4488,9 +4506,7 @@ impl TextEditor {
     }
 
     fn sync_match_info_to_panel(&mut self, cx: &mut Context<Self>) {
-        if let (Some(state), Some(panel)) =
-            (&self.find_state, &self.find_replace_panel)
-        {
+        if let (Some(state), Some(panel)) = (&self.find_state, &self.find_replace_panel) {
             let total = state.matches.len();
             let current = if total > 0 {
                 state.current_match.min(total - 1) + 1
@@ -4836,21 +4852,17 @@ impl TextEditor {
         };
 
         let source_text = self.buffer.text();
-        let replaced = match crate::find_replace::replace_all(
-            &source_text,
-            &query,
-            &replacement,
-            &options,
-        ) {
-            Ok(result) => result,
-            Err(FindError::InvalidRegex(error)) => {
-                if let Some(state) = self.find_state.as_mut() {
-                    state.regex_error = Some(error);
+        let replaced =
+            match crate::find_replace::replace_all(&source_text, &query, &replacement, &options) {
+                Ok(result) => result,
+                Err(FindError::InvalidRegex(error)) => {
+                    if let Some(state) = self.find_state.as_mut() {
+                        state.regex_error = Some(error);
+                    }
+                    cx.notify();
+                    return;
                 }
-                cx.notify();
-                return;
-            }
-        };
+            };
         if replaced.count == 0 {
             return;
         }
@@ -6853,7 +6865,8 @@ impl TextEditor {
                         display_line_count.saturating_sub(self.last_viewport_lines) as f32;
 
                     if scrollable_track_height > 0.0 && max_offset > 0.0 {
-                        let click_y = f32::from(event.position.y - track.origin.y) - thumb_height / 2.0;
+                        let click_y =
+                            f32::from(event.position.y - track.origin.y) - thumb_height / 2.0;
                         let click_fraction = (click_y / scrollable_track_height).clamp(0.0, 1.0);
                         self.set_scroll_offset(click_fraction * max_offset);
                     } else {
@@ -7129,8 +7142,10 @@ impl TextEditor {
                 let track_height = f32::from(scrollbar.track.size.height);
                 let thumb_height = f32::from(scrollbar.thumb.size.height);
                 let scrollable_track_height = (track_height - thumb_height).max(0.0);
-                let max_offset =
-                    scrollbar.display_line_count.saturating_sub(self.last_viewport_lines) as f32;
+                let max_offset = scrollbar
+                    .display_line_count
+                    .saturating_sub(self.last_viewport_lines)
+                    as f32;
 
                 if scrollable_track_height > 0.0 && max_offset > 0.0 {
                     let delta_y = f32::from(event.position.y - drag_start_y);
@@ -8255,20 +8270,18 @@ impl TextEditor {
             self.cached_bounds_origin.y + gpui::px(state.origin_y),
         );
 
-        let total_height: gpui::Pixels =
-            state
-                .items
-                .iter()
-                .fold(gpui::px(0.0), |acc, item| {
-                    acc + if item.is_separator {
-                        gpui::px(8.0)
-                    } else {
-                        item_height
-                    }
-                });
+        let total_height: gpui::Pixels = state.items.iter().fold(gpui::px(0.0), |acc, item| {
+            acc + if item.is_separator {
+                gpui::px(8.0)
+            } else {
+                item_height
+            }
+        });
 
-        let menu_bounds =
-            gpui::Bounds::new(menu_origin, gpui::size(menu_width, total_height + gpui::px(8.0)));
+        let menu_bounds = gpui::Bounds::new(
+            menu_origin,
+            gpui::size(menu_width, total_height + gpui::px(8.0)),
+        );
         if !menu_bounds.contains(&pointer) {
             return Some(ContextMenuHit {
                 inside_menu: false,
@@ -8284,7 +8297,10 @@ impl TextEditor {
                 continue;
             }
 
-            let row_bounds = gpui::Bounds::new(gpui::point(menu_origin.x, row_y), gpui::size(menu_width, item_height));
+            let row_bounds = gpui::Bounds::new(
+                gpui::point(menu_origin.x, row_y),
+                gpui::size(menu_width, item_height),
+            );
             if row_bounds.contains(&pointer) {
                 return Some(ContextMenuHit {
                     inside_menu: true,
@@ -8653,8 +8669,7 @@ impl EntityInputHandler for TextEditor {
         let scroll_offset = self.scroll_offset;
 
         let x = bounds.origin.x + gutter_width + char_width * (cursor_pos.column as f32);
-        let y = bounds.origin.y
-            + line_height * (cursor_pos.line as f32 - scroll_offset);
+        let y = bounds.origin.y + line_height * (cursor_pos.line as f32 - scroll_offset);
 
         let _ = range_utf16;
         Some(Bounds::new(

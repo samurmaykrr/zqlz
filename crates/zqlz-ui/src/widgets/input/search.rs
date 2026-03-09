@@ -93,11 +93,17 @@ impl SearchMatcher {
     }
 
     /// Update the search query and reset the current match index.
-    pub fn update_query(&mut self, query: &str, case_sensitive: bool, whole_word: bool, use_regex: bool) {
+    pub fn update_query(
+        &mut self,
+        query: &str,
+        case_sensitive: bool,
+        whole_word: bool,
+        use_regex: bool,
+    ) {
         self.case_sensitive = case_sensitive;
         self.whole_word = whole_word;
         self.use_regex = use_regex;
-        
+
         if query.len() > 0 {
             // For regex or whole word, we need to use a more complex pattern
             let pattern = if use_regex {
@@ -114,7 +120,7 @@ impl SearchMatcher {
                     escaped
                 }
             };
-            
+
             self.query = Some(
                 AhoCorasick::builder()
                     .ascii_case_insensitive(!case_sensitive)
@@ -313,8 +319,12 @@ impl SearchPanel {
             .as_ref()
             .map(|l| l.visible_range_offset.clone());
 
-        self.matcher
-            .update_query(query.as_str(), self.case_sensitive, self.whole_word, self.use_regex);
+        self.matcher.update_query(
+            query.as_str(),
+            self.case_sensitive,
+            self.whole_word,
+            self.use_regex,
+        );
 
         if let Some(visible_range_offset) = visible_range_offset {
             self.matcher

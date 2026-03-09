@@ -361,8 +361,8 @@ pub(crate) fn canonicalize_default_expression(raw: &str) -> crate::document::Def
 
     match normalized {
         // Current-timestamp synonyms across PostgreSQL, MySQL, MariaDB, SQLite
-        "now" | "current_timestamp" | "localtimestamp" | "sysdate" | "getdate"
-        | "sysdatetime" | "getutcdate" => crate::document::DefaultValue::CurrentTimestamp,
+        "now" | "current_timestamp" | "localtimestamp" | "sysdate" | "getdate" | "sysdatetime"
+        | "getutcdate" => crate::document::DefaultValue::CurrentTimestamp,
 
         // Current-date synonyms
         "current_date" | "curdate" | "today" => crate::document::DefaultValue::CurrentDate,
@@ -386,7 +386,6 @@ pub(crate) fn canonicalize_default_expression(raw: &str) -> crate::document::Def
 
 // Re-open the impl block for the remaining methods
 impl GenericExporter {
-
     fn index_info_to_definition(&self, idx: &IndexInfo) -> IndexDefinition {
         IndexDefinition {
             name: idx.name.clone(),
@@ -542,10 +541,7 @@ impl GenericExporter {
     ///
     /// A missing or zero counter is silently skipped — it just means the table
     /// has never had a row inserted and `current_value` stays `None`.
-    async fn export_sequences(
-        &self,
-        doc: &mut UdifDocument,
-    ) -> Result<(), ExportError> {
+    async fn export_sequences(&self, doc: &mut UdifDocument) -> Result<(), ExportError> {
         let driver = self.driver_name.as_str();
 
         // Collect the list of tables and their auto-increment columns from what
@@ -604,8 +600,10 @@ impl GenericExporter {
                             _ => continue,
                         };
 
-                        let current_sql =
-                            format!("SELECT last_value, is_called FROM {}", self.quote_identifier(&seq_name));
+                        let current_sql = format!(
+                            "SELECT last_value, is_called FROM {}",
+                            self.quote_identifier(&seq_name)
+                        );
                         let current_result = self
                             .connection
                             .query(&current_sql, &[])
@@ -845,7 +843,10 @@ impl GenericExporter {
         for table in doc.schema.tables.values_mut() {
             for col in &mut table.columns {
                 // Custom types whose source_type matches a known enum name need upgrading.
-                if let crate::CanonicalType::Custom { ref source_type, .. } = col.canonical_type {
+                if let crate::CanonicalType::Custom {
+                    ref source_type, ..
+                } = col.canonical_type
+                {
                     if let Some(enum_def) = doc.schema.enums.get(source_type) {
                         col.canonical_type = crate::CanonicalType::Enum {
                             name: Some(enum_def.name.clone()),
@@ -1081,7 +1082,9 @@ pub mod helpers {
 mod tests {
     use super::*;
     use std::sync::Arc;
-    use zqlz_core::{ColumnMeta, QueryResult, Result, Row, StatementResult, Transaction, ZqlzError};
+    use zqlz_core::{
+        ColumnMeta, QueryResult, Result, Row, StatementResult, Transaction, ZqlzError,
+    };
 
     // Minimal connection stub that satisfies the Connection trait.
     // No actual database access is performed — these tests exercise pure conversion logic.
@@ -1093,7 +1096,11 @@ mod tests {
             "sqlite"
         }
 
-        async fn execute(&self, _sql: &str, _params: &[zqlz_core::Value]) -> Result<StatementResult> {
+        async fn execute(
+            &self,
+            _sql: &str,
+            _params: &[zqlz_core::Value],
+        ) -> Result<StatementResult> {
             Err(ZqlzError::NotSupported("stub".into()))
         }
 
@@ -1334,7 +1341,13 @@ mod tests {
     fn test_canonicalize_now_variants_become_current_timestamp() {
         use crate::document::DefaultValue;
         // PostgreSQL, MySQL, and MariaDB all have these forms
-        for raw in &["now()", "NOW()", "CURRENT_TIMESTAMP", "current_timestamp", "localtimestamp"] {
+        for raw in &[
+            "now()",
+            "NOW()",
+            "CURRENT_TIMESTAMP",
+            "current_timestamp",
+            "localtimestamp",
+        ] {
             let result = canonicalize_default_expression(raw);
             assert!(
                 matches!(result, DefaultValue::CurrentTimestamp),
@@ -1422,7 +1435,11 @@ mod tests {
             "sqlite"
         }
 
-        async fn execute(&self, _sql: &str, _params: &[zqlz_core::Value]) -> Result<StatementResult> {
+        async fn execute(
+            &self,
+            _sql: &str,
+            _params: &[zqlz_core::Value],
+        ) -> Result<StatementResult> {
             Err(ZqlzError::NotSupported("stub".into()))
         }
 
@@ -1491,7 +1508,8 @@ mod tests {
 
     fn make_paginating_exporter(total_rows: u32) -> (GenericExporter, Arc<PaginatingConnection>) {
         let conn = Arc::new(PaginatingConnection::new(total_rows));
-        let exporter = GenericExporter::new(conn.clone() as Arc<dyn zqlz_core::Connection>, "sqlite");
+        let exporter =
+            GenericExporter::new(conn.clone() as Arc<dyn zqlz_core::Connection>, "sqlite");
         (exporter, conn)
     }
 
@@ -1563,7 +1581,10 @@ mod tests {
         assert_eq!(table_data.rows.len(), 2500);
         // Pages: [0,1000), [1000,2000), [2000,2500) — capped by row_limit.
         assert_eq!(conn.query_count(), 3);
-        assert!(table_data.partial, "partial should be true when row_limit is hit");
+        assert!(
+            table_data.partial,
+            "partial should be true when row_limit is hit"
+        );
     }
 
     #[tokio::test]

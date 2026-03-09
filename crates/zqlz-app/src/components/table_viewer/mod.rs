@@ -26,8 +26,5 @@ mod sorting;
 
 pub use delegate::PendingCellChange;
 pub use events::TableViewerEvent;
-pub use filter_types::{
-    FilterCondition,
-    SortCriterion, SortDirection,
-};
+pub use filter_types::{FilterCondition, FilterOperator, SortCriterion, SortDirection};
 pub use panel::{CopySelection, PasteClipboard, TableViewerPanel, ToggleSearch};

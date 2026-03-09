@@ -14,7 +14,20 @@ use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 
-use super::pagination_helpers::{reload_table_with_pagination, reload_table_reversed};
+use super::pagination_helpers::{reload_table_reversed, reload_table_with_pagination};
+
+fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
+    viewer_entity.update(cx, |viewer, cx| {
+        let request_generation = viewer.begin_data_request(cx);
+        if let Some(pag_state) = &viewer.pagination_state {
+            pag_state.update(cx, |state, cx| {
+                state.is_loading = true;
+                cx.notify();
+            });
+        }
+        request_generation
+    })
+}
 
 /// Handle pagination page change - reload table data with new offset.
 ///
@@ -43,18 +56,19 @@ pub(in crate::main_view) fn handle_page_changed_event(
 
     // Reuse the cached total from PaginationState so we skip the COUNT(*)
     // query on simple page navigations (filters/search haven't changed).
-    let (cached_total, pk_columns, cached_is_estimated) = viewer_entity.read_with(cx, |viewer, cx| {
-        let (total, is_est) = viewer
-            .pagination_state
-            .as_ref()
-            .map(|p| {
-                let state = p.read(cx);
-                (state.total_records, state.is_estimated)
-            })
-            .unwrap_or((None, false));
-        let pk = viewer.primary_key_columns.clone();
-        (total, pk, is_est)
-    });
+    let (cached_total, pk_columns, cached_is_estimated) =
+        viewer_entity.read_with(cx, |viewer, cx| {
+            let (total, is_est) = viewer
+                .pagination_state
+                .as_ref()
+                .map(|p| {
+                    let state = p.read(cx);
+                    (state.total_records, state.is_estimated)
+                })
+                .unwrap_or((None, false));
+            let pk = viewer.primary_key_columns.clone();
+            (total, pk, is_est)
+        });
 
     // Determine whether this page is "near the end" and should use a reversed
     // query. Criteria: we know the total, offset is past the midpoint, and we
@@ -65,7 +79,27 @@ pub(in crate::main_view) fn handle_page_changed_event(
     };
 
     if use_reversed {
-        let total = cached_total.expect("checked above");
+        let Some(total) = cached_total else {
+            tracing::warn!(
+                "Skipping reversed pagination without a cached total: table={}, page={}, limit={}",
+                table_name,
+                page,
+                limit
+            );
+            reload_table_with_pagination(
+                connection_id,
+                table_name,
+                Some(limit),
+                Some(offset),
+                cached_total,
+                None,
+                viewer_entity,
+                window,
+                cx,
+            );
+            return;
+        };
+
         reload_table_reversed(
             connection_id,
             table_name,
@@ -74,6 +108,7 @@ pub(in crate::main_view) fn handle_page_changed_event(
             total,
             cached_is_estimated,
             pk_columns,
+            None,
             viewer_entity,
             window,
             cx,
@@ -85,6 +120,7 @@ pub(in crate::main_view) fn handle_page_changed_event(
             Some(limit),
             Some(offset),
             cached_total,
+            None,
             viewer_entity,
             window,
             cx,
@@ -109,9 +145,11 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
     cx: &mut App,
 ) {
     // Guard: skip if a load is already in flight
-    let already_loading = viewer_entity.read(cx).pagination_state.as_ref().is_some_and(
-        |pag| pag.read(cx).is_loading,
-    );
+    let already_loading = viewer_entity
+        .read(cx)
+        .pagination_state
+        .as_ref()
+        .is_some_and(|pag| pag.read(cx).is_loading);
     if already_loading {
         tracing::debug!("LastPageRequested: skipping duplicate — already loading");
         return;
@@ -195,21 +233,19 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
 
         let pk_columns = viewer.primary_key_columns.clone();
 
-        (where_clauses, order_by_clauses, visible_columns, records_per_page, pk_columns)
+        (
+            where_clauses,
+            order_by_clauses,
+            visible_columns,
+            records_per_page,
+            pk_columns,
+        )
     });
 
-    let (where_clauses, order_by_clauses, visible_columns, records_per_page, pk_columns) = viewer_state;
+    let (where_clauses, order_by_clauses, visible_columns, records_per_page, pk_columns) =
+        viewer_state;
 
-    // Set loading state
-    _ = viewer_entity.update(cx, |viewer, cx| {
-        viewer.set_loading(true, cx);
-        if let Some(pag_state) = &viewer.pagination_state {
-            pag_state.update(cx, |state, cx| {
-                state.is_loading = true;
-                cx.notify();
-            });
-        }
-    });
+    let request_generation = begin_viewer_request(&viewer_entity, cx);
 
     if pk_columns.is_empty() {
         // Fallback: no PK available — sequential COUNT then OFFSET query.
@@ -230,7 +266,8 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                     .await
                 {
                     Ok(total) => {
-                        let last_page = ((total as usize) + records_per_page - 1) / records_per_page;
+                        let last_page =
+                            ((total as usize) + records_per_page - 1) / records_per_page;
                         let last_page = last_page.max(1);
                         let offset = (last_page - 1) * records_per_page;
 
@@ -243,6 +280,10 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
 
                         // Update pagination, then reload with the computed offset
                         _ = viewer_entity.update(cx, |viewer, cx| {
+                            if !viewer.is_current_request(request_generation) {
+                                return;
+                            }
+
                             if let Some(pag_state) = &viewer.pagination_state {
                                 pag_state.update(cx, |state, cx| {
                                     state.total_records = Some(total);
@@ -259,6 +300,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                                 Some(records_per_page),
                                 Some(offset),
                                 Some(total),
+                                Some(request_generation),
                                 viewer_entity.clone(),
                                 window,
                                 cx,
@@ -268,12 +310,14 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                     Err(e) => {
                         tracing::error!("On-demand COUNT(*) failed: {}", e);
                         _ = viewer_entity.update(cx, |viewer, cx| {
-                            viewer.set_loading(false, cx);
-                            if let Some(pag_state) = &viewer.pagination_state {
-                                pag_state.update(cx, |state, cx| {
-                                    state.is_loading = false;
-                                    cx.notify();
-                                });
+                            if viewer.is_current_request(request_generation) {
+                                viewer.set_loading(false, cx);
+                                if let Some(pag_state) = &viewer.pagination_state {
+                                    pag_state.update(cx, |state, cx| {
+                                        state.is_loading = false;
+                                        cx.notify();
+                                    });
+                                }
                             }
                         });
                     }
@@ -323,6 +367,16 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                         );
 
                         _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                            if !viewer.is_current_request(request_generation) {
+                                tracing::debug!(
+                                    "Discarding stale last-page result for '{}' (generation={}, current={})",
+                                    table_name,
+                                    request_generation,
+                                    viewer.current_request_generation()
+                                );
+                                return;
+                            }
+
                             viewer.load_table(
                                 connection_id,
                                 connection_name.clone(),
@@ -347,12 +401,14 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                     Err(e) => {
                         tracing::error!("Last-page concurrent fetch failed: {}", e);
                         _ = viewer_entity.update(cx, |viewer, cx| {
-                            viewer.set_loading(false, cx);
-                            if let Some(pag_state) = &viewer.pagination_state {
-                                pag_state.update(cx, |state, cx| {
-                                    state.is_loading = false;
-                                    cx.notify();
-                                });
+                            if viewer.is_current_request(request_generation) {
+                                viewer.set_loading(false, cx);
+                                if let Some(pag_state) = &viewer.pagination_state {
+                                    pag_state.update(cx, |state, cx| {
+                                        state.is_loading = false;
+                                        cx.notify();
+                                    });
+                                }
                             }
                         });
                     }
@@ -373,11 +429,7 @@ pub(in crate::main_view) fn handle_limit_changed_event(
     window: &mut Window,
     cx: &mut App,
 ) {
-    tracing::info!(
-        "LimitChanged event: table={}, limit={}",
-        table_name,
-        limit
-    );
+    tracing::info!("LimitChanged event: table={}, limit={}", table_name, limit);
 
     // Reuse cached total — changing the page size doesn't change the row count.
     let cached_total = viewer_entity.read_with(cx, |viewer, cx| {
@@ -394,6 +446,7 @@ pub(in crate::main_view) fn handle_limit_changed_event(
         Some(limit),
         Some(0),
         cached_total,
+        None,
         viewer_entity,
         window,
         cx,
@@ -431,6 +484,7 @@ pub(in crate::main_view) fn handle_limit_enabled_changed_event(
             Some(1000), // Default limit
             Some(0),    // Start from beginning
             cached_total,
+            None,
             viewer_entity,
             window,
             cx,
@@ -443,6 +497,7 @@ pub(in crate::main_view) fn handle_limit_enabled_changed_event(
             None, // No limit
             None, // No offset
             cached_total,
+            None,
             viewer_entity,
             window,
             cx,

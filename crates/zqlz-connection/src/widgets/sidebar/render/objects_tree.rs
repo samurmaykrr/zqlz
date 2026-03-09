@@ -6,7 +6,7 @@ use gpui::*;
 use uuid::Uuid;
 
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo};
-use zqlz_ui::widgets::{v_flex, ActiveTheme, Icon, ZqlzIcon};
+use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, v_flex};
 
 impl ConnectionSidebar {
     /// Build a tree of database schema objects (tables, views, triggers, etc.).

@@ -1,6 +1,6 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_ui::widgets::{v_flex, ActiveTheme};
+use zqlz_ui::widgets::{ActiveTheme, v_flex};
 
 use crate::panel::TableDesignerPanel;
 use crate::service::fk_action_to_sql;

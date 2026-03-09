@@ -1,9 +1,9 @@
 //! Query execution engine
 
-use std::sync::Arc;
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use std::sync::Arc;
 use zqlz_core::{Connection, QueryResult, Result, StatementResult};
 
 /// Information about a destructive operation that requires confirmation
@@ -140,9 +140,12 @@ impl QueryEngine {
     }
 
     /// Analyze SQL statement for destructive operations that require confirmation
-    pub fn analyze_for_destructive_operations(&self, sql: &str) -> Option<DestructiveOperationWarning> {
+    pub fn analyze_for_destructive_operations(
+        &self,
+        sql: &str,
+    ) -> Option<DestructiveOperationWarning> {
         tracing::trace!(sql_preview = %sql.chars().take(100).collect::<String>(), "analyzing SQL for destructive operations");
-        
+
         let dialect = GenericDialect {};
         let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
             tracing::debug!("failed to parse SQL, skipping destructive operation check");
@@ -153,55 +156,73 @@ impl QueryEngine {
             match statement {
                 Statement::Delete(delete) => {
                     if delete.selection.is_none() {
-                        let table_name = delete.tables.first()
+                        let table_name = delete
+                            .tables
+                            .first()
                             .map(|t| t.to_string())
                             .unwrap_or_else(|| "unknown".to_string());
-                        
+
                         return Some(DestructiveOperationWarning {
                             operation_type: DestructiveOperationType::DeleteWithoutWhere,
                             affected_object: table_name.clone(),
-                            reason: format!("This DELETE statement will remove ALL rows from table '{}'", table_name),
+                            reason: format!(
+                                "This DELETE statement will remove ALL rows from table '{}'",
+                                table_name
+                            ),
                             sql: sql.to_string(),
                         });
                     }
                 }
-                Statement::Update { table, selection, .. } => {
+                Statement::Update {
+                    table, selection, ..
+                } => {
                     if selection.is_none() {
                         let table_name = table.relation.to_string();
-                        
+
                         return Some(DestructiveOperationWarning {
                             operation_type: DestructiveOperationType::UpdateWithoutWhere,
                             affected_object: table_name.clone(),
-                            reason: format!("This UPDATE statement will modify ALL rows in table '{}'", table_name),
+                            reason: format!(
+                                "This UPDATE statement will modify ALL rows in table '{}'",
+                                table_name
+                            ),
                             sql: sql.to_string(),
                         });
                     }
                 }
-                Statement::Drop { object_type, names, .. } => {
-                    let object_names = names.iter()
+                Statement::Drop {
+                    object_type, names, ..
+                } => {
+                    let object_names = names
+                        .iter()
                         .map(|n| n.to_string())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    
+
                     return Some(DestructiveOperationWarning {
                         operation_type: DestructiveOperationType::Drop,
                         affected_object: object_names.clone(),
-                        reason: format!("This DROP statement will permanently delete {} '{}'", 
-                            object_type, object_names),
+                        reason: format!(
+                            "This DROP statement will permanently delete {} '{}'",
+                            object_type, object_names
+                        ),
                         sql: sql.to_string(),
                     });
                 }
                 Statement::Truncate { table_names, .. } => {
-                    let table_names_str = table_names.iter()
+                    let table_names_str = table_names
+                        .iter()
                         .map(|n| n.to_string())
                         .collect::<Vec<_>>()
                         .join(", ");
-                    
+
                     return Some(DestructiveOperationWarning {
                         operation_type: DestructiveOperationType::Truncate,
                         affected_object: table_names_str.clone(),
-                        reason: format!("This TRUNCATE statement will remove ALL rows from table(s) '{}'", 
-                            table_names_str),
+                        reason: format!(
+                            "This TRUNCATE statement will remove ALL rows from table(s) '{}'",
+                            table_names_str
+                        ),
                         sql: sql.to_string(),
                     });
                 }
@@ -216,7 +237,7 @@ impl QueryEngine {
     }
 
     /// Generate a DELETE statement with primary key WHERE clause
-    /// 
+    ///
     /// Builds a parameterized DELETE statement using primary key columns for the WHERE clause.
     /// This is safer and more efficient than using full row matching.
     ///
@@ -350,7 +371,7 @@ impl QueryEngine {
             if_exists_clause,
             table_name.replace('"', "\"\"")
         );
-        
+
         tracing::debug!(table = %table_name, "generated DROP TABLE statement");
         sql
     }
@@ -360,11 +381,8 @@ impl QueryEngine {
     /// Returns a TRUNCATE TABLE statement. The caller is responsible for executing this
     /// through proper confirmation flows (Feature 113 guardrails).
     pub fn generate_truncate_table(&self, table_name: &str) -> String {
-        let sql = format!(
-            "TRUNCATE TABLE \"{}\"",
-            table_name.replace('"', "\"\"")
-        );
-        
+        let sql = format!("TRUNCATE TABLE \"{}\"", table_name.replace('"', "\"\""));
+
         tracing::debug!(table = %table_name, "generated TRUNCATE TABLE statement");
         sql
     }
@@ -397,10 +415,7 @@ mod tests {
     fn test_generate_delete_by_pk_composite_key() {
         let engine = QueryEngine::new();
         let pk_columns = vec!["user_id".to_string(), "role_id".to_string()];
-        let pk_values = vec![
-            zqlz_core::Value::Int64(10),
-            zqlz_core::Value::Int64(20),
-        ];
+        let pk_values = vec![zqlz_core::Value::Int64(10), zqlz_core::Value::Int64(20)];
 
         let (sql, params) = engine.generate_delete_by_pk("user_roles", &pk_columns, &pk_values);
 
@@ -458,14 +473,21 @@ mod tests {
         let (sql, params) =
             engine.generate_delete_by_full_row("users", &column_names, &column_values);
 
-        assert_eq!(sql, "DELETE FROM \"users\" WHERE \"name\" = ? AND \"age\" = ?");
+        assert_eq!(
+            sql,
+            "DELETE FROM \"users\" WHERE \"name\" = ? AND \"age\" = ?"
+        );
         assert_eq!(params.len(), 2);
     }
 
     #[test]
     fn test_generate_delete_by_full_row_with_nulls() {
         let engine = QueryEngine::new();
-        let column_names = vec!["name".to_string(), "middle_name".to_string(), "age".to_string()];
+        let column_names = vec![
+            "name".to_string(),
+            "middle_name".to_string(),
+            "age".to_string(),
+        ];
         let column_values = vec![
             zqlz_core::Value::String("Alice".to_string()),
             zqlz_core::Value::Null,

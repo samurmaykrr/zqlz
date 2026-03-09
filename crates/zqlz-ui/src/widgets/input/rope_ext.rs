@@ -372,11 +372,7 @@ impl RopeExt for Rope {
 
         let end = offset + right.len();
 
-        if start == end {
-            None
-        } else {
-            Some(start..end)
-        }
+        if start == end { None } else { Some(start..end) }
     }
 
     fn word_at(&self, offset: usize) -> String {
@@ -444,7 +440,7 @@ mod tests {
     use sum_tree::Bias;
     use tree_sitter::Point;
 
-    use crate::widgets::{input::Position, RopeExt};
+    use crate::widgets::{RopeExt, input::Position};
 
     #[test]
     fn test_slice_line() {

@@ -68,7 +68,10 @@ impl MainView {
 
                 // Add comment header for this table
                 table_sql_parts.push(format!("-- Table: {}", table_name));
-                table_sql_parts.push(format!("-- Generated: {}", chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")));
+                table_sql_parts.push(format!(
+                    "-- Generated: {}",
+                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
+                ));
                 table_sql_parts.push(String::new());
 
                 // Get table structure
@@ -84,7 +87,10 @@ impl MainView {
                                         .as_ref()
                                         .map(|d| format!(" DEFAULT {}", d))
                                         .unwrap_or_default();
-                                    format!("    \"{}\" {}{}{}", col.name, col.data_type, nullable, default)
+                                    format!(
+                                        "    \"{}\" {}{}{}",
+                                        col.name, col.data_type, nullable, default
+                                    )
                                 })
                                 .collect();
 
@@ -128,7 +134,8 @@ impl MainView {
                                             }
                                             zqlz_core::Value::Bytes(b) => {
                                                 // Hex encode bytes without external crate
-                                                let hex_str: String = b.iter()
+                                                let hex_str: String = b
+                                                    .iter()
                                                     .map(|byte| format!("{:02x}", byte))
                                                     .collect();
                                                 format!("X'{}'", hex_str)
@@ -167,7 +174,10 @@ impl MainView {
             cx.update(|window, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(full_sql));
                 window.push_notification(
-                    Notification::success(format!("SQL for {} table(s) copied to clipboard", table_count)),
+                    Notification::success(format!(
+                        "SQL for {} table(s) copied to clipboard",
+                        table_count
+                    )),
                     cx,
                 );
             })?;
@@ -209,7 +219,12 @@ impl MainView {
         cx.spawn_in(window, async move |_this, cx| {
             // Get table details to populate field mappings
             let columns = match schema_service
-                .get_table_details(connection.clone(), connection_id, &table_name_for_wizard, None)
+                .get_table_details(
+                    connection.clone(),
+                    connection_id,
+                    &table_name_for_wizard,
+                    None,
+                )
                 .await
             {
                 Ok(details) => details
@@ -278,7 +293,11 @@ impl MainView {
     ) {
         tracing::info!(
             "Open Export Wizard for {} on connection {} (tables: {:?})",
-            if table_names.is_empty() { "all tables".to_string() } else { format!("{} table(s)", table_names.len()) },
+            if table_names.is_empty() {
+                "all tables".to_string()
+            } else {
+                format!("{} table(s)", table_names.len())
+            },
             connection_id,
             table_names,
         );
@@ -326,44 +345,40 @@ impl MainView {
                                 }
                             }
                         }
-                        _ => {
-                            match schema_introspection.list_tables(None).await {
-                                Ok(tables) => {
-                                    for table_info in tables {
-                                        let columns = match schema_service
-                                            .get_table_details(
-                                                connection.clone(),
-                                                connection_id,
-                                                &table_info.name,
-                                                None,
-                                            )
-                                            .await
-                                        {
-                                            Ok(details) => details
-                                                .columns
-                                                .into_iter()
-                                                .map(|c| c.name)
-                                                .collect::<Vec<_>>(),
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    "Could not fetch columns for '{}': {}",
-                                                    table_info.name,
-                                                    e
-                                                );
-                                                Vec::new()
-                                            }
-                                        };
-                                        table_configs.push(TableExportConfig::new(
-                                            table_info.name,
-                                            columns,
-                                        ));
-                                    }
-                                }
-                                Err(e) => {
-                                    tracing::error!("Could not list tables for export: {}", e);
+                        _ => match schema_introspection.list_tables(None).await {
+                            Ok(tables) => {
+                                for table_info in tables {
+                                    let columns = match schema_service
+                                        .get_table_details(
+                                            connection.clone(),
+                                            connection_id,
+                                            &table_info.name,
+                                            None,
+                                        )
+                                        .await
+                                    {
+                                        Ok(details) => details
+                                            .columns
+                                            .into_iter()
+                                            .map(|c| c.name)
+                                            .collect::<Vec<_>>(),
+                                        Err(e) => {
+                                            tracing::warn!(
+                                                "Could not fetch columns for '{}': {}",
+                                                table_info.name,
+                                                e
+                                            );
+                                            Vec::new()
+                                        }
+                                    };
+                                    table_configs
+                                        .push(TableExportConfig::new(table_info.name, columns));
                                 }
                             }
-                        }
+                            Err(e) => {
+                                tracing::error!("Could not list tables for export: {}", e);
+                            }
+                        },
                     }
                 }
             } else {
@@ -379,11 +394,7 @@ impl MainView {
                             .map(|c| c.name)
                             .collect::<Vec<_>>(),
                         Err(e) => {
-                            tracing::warn!(
-                                "Could not fetch columns for '{}': {}",
-                                table_name,
-                                e
-                            );
+                            tracing::warn!("Could not fetch columns for '{}': {}", table_name, e);
                             Vec::new()
                         }
                     };

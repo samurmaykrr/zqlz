@@ -12,11 +12,11 @@ mod global_state;
 mod icon;
 mod index_path;
 mod root;
+mod status_dot;
 mod styled;
 mod virtual_list;
 mod window_ext;
 mod zqlz_icons;
-mod status_dot;
 
 pub(crate) mod actions;
 
@@ -60,8 +60,8 @@ pub mod tree;
 pub mod typography;
 pub mod window_border;
 
-pub use anchored::anchored;
 pub use crate::widgets::styled::Disableable;
+pub use anchored::anchored;
 pub use element_ext::ElementExt;
 pub use event::InteractiveElementExt;
 pub use geometry::*;
@@ -69,6 +69,7 @@ pub use icon::*;
 pub use index_path::IndexPath;
 pub use input::{Rope, RopeExt, RopeLines};
 pub use root::Root;
+pub use status_dot::{ConnectionStatus, StatusDot};
 pub use styled::*;
 pub use theme::*;
 pub use title_bar::{TITLE_BAR_HEIGHT, TitleBar};
@@ -80,7 +81,6 @@ pub use virtual_list::{VirtualList, VirtualListScrollHandle, h_virtual_list, v_v
 pub use window_border::{WindowBorder, window_border, window_paddings};
 pub use window_ext::WindowExt;
 pub use zqlz_icons::{DatabaseLogo, ZqlzIcon};
-pub use status_dot::{ConnectionStatus, StatusDot};
 
 /// Initialize the widget system
 pub fn init(cx: &mut App) {

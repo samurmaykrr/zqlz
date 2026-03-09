@@ -48,7 +48,7 @@ pub const SYSTEM_MONO_FONT_LINUX: &str = "DejaVu Sans Mono";
 /// Use these functions for consistent sizing across the UI.
 /// These correspond to the TextVariant sizes in typography.rs.
 pub mod sizes {
-    use gpui::{px, Pixels};
+    use gpui::{Pixels, px};
 
     /// Extra small text (12px) - captions, badges
     pub fn xs() -> Pixels {

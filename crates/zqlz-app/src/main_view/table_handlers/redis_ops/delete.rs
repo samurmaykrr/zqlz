@@ -6,12 +6,8 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    ActiveTheme as _,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    v_flex,
-    WindowExt,
-    checkbox::Checkbox,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, checkbox::Checkbox,
+    dialog::DialogButtonProps, v_flex,
 };
 
 use crate::app::AppState;

@@ -684,7 +684,7 @@ impl ConnectionWindow {
         } else {
             "Create Connection"
         };
-        
+
         // Determine which tabs exist
         let tabs = self.get_available_tabs();
         let has_tabs = tabs.len() > 1;
@@ -717,9 +717,7 @@ impl ConnectionWindow {
                     ),
             )
             // Tabs (if multiple tabs exist)
-            .when(has_tabs, |this| {
-                this.child(self.render_tabs(&tabs, cx))
-            })
+            .when(has_tabs, |this| this.child(self.render_tabs(&tabs, cx)))
             // Form content
             .child(
                 div()
@@ -775,12 +773,12 @@ impl ConnectionWindow {
             )
             .into_any_element()
     }
-    
+
     fn get_available_tabs(&self) -> Vec<(String, String)> {
         let mut tabs = vec![("general".to_string(), "General".to_string())];
         let mut seen = std::collections::HashSet::new();
         seen.insert("general".to_string());
-        
+
         for field in &self.field_inputs {
             if let Some(tab) = &field.tab {
                 if !seen.contains(tab) {
@@ -796,10 +794,10 @@ impl ConnectionWindow {
                 }
             }
         }
-        
+
         tabs
     }
-    
+
     fn render_tabs(&self, tabs: &[(String, String)], cx: &Context<Self>) -> impl IntoElement {
         h_flex()
             .gap_0()
@@ -808,7 +806,7 @@ impl ConnectionWindow {
             .children(tabs.iter().map(|(tab_id, tab_label)| {
                 let is_active = &self.active_tab == tab_id;
                 let tab_id_clone = tab_id.clone();
-                
+
                 div()
                     .id(SharedString::from(format!("tab-{}", tab_id)))
                     .px_4()
@@ -837,24 +835,27 @@ impl ConnectionWindow {
                     .child(
                         div()
                             .text_sm()
-                            .font_weight(if is_active { FontWeight::SEMIBOLD } else { FontWeight::NORMAL })
+                            .font_weight(if is_active {
+                                FontWeight::SEMIBOLD
+                            } else {
+                                FontWeight::NORMAL
+                            })
                             .child(tab_label.clone()),
                     )
             }))
     }
-    
+
     fn render_tab_fields(&self, _window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         // Collect fields for this tab
-        let fields: Vec<&FieldInput> = self.field_inputs
+        let fields: Vec<&FieldInput> = self
+            .field_inputs
             .iter()
-            .filter(|field| {
-                match &field.tab {
-                    Some(tab) => tab == &self.active_tab,
-                    None => self.active_tab == "general",
-                }
+            .filter(|field| match &field.tab {
+                Some(tab) => tab == &self.active_tab,
+                None => self.active_tab == "general",
             })
             .collect();
-        
+
         // Group fields by row
         let mut groups: Vec<Vec<&FieldInput>> = Vec::new();
         let mut current_group: Option<u8> = None;
@@ -886,7 +887,7 @@ impl ConnectionWindow {
         if !current_row.is_empty() {
             groups.push(current_row);
         }
-        
+
         // Render groups
         groups
             .into_iter()
@@ -941,33 +942,44 @@ impl ConnectionWindow {
                         h_flex()
                             .gap_2()
                             .child(Input::new(&field.input).flex_1())
-                            .child(Button::new("browse").label("Browse...").on_click({
-                                let input = input_for_browse.clone();
-                                cx.listener(move |_, _, window, cx| {
-                                    let input = input.clone();
-                                    let window_handle = window.window_handle();
-                                    let receiver = cx.prompt_for_paths(PathPromptOptions {
-                                        files: true,
-                                        directories: false,
-                                        multiple: false,
-                                        prompt: Some("Select File".into()),
-                                    });
+                            .child(
+                                Button::new("browse")
+                                    .label("Browse...")
+                                    .primary()
+                                    .on_click({
+                                        let input = input_for_browse.clone();
+                                        cx.listener(move |_, _, window, cx| {
+                                            let input = input.clone();
+                                            let window_handle = window.window_handle();
+                                            let receiver = cx.prompt_for_paths(PathPromptOptions {
+                                                files: true,
+                                                directories: false,
+                                                multiple: false,
+                                                prompt: Some("Select File".into()),
+                                            });
 
-                                    cx.spawn(async move |_handle, cx| {
-                                        if let Ok(Ok(Some(paths))) = receiver.await {
-                                            if let Some(path) = paths.first() {
-                                                let path_str = path.to_string_lossy().to_string();
-                                                _ = window_handle.update(cx, |_, window, cx| {
-                                                    input.update(cx, |input, cx| {
-                                                        input.set_value(path_str, window, cx);
-                                                    });
-                                                });
-                                            }
-                                        }
-                                    })
-                                    .detach();
-                                })
-                            })),
+                                            cx.spawn(async move |_handle, cx| {
+                                                if let Ok(Ok(Some(paths))) = receiver.await {
+                                                    if let Some(path) = paths.first() {
+                                                        let path_str =
+                                                            path.to_string_lossy().to_string();
+                                                        _ = window_handle.update(
+                                                            cx,
+                                                            |_, window, cx| {
+                                                                input.update(cx, |input, cx| {
+                                                                    input.set_value(
+                                                                        path_str, window, cx,
+                                                                    );
+                                                                });
+                                                            },
+                                                        );
+                                                    }
+                                                }
+                                            })
+                                            .detach();
+                                        })
+                                    }),
+                            ),
                     )
                     .when_some(help_element, |this, help| this.child(help))
             }
@@ -979,7 +991,7 @@ impl ConnectionWindow {
                     .map(|opt| opt.label.to_string())
                     .collect::<Vec<_>>()
                     .join(", ");
-                
+
                 v_flex()
                     .gap_1()
                     .child(label_element)
@@ -988,7 +1000,7 @@ impl ConnectionWindow {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child(format!("Options: {}", options_hint))
+                            .child(format!("Options: {}", options_hint)),
                     )
                     .when_some(help_element, |this, help| this.child(help))
             }
@@ -1003,7 +1015,7 @@ impl ConnectionWindow {
                         div()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Enter 'true' or 'false'")
+                            .child("Enter 'true' or 'false'"),
                     )
                     .when_some(help_element, |this, help| this.child(help))
             }

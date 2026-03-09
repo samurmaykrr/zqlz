@@ -11,7 +11,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -62,8 +62,14 @@ mod tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(1)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected results from actor-film join");
-        assert!(result.rows.len() <= 5, "Expected at most 5 results due to LIMIT");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected results from actor-film join"
+        );
+        assert!(
+            result.rows.len() <= 5,
+            "Expected at most 5 results due to LIMIT"
+        );
         assert_eq!(result.columns.len(), 3, "Expected 3 columns");
 
         Ok(())
@@ -88,10 +94,19 @@ mod tests {
             LIMIT 10
         ";
 
-        let result = execute_query(conn.as_ref(), driver, sql, &[Value::String("Action".into())]).await?;
+        let result = execute_query(
+            conn.as_ref(),
+            driver,
+            sql,
+            &[Value::String("Action".into())],
+        )
+        .await?;
 
         assert!(!result.rows.is_empty(), "Expected Action films");
-        assert!(result.rows.len() <= 10, "Expected at most 10 results due to LIMIT");
+        assert!(
+            result.rows.len() <= 10,
+            "Expected at most 10 results due to LIMIT"
+        );
 
         Ok(())
     }
@@ -116,8 +131,15 @@ mod tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(1)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected customer 1 to have payments");
-        assert_eq!(result.rows.len(), 1, "Expected exactly one row for customer 1");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected customer 1 to have payments"
+        );
+        assert_eq!(
+            result.rows.len(),
+            1,
+            "Expected exactly one row for customer 1"
+        );
 
         Ok(())
     }
@@ -145,7 +167,10 @@ mod tests {
         // But the query should execute successfully
         for row in &result.rows {
             let film_id = row.get_by_name("film_id").context("Missing film_id")?;
-            assert!(matches!(film_id, Value::Null), "Expected NULL for film_id in LEFT JOIN with no match");
+            assert!(
+                matches!(film_id, Value::Null),
+                "Expected NULL for film_id in LEFT JOIN with no match"
+            );
         }
 
         Ok(())
@@ -170,7 +195,10 @@ mod tests {
         let result = execute_query(conn.as_ref(), driver, sql, &[]).await?;
 
         assert!(!result.rows.is_empty(), "Expected results from CROSS JOIN");
-        assert!(result.rows.len() >= 2, "Expected at least 2 results from CROSS JOIN");
+        assert!(
+            result.rows.len() >= 2,
+            "Expected at least 2 results from CROSS JOIN"
+        );
 
         Ok(())
     }
@@ -223,7 +251,8 @@ mod tests {
             driver,
             sql,
             &[Value::String("PG".into()), Value::String("Action".into())],
-        ).await?;
+        )
+        .await?;
 
         // Query should execute successfully
         Ok(())
@@ -251,7 +280,10 @@ mod tests {
         let result = execute_query(conn.as_ref(), driver, sql, &[]).await?;
 
         assert!(!result.rows.is_empty(), "Expected category results");
-        assert!(result.rows.len() <= 5, "Expected at most 5 results due to LIMIT");
+        assert!(
+            result.rows.len() <= 5,
+            "Expected at most 5 results due to LIMIT"
+        );
 
         Ok(())
     }
@@ -276,7 +308,10 @@ mod tests {
         let result = execute_query(conn.as_ref(), driver, sql, &[]).await?;
 
         assert!(!result.rows.is_empty(), "Expected films with language");
-        assert!(result.rows.len() <= 5, "Expected at most 5 results due to LIMIT");
+        assert!(
+            result.rows.len() <= 5,
+            "Expected at most 5 results due to LIMIT"
+        );
 
         Ok(())
     }
@@ -299,7 +334,8 @@ mod tests {
             LIMIT 10
         ";
 
-        let result = execute_query(conn.as_ref(), driver, sql, &[Value::String("PG".into())]).await?;
+        let result =
+            execute_query(conn.as_ref(), driver, sql, &[Value::String("PG".into())]).await?;
 
         // Query should execute successfully
         Ok(())
@@ -314,7 +350,9 @@ mod tests {
         conn.execute(
             "CREATE TEMP TABLE IF NOT EXISTS test_users (id INTEGER PRIMARY KEY, name TEXT)",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         conn.execute(
             "CREATE TEMP TABLE IF NOT EXISTS test_orders (id INTEGER PRIMARY KEY, user_id INTEGER, amount REAL)",
@@ -325,12 +363,16 @@ mod tests {
         conn.execute(
             "INSERT INTO test_users (id, name) VALUES (1, 'Alice'), (2, 'Bob')",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         conn.execute(
             "INSERT INTO test_orders (id, user_id, amount) VALUES (1, 1, 100.0), (2, 1, 200.0)",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Test INNER JOIN
         let result = conn
@@ -352,13 +394,13 @@ mod tests {
 }
 
 /// Subquery tests for SQL subquery functionality
-/// 
+///
 /// This module tests subqueries in SELECT, WHERE, FROM clauses,
 /// as well as correlated subqueries and nested subqueries.
 #[cfg(test)]
 mod subquery_tests {
     use super::tests::execute_query;
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -384,7 +426,7 @@ mod subquery_tests {
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(1)]).await?;
 
         assert_eq!(result.rows.len(), 1, "Expected 1 actor");
-        
+
         let row = &result.rows[0];
         let film_count = row
             .get_by_name("film_count")
@@ -422,9 +464,12 @@ mod subquery_tests {
         // Verify all amounts are above average
         let avg_sql = "SELECT AVG(amount) AS avg_amount FROM payment";
         let avg_result = execute_query(conn.as_ref(), driver, avg_sql, &[]).await?;
-        
+
         let avg_row = avg_result.rows.first().context("Expected avg result")?;
-        let avg_amount = match avg_row.get_by_name("avg_amount").context("Missing avg_amount")? {
+        let avg_amount = match avg_row
+            .get_by_name("avg_amount")
+            .context("Missing avg_amount")?
+        {
             Value::Float64(f) => *f,
             Value::Float32(f) => (*f) as f64,
             Value::String(s) => s.parse::<f64>().context("Failed to parse decimal as f64")?,
@@ -476,7 +521,10 @@ mod subquery_tests {
         assert!(result.rows.len() <= 5, "Expected at most 5 results");
 
         for row in &result.rows {
-            let total_amount = match row.get_by_name("total_amount").context("Missing total_amount")? {
+            let total_amount = match row
+                .get_by_name("total_amount")
+                .context("Missing total_amount")?
+            {
                 Value::Float64(f) => *f,
                 Value::Float32(f) => (*f) as f64,
                 Value::String(s) => s.parse::<f64>().context("Failed to parse decimal as f64")?,
@@ -509,7 +557,13 @@ mod subquery_tests {
             LIMIT 10
         ";
 
-        let result = execute_query(conn.as_ref(), driver, sql, &[Value::String("ACADEMY%".into())]).await?;
+        let result = execute_query(
+            conn.as_ref(),
+            driver,
+            sql,
+            &[Value::String("ACADEMY%".into())],
+        )
+        .await?;
 
         assert!(!result.rows.is_empty(), "Expected actors in ACADEMY films");
         assert!(result.rows.len() <= 10, "Expected at most 10 results");
@@ -601,7 +655,10 @@ mod subquery_tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(20)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected customers with >20 rentals");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected customers with >20 rentals"
+        );
         assert!(result.rows.len() <= 10, "Expected at most 10 results");
 
         for row in &result.rows {
@@ -644,14 +701,17 @@ mod subquery_tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(1)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected films above average rental rate");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected films above average rental rate"
+        );
         assert!(result.rows.len() <= 5, "Expected at most 5 results");
 
         Ok(())
     }
 
     /// Integration test for subquery functionality
-    /// 
+    ///
     /// This test only runs against SQLite to avoid Docker container dependencies.
     /// It validates that subqueries work correctly.
     #[tokio::test]
@@ -700,7 +760,10 @@ mod subquery_tests {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        assert!(!result2.rows.is_empty(), "Expected products above average price");
+        assert!(
+            !result2.rows.is_empty(),
+            "Expected products above average price"
+        );
 
         // Test subquery with IN
         let result3 = conn
@@ -722,14 +785,18 @@ mod subquery_tests {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        assert_eq!(result4.rows.len(), 2, "Expected 2 products with sales (EXISTS)");
+        assert_eq!(
+            result4.rows.len(),
+            2,
+            "Expected 2 products with sales (EXISTS)"
+        );
 
         Ok(())
     }
 }
 
 /// CTE (Common Table Expression) tests
-/// 
+///
 /// This module tests Common Table Expressions (CTEs) including:
 /// - Simple CTEs with single definition
 /// - Multiple CTEs in single query
@@ -739,13 +806,13 @@ mod subquery_tests {
 #[cfg(test)]
 mod cte_tests {
     use super::tests::execute_query;
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
 
     /// Test simple CTE
-    /// 
+    ///
     /// Creates a basic CTE and queries from it.
     #[rstest]
     #[case::postgres(TestDriver::Postgres)]
@@ -773,11 +840,16 @@ mod cte_tests {
 
         assert!(!result.rows.is_empty(), "Expected actors with >20 films");
         assert!(result.rows.len() <= 5, "Expected at most 5 results");
-        assert_eq!(result.columns.len(), 3, "Expected 3 columns: first_name, last_name, film_count");
+        assert_eq!(
+            result.columns.len(),
+            3,
+            "Expected 3 columns: first_name, last_name, film_count"
+        );
 
         // Verify film_count is greater than 20
         for row in &result.rows {
-            let film_count = row.get_by_name("film_count")
+            let film_count = row
+                .get_by_name("film_count")
                 .context("Expected film_count column")?;
             match film_count {
                 Value::Int64(count) => assert!(count > &20, "Expected film_count > 20"),
@@ -790,7 +862,7 @@ mod cte_tests {
     }
 
     /// Test multiple CTEs
-    /// 
+    ///
     /// Creates multiple CTEs and queries from them.
     #[rstest]
     #[case::postgres(TestDriver::Postgres)]
@@ -822,7 +894,13 @@ mod cte_tests {
             LIMIT 5
         ";
 
-        let result = execute_query(conn.as_ref(), driver, sql, &[Value::String("Action".into())]).await?;
+        let result = execute_query(
+            conn.as_ref(),
+            driver,
+            sql,
+            &[Value::String("Action".into())],
+        )
+        .await?;
 
         assert!(!result.rows.is_empty(), "Expected actors in action films");
         assert!(result.rows.len() <= 5, "Expected at most 5 results");
@@ -832,7 +910,7 @@ mod cte_tests {
     }
 
     /// Test CTE with JOIN
-    /// 
+    ///
     /// Tests CTE combined with JOIN operations.
     #[rstest]
     #[case::postgres(TestDriver::Postgres)]
@@ -858,14 +936,17 @@ mod cte_tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(120)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected long films with categories");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected long films with categories"
+        );
         assert!(result.rows.len() <= 10, "Expected at most 10 results");
 
         Ok(())
     }
 
     /// Test recursive CTE with numbers
-    /// 
+    ///
     /// Tests recursive CTE functionality by generating a sequence of numbers.
     /// Note: SQLite and PostgreSQL syntax differs slightly from MySQL.
     #[rstest]
@@ -905,7 +986,7 @@ mod cte_tests {
     }
 
     /// Test CTE used in subquery
-    /// 
+    ///
     /// Tests CTE that is referenced within a subquery.
     #[rstest]
     #[case::postgres(TestDriver::Postgres)]
@@ -931,14 +1012,17 @@ mod cte_tests {
 
         let result = execute_query(conn.as_ref(), driver, sql, &[Value::Int64(50)]).await?;
 
-        assert!(!result.rows.is_empty(), "Expected categories with >50 films");
+        assert!(
+            !result.rows.is_empty(),
+            "Expected categories with >50 films"
+        );
         assert!(result.rows.len() <= 5, "Expected at most 5 results");
 
         Ok(())
     }
 
     /// Integration test for CTE functionality
-    /// 
+    ///
     /// This test only runs against SQLite to avoid Docker container dependencies.
     /// It validates that CTEs work correctly with both simple and recursive scenarios.
     #[tokio::test]
@@ -960,7 +1044,9 @@ mod cte_tests {
                 (4, 'David', 2, 60000.0),
                 (5, 'Eve', 2, 65000.0)",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Test simple CTE
         let result = conn
@@ -974,7 +1060,11 @@ mod cte_tests {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        assert_eq!(result.rows.len(), 3, "Expected 3 high earners (Alice, Bob, Charlie)");
+        assert_eq!(
+            result.rows.len(),
+            3,
+            "Expected 3 high earners (Alice, Bob, Charlie)"
+        );
 
         // Test multiple CTEs
         let result2 = conn
@@ -1006,13 +1096,19 @@ mod cte_tests {
             .await
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        assert_eq!(result3.rows.len(), 5, "Expected all 5 employees in hierarchy");
+        assert_eq!(
+            result3.rows.len(),
+            5,
+            "Expected all 5 employees in hierarchy"
+        );
 
         // Verify hierarchy levels
-        let alice_row = result3.rows.iter().find(|r| {
-            matches!(r.get_by_name("name"), Some(Value::String(s)) if s == "Alice")
-        }).context("Expected to find Alice")?;
-        
+        let alice_row = result3
+            .rows
+            .iter()
+            .find(|r| matches!(r.get_by_name("name"), Some(Value::String(s)) if s == "Alice"))
+            .context("Expected to find Alice")?;
+
         let alice_level = alice_row.get_by_name("level").context("Expected level")?;
         match alice_level {
             Value::Int64(level) => assert_eq!(level, &0, "Alice should be at level 0"),
@@ -1030,7 +1126,7 @@ mod cte_tests {
 /// PARTITION BY, ORDER BY, and window frames (ROWS/RANGE).
 #[cfg(test)]
 mod window_function_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -1056,17 +1152,26 @@ mod window_function_tests {
             LIMIT 10
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert_eq!(result.rows.len(), 10, "Expected 10 rows");
         assert_eq!(result.columns.len(), 4, "Expected 4 columns");
 
         // Verify row numbers are sequential 1, 2, 3, ...
         for (idx, row) in result.rows.iter().enumerate() {
-            let row_num = row.get_by_name("row_num").context("Expected row_num column")?;
+            let row_num = row
+                .get_by_name("row_num")
+                .context("Expected row_num column")?;
             match row_num {
-                Value::Int64(n) => assert_eq!(*n, (idx + 1) as i64, "Row numbers should be sequential"),
-                Value::Int32(n) => assert_eq!(*n, (idx + 1) as i32, "Row numbers should be sequential"),
+                Value::Int64(n) => {
+                    assert_eq!(*n, (idx + 1) as i64, "Row numbers should be sequential")
+                }
+                Value::Int32(n) => {
+                    assert_eq!(*n, (idx + 1) as i32, "Row numbers should be sequential")
+                }
                 _ => anyhow::bail!("Unexpected type for row_num: {:?}", row_num),
             }
         }
@@ -1095,10 +1200,13 @@ mod window_function_tests {
             LIMIT 20
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert_eq!(result.rows.len(), 20, "Expected 20 rows");
-        
+
         // Verify ranks are present and reasonable
         let first_rank = result.rows[0]
             .get_by_name("rental_rank")
@@ -1133,12 +1241,17 @@ mod window_function_tests {
             LIMIT 20
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert!(!result.rows.is_empty(), "Expected results");
-        
+
         // Verify dense ranks are consecutive (no gaps)
-        let first_rank = result.rows[0].get_by_name("dense_rank").context("Expected dense_rank")?;
+        let first_rank = result.rows[0]
+            .get_by_name("dense_rank")
+            .context("Expected dense_rank")?;
         match first_rank {
             Value::Int64(n) => assert_eq!(*n, 1, "First dense rank should be 1"),
             Value::Int32(n) => assert_eq!(*n, 1, "First dense rank should be 1"),
@@ -1169,23 +1282,28 @@ mod window_function_tests {
             LIMIT 20
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert_eq!(result.rows.len(), 20, "Expected 20 rows");
-        
+
         // Verify partitioning: first film in each rating should have rank_in_rating = 1
         let mut seen_ratings = std::collections::HashSet::new();
         let mut first_ranks_correct = true;
-        
+
         for row in &result.rows {
             let rating = row.get_by_name("rating").context("Expected rating")?;
-            let rank = row.get_by_name("rank_in_rating").context("Expected rank_in_rating")?;
-            
+            let rank = row
+                .get_by_name("rank_in_rating")
+                .context("Expected rank_in_rating")?;
+
             let rating_str = match rating {
                 Value::String(s) => s.clone(),
                 _ => continue,
             };
-            
+
             if !seen_ratings.contains(&rating_str) {
                 // First occurrence of this rating, rank should be 1
                 seen_ratings.insert(rating_str.clone());
@@ -1204,8 +1322,11 @@ mod window_function_tests {
                 }
             }
         }
-        
-        assert!(first_ranks_correct, "First film in each rating partition should have rank 1");
+
+        assert!(
+            first_ranks_correct,
+            "First film in each rating partition should have rank 1"
+        );
 
         Ok(())
     }
@@ -1233,23 +1354,31 @@ mod window_function_tests {
             LIMIT 10
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert_eq!(result.rows.len(), 10, "Expected 10 rows");
-        
+
         // Verify running total is monotonically increasing
         let mut prev_total: i64 = 0;
         for row in &result.rows {
-            let running_total = row.get_by_name("running_total").context("Expected running_total")?;
-            
+            let running_total = row
+                .get_by_name("running_total")
+                .context("Expected running_total")?;
+
             let total_val = match running_total {
                 Value::Int64(n) => *n,
                 Value::Int32(n) => *n as i64,
                 Value::Decimal(d) => d.parse::<i64>().unwrap_or(0),
                 _ => anyhow::bail!("Unexpected type for running_total: {:?}", running_total),
             };
-            
-            assert!(total_val >= prev_total, "Running total should be non-decreasing");
+
+            assert!(
+                total_val >= prev_total,
+                "Running total should be non-decreasing"
+            );
             prev_total = total_val;
         }
 
@@ -1278,29 +1407,49 @@ mod window_function_tests {
             LIMIT 10
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert_eq!(result.rows.len(), 10, "Expected 10 rows");
         assert_eq!(result.columns.len(), 4, "Expected 4 columns");
-        
+
         // First row should have NULL prev_length
-        let first_prev = result.rows[0].get_by_name("prev_length").context("Expected prev_length")?;
-        assert!(matches!(first_prev, Value::Null), "First row's prev_length should be NULL");
-        
+        let first_prev = result.rows[0]
+            .get_by_name("prev_length")
+            .context("Expected prev_length")?;
+        assert!(
+            matches!(first_prev, Value::Null),
+            "First row's prev_length should be NULL"
+        );
+
         // Last row should have NULL next_length
-        let last_next = result.rows[9].get_by_name("next_length").context("Expected next_length")?;
-        assert!(matches!(last_next, Value::Null), "Last row's next_length should be NULL");
-        
+        let last_next = result.rows[9]
+            .get_by_name("next_length")
+            .context("Expected next_length")?;
+        assert!(
+            matches!(last_next, Value::Null),
+            "Last row's next_length should be NULL"
+        );
+
         // Middle rows should have non-NULL values for both LAG and LEAD (usually)
         if result.rows.len() > 2 {
             let middle_row = &result.rows[5];
-            let prev = middle_row.get_by_name("prev_length").context("Expected prev_length")?;
-            let next = middle_row.get_by_name("next_length").context("Expected next_length")?;
-            
+            let prev = middle_row
+                .get_by_name("prev_length")
+                .context("Expected prev_length")?;
+            let next = middle_row
+                .get_by_name("next_length")
+                .context("Expected next_length")?;
+
             // At least one of prev/next should be non-NULL
             let has_prev = !matches!(prev, Value::Null);
             let has_next = !matches!(next, Value::Null);
-            assert!(has_prev || has_next, "Middle row should have at least one non-NULL LAG/LEAD value");
+            assert!(
+                has_prev || has_next,
+                "Middle row should have at least one non-NULL LAG/LEAD value"
+            );
         }
 
         Ok(())
@@ -1336,30 +1485,47 @@ mod window_function_tests {
             LIMIT 20
         ";
 
-        let result = conn.query(sql, &[]).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        let result = conn
+            .query(sql, &[])
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         assert!(!result.rows.is_empty(), "Expected results");
         assert_eq!(result.columns.len(), 4, "Expected 4 columns");
-        
+
         // Verify all rows in same partition have same first_title and last_title
-        let mut partition_first: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        let mut partition_last: std::collections::HashMap<String, String> = std::collections::HashMap::new();
-        
+        let mut partition_first: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut partition_last: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+
         for row in &result.rows {
             let rating = row.get_by_name("rating").context("Expected rating")?;
-            let first_title = row.get_by_name("first_title").context("Expected first_title")?;
-            let last_title = row.get_by_name("last_title").context("Expected last_title")?;
-            
-            if let (Value::String(r), Value::String(f), Value::String(l)) = (rating, first_title, last_title) {
+            let first_title = row
+                .get_by_name("first_title")
+                .context("Expected first_title")?;
+            let last_title = row
+                .get_by_name("last_title")
+                .context("Expected last_title")?;
+
+            if let (Value::String(r), Value::String(f), Value::String(l)) =
+                (rating, first_title, last_title)
+            {
                 // Check consistency within partition
                 if let Some(expected_first) = partition_first.get(r) {
-                    assert_eq!(f, expected_first, "All rows in partition should have same FIRST_VALUE");
+                    assert_eq!(
+                        f, expected_first,
+                        "All rows in partition should have same FIRST_VALUE"
+                    );
                 } else {
                     partition_first.insert(r.clone(), f.clone());
                 }
-                
+
                 if let Some(expected_last) = partition_last.get(r) {
-                    assert_eq!(l, expected_last, "All rows in partition should have same LAST_VALUE");
+                    assert_eq!(
+                        l, expected_last,
+                        "All rows in partition should have same LAST_VALUE"
+                    );
                 } else {
                     partition_last.insert(r.clone(), l.clone());
                 }
@@ -1376,7 +1542,9 @@ mod window_function_tests {
         use zqlz_driver_sqlite::SqliteDriver;
 
         let config = ConnectionConfig::new_sqlite(":memory:");
-        let conn = SqliteDriver::new().connect(&config).await
+        let conn = SqliteDriver::new()
+            .connect(&config)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to connect: {}", e))?;
 
         // Create test table with sample data
@@ -1387,7 +1555,9 @@ mod window_function_tests {
                 score INTEGER
             )",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         conn.execute(
             "INSERT INTO test_scores (student, subject, score) VALUES 
@@ -1398,7 +1568,9 @@ mod window_function_tests {
                 ('Charlie', 'Math', 78),
                 ('Charlie', 'English', 85)",
             &[],
-        ).await.map_err(|e| anyhow::anyhow!("{}", e))?;
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Test ROW_NUMBER with PARTITION BY
         let result = conn

@@ -1,7 +1,97 @@
+use std::collections::HashSet;
+
 use super::*;
 use zqlz_ui::widgets::spinner::Spinner;
 
 impl TableViewerPanel {
+    fn render_selection_stats(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let table_state = self.table_state.as_ref()?;
+        let table = table_state.read(cx);
+        let selection = table.cell_selection();
+
+        let cell_count = selection.cell_count();
+        if cell_count == 0 {
+            return None;
+        }
+
+        let selected_cells = selection.selected_cells();
+        if selected_cells.is_empty() {
+            return None;
+        }
+
+        let theme = cx.theme();
+        let delegate = table.delegate();
+
+        let distinct_rows: HashSet<usize> = selected_cells.iter().map(|cell| cell.row).collect();
+
+        let selection_label = if cell_count == 1 {
+            "1 cell".to_string()
+        } else if distinct_rows.len() == 1 {
+            format!("{} cells in 1 row", cell_count)
+        } else {
+            format!("{} cells in {} rows", cell_count, distinct_rows.len())
+        };
+
+        let mut numeric_values: Vec<f64> = Vec::new();
+        for cell in &selected_cells {
+            let text = delegate.cell_text(cell.row, cell.col, cx);
+            if let Ok(number) = text.parse::<f64>() {
+                numeric_values.push(number);
+            }
+        }
+
+        let stats_elements = if numeric_values.len() > 1 {
+            let sum: f64 = numeric_values.iter().sum();
+            let average = sum / numeric_values.len() as f64;
+            let min = numeric_values.iter().cloned().fold(f64::INFINITY, f64::min);
+            let max = numeric_values
+                .iter()
+                .cloned()
+                .fold(f64::NEG_INFINITY, f64::max);
+
+            let format_number = |value: f64| -> String {
+                if value == value.floor() && value.abs() < 1e15 {
+                    format!("{}", value as i64)
+                } else {
+                    format!("{:.2}", value)
+                }
+            };
+
+            Some((
+                format_number(sum),
+                format_number(average),
+                format_number(min),
+                format_number(max),
+            ))
+        } else {
+            None
+        };
+
+        Some(
+            h_flex()
+                .w_full()
+                .h(px(24.0))
+                .px_3()
+                .gap_3()
+                .items_center()
+                .justify_end()
+                .border_t_1()
+                .border_color(theme.border)
+                .bg(theme.tab_bar)
+                .text_xs()
+                .text_color(theme.muted_foreground)
+                .child(selection_label)
+                .when_some(stats_elements, |this, (sum, average, min, max)| {
+                    this.child(div().h(px(12.0)).w(px(1.0)).bg(theme.border))
+                        .child(format!("Sum: {}", sum))
+                        .child(format!("Avg: {}", average))
+                        .child(format!("Min: {}", min))
+                        .child(format!("Max: {}", max))
+                })
+                .into_any_element(),
+        )
+    }
+
     pub fn render_empty(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
@@ -115,17 +205,6 @@ impl Render for TableViewerPanel {
         let footer_bg_color = theme.tab_bar;
         let footer_text_color = theme.muted_foreground;
 
-        if !self.auto_commit_mode {
-            let has_pending_changes = self
-                .table_state
-                .as_ref()
-                .map(|s| s.read(cx).delegate().has_pending_changes())
-                .unwrap_or(false);
-            if has_pending_changes && !self.transaction_panel_expanded {
-                self.transaction_panel_expanded = true;
-            }
-        }
-
         h_flex()
             .id("table-viewer")
             .key_context("TableViewerPanel")
@@ -139,11 +218,20 @@ impl Render for TableViewerPanel {
             .on_action(cx.listener(|this, _: &DeleteSelectedRows, _window, cx| {
                 this.emit_delete_rows(cx);
             }))
+            .on_action(cx.listener(|this, _: &UndoEdit, _window, cx| {
+                this.undo_edit(cx);
+            }))
+            .on_action(cx.listener(|this, _: &RedoEdit, _window, cx| {
+                this.redo_edit(cx);
+            }))
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| {
                 this.toggle_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseSearch, _window, cx| {
                 this.close_search(cx);
+            }))
+            .on_action(cx.listener(|this, _: &ToggleReplace, window, cx| {
+                this.toggle_replace(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
                 this.copy_selection(cx);
@@ -189,6 +277,10 @@ impl Render for TableViewerPanel {
                             .overflow_hidden()
                             .child(Table::new(table_state).stripe(true)),
                     );
+
+                    if let Some(stats) = self.render_selection_stats(cx) {
+                        content = content.child(stats);
+                    }
 
                     if let Some(pag_state) = self
                         .pagination_state

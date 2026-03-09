@@ -6,8 +6,8 @@
 //! that handles menu visibility, positioning, and event subscriptions.
 
 use gpui::*;
-use zqlz_ui::widgets::menu::PopupMenu;
 use zqlz_ui::widgets::ActiveTheme;
+use zqlz_ui::widgets::menu::PopupMenu;
 
 /// State for context menus
 ///

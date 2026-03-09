@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use tokio::sync::Mutex;
 use tokio_postgres::{
-    types::{FromSql, ToSql},
     CancelToken, Client, NoTls, Row as PgRow,
+    types::{FromSql, ToSql},
 };
 use zqlz_core::{
     CellUpdateRequest, ColumnMeta, Connection, QueryCancelHandle, QueryResult, Result, Row,
@@ -115,9 +115,9 @@ impl PostgresConnection {
         ssl_client_key: Option<&str>,
     ) -> Result<Self> {
         tracing::info!(
-            host = %host, 
-            port = %port, 
-            database = %database, 
+            host = %host,
+            port = %port,
+            database = %database,
             ssl_mode = %ssl_mode,
             "connecting to PostgreSQL database"
         );
@@ -150,72 +150,87 @@ impl PostgresConnection {
 
         // Determine whether to use TLS or NoTls based on ssl_mode
         let use_tls = !ssl_mode.eq_ignore_ascii_case("disable");
-        
+
         let (client, cancel_token) = if use_tls {
             // Build TLS connector
             let mut tls_builder = TlsConnector::builder();
-            
+
             // Load CA certificate if provided
             if let Some(ca_cert_path) = ssl_ca_cert
                 && !ca_cert_path.is_empty()
             {
-                let ca_cert_data = fs::read(ca_cert_path)
-                    .map_err(|e| ZqlzError::Connection(format!("Failed to read CA certificate: {}", e)))?;
-                let ca_cert = Certificate::from_pem(&ca_cert_data)
-                    .map_err(|e| ZqlzError::Connection(format!("Failed to parse CA certificate: {}", e)))?;
+                let ca_cert_data = fs::read(ca_cert_path).map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to read CA certificate: {}", e))
+                })?;
+                let ca_cert = Certificate::from_pem(&ca_cert_data).map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to parse CA certificate: {}", e))
+                })?;
                 tls_builder.add_root_certificate(ca_cert);
             }
-            
+
             // Load client certificate and key if provided
-            if let (Some(client_cert_path), Some(client_key_path)) = (ssl_client_cert, ssl_client_key)
-                && !client_cert_path.is_empty() && !client_key_path.is_empty()
+            if let (Some(client_cert_path), Some(client_key_path)) =
+                (ssl_client_cert, ssl_client_key)
+                && !client_cert_path.is_empty()
+                && !client_key_path.is_empty()
             {
-                let client_cert_data = fs::read(client_cert_path)
-                    .map_err(|e| ZqlzError::Connection(format!("Failed to read client certificate: {}", e)))?;
-                let client_key_data = fs::read(client_key_path)
-                    .map_err(|e| ZqlzError::Connection(format!("Failed to read client key: {}", e)))?;
-                
+                let client_cert_data = fs::read(client_cert_path).map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to read client certificate: {}", e))
+                })?;
+                let client_key_data = fs::read(client_key_path).map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to read client key: {}", e))
+                })?;
+
                 // Combine cert and key into PKCS12 identity
-                let identity = Identity::from_pkcs8(&client_cert_data, &client_key_data)
-                    .map_err(|e| ZqlzError::Connection(format!("Failed to create identity from certificate and key: {}", e)))?;
+                let identity =
+                    Identity::from_pkcs8(&client_cert_data, &client_key_data).map_err(|e| {
+                        ZqlzError::Connection(format!(
+                            "Failed to create identity from certificate and key: {}",
+                            e
+                        ))
+                    })?;
                 tls_builder.identity(identity);
             }
-            
+
             // For verify-full mode, enable hostname verification
             let danger_accept_invalid = matches!(
                 ssl_mode.to_lowercase().as_str(),
                 "require" | "verify-ca" | "verify_ca"
             );
             tls_builder.danger_accept_invalid_hostnames(danger_accept_invalid);
-            
+
             // For require mode without CA cert, accept invalid certs
             let danger_accept_invalid_certs =
                 ssl_mode.to_lowercase() == "require" && ssl_ca_cert.is_none();
             tls_builder.danger_accept_invalid_certs(danger_accept_invalid_certs);
-            
-            let tls_connector = tls_builder
-                .build()
-                .map_err(|e| ZqlzError::Connection(format!("Failed to build TLS connector: {}", e)))?;
+
+            let tls_connector = tls_builder.build().map_err(|e| {
+                ZqlzError::Connection(format!("Failed to build TLS connector: {}", e))
+            })?;
             let tls = MakeTlsConnector::new(tls_connector);
-            
+
             let (client, connection) = runtime
                 .spawn({
                     let config = config.clone();
                     async move { config.connect(tls).await }
                 })
                 .await
-                .map_err(|e| ZqlzError::Connection(format!("PostgreSQL connection task failed: {}", e)))?
-                .map_err(|e| ZqlzError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-            
+                .map_err(|e| {
+                    ZqlzError::Connection(format!("PostgreSQL connection task failed: {}", e))
+                })?
+                .map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to connect to PostgreSQL: {}", e))
+                })?;
+
             let cancel_token = client.cancel_token();
-            
+
             // Spawn connection task
             runtime.spawn(async move {
                 if let Err(e) = connection.await {
                     tracing::error!(error = %e, "PostgreSQL connection error");
                 }
             });
-            
+
             (client, cancel_token)
         } else {
             // No TLS
@@ -225,25 +240,29 @@ impl PostgresConnection {
                     async move { config.connect(NoTls).await }
                 })
                 .await
-                .map_err(|e| ZqlzError::Connection(format!("PostgreSQL connection task failed: {}", e)))?
-                .map_err(|e| ZqlzError::Connection(format!("Failed to connect to PostgreSQL: {}", e)))?;
-            
+                .map_err(|e| {
+                    ZqlzError::Connection(format!("PostgreSQL connection task failed: {}", e))
+                })?
+                .map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to connect to PostgreSQL: {}", e))
+                })?;
+
             let cancel_token = client.cancel_token();
-            
+
             // Spawn connection task
             runtime.spawn(async move {
                 if let Err(e) = connection.await {
                     tracing::error!(error = %e, "PostgreSQL connection error");
                 }
             });
-            
+
             (client, cancel_token)
         };
 
         tracing::info!(
-            host = %host, 
-            port = %port, 
-            database = %database, 
+            host = %host,
+            port = %port,
+            database = %database,
             ssl_mode = %ssl_mode,
             "PostgreSQL connection established"
         );
@@ -500,7 +519,10 @@ impl PgValue {
                     .or_else(|| {
                         chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d")
                             .ok()
-                            .and_then(|date| chrono::NaiveTime::from_hms_opt(0, 0, 0).map(|time| date.and_time(time)))
+                            .and_then(|date| {
+                                chrono::NaiveTime::from_hms_opt(0, 0, 0)
+                                    .map(|time| date.and_time(time))
+                            })
                     });
                 parsed
                     .map(PgValue::DateTime)
@@ -518,7 +540,10 @@ impl PgValue {
                                     .ok()
                             })
                             .map(|timestamp| {
-                                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(timestamp, chrono::Utc)
+                                chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(
+                                    timestamp,
+                                    chrono::Utc,
+                                )
                             })
                     })
                     .or_else(|| {
@@ -613,7 +638,9 @@ impl Drop for PostgresTransaction {
     fn drop(&mut self) {
         // If transaction is neither committed nor rolled back, automatically roll back
         if !self.committed && !self.rolled_back {
-            tracing::warn!("PostgreSQL transaction dropped without commit or rollback, auto-rolling back");
+            tracing::warn!(
+                "PostgreSQL transaction dropped without commit or rollback, auto-rolling back"
+            );
             // We can't async rollback in Drop, but the BEGIN will auto-rollback when connection is reused
         }
     }
@@ -623,21 +650,21 @@ impl Drop for PostgresTransaction {
 impl Transaction for PostgresTransaction {
     async fn commit(mut self: Box<Self>) -> Result<()> {
         tracing::debug!("committing PostgreSQL transaction");
-        
+
         if self.rolled_back {
             return Err(ZqlzError::Query("Transaction already rolled back".into()));
         }
-        
+
         if self.committed {
             return Err(ZqlzError::Query("Transaction already committed".into()));
         }
-        
+
         let client = self.client.lock().await;
         client.execute("COMMIT", &[]).await.map_err(|e| {
             let message = format_postgres_error(&e);
             ZqlzError::Query(format!("Failed to commit transaction: {}", message))
         })?;
-        
+
         self.committed = true;
         tracing::debug!("PostgreSQL transaction committed successfully");
         Ok(())
@@ -645,21 +672,21 @@ impl Transaction for PostgresTransaction {
 
     async fn rollback(mut self: Box<Self>) -> Result<()> {
         tracing::debug!("rolling back PostgreSQL transaction");
-        
+
         if self.committed {
             return Err(ZqlzError::Query("Transaction already committed".into()));
         }
-        
+
         if self.rolled_back {
             return Ok(()); // Already rolled back, that's fine
         }
-        
+
         let client = self.client.lock().await;
         client.execute("ROLLBACK", &[]).await.map_err(|e| {
             let message = format_postgres_error(&e);
             ZqlzError::Query(format!("Failed to rollback transaction: {}", message))
         })?;
-        
+
         self.rolled_back = true;
         tracing::debug!("PostgreSQL transaction rolled back successfully");
         Ok(())
@@ -667,7 +694,7 @@ impl Transaction for PostgresTransaction {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing query in transaction");
-        
+
         let start_time = std::time::Instant::now();
         let client = self.client.lock().await;
 
@@ -692,13 +719,10 @@ impl Transaction for PostgresTransaction {
         let param_refs: Vec<&(dyn ToSql + Sync)> =
             pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
 
-        let pg_rows = client
-            .query(&statement, &param_refs)
-            .await
-            .map_err(|e| {
-                let message = format_postgres_error(&e);
-                ZqlzError::Query(format!("Failed to execute query: {}", message))
-            })?;
+        let pg_rows = client.query(&statement, &param_refs).await.map_err(|e| {
+            let message = format_postgres_error(&e);
+            ZqlzError::Query(format!("Failed to execute query: {}", message))
+        })?;
 
         // Get column metadata from prepared statement so empty result sets still include columns.
         let mut columns = Vec::new();
@@ -749,7 +773,7 @@ impl Transaction for PostgresTransaction {
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing statement in transaction");
-        
+
         let client = self.client.lock().await;
 
         // Prepare first so we know the target column types for each parameter
@@ -773,13 +797,10 @@ impl Transaction for PostgresTransaction {
         let param_refs: Vec<&(dyn ToSql + Sync)> =
             pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
 
-        let rows_affected = client
-            .execute(&statement, &param_refs)
-            .await
-            .map_err(|e| {
-                let message = format_postgres_error(&e);
-                ZqlzError::Query(format!("Failed to execute statement: {}", message))
-            })?;
+        let rows_affected = client.execute(&statement, &param_refs).await.map_err(|e| {
+            let message = format_postgres_error(&e);
+            ZqlzError::Query(format!("Failed to execute statement: {}", message))
+        })?;
 
         Ok(StatementResult {
             is_query: false,
@@ -825,13 +846,10 @@ impl Connection for PostgresConnection {
         let param_refs: Vec<&(dyn ToSql + Sync)> =
             pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
 
-        let rows_affected = client
-            .execute(&statement, &param_refs)
-            .await
-            .map_err(|e| {
-                let message = format_postgres_error(&e);
-                ZqlzError::Query(format!("Failed to execute statement: {}", message))
-            })?;
+        let rows_affected = client.execute(&statement, &param_refs).await.map_err(|e| {
+            let message = format_postgres_error(&e);
+            ZqlzError::Query(format!("Failed to execute statement: {}", message))
+        })?;
 
         tracing::debug!(affected_rows = rows_affected, "statement executed");
         Ok(StatementResult {
@@ -869,13 +887,10 @@ impl Connection for PostgresConnection {
         let param_refs: Vec<&(dyn ToSql + Sync)> =
             pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
 
-        let pg_rows = client
-            .query(&statement, &param_refs)
-            .await
-            .map_err(|e| {
-                let message = format_postgres_error(&e);
-                ZqlzError::Query(format!("Failed to execute query: {}", message))
-            })?;
+        let pg_rows = client.query(&statement, &param_refs).await.map_err(|e| {
+            let message = format_postgres_error(&e);
+            ZqlzError::Query(format!("Failed to execute query: {}", message))
+        })?;
 
         // Get column metadata from prepared statement so empty result sets still include columns.
         let mut columns = Vec::new();
@@ -932,16 +947,16 @@ impl Connection for PostgresConnection {
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
         tracing::debug!("beginning PostgreSQL transaction");
-        
+
         let client = self.client.lock().await;
         client.execute("BEGIN", &[]).await.map_err(|e| {
             let message = format_postgres_error(&e);
             ZqlzError::Query(format!("Failed to begin transaction: {}", message))
         })?;
-        
+
         // Release the lock and return the transaction
         drop(client);
-        
+
         tracing::debug!("PostgreSQL transaction begun successfully");
         Ok(Box::new(PostgresTransaction {
             client: Arc::clone(&self.client),
@@ -1033,23 +1048,20 @@ impl Connection for PostgresConnection {
         tracing::debug!("PostgreSQL update SQL: {}", sql);
 
         let client = self.client.lock().await;
-        let rows_affected = client
-            .execute(&sql, &[])
-            .await
-            .map_err(|e| {
-                tracing::error!("PostgreSQL cell update error: {:?}", e);
-                tracing::error!("Error details: {}", e);
-                if let Some(db_error) = e.as_db_error() {
-                    tracing::error!(
-                        "Database error details - Code: {:?}, Message: {}, Detail: {:?}, Hint: {:?}",
-                        db_error.code(),
-                        db_error.message(),
-                        db_error.detail(),
-                        db_error.hint()
-                    );
-                }
-                ZqlzError::Query(format!("Failed to update cell: {}", e))
-            })?;
+        let rows_affected = client.execute(&sql, &[]).await.map_err(|e| {
+            tracing::error!("PostgreSQL cell update error: {:?}", e);
+            tracing::error!("Error details: {}", e);
+            if let Some(db_error) = e.as_db_error() {
+                tracing::error!(
+                    "Database error details - Code: {:?}, Message: {}, Detail: {:?}, Hint: {:?}",
+                    db_error.code(),
+                    db_error.message(),
+                    db_error.detail(),
+                    db_error.hint()
+                );
+            }
+            ZqlzError::Query(format!("Failed to update cell: {}", e))
+        })?;
 
         tracing::debug!(affected_rows = rows_affected, "cell update completed");
         Ok(rows_affected)

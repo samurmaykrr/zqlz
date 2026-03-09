@@ -4,7 +4,7 @@
 //! These tests validate that drivers can handle significant data volumes without
 //! performance degradation or resource exhaustion.
 
-use crate::fixtures::{sql_drivers, test_connection, TestDriver};
+use crate::fixtures::{TestDriver, sql_drivers, test_connection};
 use anyhow::{Context, Result};
 use rstest::rstest;
 use zqlz_core::{Connection, Value};
@@ -324,9 +324,16 @@ async fn test_large_many_columns_result(#[case] driver: TestDriver) -> Result<()
 
     // Create temporary table with many columns (50 columns)
     let mut create_table_sql = match driver {
-        TestDriver::Postgres => "CREATE TEMPORARY TABLE many_columns_test (id INTEGER PRIMARY KEY".to_string(),
-        TestDriver::Mysql => "CREATE TEMPORARY TABLE IF NOT EXISTS many_columns_test (id INTEGER PRIMARY KEY".to_string(),
-        TestDriver::Sqlite => "CREATE TEMPORARY TABLE many_columns_test (id INTEGER PRIMARY KEY".to_string(),
+        TestDriver::Postgres => {
+            "CREATE TEMPORARY TABLE many_columns_test (id INTEGER PRIMARY KEY".to_string()
+        }
+        TestDriver::Mysql => {
+            "CREATE TEMPORARY TABLE IF NOT EXISTS many_columns_test (id INTEGER PRIMARY KEY"
+                .to_string()
+        }
+        TestDriver::Sqlite => {
+            "CREATE TEMPORARY TABLE many_columns_test (id INTEGER PRIMARY KEY".to_string()
+        }
         _ => unreachable!(),
     };
 
@@ -480,10 +487,7 @@ async fn test_large_update_many_rows(#[case] driver: TestDriver) -> Result<()> {
     )
     .await?;
 
-    assert_eq!(
-        affected, total_rows as u64,
-        "Should have updated 5000 rows"
-    );
+    assert_eq!(affected, total_rows as u64, "Should have updated 5000 rows");
 
     // Verify updates
     let result = query_sql(
@@ -502,10 +506,7 @@ async fn test_large_update_many_rows(#[case] driver: TestDriver) -> Result<()> {
         .get_by_name("count")
         .and_then(|v| v.as_i64())
         .context("Should get count")?;
-    assert_eq!(
-        count, total_rows as i64,
-        "All 5000 rows should be updated"
-    );
+    assert_eq!(count, total_rows as i64, "All 5000 rows should be updated");
 
     Ok(())
 }
@@ -642,10 +643,7 @@ async fn integration_test_large_data_handling_works() -> Result<()> {
     for i in 0..100 {
         conn.execute(
             "INSERT INTO large_data (id, data) VALUES (?, ?)",
-            &[
-                Value::Int64(i),
-                Value::String(format!("data_value_{}", i)),
-            ],
+            &[Value::Int64(i), Value::String(format!("data_value_{}", i))],
         )
         .await?;
     }

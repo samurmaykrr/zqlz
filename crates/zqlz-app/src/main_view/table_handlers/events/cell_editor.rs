@@ -12,10 +12,7 @@
 
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
 
 use crate::app::AppState;
@@ -49,18 +46,16 @@ impl MainView {
                     return;
                 };
 
-                let database_name = source_viewer
-                    .as_ref()
-                    .and_then(|v| {
-                        v.read_with(cx, |viewer, _cx| viewer.database_name())
-                            .ok()
-                            .flatten()
-                    });
+                let database_name = source_viewer.as_ref().and_then(|v| {
+                    v.read_with(cx, |viewer, _cx| viewer.database_name())
+                        .ok()
+                        .flatten()
+                });
 
-                let Some(connection) = app_state.connections.get_for_database_cached(
-                    cell_data.connection_id,
-                    database_name.as_deref(),
-                ) else {
+                let Some(connection) = app_state
+                    .connections
+                    .get_for_database_cached(cell_data.connection_id, database_name.as_deref())
+                else {
                     tracing::error!("Connection not found: {}", cell_data.connection_id);
                     return;
                 };
@@ -74,16 +69,14 @@ impl MainView {
                 let original_value = cell_data.current_value.clone();
                 let is_redis = connection.driver_name() == "redis";
                 let schema_qualifier = if !is_redis {
-                    source_viewer
-                        .as_ref()
-                        .and_then(|v| {
-                            v.read_with(cx, |viewer, _cx| {
-                                let db = viewer.database_name();
-                                resolve_schema_qualifier(connection.driver_name(), &db)
-                            })
-                            .ok()
-                            .flatten()
+                    source_viewer.as_ref().and_then(|v| {
+                        v.read_with(cx, |viewer, _cx| {
+                            let db = viewer.database_name();
+                            resolve_schema_qualifier(connection.driver_name(), &db)
                         })
+                        .ok()
+                        .flatten()
+                    })
                 } else {
                     None
                 };

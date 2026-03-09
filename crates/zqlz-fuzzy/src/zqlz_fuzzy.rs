@@ -171,11 +171,7 @@ impl FuzzyMatcher {
                             original_candidate[..byte_pos].chars().last().unwrap_or(' ');
                         !prev_char.is_alphanumeric()
                     });
-                if is_word_start {
-                    Some(idx)
-                } else {
-                    None
-                }
+                if is_word_start { Some(idx) } else { None }
             })
             .collect();
 

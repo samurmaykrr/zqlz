@@ -16,22 +16,169 @@ impl TableViewerDelegate {
             .unwrap_or(false)
     }
 
-    pub(super) fn parse_boolean_value(&self, value: &str) -> Option<bool> {
+    pub fn is_integer_column(&self, data_col_ix: usize) -> bool {
+        self.column_meta
+            .get(data_col_ix)
+            .map(|col| {
+                let t = col.data_type.to_lowercase();
+                let base = base_type(&t);
+                matches!(
+                    base,
+                    "int2"
+                        | "int4"
+                        | "int8"
+                        | "smallint"
+                        | "integer"
+                        | "bigint"
+                        | "int"
+                        | "mediumint"
+                        | "tinyint"
+                        | "serial"
+                        | "bigserial"
+                        | "smallserial"
+                ) && !self.is_boolean_column(data_col_ix)
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn is_float_column(&self, data_col_ix: usize) -> bool {
+        self.column_meta
+            .get(data_col_ix)
+            .map(|col| {
+                let t = col.data_type.to_lowercase();
+                let base = base_type(&t);
+                matches!(
+                    base,
+                    "float4"
+                        | "float8"
+                        | "real"
+                        | "double precision"
+                        | "double"
+                        | "float"
+                        | "numeric"
+                        | "decimal"
+                        | "money"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    pub fn is_string_column(&self, data_col_ix: usize) -> bool {
+        self.column_meta
+            .get(data_col_ix)
+            .map(|col| {
+                let t = col.data_type.to_lowercase();
+                let base = base_type(&t);
+                matches!(
+                    base,
+                    "text"
+                        | "varchar"
+                        | "char"
+                        | "bpchar"
+                        | "name"
+                        | "citext"
+                        | "character varying"
+                        | "character"
+                        | "nvarchar"
+                        | "nchar"
+                        | "longtext"
+                        | "mediumtext"
+                        | "tinytext"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    /// Validate a cell value against the column's data type.
+    /// Accepts a user-entered string (from inline edit or paste).
+    /// Returns `Ok(())` if valid, or `Err(message)` describing the problem.
+    pub fn validate_cell_value(&self, data_col: usize, value: &str) -> Result<(), String> {
         if value.is_empty() || value.eq_ignore_ascii_case("null") {
-            return None;
+            return Ok(());
         }
-        match value.to_lowercase().as_str() {
-            "true" | "t" | "1" | "yes" | "y" | "on" => Some(true),
-            "false" | "f" | "0" | "no" | "n" | "off" => Some(false),
-            _ => None,
+
+        if self.is_integer_column(data_col) {
+            if value.parse::<i64>().is_err() {
+                let col_name = self
+                    .column_meta
+                    .get(data_col)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("column");
+                return Err(format!(
+                    "'{}' is not a valid integer for column '{}'",
+                    value, col_name
+                ));
+            }
+        }
+
+        if self.is_float_column(data_col) {
+            if value.parse::<f64>().is_err() {
+                let col_name = self
+                    .column_meta
+                    .get(data_col)
+                    .map(|c| c.name.as_str())
+                    .unwrap_or("column");
+                return Err(format!(
+                    "'{}' is not a valid number for column '{}'",
+                    value, col_name
+                ));
+            }
+        }
+
+        if self.is_string_column(data_col) {
+            if let Some(max_length) = self.column_meta.get(data_col).and_then(|c| c.max_length) {
+                if max_length > 0 && value.len() > max_length as usize {
+                    let col_name = self
+                        .column_meta
+                        .get(data_col)
+                        .map(|c| c.name.as_str())
+                        .unwrap_or("column");
+                    return Err(format!(
+                        "Value exceeds max length {} for column '{}' ({} chars)",
+                        max_length,
+                        col_name,
+                        value.len()
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn parse_boolean_value(&self, value: &Value) -> Option<bool> {
+        match value {
+            Value::Null => None,
+            Value::Bool(b) => Some(*b),
+            Value::Int8(v) => Some(*v != 0),
+            Value::Int16(v) => Some(*v != 0),
+            Value::Int32(v) => Some(*v != 0),
+            Value::Int64(v) => Some(*v != 0),
+            Value::String(s) => {
+                if s.is_empty() || s.eq_ignore_ascii_case("null") {
+                    return None;
+                }
+                match s.to_lowercase().as_str() {
+                    "true" | "t" | "1" | "yes" | "y" | "on" => Some(true),
+                    "false" | "f" | "0" | "no" | "n" | "off" => Some(false),
+                    _ => None,
+                }
+            }
+            _ => {
+                let s = value.display_for_table();
+                match s.to_lowercase().as_str() {
+                    "true" | "t" | "1" | "yes" | "y" | "on" => Some(true),
+                    "false" | "f" | "0" | "no" | "n" | "off" => Some(false),
+                    _ => None,
+                }
+            }
         }
     }
 
-    fn format_boolean_value(&self, value: Option<bool>) -> String {
+    fn format_boolean_value(&self, value: Option<bool>) -> Value {
         match value {
-            Some(true) => "true".to_string(),
-            Some(false) => "false".to_string(),
-            None => String::new(),
+            Some(b) => Value::Bool(b),
+            None => Value::Null,
         }
     }
 
@@ -60,70 +207,26 @@ impl TableViewerDelegate {
 
         let new_value = self.format_boolean_value(new_bool);
 
+        self.push_undo(UndoEntry {
+            edits: vec![UndoCellEdit {
+                row,
+                data_col,
+                old_value: current_value.clone(),
+                new_value: new_value.clone(),
+            }],
+        });
+
         let total_rows = self.rows.len();
         let new_row_idx = self.pending_changes.get_new_row_index(row, total_rows);
 
         if let Some(new_row_idx) = new_row_idx {
-            if let Some(row_data) = self.rows.get_mut(row) {
-                if let Some(cell) = row_data.get_mut(data_col) {
-                    *cell = new_value.clone();
-                }
-            }
+            self.apply_value_locally(row, data_col, new_value.clone());
             self.pending_changes
                 .update_new_row_cell(new_row_idx, data_col, new_value);
         } else if self.auto_commit_mode {
-            let table_name = self.table_name.clone();
-            let connection_id = self.connection_id;
-            let all_row_values = self.rows.get(row).cloned().unwrap_or_default();
-            let all_column_names: Vec<String> =
-                self.column_meta.iter().map(|c| c.name.clone()).collect();
-            let all_column_types: Vec<String> = self
-                .column_meta
-                .iter()
-                .map(|c| c.data_type.clone())
-                .collect();
-            let column_name = self
-                .column_meta
-                .get(data_col)
-                .map(|c| c.name.clone())
-                .unwrap_or_default();
-
-            if let Some(row_data) = self.rows.get_mut(row) {
-                if let Some(cell) = row_data.get_mut(data_col) {
-                    *cell = new_value.clone();
-                }
-            }
-
-            let viewer_panel = self.viewer_panel.clone();
-            cx.defer(move |cx| {
-                _ = viewer_panel.update(cx, |_panel, cx| {
-                    cx.emit(TableViewerEvent::SaveCell {
-                        table_name,
-                        connection_id,
-                        row,
-                        col: data_col,
-                        column_name,
-                        new_value,
-                        original_value: current_value,
-                        all_row_values,
-                        all_column_names,
-                        all_column_types,
-                    });
-                });
-            });
+            self.save_existing_cell_or_queue(row, data_col, new_value, &current_value, cx);
         } else {
-            if let Some(row_data) = self.rows.get_mut(row) {
-                if let Some(cell) = row_data.get_mut(data_col) {
-                    self.pending_changes.modified_cells.insert(
-                        (row, data_col),
-                        PendingCellChange {
-                            original_value: current_value,
-                            new_value: new_value.clone(),
-                        },
-                    );
-                    *cell = new_value;
-                }
-            }
+            self.store_pending_cell_change(row, data_col, new_value, &current_value);
         }
 
         cx.notify();
@@ -211,7 +314,7 @@ impl TableViewerDelegate {
         self.column_meta
             .get(data_col_ix)
             .map(|col| {
-                if col.enum_values.is_some() && !col.enum_values.as_ref().unwrap().is_empty() {
+                if col.enum_values.as_ref().is_some_and(|v| !v.is_empty()) {
                     return true;
                 }
                 let t = col.data_type.to_lowercase();
@@ -250,8 +353,17 @@ impl TableViewerDelegate {
             .unwrap_or(false)
     }
 
-    /// Check if a cell value looks like a binary placeholder
-    pub fn is_bytes_placeholder(value: &str) -> bool {
-        value == "BLOB" || (value.starts_with('<') && value.ends_with("bytes>"))
+    /// Check if a cell value is binary data
+    pub fn is_bytes_value(value: &Value) -> bool {
+        matches!(value, Value::Bytes(_))
+    }
+}
+
+/// Extract the base type name from a possibly-parameterized SQL type
+/// (e.g. "varchar(255)" -> "varchar", "decimal(10,2)" -> "decimal").
+fn base_type(type_string: &str) -> &str {
+    match type_string.find('(') {
+        Some(idx) => &type_string[..idx],
+        None => type_string,
     }
 }

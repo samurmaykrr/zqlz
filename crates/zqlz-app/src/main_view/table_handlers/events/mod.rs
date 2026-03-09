@@ -8,8 +8,6 @@
 mod cell_editor;
 mod key_value_editor;
 mod open_viewer;
-mod refresh_objects;
-mod refresh_schema;
 
-// open_viewer, refresh_objects, and refresh_schema define impl MainView methods
-// that are accessible throughout the main_view module via pub(in crate::main_view)
+// open_viewer defines impl MainView methods that are accessible throughout the
+// main_view module via pub(in crate::main_view)

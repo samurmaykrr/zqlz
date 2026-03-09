@@ -53,7 +53,7 @@ impl MainView {
                 "Destructive operation detected: {}",
                 warning.reason
             );
-            
+
             // TODO: Show confirmation dialog
             // For now, we log the warning and continue execution
             // A full implementation would show a dialog and only proceed if user confirms
@@ -92,7 +92,6 @@ impl MainView {
         });
 
         if let (Some(conn_id), Some(conn)) = (connection_id, connection) {
-
             // Get and store the cancel handle for this query
             // This allows us to interrupt the actual database query, not just drop the task
             if let Some(cancel_handle) = conn.cancel_handle() {
@@ -106,89 +105,89 @@ impl MainView {
             let results_panel = results_panel.downgrade();
 
             let task = cx.spawn_in(window, async move |this, cx| {
-                    // ✅ Use QueryService - all logic encapsulated
-                    let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
-                    let is_schema_modifying_sql = QueryEngine::new().is_schema_modifying(&sql);
+                // ✅ Use QueryService - all logic encapsulated
+                let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
+                let is_schema_modifying_sql = QueryEngine::new().is_schema_modifying(&sql);
 
-                    _ = query_tabs_panel.update(cx, |panel, cx| {
-                        panel.set_editor_executing(editor_index, false, cx);
-                    });
-
-                    // Convert service QueryExecution to component QueryExecution
-                    let execution = match service_execution {
-                        Ok(exec) => {
-                            // Invalidate schema cache if DDL was executed
-                            if is_schema_modifying_sql {
-                                schema_service.invalidate_connection_cache(conn_id);
-
-                                // Trigger LSP schema refresh on the editor so completions
-                                // reflect the new schema without requiring a reconnect.
-                                _ = query_tabs_panel.update(cx, |panel, cx| {
-                                    if let Some(editor) = panel.get_editor(editor_index) {
-                                        _ = editor.update(cx, |editor, cx| {
-                                            editor.notify_query_executed(&sql, cx);
-                                        });
-                                    }
-                                });
-                            }
-
-                            let start_time = chrono::Utc::now()
-                                - chrono::Duration::milliseconds(exec.duration_ms as i64);
-                            let end_time = chrono::Utc::now();
-
-                            QueryExecution {
-                                sql: exec.sql,
-                                start_time,
-                                end_time,
-                                duration_ms: exec.duration_ms,
-                                connection_name,
-                                database_name,
-                                statements: exec
-                                    .statements
-                                    .into_iter()
-                                    .map(|s| StatementResult {
-                                        sql: s.sql,
-                                        duration_ms: s.duration_ms,
-                                        result: s.result,
-                                        error: s.error,
-                                        affected_rows: s.affected_rows,
-                                    })
-                                    .collect(),
-                            }
-                        }
-                        Err(e) => {
-                            let now = chrono::Utc::now();
-                            QueryExecution {
-                                sql,
-                                start_time: now,
-                                end_time: now,
-                                duration_ms: 0,
-                                connection_name,
-                                database_name,
-                                statements: vec![StatementResult {
-                                    sql: String::new(),
-                                    duration_ms: 0,
-                                    result: None,
-                                    error: Some(format!("Service error: {}", e)),
-                                    affected_rows: 0,
-                                }],
-                            }
-                        }
-                    };
-
-                    _ = results_panel.update_in(cx, |panel, window, cx| {
-                        panel.set_execution(execution, window, cx);
-                    });
-
-                    // Remove this task and cancel handle from the running maps when done
-                    _ = this.update(cx, |main_view, cx| {
-                        main_view.running_query_tasks.remove(&editor_index);
-                        main_view.query_cancel_handles.remove(&editor_index);
-                        main_view.refresh_query_history(cx);
-                    });
-
-                    anyhow::Ok(())
+                _ = query_tabs_panel.update(cx, |panel, cx| {
+                    panel.set_editor_executing(editor_index, false, cx);
                 });
+
+                // Convert service QueryExecution to component QueryExecution
+                let execution = match service_execution {
+                    Ok(exec) => {
+                        // Invalidate schema cache if DDL was executed
+                        if is_schema_modifying_sql {
+                            schema_service.invalidate_connection_cache(conn_id);
+
+                            // Trigger LSP schema refresh on the editor so completions
+                            // reflect the new schema without requiring a reconnect.
+                            _ = query_tabs_panel.update(cx, |panel, cx| {
+                                if let Some(editor) = panel.get_editor(editor_index) {
+                                    _ = editor.update(cx, |editor, cx| {
+                                        editor.notify_query_executed(&sql, cx);
+                                    });
+                                }
+                            });
+                        }
+
+                        let start_time = chrono::Utc::now()
+                            - chrono::Duration::milliseconds(exec.duration_ms as i64);
+                        let end_time = chrono::Utc::now();
+
+                        QueryExecution {
+                            sql: exec.sql,
+                            start_time,
+                            end_time,
+                            duration_ms: exec.duration_ms,
+                            connection_name,
+                            database_name,
+                            statements: exec
+                                .statements
+                                .into_iter()
+                                .map(|s| StatementResult {
+                                    sql: s.sql,
+                                    duration_ms: s.duration_ms,
+                                    result: s.result,
+                                    error: s.error,
+                                    affected_rows: s.affected_rows,
+                                })
+                                .collect(),
+                        }
+                    }
+                    Err(e) => {
+                        let now = chrono::Utc::now();
+                        QueryExecution {
+                            sql,
+                            start_time: now,
+                            end_time: now,
+                            duration_ms: 0,
+                            connection_name,
+                            database_name,
+                            statements: vec![StatementResult {
+                                sql: String::new(),
+                                duration_ms: 0,
+                                result: None,
+                                error: Some(format!("Service error: {}", e)),
+                                affected_rows: 0,
+                            }],
+                        }
+                    }
+                };
+
+                _ = results_panel.update_in(cx, |panel, window, cx| {
+                    panel.set_execution(execution, window, cx);
+                });
+
+                // Remove this task and cancel handle from the running maps when done
+                _ = this.update(cx, |main_view, cx| {
+                    main_view.running_query_tasks.remove(&editor_index);
+                    main_view.query_cancel_handles.remove(&editor_index);
+                    main_view.refresh_query_history(cx);
+                });
+
+                anyhow::Ok(())
+            });
 
             // Map the task to ignore the result (we handle it inside)
             let task = cx.spawn(async move |_this, _cx| {
@@ -376,13 +375,27 @@ impl MainView {
                     state.set_active_editor(editor_id, cx);
                 });
             }
-            QueryTabsPanelEvent::SwitchConnection { connection_id, editor_index } => {
+            QueryTabsPanelEvent::SwitchConnection {
+                connection_id,
+                editor_index,
+            } => {
                 // TODO: Implement connection switching for editor
-                tracing::info!("Switch connection requested for editor {} to connection {}", editor_index, connection_id);
+                tracing::info!(
+                    "Switch connection requested for editor {} to connection {}",
+                    editor_index,
+                    connection_id
+                );
             }
-            QueryTabsPanelEvent::SwitchDatabase { database_name, editor_index } => {
+            QueryTabsPanelEvent::SwitchDatabase {
+                database_name,
+                editor_index,
+            } => {
                 // TODO: Implement database switching for editor
-                tracing::info!("Switch database requested for editor {} to database {}", editor_index, database_name);
+                tracing::info!(
+                    "Switch database requested for editor {} to database {}",
+                    editor_index,
+                    database_name
+                );
             }
         }
     }
@@ -430,52 +443,51 @@ impl MainView {
         });
 
         if let (Some(conn_id), Some(conn)) = (connection_id, connection) {
-
             let sql = sql.clone();
             let query_tabs_panel = query_tabs_panel.downgrade();
             let results_panel = results_panel.downgrade();
 
             cx.spawn_in(window, async move |_this, cx| {
-                    // Use QueryService to run EXPLAIN
-                    let service_result = query_service.explain_query(conn, conn_id, &sql).await;
+                // Use QueryService to run EXPLAIN
+                let service_result = query_service.explain_query(conn, conn_id, &sql).await;
 
-                    _ = query_tabs_panel.update(cx, |panel, cx| {
-                        panel.set_editor_executing(editor_index, false, cx);
-                    });
+                _ = query_tabs_panel.update(cx, |panel, cx| {
+                    panel.set_editor_executing(editor_index, false, cx);
+                });
 
-                    // Convert service ExplainResult to UI ExplainResult
-                    let explain_result = match service_result {
-                        Ok(result) => ExplainResult {
-                            sql: result.sql,
-                            duration_ms: result.duration_ms,
-                            raw_output: result.raw_output,
-                            query_plan: result.query_plan,
-                            analyzed_plan: result.analyzed_plan,
-                            error: result.error,
-                            connection_name,
-                            database_name,
-                            timestamp: chrono::Utc::now(),
-                        },
-                        Err(e) => ExplainResult {
-                            sql,
-                            duration_ms: 0,
-                            raw_output: None,
-                            query_plan: None,
-                            analyzed_plan: None,
-                            error: Some(format!("Service error: {}", e)),
-                            connection_name,
-                            database_name,
-                            timestamp: chrono::Utc::now(),
-                        },
-                    };
+                // Convert service ExplainResult to UI ExplainResult
+                let explain_result = match service_result {
+                    Ok(result) => ExplainResult {
+                        sql: result.sql,
+                        duration_ms: result.duration_ms,
+                        raw_output: result.raw_output,
+                        query_plan: result.query_plan,
+                        analyzed_plan: result.analyzed_plan,
+                        error: result.error,
+                        connection_name,
+                        database_name,
+                        timestamp: chrono::Utc::now(),
+                    },
+                    Err(e) => ExplainResult {
+                        sql,
+                        duration_ms: 0,
+                        raw_output: None,
+                        query_plan: None,
+                        analyzed_plan: None,
+                        error: Some(format!("Service error: {}", e)),
+                        connection_name,
+                        database_name,
+                        timestamp: chrono::Utc::now(),
+                    },
+                };
 
-                    _ = results_panel.update_in(cx, |panel, window, cx| {
-                        panel.add_explain_result(explain_result, window, cx);
-                    });
+                _ = results_panel.update_in(cx, |panel, window, cx| {
+                    panel.add_explain_result(explain_result, window, cx);
+                });
 
-                    anyhow::Ok(())
-                })
-                .detach();
+                anyhow::Ok(())
+            })
+            .detach();
         } else {
             query_tabs_panel.update(cx, |panel, cx| {
                 panel.set_editor_executing(editor_index, false, cx);
@@ -629,7 +641,7 @@ impl MainView {
 
         let query_editor = cx.new(|cx| {
             let mut editor = QueryEditor::new(query_name.clone(), active_conn_id, schema_service, window, cx);
-            
+
             // If we have a connection, set it immediately so schema loads
             if let Some(ref conn) = connection {
                 tracing::debug!(connection_id = ?active_conn_id, driver_type = ?driver_type, "Setting connection on new QueryEditor");
@@ -637,17 +649,12 @@ impl MainView {
             } else {
                 tracing::warn!("No connection available for new QueryEditor");
             }
-            
+
             editor
         });
 
-        let subscription = self.subscribe_query_editor(
-            &query_editor,
-            query_name.clone(),
-            editor_id,
-            window,
-            cx,
-        );
+        let subscription =
+            self.subscribe_query_editor(&query_editor, query_name.clone(), editor_id, window, cx);
 
         self._subscriptions.push(subscription);
 
@@ -688,27 +695,27 @@ impl MainView {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
-                        
+
                         tracing::info!(query_name = %query_name, "Executing query from editor");
-                        
+
                         editor.update(cx, |editor, cx| {
                             editor.set_executing(true, cx);
                         });
-                        
+
                         let Some(app_state) = cx.try_global::<AppState>() else {
                             tracing::error!("No AppState available");
                             return;
                         };
-                        
+
                         // ✅ Get QueryService
                         let query_service = app_state.query_service.clone();
-                        
+
                         let conn_id = connection_id.or_else(|| {
                             app_state.saved_connections()
                                 .first()
                                 .map(|c| c.id)
                         });
-                        
+
                         let Some(conn_id) = conn_id else {
                             tracing::warn!("No connection available for query execution");
                             editor.update(cx, |editor, cx| {
@@ -716,7 +723,7 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         let Some(conn) = app_state.connections.get(conn_id) else {
                             tracing::error!("Connection not found: {}", conn_id);
                             editor.update(cx, |editor, cx| {
@@ -727,16 +734,16 @@ impl MainView {
 
                         // Get cancel handle for WorkspaceState tracking
                         let cancel_handle = conn.cancel_handle();
-                        
+
                         // Get connection info for display (before releasing app_state borrow)
                         let connection_info = app_state.saved_connections().into_iter().find(|c| c.id == conn_id);
                         let connection_name = connection_info.as_ref().map(|c| c.name.clone());
                         let database_name = connection_info.as_ref().and_then(|c| {
                             c.params.get("database").or_else(|| c.params.get("path")).cloned()
                         });
-                        
+
                         let sql = sql.clone();
-                        
+
                         // Track query in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade() {
                             if let Some(handle) = cancel_handle {
@@ -745,14 +752,14 @@ impl MainView {
                                 });
                             }
                         }
-                        
+
                         let results_panel = results_panel.clone();
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
-                        
+
                         cx.spawn_in(window, async move |this, cx| {
                             tracing::debug!(sql = %sql, "Executing query");
-                            
+
                             // ✅ Use QueryService - all logic encapsulated
                             let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
                             let query_success = service_execution.is_ok();
@@ -765,10 +772,10 @@ impl MainView {
                             let execution = match service_execution {
                                 Ok(exec) => {
                                     tracing::info!(statements = exec.statements.len(), duration_ms = exec.duration_ms, "Query executed successfully");
-                                    
+
                                     let start_time = chrono::Utc::now() - chrono::Duration::milliseconds(exec.duration_ms as i64);
                                     let end_time = chrono::Utc::now();
-                                    
+
                                     QueryExecution {
                                         sql: exec.sql,
                                         start_time,
@@ -805,7 +812,7 @@ impl MainView {
                                     }
                                 }
                             };
-                            
+
                             _ = results_panel.update_in(cx, |panel, window, cx| {
                                 panel.set_execution(execution, window, cx);
                             });
@@ -816,7 +823,7 @@ impl MainView {
                                     state.complete_query(editor_id, query_success, cx);
                                 });
                             }
-                            
+
                             // Always reset executing state when query completes
                             if let Err(e) = editor_weak.update(cx, |editor, cx| {
                                 editor.set_executing(false, cx);
@@ -845,26 +852,26 @@ impl MainView {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
-                        
+
                         tracing::info!(query_name = %query_name, "Executing selection from editor");
-                        
+
                         editor.update(cx, |editor, cx| {
                             editor.set_executing(true, cx);
                         });
-                        
+
                         let Some(app_state) = cx.try_global::<AppState>() else {
                             tracing::error!("No AppState available");
                             return;
                         };
-                        
+
                         let query_service = app_state.query_service.clone();
-                        
+
                         let conn_id = connection_id.or_else(|| {
                             app_state.saved_connections()
                                 .first()
                                 .map(|c| c.id)
                         });
-                        
+
                         let Some(conn_id) = conn_id else {
                             tracing::warn!("No connection available for query execution");
                             editor.update(cx, |editor, cx| {
@@ -872,7 +879,7 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         let Some(conn) = app_state.connections.get(conn_id) else {
                             tracing::error!("Connection not found: {}", conn_id);
                             editor.update(cx, |editor, cx| {
@@ -883,16 +890,16 @@ impl MainView {
 
                         // Get cancel handle for WorkspaceState tracking
                         let cancel_handle = conn.cancel_handle();
-                        
+
                         // Get connection info for display (before releasing app_state borrow)
                         let connection_info = app_state.saved_connections().into_iter().find(|c| c.id == conn_id);
                         let connection_name = connection_info.as_ref().map(|c| c.name.clone());
                         let database_name = connection_info.as_ref().and_then(|c| {
                             c.params.get("database").or_else(|| c.params.get("path")).cloned()
                         });
-                        
+
                         let sql = sql.clone();
-                        
+
                         // Track query in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade() {
                             if let Some(handle) = cancel_handle {
@@ -901,11 +908,11 @@ impl MainView {
                                 });
                             }
                         }
-                        
+
                         let results_panel = results_panel.clone();
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
-                        
+
                         cx.spawn_in(window, async move |this, cx| {
                             tracing::debug!(sql = %sql, "Executing selection");
 
@@ -919,10 +926,10 @@ impl MainView {
                             let execution = match service_execution {
                                 Ok(exec) => {
                                     tracing::info!(statements = exec.statements.len(), duration_ms = exec.duration_ms, "Selection executed successfully");
-                                    
+
                                     let start_time = chrono::Utc::now() - chrono::Duration::milliseconds(exec.duration_ms as i64);
                                     let end_time = chrono::Utc::now();
-                                    
+
                                     QueryExecution {
                                         sql: exec.sql,
                                         start_time,
@@ -959,7 +966,7 @@ impl MainView {
                                     }
                                 }
                             };
-                            
+
                             _ = results_panel.update_in(cx, |panel, window, cx| {
                                 panel.set_execution(execution, window, cx);
                             });
@@ -970,7 +977,7 @@ impl MainView {
                                     state.complete_query(editor_id, query_success, cx);
                                 });
                             }
-                            
+
                             // Always reset executing state when query completes
                             if let Err(e) = editor_weak.update(cx, |editor, cx| {
                                 editor.set_executing(false, cx);
@@ -997,26 +1004,26 @@ impl MainView {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
-                        
+
                         tracing::info!(query_name = %query_name, "Explaining query from editor");
-                        
+
                         editor.update(cx, |editor, cx| {
                             editor.set_executing(true, cx);
                         });
-                        
+
                         let Some(app_state) = cx.try_global::<AppState>() else {
                             tracing::error!("No AppState available");
                             return;
                         };
-                        
+
                         let query_service = app_state.query_service.clone();
-                        
+
                         let conn_id = connection_id.or_else(|| {
                             app_state.saved_connections()
                                 .first()
                                 .map(|c| c.id)
                         });
-                        
+
                         let Some(conn_id) = conn_id else {
                             tracing::warn!("No connection available for explain");
                             editor.update(cx, |editor, cx| {
@@ -1024,7 +1031,7 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         let Some(conn) = app_state.connections.get(conn_id) else {
                             tracing::error!("Connection not found: {}", conn_id);
                             editor.update(cx, |editor, cx| {
@@ -1032,19 +1039,19 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         // Get cancel handle for WorkspaceState tracking
                         let cancel_handle = conn.cancel_handle();
-                        
+
                         // Get connection info for display (before releasing app_state borrow)
                         let connection_info = app_state.saved_connections().into_iter().find(|c| c.id == conn_id);
                         let connection_name = connection_info.as_ref().map(|c| c.name.clone());
                         let database_name = connection_info.as_ref().and_then(|c| {
                             c.params.get("database").or_else(|| c.params.get("path")).cloned()
                         });
-                        
+
                         let sql = sql.clone();
-                        
+
                         // Track explain in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade() {
                             if let Some(handle) = cancel_handle {
@@ -1053,17 +1060,17 @@ impl MainView {
                                 });
                             }
                         }
-                        
+
                         let results_panel = results_panel.clone();
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
-                        
+
                         cx.spawn_in(window, async move |_this, cx| {
                             tracing::debug!(sql = %sql, "Explaining query");
-                            
+
                             let service_result = query_service.explain_query(conn, conn_id, &sql).await;
                             let explain_success = service_result.is_ok();
-                            
+
                             let explain_result = match service_result {
                                 Ok(result) => {
                                     tracing::info!(duration_ms = result.duration_ms, "Explain completed");
@@ -1094,7 +1101,7 @@ impl MainView {
                                     }
                                 }
                             };
-                            
+
                             _ = results_panel.update_in(cx, |panel, window, cx| {
                                 panel.add_explain_result(explain_result, window, cx);
                             });
@@ -1105,14 +1112,14 @@ impl MainView {
                                     state.complete_query(editor_id, explain_success, cx);
                                 });
                             }
-                            
+
                             // Always reset executing state when explain completes
                             if let Err(e) = editor_weak.update(cx, |editor, cx| {
                                 editor.set_executing(false, cx);
                             }) {
                                 tracing::warn!("Failed to reset executing state: {}", e);
                             }
-                            
+
                             anyhow::Ok(())
                         }).detach();
                     }
@@ -1120,26 +1127,26 @@ impl MainView {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
-                        
+
                         tracing::info!(query_name = %query_name, "Explaining selection from editor");
-                        
+
                         editor.update(cx, |editor, cx| {
                             editor.set_executing(true, cx);
                         });
-                        
+
                         let Some(app_state) = cx.try_global::<AppState>() else {
                             tracing::error!("No AppState available");
                             return;
                         };
-                        
+
                         let query_service = app_state.query_service.clone();
-                        
+
                         let conn_id = connection_id.or_else(|| {
                             app_state.saved_connections()
                                 .first()
                                 .map(|c| c.id)
                         });
-                        
+
                         let Some(conn_id) = conn_id else {
                             tracing::warn!("No connection available for explain");
                             editor.update(cx, |editor, cx| {
@@ -1147,7 +1154,7 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         let Some(conn) = app_state.connections.get(conn_id) else {
                             tracing::error!("Connection not found: {}", conn_id);
                             editor.update(cx, |editor, cx| {
@@ -1155,19 +1162,19 @@ impl MainView {
                             });
                             return;
                         };
-                        
+
                         // Get cancel handle for WorkspaceState tracking
                         let cancel_handle = conn.cancel_handle();
-                        
+
                         // Get connection info for display (before releasing app_state borrow)
                         let connection_info = app_state.saved_connections().into_iter().find(|c| c.id == conn_id);
                         let connection_name = connection_info.as_ref().map(|c| c.name.clone());
                         let database_name = connection_info.as_ref().and_then(|c| {
                             c.params.get("database").or_else(|| c.params.get("path")).cloned()
                         });
-                        
+
                         let sql = sql.clone();
-                        
+
                         // Track explain in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade() {
                             if let Some(handle) = cancel_handle {
@@ -1176,17 +1183,17 @@ impl MainView {
                                 });
                             }
                         }
-                        
+
                         let results_panel = results_panel.clone();
                         let editor_weak = editor.downgrade();
                         let workspace_state_weak = workspace_state.clone();
-                        
+
                         cx.spawn_in(window, async move |_this, cx| {
                             tracing::debug!(sql = %sql, "Explaining selection");
-                            
+
                             let service_result = query_service.explain_query(conn, conn_id, &sql).await;
                             let explain_success = service_result.is_ok();
-                            
+
                             let explain_result = match service_result {
                                 Ok(result) => {
                                     tracing::info!(duration_ms = result.duration_ms, "Explain completed");
@@ -1217,7 +1224,7 @@ impl MainView {
                                     }
                                 }
                             };
-                            
+
                             _ = results_panel.update_in(cx, |panel, window, cx| {
                                 panel.add_explain_result(explain_result, window, cx);
                             });
@@ -1228,14 +1235,14 @@ impl MainView {
                                     state.complete_query(editor_id, explain_success, cx);
                                 });
                             }
-                            
+
                             // Always reset executing state when explain completes
                             if let Err(e) = editor_weak.update(cx, |editor, cx| {
                                 editor.set_executing(false, cx);
                             }) {
                                 tracing::warn!("Failed to reset executing state: {}", e);
                             }
-                            
+
                             anyhow::Ok(())
                         }).detach();
                     }
@@ -1243,13 +1250,13 @@ impl MainView {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
-                        
+
                         tracing::info!(query_name = %query_name, "Query cancelled by user");
-                        
+
                         editor.update(cx, |editor, cx| {
                             editor.set_executing(false, cx);
                         });
-                        
+
                         // Note: The actual database query may still complete in the background,
                         // but the UI will no longer show it as executing
                     }
