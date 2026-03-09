@@ -42,7 +42,8 @@ impl TableViewerDelegate {
         let mut index = 0;
         while index < self.rows.len() && content_widths.len() < sample_size {
             if let Some(value) = self.rows[index].get(data_col_ix) {
-                let first_line = value.lines().next().unwrap_or(value);
+                let display = value.display_for_table();
+                let first_line = display.lines().next().unwrap_or(&display);
                 let measured = if first_line.len() > 60 {
                     &first_line[..60]
                 } else {

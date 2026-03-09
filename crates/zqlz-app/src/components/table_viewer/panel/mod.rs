@@ -17,7 +17,7 @@ use zqlz_ui::widgets::{
     v_flex,
 };
 
-use crate::actions::{CancelCellEditing, CommitChanges, DeleteSelectedRows};
+use crate::actions::{CancelCellEditing, CommitChanges, DeleteSelectedRows, RedoEdit, UndoEdit};
 use crate::icons::ZqlzIcon;
 
 actions!(
@@ -27,7 +27,8 @@ actions!(
         CloseSearch,
         CopySelection,
         PasteClipboard,
-        OpenRowEditor
+        OpenRowEditor,
+        ToggleReplace,
     ]
 );
 
@@ -36,21 +37,23 @@ use super::column_visibility::{
 };
 use crate::components::table_viewer::delegate::TableViewerDelegate;
 use crate::components::table_viewer::events::TableViewerEvent;
-use crate::components::table_viewer::filter_panel::{FilterPanel, FilterPanelEvent, FilterPanelState};
+use crate::components::table_viewer::filter_panel::{
+    FilterPanel, FilterPanelEvent, FilterPanelState,
+};
 use crate::components::table_viewer::filter_types::ColumnSelectItem;
 
 // Submodules
-mod loader;
-mod state;
-mod toolbar;
-mod search;
 mod actions;
-mod selection;
 mod clipboard;
+mod column_ops;
 mod export;
 mod filters;
-mod column_ops;
+mod loader;
 mod render;
+mod search;
+mod selection;
+mod state;
+mod toolbar;
 mod traits;
 
 /// Table viewer panel - main component
@@ -85,9 +88,6 @@ pub struct TableViewerPanel {
     /// Loading state (shows spinner)
     pub(super) is_loading: bool,
 
-    /// Selected row indices (for delete operations)
-    pub(crate) selected_rows: std::collections::HashSet<usize>,
-
     /// Filter panel state
     pub(crate) filter_panel_state: Option<Entity<FilterPanelState>>,
 
@@ -118,6 +118,12 @@ pub struct TableViewerPanel {
     /// Debounce task for search input - prevents firing a query on every keystroke
     pub(super) _search_debounce_task: Option<Task<()>>,
 
+    /// Replace input state (for find & replace)
+    pub(super) replace_input: Option<Entity<InputState>>,
+
+    /// Whether the replace bar is visible
+    pub(super) replace_visible: bool,
+
     /// Pagination state
     pub(crate) pagination_state: Option<Entity<PaginationState>>,
 
@@ -140,6 +146,13 @@ pub struct TableViewerPanel {
 
     /// Periodic re-render task that ticks during loading to update the elapsed timer
     pub(super) _loading_timer_task: Option<Task<()>>,
+
+    /// Monotonic generation for server-driven table loads.
+    ///
+    /// Async refresh, pagination, filter, and initial-load tasks capture the
+    /// current value before they start. Their results are only applied if the
+    /// generation still matches when they complete.
+    pub(super) active_request_generation: u64,
 }
 
 impl TableViewerPanel {
@@ -156,7 +169,6 @@ impl TableViewerPanel {
             driver_category: DriverCategory::Relational,
             row_count: 0,
             is_loading: false,
-            selected_rows: std::collections::HashSet::new(),
             filter_panel_state: None,
             column_visibility_state: None,
             filter_expanded: false,
@@ -167,6 +179,8 @@ impl TableViewerPanel {
             search_visible: false,
             search_text: String::new(),
             _search_debounce_task: None,
+            replace_input: None,
+            replace_visible: false,
             pagination_state: None,
             auto_commit_mode: true,
             transaction_panel_expanded: false,
@@ -174,6 +188,7 @@ impl TableViewerPanel {
             primary_key_columns: Vec::new(),
             loading_started_at: None,
             _loading_timer_task: None,
+            active_request_generation: 0,
         }
     }
 

@@ -4,13 +4,14 @@
 
 use gpui::*;
 use zqlz_ui::widgets::{
+    ActiveTheme, Sizable,
     button::{Button, ButtonVariant, ButtonVariants},
     dock::{Panel, PanelEvent, PanelState},
-    h_flex, v_flex, ActiveTheme, Sizable,
+    h_flex, v_flex,
 };
 
-use crate::diff::{Change, ChangeType};
 use crate::VersionDiff;
+use crate::diff::{Change, ChangeType};
 
 /// Display mode for the diff viewer
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

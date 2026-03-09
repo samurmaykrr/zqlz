@@ -35,5 +35,5 @@ pub use models::{
     CheckConstraintDesign, ColumnDesign, DataTypeCategory, DataTypeInfo, DatabaseDialect,
     ForeignKeyDesign, IndexDesign, TableDesign, TableOptions, ValidationError, get_data_types,
 };
-pub use panel::{DesignerTab, TableDesignerPanel};
+pub use panel::{DesignerTab, TableDesignerPanel, init};
 pub use service::{DdlGenerator, TableLoader, fk_action_to_sql};

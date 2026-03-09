@@ -10,12 +10,13 @@ use gpui::*;
 use serde_json;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
     checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputState},
-    v_flex, ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
+    v_flex,
 };
 
 use super::TableViewerPanel;

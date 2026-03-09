@@ -291,14 +291,21 @@ fn compare_non_null_values(a: &Value, b: &Value) -> Ordering {
 
         // Cross-type integer comparison (promote to i64)
         (a, b) if a.as_i64().is_some() && b.as_i64().is_some() => {
-            a.as_i64().unwrap().cmp(&b.as_i64().unwrap())
+            if let (Some(ia), Some(ib)) = (a.as_i64(), b.as_i64()) {
+                ia.cmp(&ib)
+            } else {
+                Ordering::Equal
+            }
         }
 
         // Cross-type float comparison (promote to f64)
-        (a, b) if a.as_f64().is_some() && b.as_f64().is_some() => a
-            .as_f64()
-            .partial_cmp(&b.as_f64())
-            .unwrap_or(Ordering::Equal),
+        (a, b) if a.as_f64().is_some() && b.as_f64().is_some() => {
+            if let (Some(fa), Some(fb)) = (a.as_f64(), b.as_f64()) {
+                fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
+            } else {
+                Ordering::Equal
+            }
+        }
 
         // Fallback: compare string representations
         _ => a.to_string().cmp(&b.to_string()),

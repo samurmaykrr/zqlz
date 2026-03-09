@@ -1,12 +1,13 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    Disableable, IconName, Sizable,
     button::{Button, ButtonVariants},
-    h_flex, Disableable, IconName, Sizable,
+    h_flex,
 };
 
-use crate::panel::TableDesignerPanel;
 use crate::DesignerTab;
+use crate::panel::TableDesignerPanel;
 
 /// Render the toolbar with add/remove/move buttons. Extracted from panel.rs
 pub(in crate::panel) fn render_toolbar(

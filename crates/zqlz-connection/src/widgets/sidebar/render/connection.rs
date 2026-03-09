@@ -7,8 +7,8 @@ use gpui::*;
 
 use crate::widgets::sidebar::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent};
 use zqlz_ui::widgets::{
-    caption, h_flex, tooltip::Tooltip, typography::body_small, v_flex, ActiveTheme, Colorize as _,
-    Icon, IconName, Sizable, ZqlzIcon,
+    ActiveTheme, Colorize as _, Icon, IconName, Sizable, ZqlzIcon, caption, h_flex,
+    tooltip::Tooltip, typography::body_small, v_flex,
 };
 
 impl ConnectionSidebar {
@@ -113,6 +113,7 @@ impl ConnectionSidebar {
                     .on_mouse_down(
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
                             this.show_connection_context_menu(conn_id, event.position, window, cx);
                         }),
                     )

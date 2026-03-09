@@ -8,6 +8,8 @@
 //! - Syncing field changes between row editor and table grid
 
 use gpui::*;
+use std::sync::Arc;
+use zqlz_core::Connection;
 use zqlz_core::StatementResult;
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
@@ -16,9 +18,15 @@ use crate::app::AppState;
 use crate::components::{KeyValueEditorEvent, RedisValueType, TableViewerPanel};
 use crate::main_view::MainView;
 use crate::main_view::table_handlers_utils::{
-    conversion::resolve_schema_qualifier,
-    formatting::escape_redis_value,
+    conversion::resolve_schema_qualifier, formatting::escape_redis_value,
 };
+
+async fn execute_redis_command(
+    connection: &Arc<dyn Connection>,
+    command: String,
+) -> anyhow::Result<StatementResult> {
+    connection.execute(&command, &[]).await.map_err(Into::into)
+}
 
 impl MainView {
     pub(in crate::main_view) fn handle_key_value_editor_event(
@@ -32,6 +40,7 @@ impl MainView {
                 original_key,
                 new_key,
                 connection_id,
+                database_name,
                 value_type,
                 new_value,
                 new_ttl,
@@ -51,7 +60,10 @@ impl MainView {
                     return;
                 };
 
-                let Some(connection) = app_state.connections.get(connection_id) else {
+                let Some(connection) = app_state
+                    .connections
+                    .get_for_database_cached(connection_id, database_name.as_deref())
+                else {
                     tracing::error!("Connection not found: {}", connection_id);
                     return;
                 };
@@ -61,40 +73,22 @@ impl MainView {
                 let dock_area = self.dock_area.clone();
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    // If this is a rename operation, delete the old key first
-                    if is_rename {
-                        tracing::info!("Renaming key from '{}' to '{}'", original_key, key);
-                        let del_result = connection
-                            .execute(&format!("DEL {}", original_key), &[])
-                            .await;
-                        if let Err(e) = del_result {
-                            tracing::error!(
-                                "Failed to delete old key '{}' during rename: {}",
-                                original_key,
-                                e
-                            );
-                            // Continue anyway - the new key will still be created
-                        }
-                    }
+                    let escaped_key = escape_redis_value(&key);
+                    let temporary_key =
+                        format!("__zqlz_tmp__:{}:{}", connection_id, uuid::Uuid::new_v4());
+                    let escaped_temporary_key = escape_redis_value(&temporary_key);
 
-                    // Build the SET command based on value type
-                    let result = match value_type {
+                    let temp_key_created = match value_type {
                         RedisValueType::String | RedisValueType::Json => {
-                            // For string types, use SET command
-                            let mut cmd = format!("SET {} {}", key, escape_redis_value(&new_value));
-                            if let Some(ttl) = new_ttl {
-                                cmd.push_str(&format!(" EX {}", ttl));
-                            }
-                            connection.execute(&cmd, &[]).await
+                            let cmd = format!(
+                                "SET {} {}",
+                                escaped_temporary_key,
+                                escape_redis_value(&new_value)
+                            );
+                            execute_redis_command(&connection, cmd).await?;
+                            true
                         }
                         RedisValueType::List => {
-                            // For lists, we need to delete and re-add all items
-                            // First delete the existing key
-                            // DEL failures are intentionally ignored: if the key doesn't exist,
-                            // the subsequent write still creates it correctly.
-                            let _ = connection.execute(&format!("DEL {}", key), &[]).await;
-
-                            // Parse the value as JSON array or line-separated values
                             let items: Vec<String> = if new_value.trim().starts_with('[') {
                                 serde_json::from_str(&new_value).unwrap_or_else(|_| {
                                     new_value.lines().map(|s| s.to_string()).collect()
@@ -103,27 +97,21 @@ impl MainView {
                                 new_value.lines().map(|s| s.to_string()).collect()
                             };
 
-                            // Add items using RPUSH
                             if !items.is_empty() {
                                 let escaped_items: Vec<String> =
                                     items.iter().map(|i| escape_redis_value(i)).collect();
-                                let cmd = format!("RPUSH {} {}", key, escaped_items.join(" "));
-                                connection.execute(&cmd, &[]).await
+                                let cmd = format!(
+                                    "RPUSH {} {}",
+                                    escaped_temporary_key,
+                                    escaped_items.join(" ")
+                                );
+                                execute_redis_command(&connection, cmd).await?;
+                                true
                             } else {
-                                // No items to add, return empty result
-                                Ok(StatementResult {
-                                    is_query: false,
-                                    result: None,
-                                    affected_rows: 0,
-                                    error: None,
-                                })
+                                false
                             }
                         }
                         RedisValueType::Set => {
-                            // For sets, delete and re-add
-                            // DEL failures are intentionally ignored: a missing key is fine; the SADD below creates it.
-                            let _ = connection.execute(&format!("DEL {}", key), &[]).await;
-
                             let items: Vec<String> = if new_value.trim().starts_with('[') {
                                 serde_json::from_str(&new_value).unwrap_or_else(|_| {
                                     new_value.lines().map(|s| s.to_string()).collect()
@@ -135,23 +123,18 @@ impl MainView {
                             if !items.is_empty() {
                                 let escaped_items: Vec<String> =
                                     items.iter().map(|i| escape_redis_value(i)).collect();
-                                let cmd = format!("SADD {} {}", key, escaped_items.join(" "));
-                                connection.execute(&cmd, &[]).await
+                                let cmd = format!(
+                                    "SADD {} {}",
+                                    escaped_temporary_key,
+                                    escaped_items.join(" ")
+                                );
+                                execute_redis_command(&connection, cmd).await?;
+                                true
                             } else {
-                                Ok(StatementResult {
-                                    is_query: false,
-                                    result: None,
-                                    affected_rows: 0,
-                                    error: None,
-                                })
+                                false
                             }
                         }
                         RedisValueType::ZSet => {
-                            // For sorted sets, parse as JSON object with score:member pairs
-                            // DEL failures are intentionally ignored: a missing key is fine; the ZADD below creates it.
-                            let _ = connection.execute(&format!("DEL {}", key), &[]).await;
-
-                            // Try to parse as JSON object {"member": score, ...} or array of [score, member]
                             let items: Vec<(f64, String)> = if let Ok(obj) =
                                 serde_json::from_str::<serde_json::Value>(&new_value)
                             {
@@ -187,22 +170,15 @@ impl MainView {
                                         vec![score.to_string(), escape_redis_value(member)]
                                     })
                                     .collect();
-                                let cmd = format!("ZADD {} {}", key, args.join(" "));
-                                connection.execute(&cmd, &[]).await
+                                let cmd =
+                                    format!("ZADD {} {}", escaped_temporary_key, args.join(" "));
+                                execute_redis_command(&connection, cmd).await?;
+                                true
                             } else {
-                                Ok(StatementResult {
-                                    is_query: false,
-                                    result: None,
-                                    affected_rows: 0,
-                                    error: None,
-                                })
+                                false
                             }
                         }
                         RedisValueType::Hash => {
-                            // For hashes, parse as JSON object
-                            // DEL failures are intentionally ignored: a missing key is fine; the HSET below creates it.
-                            let _ = connection.execute(&format!("DEL {}", key), &[]).await;
-
                             let fields: Vec<(String, String)> = if let Ok(obj) =
                                 serde_json::from_str::<serde_json::Value>(&new_value)
                             {
@@ -230,43 +206,71 @@ impl MainView {
                                         vec![escape_redis_value(k), escape_redis_value(v)]
                                     })
                                     .collect();
-                                let cmd = format!("HSET {} {}", key, args.join(" "));
-                                connection.execute(&cmd, &[]).await
+                                let cmd =
+                                    format!("HSET {} {}", escaped_temporary_key, args.join(" "));
+                                execute_redis_command(&connection, cmd).await?;
+                                true
                             } else {
-                                Ok(StatementResult {
-                                    is_query: false,
-                                    result: None,
-                                    affected_rows: 0,
-                                    error: None,
-                                })
+                                false
                             }
                         }
                         RedisValueType::Stream => {
-                            // Streams are append-only, just add a new entry
                             let cmd = format!(
                                 "XADD {} * message {}",
-                                key,
+                                escaped_temporary_key,
                                 escape_redis_value(&new_value)
                             );
-                            connection.execute(&cmd, &[]).await
+                            execute_redis_command(&connection, cmd).await?;
+                            true
                         }
                     };
 
-                    // Set or remove TTL if value was set successfully
-                    if result.is_ok() {
+                    let result: anyhow::Result<()> = if temp_key_created {
                         match new_ttl {
                             Some(ttl) => {
-                                // Set the TTL — EXPIRE failures are intentionally ignored; the value write succeeded.
-                                let _ = connection
-                                    .execute(&format!("EXPIRE {} {}", key, ttl), &[])
-                                    .await;
+                                execute_redis_command(
+                                    &connection,
+                                    format!("EXPIRE {} {}", escaped_temporary_key, ttl),
+                                )
+                                .await?;
                             }
                             None => {
-                                // Remove TTL (make key persistent) — PERSIST failures are intentionally ignored.
-                                let _ = connection.execute(&format!("PERSIST {}", key), &[]).await;
+                                execute_redis_command(
+                                    &connection,
+                                    format!("PERSIST {}", escaped_temporary_key),
+                                )
+                                .await?;
                             }
                         }
-                    }
+
+                        execute_redis_command(
+                            &connection,
+                            format!("RENAME {} {}", escaped_temporary_key, escaped_key),
+                        )
+                        .await?;
+
+                        if is_rename {
+                            let escaped_original_key = escape_redis_value(&original_key);
+                            execute_redis_command(
+                                &connection,
+                                format!("DEL {}", escaped_original_key),
+                            )
+                            .await?;
+                        }
+
+                        Ok(())
+                    } else {
+                        execute_redis_command(&connection, format!("DEL {}", escaped_key)).await?;
+                        if is_rename {
+                            let escaped_original_key = escape_redis_value(&original_key);
+                            execute_redis_command(
+                                &connection,
+                                format!("DEL {}", escaped_original_key),
+                            )
+                            .await?;
+                        }
+                        Ok(())
+                    };
 
                     match result {
                         Ok(_) => {
@@ -298,7 +302,11 @@ impl MainView {
             KeyValueEditorEvent::Cancelled => {
                 tracing::debug!("Key-value editor cancelled");
             }
-            KeyValueEditorEvent::Deleted { key, connection_id } => {
+            KeyValueEditorEvent::Deleted {
+                key,
+                connection_id,
+                database_name,
+            } => {
                 tracing::info!("Key-value editor delete: key={}", key);
 
                 let Some(app_state) = cx.try_global::<AppState>() else {
@@ -306,7 +314,10 @@ impl MainView {
                     return;
                 };
 
-                let Some(connection) = app_state.connections.get(connection_id) else {
+                let Some(connection) = app_state
+                    .connections
+                    .get_for_database_cached(connection_id, database_name.as_deref())
+                else {
                     tracing::error!("Connection not found: {}", connection_id);
                     return;
                 };
@@ -317,7 +328,7 @@ impl MainView {
 
                 cx.spawn_in(window, async move |_this, cx| {
                     let result = connection
-                        .execute(&format!("DEL {}", key_for_delete), &[])
+                        .execute(&format!("DEL {}", escape_redis_value(&key_for_delete)), &[])
                         .await;
 
                     match result {
@@ -379,25 +390,23 @@ impl MainView {
                     .and_then(|v| v.read_with(cx, |viewer, _cx| viewer.database_name()).ok())
                     .flatten();
 
-                let Some(connection) = app_state.connections.get_for_database_cached(
-                    connection_id,
-                    database_name.as_deref(),
-                ) else {
+                let Some(connection) = app_state
+                    .connections
+                    .get_for_database_cached(connection_id, database_name.as_deref())
+                else {
                     tracing::error!("Connection not found: {}", connection_id);
                     return;
                 };
 
                 let table_service = app_state.table_service.clone();
-                let schema_qualifier = source_viewer
-                    .as_ref()
-                    .and_then(|v| {
-                        v.read_with(cx, |viewer, _cx| {
-                            let db = viewer.database_name();
-                            resolve_schema_qualifier(connection.driver_name(), &db)
-                        })
-                        .ok()
-                        .flatten()
-                    });
+                let schema_qualifier = source_viewer.as_ref().and_then(|v| {
+                    v.read_with(cx, |viewer, _cx| {
+                        let db = viewer.database_name();
+                        resolve_schema_qualifier(connection.driver_name(), &db)
+                    })
+                    .ok()
+                    .flatten()
+                });
                 let connection = connection.clone();
                 let table_name = table_name.clone();
                 let column_names = column_names.clone();
@@ -431,7 +440,8 @@ impl MainView {
                             let Some(col_name) = column_names.get(col_index) else {
                                 continue;
                             };
-                            let original = original_row_values.get(col_index)
+                            let original = original_row_values
+                                .get(col_index)
                                 .cloned()
                                 .unwrap_or_default();
 
@@ -454,13 +464,16 @@ impl MainView {
                             };
 
                             if let Err(e) = table_service
-                                .update_cell(connection.clone(), &table_name, schema_qualifier.as_deref(), cell_update)
+                                .update_cell(
+                                    connection.clone(),
+                                    &table_name,
+                                    schema_qualifier.as_deref(),
+                                    cell_update,
+                                )
                                 .await
                             {
-                                update_error = Some(format!(
-                                    "Failed to update column '{}': {}",
-                                    col_name, e
-                                ));
+                                update_error =
+                                    Some(format!("Failed to update column '{}': {}", col_name, e));
                                 break;
                             }
                         }
@@ -490,10 +503,7 @@ impl MainView {
                     if is_success {
                         _ = window_handle.update(cx, |_, window, cx| {
                             window.push_notification(
-                                Notification::success(&format!(
-                                    "Row {} in {}",
-                                    action, table_name
-                                )),
+                                Notification::success(&format!("Row {} in {}", action, table_name)),
                                 cx,
                             );
                         });

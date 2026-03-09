@@ -160,7 +160,9 @@ impl ConnectionManager {
             return Ok(main_conn);
         }
 
-        let key = (id, database_name.to_string());
+        let normalized_database_name =
+            Self::normalize_database_name(main_conn.driver_name(), database_name);
+        let key = (id, normalized_database_name.clone());
 
         // Check cache first
         if let Some(cached) = self.database_connections.read().get(&key) {
@@ -184,18 +186,16 @@ impl ConnectionManager {
         for (param_key, value) in &saved.params {
             config = config.with_param(param_key, value.clone());
         }
-        config = config.with_param("database", database_name);
+        config = config.with_param("database", normalized_database_name.as_str());
 
         tracing::info!(
             connection_id = %id,
-            database = %database_name,
+            database = %normalized_database_name,
             "creating database-specific connection"
         );
 
         let conn = driver.connect(&config).await?;
-        self.database_connections
-            .write()
-            .insert(key, conn.clone());
+        self.database_connections.write().insert(key, conn.clone());
 
         Ok(conn)
     }
@@ -203,7 +203,18 @@ impl ConnectionManager {
     /// Returns true for drivers where each connection is scoped to a single database
     /// and separate connections are needed to access different databases.
     fn needs_per_database_connection(driver_name: &str) -> bool {
-        matches!(driver_name, "postgres" | "postgresql" | "mssql")
+        matches!(driver_name, "postgres" | "postgresql" | "mssql" | "redis")
+    }
+
+    fn normalize_database_name(driver_name: &str, database_name: &str) -> String {
+        if driver_name == "redis" {
+            database_name
+                .strip_prefix("db")
+                .unwrap_or(database_name)
+                .to_string()
+        } else {
+            database_name.to_string()
+        }
     }
 
     /// Get a connection appropriate for the given database, using the main
@@ -227,14 +238,16 @@ impl ConnectionManager {
             return Some(main_conn);
         }
 
-        let key = (id, database_name.to_string());
+        let normalized_database_name =
+            Self::normalize_database_name(main_conn.driver_name(), database_name);
+        let key = (id, normalized_database_name.clone());
         let cached = self.database_connections.read().get(&key).cloned();
         match cached {
             Some(conn) if !conn.is_closed() => Some(conn),
             _ => {
                 tracing::warn!(
                     connection_id = %id,
-                    database = %database_name,
+                    database = %normalized_database_name,
                     "database-specific connection not yet cached, falling back to main connection"
                 );
                 Some(main_conn)
@@ -352,7 +365,7 @@ impl ConnectionManager {
     #[tracing::instrument(skip(self), fields(connection_id = %id))]
     pub async fn list_databases(&self, id: Uuid) -> Result<Vec<String>> {
         use zqlz_core::DatabaseInfo;
-        
+
         tracing::debug!("listing databases for connection");
         let conn = self
             .get(id)

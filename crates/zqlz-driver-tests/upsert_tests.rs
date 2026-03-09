@@ -33,7 +33,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -53,8 +53,7 @@ mod tests {
                 let mut param_num = 1;
                 let mut converted_sql = sql.to_string();
                 while converted_sql.contains(&format!("${}", param_num)) {
-                    converted_sql =
-                        converted_sql.replace(&format!("${}", param_num), "?");
+                    converted_sql = converted_sql.replace(&format!("${}", param_num), "?");
                     param_num += 1;
                 }
                 (converted_sql, params.to_vec())
@@ -82,8 +81,7 @@ mod tests {
                 let mut param_num = 1;
                 let mut converted_sql = sql.to_string();
                 while converted_sql.contains(&format!("${}", param_num)) {
-                    converted_sql =
-                        converted_sql.replace(&format!("${}", param_num), "?");
+                    converted_sql = converted_sql.replace(&format!("${}", param_num), "?");
                     param_num += 1;
                 }
                 (converted_sql, params.to_vec())
@@ -151,10 +149,7 @@ mod tests {
             .map_err(|e| anyhow::anyhow!("{}", e))?;
 
         // Verify the row was inserted
-        assert_eq!(
-            result.affected_rows, 1,
-            "UPSERT should insert 1 new row"
-        );
+        assert_eq!(result.affected_rows, 1, "UPSERT should insert 1 new row");
 
         // Verify data
         let verify_result = query_sql(
@@ -549,9 +544,7 @@ mod tests {
     #[rstest]
     #[case::postgres(TestDriver::Postgres)]
     #[tokio::test]
-    async fn test_upsert_with_returning_if_supported(
-        #[case] driver: TestDriver,
-    ) -> Result<()> {
+    async fn test_upsert_with_returning_if_supported(#[case] driver: TestDriver) -> Result<()> {
         let conn = test_connection(driver).await?;
 
         let test_id = 99995_i64;
@@ -628,15 +621,11 @@ mod tests {
 
         // Create temporary table
         let create_table_sql = match driver {
-            TestDriver::Postgres => {
-                "CREATE TEMP TABLE test_upsert (id INT PRIMARY KEY, name TEXT)"
-            }
+            TestDriver::Postgres => "CREATE TEMP TABLE test_upsert (id INT PRIMARY KEY, name TEXT)",
             TestDriver::Mysql => {
                 "CREATE TEMPORARY TABLE test_upsert (id INT PRIMARY KEY, name TEXT)"
             }
-            TestDriver::Sqlite => {
-                "CREATE TEMP TABLE test_upsert (id INT PRIMARY KEY, name TEXT)"
-            }
+            TestDriver::Sqlite => "CREATE TEMP TABLE test_upsert (id INT PRIMARY KEY, name TEXT)",
             TestDriver::Redis => anyhow::bail!("Redis does not support SQL"),
         };
 

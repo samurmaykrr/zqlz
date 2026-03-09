@@ -6,7 +6,7 @@ impl TableViewerPanel {
 
         let connection_id = self.connection_id;
         let table_name = self.table_name.clone();
-        let has_selection = !self.selected_rows.is_empty();
+        let has_selection = self.has_any_selection(cx);
 
         h_flex()
             .w_full()
@@ -123,42 +123,73 @@ impl TableViewerPanel {
                                         .child(format!("{} pending", pending_count)),
                                 )
                             })
-                            .when(self.transaction_panel_expanded, |this| {
-                                this
-                                    .child(
-                                        Button::new("commit-changes")
-                                            .icon(ZqlzIcon::Check)
-                                            .ghost()
-                                            .small()
-                                            .tooltip(format!("Commit Changes ({})", pending_count))
-                                            .disabled(!has_pending_changes)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.emit_commit_changes(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("discard-changes")
-                                            .icon(ZqlzIcon::X)
-                                            .ghost()
-                                            .small()
-                                            .tooltip("Discard Changes")
-                                            .disabled(!has_pending_changes)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.discard_pending_changes(cx);
-                                            })),
-                                    )
-                                    .child(
-                                        Button::new("generate-sql")
-                                            .icon(ZqlzIcon::Code)
-                                            .ghost()
-                                            .small()
-                                            .tooltip("Generate SQL for Changes")
-                                            .disabled(!has_pending_changes)
-                                            .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.emit_generate_sql(cx);
-                                            })),
-                                    )
+                    .when(self.transaction_panel_expanded, |this| {
+                        let (can_undo, can_redo) = self
+                            .table_state
+                            .as_ref()
+                            .map(|s| {
+                                let delegate = s.read(cx).delegate();
+                                (delegate.can_undo(), delegate.can_redo())
                             })
+                            .unwrap_or((false, false));
+
+                        this
+                            .child(
+                                Button::new("undo-edit")
+                                    .icon(ZqlzIcon::Undo)
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Undo (Cmd+Z)")
+                                    .disabled(!can_undo)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.undo_edit(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("redo-edit")
+                                    .icon(ZqlzIcon::Redo)
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Redo (Cmd+Shift+Z)")
+                                    .disabled(!can_redo)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.redo_edit(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("commit-changes")
+                                    .icon(ZqlzIcon::Check)
+                                    .ghost()
+                                    .small()
+                                    .tooltip(format!("Commit Changes ({})", pending_count))
+                                    .disabled(!has_pending_changes)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.emit_commit_changes(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("discard-changes")
+                                    .icon(ZqlzIcon::X)
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Discard Changes")
+                                    .disabled(!has_pending_changes)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.discard_pending_changes(cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("generate-sql")
+                                    .icon(ZqlzIcon::Code)
+                                    .ghost()
+                                    .small()
+                                    .tooltip("Generate SQL for Changes")
+                                    .disabled(!has_pending_changes)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        this.emit_generate_sql(cx);
+                                    })),
+                            )
+                    })
                     })
                     .when(self.auto_commit_mode && has_pending_changes, |this| {
                         this.child(
@@ -244,6 +275,11 @@ impl TableViewerPanel {
             )
             .child({
                 let has_data = connection_id.is_some() && table_name.is_some();
+                let has_cell_selection = self
+                    .table_state
+                    .as_ref()
+                    .map(|s| s.read(cx).cell_selection().cell_count() > 0)
+                    .unwrap_or(false);
                 let panel = cx.entity().downgrade();
                 Button::new("export-table")
                     .icon(ZqlzIcon::Export)
@@ -257,29 +293,99 @@ impl TableViewerPanel {
                             let panel_csv = panel.clone();
                             let panel_json = panel.clone();
                             let panel_sql = panel.clone();
+                            let panel_csv_file = panel.clone();
+                            let panel_json_file = panel.clone();
+                            let panel_sql_file = panel.clone();
+                            let panel_csv_sel = panel.clone();
+                            let panel_json_sel = panel.clone();
+                            let panel_sql_sel = panel.clone();
                             menu.item(PopupMenuItem::new("Export as CSV").on_click(
                                 move |_, _window, cx| {
-                                    _ = panel_csv.update(cx, |this, cx| {
+                                    if let Err(e) = panel_csv.update(cx, |this, cx| {
                                         this.export_csv(cx);
-                                    });
+                                    }) {
+                                        tracing::error!("Failed to export CSV: {}", e);
+                                    }
                                 },
                             ))
                             .item(PopupMenuItem::new("Export as JSON").on_click(
                                 move |_, _window, cx| {
-                                    _ = panel_json.update(cx, |this, cx| {
+                                    if let Err(e) = panel_json.update(cx, |this, cx| {
                                         this.export_json(cx);
-                                    });
+                                    }) {
+                                        tracing::error!("Failed to export JSON: {}", e);
+                                    }
                                 },
                             ))
                             .item(
                                 PopupMenuItem::new("Export as SQL INSERT").on_click(
                                     move |_, _window, cx| {
-                                        _ = panel_sql.update(cx, |this, cx| {
+                                        if let Err(e) = panel_sql.update(cx, |this, cx| {
                                             this.export_sql(cx);
-                                        });
+                                        }) {
+                                            tracing::error!("Failed to export SQL: {}", e);
+                                        }
                                     },
                                 ),
                             )
+                            .separator()
+                            .item(PopupMenuItem::new("Export CSV to File...").on_click(
+                                move |_, _window, cx| {
+                                    if let Err(e) = panel_csv_file.update(cx, |this, cx| {
+                                        this.export_csv_to_file(cx);
+                                    }) {
+                                        tracing::error!("Failed to export CSV to file: {}", e);
+                                    }
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Export JSON to File...").on_click(
+                                move |_, _window, cx| {
+                                    if let Err(e) = panel_json_file.update(cx, |this, cx| {
+                                        this.export_json_to_file(cx);
+                                    }) {
+                                        tracing::error!("Failed to export JSON to file: {}", e);
+                                    }
+                                },
+                            ))
+                            .item(PopupMenuItem::new("Export SQL to File...").on_click(
+                                move |_, _window, cx| {
+                                    if let Err(e) = panel_sql_file.update(cx, |this, cx| {
+                                        this.export_sql_to_file(cx);
+                                    }) {
+                                        tracing::error!("Failed to export SQL to file: {}", e);
+                                    }
+                                },
+                            ))
+                            .when(has_cell_selection, |menu| {
+                                menu.separator()
+                                .item(PopupMenuItem::new("Export Selected as CSV").on_click(
+                                    move |_, _window, cx| {
+                                        if let Err(e) = panel_csv_sel.update(cx, |this, cx| {
+                                            this.export_selected_csv(cx);
+                                        }) {
+                                            tracing::error!("Failed to export selected CSV: {}", e);
+                                        }
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Export Selected as JSON").on_click(
+                                    move |_, _window, cx| {
+                                        if let Err(e) = panel_json_sel.update(cx, |this, cx| {
+                                            this.export_selected_json(cx);
+                                        }) {
+                                            tracing::error!("Failed to export selected JSON: {}", e);
+                                        }
+                                    },
+                                ))
+                                .item(PopupMenuItem::new("Export Selected as SQL").on_click(
+                                    move |_, _window, cx| {
+                                        if let Err(e) = panel_sql_sel.update(cx, |this, cx| {
+                                            this.export_selected_sql(cx);
+                                        }) {
+                                            tracing::error!("Failed to export selected SQL: {}", e);
+                                        }
+                                    },
+                                ))
+                            })
                         }
                     })
             })

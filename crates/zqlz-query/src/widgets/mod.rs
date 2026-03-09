@@ -10,14 +10,15 @@ mod query_tabs_panel;
 mod results_panel;
 
 pub use actions::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp,
-    DeleteLine, DismissInlineSuggestion, DuplicateLine, FindNext, FindPrevious, FindReferences, FormatQuery,
-    GoToDefinition, MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, RenameSymbol, SaveQuery,
-    SaveQueryAs, ShowCodeActions, ShowHover, ToggleLineComment, ToggleProblemsPanel, TriggerCompletion,
-    TriggerParameterHints, UncommentSelection,
+    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown,
+    CopyLineUp, DeleteLine, DismissInlineSuggestion, DuplicateLine, FindNext, FindPrevious,
+    FindReferences, FormatQuery, GoToDefinition, MoveLineDown, MoveLineUp, NextProblem,
+    PreviousProblem, RenameSymbol, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover,
+    ToggleLineComment, ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints,
+    UncommentSelection,
 };
 pub use history_panel::{QueryHistoryPanel, QueryHistoryPanelEvent};
-pub use problems_panel::{ProblemEntry, ProblemsPanel, ProblemsPanelEvent, ProblemSeverity};
+pub use problems_panel::{ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent};
 pub use query_editor::{
     DiagnosticInfo, DiagnosticInfoSeverity, EditorMode, EditorObjectType, QueryEditor,
     QueryEditorEvent,

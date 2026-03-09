@@ -160,12 +160,7 @@ where
 
     /// Clear the search input's visual text without triggering an input change event.
     /// Callers are responsible for updating the delegate's search state separately.
-    pub fn set_query(
-        &mut self,
-        query: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
         let query: SharedString = query.to_string().into();
         self.query_input.update(cx, |input, cx| {
             input.set_value(query, window, cx);

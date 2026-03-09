@@ -6,7 +6,7 @@
 //! The encoding preserves type information so that values can be correctly
 //! interpreted during import, even when the target database has different types.
 
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use zqlz_core::Value;

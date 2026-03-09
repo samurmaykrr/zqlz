@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use crate::widgets::{
+    ActiveTheme, AxisExt as _, Placement,
     dock::PanelInfo,
     h_flex,
     resizable::{
-        resizable_panel, ResizablePanelEvent, ResizablePanelGroup, ResizablePanelState,
-        ResizableState, PANEL_MIN_SIZE,
+        PANEL_MIN_SIZE, ResizablePanelEvent, ResizablePanelGroup, ResizablePanelState,
+        ResizableState, resizable_panel,
     },
-    ActiveTheme, AxisExt as _, Placement,
 };
 
 use super::{DockArea, Panel, PanelEvent, PanelState, PanelView, TabPanel};

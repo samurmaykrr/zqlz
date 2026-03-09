@@ -11,13 +11,14 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_core::ColumnMeta;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Icon, IndexPath, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
     checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputState},
     select::{Select, SelectEvent, SelectItem, SelectState},
-    v_flex, ActiveTheme, Disableable, Icon, IndexPath, Sizable, ZqlzIcon,
+    v_flex,
 };
 
 use super::TableViewerPanel;
@@ -208,12 +209,13 @@ pub struct KeyValueData {
     pub ttl: i64,
     pub size_bytes: Option<i64>,
     pub connection_id: Uuid,
+    pub database_name: Option<String>,
     pub is_new: bool,
 }
 
 #[allow(dead_code)]
 impl KeyValueData {
-    pub fn new(key: String, connection_id: Uuid) -> Self {
+    pub fn new(key: String, connection_id: Uuid, database_name: Option<String>) -> Self {
         Self {
             key,
             value_type: RedisValueType::String,
@@ -221,6 +223,7 @@ impl KeyValueData {
             ttl: -1,
             size_bytes: None,
             connection_id,
+            database_name,
             is_new: true,
         }
     }
@@ -287,6 +290,7 @@ pub enum KeyValueEditorEvent {
         original_key: String,
         new_key: String,
         connection_id: Uuid,
+        database_name: Option<String>,
         value_type: RedisValueType,
         new_value: String,
         new_ttl: Option<u64>,
@@ -295,6 +299,7 @@ pub enum KeyValueEditorEvent {
     Deleted {
         key: String,
         connection_id: Uuid,
+        database_name: Option<String>,
     },
     /// A SQL row was saved (new or updated)
     RowSaved {
@@ -706,9 +711,15 @@ impl KeyValueEditorPanel {
         }
     }
 
-    pub fn new_key(&mut self, connection_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_key(
+        &mut self,
+        connection_id: Uuid,
+        database_name: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.mode = RowEditorMode::RedisKey;
-        let data = KeyValueData::new(String::new(), connection_id);
+        let data = KeyValueData::new(String::new(), connection_id, database_name);
         self.edit_key(data, window, cx);
 
         self.key_input.update(cx, |input, cx| {
@@ -1171,6 +1182,7 @@ impl KeyValueEditorPanel {
             original_key: data.key.clone(),
             new_key,
             connection_id: data.connection_id,
+            database_name: data.database_name.clone(),
             value_type,
             new_value,
             new_ttl,
@@ -1242,6 +1254,7 @@ impl KeyValueEditorPanel {
             cx.emit(KeyValueEditorEvent::Deleted {
                 key: data.key.clone(),
                 connection_id: data.connection_id,
+                database_name: data.database_name.clone(),
             });
         }
 

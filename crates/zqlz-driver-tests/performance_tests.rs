@@ -8,7 +8,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use std::time::{Duration, Instant};
@@ -31,17 +31,11 @@ mod tests {
             || error_text.contains("deadlock")
     }
 
-    async fn execute_with_retry(
-        conn: &dyn Connection,
-        sql: &str,
-        attempts: usize,
-    ) -> Result<()> {
+    async fn execute_with_retry(conn: &dyn Connection, sql: &str, attempts: usize) -> Result<()> {
         for attempt in 1..=attempts {
             match conn.execute(sql, &[]).await {
                 Ok(_) => return Ok(()),
-                Err(error)
-                    if attempt < attempts && is_retryable_lock_error(&error.to_string()) =>
-                {
+                Err(error) if attempt < attempts && is_retryable_lock_error(&error.to_string()) => {
                     let backoff_ms = 50 * attempt as u64;
                     tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
                 }
@@ -270,7 +264,10 @@ mod tests {
         // Build batch INSERT query
         for i in 0..batch_size {
             let id = 90000 + i;
-            insert_values.push(format!("({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)", id, i));
+            insert_values.push(format!(
+                "({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)",
+                id, i
+            ));
         }
 
         let query = format!(
@@ -333,7 +330,10 @@ mod tests {
 
         for i in 0..batch_size {
             let id = 90000 + i;
-            insert_values.push(format!("({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)", id, i));
+            insert_values.push(format!(
+                "({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)",
+                id, i
+            ));
         }
 
         let insert_query = format!(
@@ -346,7 +346,8 @@ mod tests {
             .context("Failed to insert test data")?;
 
         // Measure UPDATE performance
-        let update_query = "UPDATE actor SET last_name = 'Updated' WHERE actor_id BETWEEN 90000 AND 90099";
+        let update_query =
+            "UPDATE actor SET last_name = 'Updated' WHERE actor_id BETWEEN 90000 AND 90099";
 
         let duration = measure_query_time(|| async {
             let result = conn
@@ -410,7 +411,10 @@ mod tests {
 
         for i in 0..batch_size {
             let id = 90000 + i;
-            insert_values.push(format!("({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)", id, i));
+            insert_values.push(format!(
+                "({}, 'PerfTest', 'Actor{}', CURRENT_TIMESTAMP)",
+                id, i
+            ));
         }
 
         let insert_query = format!(
@@ -1002,7 +1006,12 @@ mod tests {
     async fn test_lock_timeout_or_busy_handling(#[case] driver: TestDriver) -> Result<()> {
         let conn1 = test_connection(driver).await?;
         let conn2 = test_connection(driver).await?;
-        execute_with_retry(conn1.as_ref(), "DELETE FROM actor WHERE actor_id = 80400", 8).await?;
+        execute_with_retry(
+            conn1.as_ref(),
+            "DELETE FROM actor WHERE actor_id = 80400",
+            8,
+        )
+        .await?;
 
         // Setup: Insert test row
         execute_with_retry(
@@ -1052,7 +1061,12 @@ mod tests {
         conn1.execute("ROLLBACK", &[]).await?;
 
         // Cleanup
-        execute_with_retry(conn1.as_ref(), "DELETE FROM actor WHERE actor_id = 80400", 8).await?;
+        execute_with_retry(
+            conn1.as_ref(),
+            "DELETE FROM actor WHERE actor_id = 80400",
+            8,
+        )
+        .await?;
 
         let _blocked_or_timed_out = task2.await.context("Task 2 panicked")??;
 
@@ -1073,7 +1087,12 @@ mod tests {
 
         let conn1 = test_connection(driver).await?;
         let conn2 = test_connection(driver).await?;
-        execute_with_retry(conn1.as_ref(), "DELETE FROM actor WHERE actor_id = 80500", 8).await?;
+        execute_with_retry(
+            conn1.as_ref(),
+            "DELETE FROM actor WHERE actor_id = 80500",
+            8,
+        )
+        .await?;
 
         // Setup: Insert test row
         execute_with_retry(
@@ -1162,8 +1181,9 @@ mod tests {
             .unwrap_or(false);
 
         // At least one should commit, or both should fail due expected serialization conflicts.
-        let success =
-            commit1_result.is_ok() || commit2_result.is_ok() || (update1_conflict && update2_conflict);
+        let success = commit1_result.is_ok()
+            || commit2_result.is_ok()
+            || (update1_conflict && update2_conflict);
         assert!(
             success,
             "Expected commit success or serialization/lock conflict handling"
@@ -1171,8 +1191,12 @@ mod tests {
 
         // Cleanup
         let cleanup_conn = test_connection(driver).await?;
-        execute_with_retry(cleanup_conn.as_ref(), "DELETE FROM actor WHERE actor_id = 80500", 8)
-            .await?;
+        execute_with_retry(
+            cleanup_conn.as_ref(),
+            "DELETE FROM actor WHERE actor_id = 80500",
+            8,
+        )
+        .await?;
 
         Ok(())
     }
@@ -1183,9 +1207,7 @@ mod tests {
     #[case::mysql(TestDriver::Mysql)]
     #[case::sqlite(TestDriver::Sqlite)]
     #[tokio::test]
-    async fn integration_test_concurrent_operations_work(
-        #[case] driver: TestDriver,
-    ) -> Result<()> {
+    async fn integration_test_concurrent_operations_work(#[case] driver: TestDriver) -> Result<()> {
         let num_tasks = 5;
         let mut tasks = Vec::new();
 

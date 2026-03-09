@@ -6,11 +6,12 @@
 use chrono::{DateTime, Utc};
 use gpui::*;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     scroll::ScrollableElement,
-    v_flex, ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
+    v_flex,
 };
 
 use crate::history::QueryHistoryEntry;

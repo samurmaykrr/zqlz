@@ -10,6 +10,10 @@ use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 
+fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
+    viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
+}
+
 pub(in crate::main_view) fn handle_apply_filters_event(
     connection_id: Uuid,
     table_name: &str,
@@ -65,15 +69,17 @@ pub(in crate::main_view) fn handle_apply_filters_event(
             .collect();
 
         if !searchable_columns.is_empty() {
-            let escaped_search = search_text.replace("'", "''").replace("%", "\\%").replace("_", "\\_");
+            let escaped_search = search_text
+                .replace("'", "''")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
             let column_conditions: Vec<String> = searchable_columns
                 .iter()
                 .map(|col_name| {
                     let escaped_col = format!("\"{}\"", col_name.replace("\"", "\"\""));
                     format!(
                         "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                        escaped_col,
-                        escaped_search
+                        escaped_col, escaped_search
                     )
                 })
                 .collect();
@@ -94,9 +100,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
     let filter_count = where_clauses.len();
     let sort_count = order_by_clauses.len();
 
-    _ = viewer_entity.update(cx, |viewer, cx| {
-        viewer.set_loading(true, cx);
-    });
+    let request_generation = begin_viewer_request(&viewer_entity, cx);
 
     window
         .spawn(cx, async move |cx| {
@@ -123,6 +127,16 @@ pub(in crate::main_view) fn handle_apply_filters_event(
                     );
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if !viewer.is_current_request(request_generation) {
+                            tracing::debug!(
+                                "Discarding stale filtered load for '{}' (generation={}, current={})",
+                                table_name,
+                                request_generation,
+                                viewer.current_request_generation()
+                            );
+                            return;
+                        }
+
                         viewer.load_table(
                             connection_id,
                             connection_name.clone(),
@@ -153,11 +167,13 @@ pub(in crate::main_view) fn handle_apply_filters_event(
                     tracing::error!("Failed to apply filters: {}", e);
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
-                        viewer.set_loading(false, cx);
-                        window.push_notification(
-                            Notification::error(&format!("Failed to apply filters: {}", e)),
-                            cx,
-                        );
+                        if viewer.is_current_request(request_generation) {
+                            viewer.set_loading(false, cx);
+                            window.push_notification(
+                                Notification::error(&format!("Failed to apply filters: {}", e)),
+                                cx,
+                            );
+                        }
                     });
                 }
             }

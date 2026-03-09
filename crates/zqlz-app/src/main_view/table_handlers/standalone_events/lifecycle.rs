@@ -6,8 +6,8 @@ use zqlz_query::ResultsPanel;
 
 use crate::app::AppState;
 use crate::components::{InspectorPanel, InspectorView, SchemaDetailsPanel};
-use crate::main_view::table_handlers_utils::{
-    conversion::{convert_to_schema_details, resolve_schema_qualifier},
+use crate::main_view::table_handlers_utils::conversion::{
+    convert_to_schema_details, resolve_schema_qualifier,
 };
 
 pub(in crate::main_view) fn handle_became_active_event(
@@ -67,10 +67,9 @@ pub(in crate::main_view) fn handle_became_active_event(
         .spawn(cx, async move |cx| {
             let (conn, schema_service) = match cx.update(|_window, cx| {
                 let app_state = cx.try_global::<AppState>()?;
-                let conn = app_state.connections.get_for_database_cached(
-                    connection_id,
-                    database_name.as_deref(),
-                );
+                let conn = app_state
+                    .connections
+                    .get_for_database_cached(connection_id, database_name.as_deref());
                 let schema_service = app_state.schema_service.clone();
                 Some((conn?, schema_service))
             }) {
@@ -85,11 +84,15 @@ pub(in crate::main_view) fn handle_became_active_event(
                 panel.set_loading_for_table(connection_id, &table_name, cx);
             });
 
-            let schema_qualifier =
-                resolve_schema_qualifier(conn.driver_name(), &database_name);
+            let schema_qualifier = resolve_schema_qualifier(conn.driver_name(), &database_name);
 
             match schema_service
-                .get_table_details(conn.clone(), connection_id, &table_name, schema_qualifier.as_deref())
+                .get_table_details(
+                    conn.clone(),
+                    connection_id,
+                    &table_name,
+                    schema_qualifier.as_deref(),
+                )
                 .await
             {
                 Ok(table_details) => {

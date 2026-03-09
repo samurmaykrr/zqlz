@@ -9,7 +9,20 @@ impl TableViewerDelegate {
 
         if let Some(ref search_text) = filter {
             self.is_filtering = true;
-            let original_row_count = self.rows.len() - self.pending_changes.new_rows.len();
+            let Some(original_row_count) = self
+                .rows
+                .len()
+                .checked_sub(self.pending_changes.new_rows.len())
+            else {
+                tracing::error!(
+                    "Cannot apply search filter because pending new rows exceed total rows: total_rows={}, new_rows={}",
+                    self.rows.len(),
+                    self.pending_changes.new_rows.len()
+                );
+                self.filtered_row_indices.clear();
+                self.is_filtering = false;
+                return;
+            };
 
             self.filtered_row_indices = self
                 .rows
@@ -19,8 +32,11 @@ impl TableViewerDelegate {
                     if *idx >= original_row_count {
                         return true;
                     }
-                    row.iter()
-                        .any(|cell| cell.to_lowercase().contains(search_text))
+                    row.iter().any(|cell| {
+                        cell.display_for_table()
+                            .to_lowercase()
+                            .contains(search_text)
+                    })
                 })
                 .map(|(idx, _)| idx)
                 .collect();
@@ -33,6 +49,10 @@ impl TableViewerDelegate {
     /// Apply structured filter conditions against in-memory rows.
     /// Used for KeyValue/Document drivers where data is already loaded.
     pub fn apply_advanced_filters(&mut self, filters: &[FilterCondition], search_text: &str) {
+        // Persist so recompute_filtered_indices can re-apply after a sort
+        self.last_filter_conditions = filters.to_vec();
+        self.last_filter_search_text = search_text.to_string();
+
         let enabled_filters: Vec<&FilterCondition> = filters
             .iter()
             .filter(|f| f.enabled && f.is_valid())
@@ -61,9 +81,11 @@ impl TableViewerDelegate {
                 }
                 // Check search text (matches any column)
                 if has_search
-                    && !row
-                        .iter()
-                        .any(|cell| cell.to_lowercase().contains(&search_lower))
+                    && !row.iter().any(|cell| {
+                        cell.display_for_table()
+                            .to_lowercase()
+                            .contains(&search_lower)
+                    })
                 {
                     return false;
                 }
@@ -81,9 +103,12 @@ impl TableViewerDelegate {
         }
     }
 
-    pub(super) fn cell_matches_search(&self, value: &str) -> bool {
+    pub(super) fn cell_matches_search(&self, value: &Value) -> bool {
         if let Some(ref search_text) = self.search_filter {
-            value.to_lowercase().contains(search_text)
+            value
+                .display_for_table()
+                .to_lowercase()
+                .contains(search_text)
         } else {
             false
         }
@@ -103,7 +128,7 @@ impl TableViewerDelegate {
 
 /// Check if a row matches all filter conditions, respecting AND/OR logical operators.
 fn row_matches_filters(
-    row: &[String],
+    row: &[Value],
     filters: &[&FilterCondition],
     column_meta: &[ColumnMeta],
 ) -> bool {
@@ -130,7 +155,7 @@ fn row_matches_filters(
 }
 
 /// Evaluate a single filter condition against a row.
-fn evaluate_filter(filter: &FilterCondition, row: &[String], column_meta: &[ColumnMeta]) -> bool {
+fn evaluate_filter(filter: &FilterCondition, row: &[Value], column_meta: &[ColumnMeta]) -> bool {
     // Custom SQL filters can't be evaluated client-side — skip them
     if filter.operator.is_custom() || filter.custom_sql.is_some() {
         return true;
@@ -148,11 +173,20 @@ fn evaluate_filter(filter: &FilterCondition, row: &[String], column_meta: &[Colu
         None => return true,
     };
 
-    let cell_value = row.get(col_index).map(|s| s.as_str()).unwrap_or("");
+    let cell = row.get(col_index);
+
+    // For IsNull / IsNotNull / IsEmpty / IsNotEmpty, operate on the Value directly
+    match filter.operator {
+        FilterOperator::IsNull => return cell.map_or(true, |v| v.is_null()),
+        FilterOperator::IsNotNull => return cell.map_or(false, |v| !v.is_null()),
+        _ => {}
+    }
+
+    let cell_value = cell.map(|v| v.display_for_table()).unwrap_or_default();
 
     evaluate_operator(
         filter.operator,
-        cell_value,
+        &cell_value,
         &filter.value,
         filter.value2.as_deref(),
     )
@@ -186,9 +220,9 @@ fn evaluate_operator(
         FilterOperator::EndsWith => cell_lower.ends_with(&filter_lower),
         FilterOperator::DoesNotEndWith => !cell_lower.ends_with(&filter_lower),
 
-        FilterOperator::IsNull => cell_value.is_empty() || cell_value.eq_ignore_ascii_case("null"),
-        FilterOperator::IsNotNull => {
-            !cell_value.is_empty() && !cell_value.eq_ignore_ascii_case("null")
+        FilterOperator::IsNull | FilterOperator::IsNotNull => {
+            // Handled before display_for_table conversion; unreachable here
+            true
         }
         FilterOperator::IsEmpty => cell_value.is_empty(),
         FilterOperator::IsNotEmpty => !cell_value.is_empty(),

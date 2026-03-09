@@ -374,7 +374,8 @@ impl RenderOnce for CompletionMenuItem {
         let deprecated = item.deprecated.unwrap_or(false);
 
         // Build highlight ranges from matched character indices
-        let highlights: Vec<_> = build_highlights_from_indices(&item.label, &self.matched_indices, cx);
+        let highlights: Vec<_> =
+            build_highlights_from_indices(&item.label, &self.matched_indices, cx);
 
         div()
             .id(self.ix)
@@ -558,7 +559,11 @@ impl<E: CompletionMenuEditor> ListDelegate for CompletionMenuDelegate<E> {
     ) -> Option<Self::Item> {
         let entry = self.filtered.get(ix.row)?;
         let item = self.items.get(entry.source_index)?;
-        Some(CompletionMenuItem::new(ix.row, item.clone(), entry.matched_indices.clone()))
+        Some(CompletionMenuItem::new(
+            ix.row,
+            item.clone(),
+            entry.matched_indices.clone(),
+        ))
     }
 
     fn set_selected_index(
@@ -599,11 +604,7 @@ pub struct CompletionMenu<E: CompletionMenuEditor> {
 }
 
 impl<E: CompletionMenuEditor> CompletionMenu<E> {
-    pub fn new(
-        editor: Entity<E>,
-        window: &mut Window,
-        cx: &mut App,
-    ) -> Entity<Self> {
+    pub fn new(editor: Entity<E>, window: &mut Window, cx: &mut App) -> Entity<Self> {
         cx.new(|cx: &mut Context<Self>| {
             let view = cx.entity();
             let delegate = CompletionMenuDelegate {
@@ -618,12 +619,14 @@ impl<E: CompletionMenuEditor> CompletionMenu<E> {
             let list = cx.new(|cx| ListState::new(delegate, window, cx));
 
             let _subscriptions =
-                vec![cx.subscribe(&list, |this: &mut Self, _, ev: &ListEvent, cx| {
-                    if let ListEvent::Confirm(_) = ev {
-                        this.hide(cx);
-                    }
-                    cx.notify();
-                })];
+                vec![
+                    cx.subscribe(&list, |this: &mut Self, _, ev: &ListEvent, cx| {
+                        if let ListEvent::Confirm(_) = ev {
+                            this.hide(cx);
+                        }
+                        cx.notify();
+                    }),
+                ];
 
             Self {
                 offset: 0,
@@ -652,55 +655,57 @@ impl<E: CompletionMenuEditor> CompletionMenu<E> {
         let editor = self.editor.clone();
 
         cx.spawn_in(window, async move |_, cx| {
-            editor.update_in(cx, |editor, window, cx| {
-                let text = editor.completion_text_string(cx);
-                let cursor_offset = editor.completion_cursor_offset(cx);
+            editor
+                .update_in(cx, |editor, window, cx| {
+                    let text = editor.completion_text_string(cx);
+                    let cursor_offset = editor.completion_cursor_offset(cx);
 
-                let mut new_text =
-                    item.insert_text.clone().unwrap_or_else(|| item.label.clone());
-                let mut start_byte = trigger_start;
-                let mut end_byte = offset;
+                    let mut new_text = item
+                        .insert_text
+                        .clone()
+                        .unwrap_or_else(|| item.label.clone());
+                    let mut start_byte = trigger_start;
+                    let mut end_byte = offset;
 
-                if let Some(text_edit) = item.text_edit.as_ref() {
-                    match text_edit {
-                        CompletionTextEdit::Edit(edit) => {
-                            new_text = edit.new_text.clone();
-                            start_byte = position_to_byte_offset(&text, &edit.range.start);
-                            end_byte = position_to_byte_offset(&text, &edit.range.end);
-                        }
-                        CompletionTextEdit::InsertAndReplace(edit) => {
-                            new_text = edit.new_text.clone();
-                            start_byte =
-                                position_to_byte_offset(&text, &edit.replace.start);
-                            end_byte = position_to_byte_offset(&text, &edit.replace.end);
+                    if let Some(text_edit) = item.text_edit.as_ref() {
+                        match text_edit {
+                            CompletionTextEdit::Edit(edit) => {
+                                new_text = edit.new_text.clone();
+                                start_byte = position_to_byte_offset(&text, &edit.range.start);
+                                end_byte = position_to_byte_offset(&text, &edit.range.end);
+                            }
+                            CompletionTextEdit::InsertAndReplace(edit) => {
+                                new_text = edit.new_text.clone();
+                                start_byte = position_to_byte_offset(&text, &edit.replace.start);
+                                end_byte = position_to_byte_offset(&text, &edit.replace.end);
+                            }
                         }
                     }
-                }
 
-                // Strip trailing space if the next char is already whitespace
-                if new_text.ends_with(' ') && cursor_offset < text.len() {
-                    if text[cursor_offset..]
-                        .chars()
-                        .next()
-                        .map(|c| c.is_whitespace())
-                        .unwrap_or(false)
-                    {
-                        new_text = new_text.trim_end().to_string();
+                    // Strip trailing space if the next char is already whitespace
+                    if new_text.ends_with(' ') && cursor_offset < text.len() {
+                        if text[cursor_offset..]
+                            .chars()
+                            .next()
+                            .map(|c| c.is_whitespace())
+                            .unwrap_or(false)
+                        {
+                            new_text = new_text.trim_end().to_string();
+                        }
                     }
-                }
 
-                let start_byte = start_byte.min(text.len());
-                let end_byte = end_byte.min(text.len());
+                    let start_byte = start_byte.min(text.len());
+                    let end_byte = end_byte.min(text.len());
 
-                editor.completion_replace_text_in_range(
-                    start_byte..end_byte,
-                    &new_text,
-                    window,
-                    cx,
-                );
-                editor.completion_focus_editor(window, cx);
-            })
-            .ok();
+                    editor.completion_replace_text_in_range(
+                        start_byte..end_byte,
+                        &new_text,
+                        window,
+                        cx,
+                    );
+                    editor.completion_focus_editor(window, cx);
+                })
+                .ok();
         })
         .detach();
 
@@ -823,12 +828,7 @@ impl<E: CompletionMenuEditor> CompletionMenu<E> {
 
     /// Re-runs the fuzzy filter on the existing items with the current query.
     /// Hides the menu if no items match. Does not re-fetch items from the LSP.
-    pub fn refilter(
-        &mut self,
-        offset: usize,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn refilter(&mut self, offset: usize, window: &mut Window, cx: &mut Context<Self>) {
         self.offset = offset;
         self.list.update(cx, |this, cx| {
             this.delegate_mut().query = self.query.clone();
@@ -914,9 +914,9 @@ impl<E: CompletionMenuEditor> Render for CompletionMenu<E> {
 
         if full_doc_content != self.last_doc_content {
             self.last_doc_content = full_doc_content.clone();
-            self.doc_text_view_state = full_doc_content
-                .as_ref()
-                .map(|doc| cx.new(|cx: &mut Context<TextViewState>| TextViewState::markdown(doc, cx)));
+            self.doc_text_view_state = full_doc_content.as_ref().map(|doc| {
+                cx.new(|cx: &mut Context<TextViewState>| TextViewState::markdown(doc, cx))
+            });
         }
 
         let doc_state = self.doc_text_view_state.clone();

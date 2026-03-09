@@ -97,7 +97,11 @@ pub fn load_connections() -> Result<Vec<SavedConnection>> {
         "ALTER TABLE connections ADD COLUMN color TEXT",
     ] {
         if let Err(e) = db.execute(ddl, []) {
-            tracing::debug!("migration step skipped ('{}') — likely already applied: {}", ddl, e);
+            tracing::debug!(
+                "migration step skipped ('{}') — likely already applied: {}",
+                ddl,
+                e
+            );
         }
     }
 
@@ -200,12 +204,16 @@ pub fn save_connection(saved: &SavedConnection) -> Result<()> {
         "ALTER TABLE connections ADD COLUMN color TEXT",
     ] {
         if let Err(e) = db.execute(ddl, []) {
-            tracing::debug!("migration step skipped ('{}') — likely already applied: {}", ddl, e);
+            tracing::debug!(
+                "migration step skipped ('{}') — likely already applied: {}",
+                ddl,
+                e
+            );
         }
     }
 
-    let params_json = serde_json::to_string(&saved.params)
-        .context("serializing connection params")?;
+    let params_json =
+        serde_json::to_string(&saved.params).context("serializing connection params")?;
 
     db.execute(
         "INSERT OR REPLACE INTO connections
@@ -280,7 +288,10 @@ pub async fn execute_query(
     let mut had_error = false;
 
     if single_transaction && let Err(e) = connection.execute("BEGIN", &[]).await {
-        tracing::warn!("BEGIN failed ({}); continuing without transaction wrapping", e);
+        tracing::warn!(
+            "BEGIN failed ({}); continuing without transaction wrapping",
+            e
+        );
     }
 
     for stmt_sql in &statements_sql {
@@ -621,7 +632,7 @@ pub fn load_history(
                     return Err(anyhow::anyhow!(
                         "no connection found matching '{}'",
                         name_or_id
-                    ))
+                    ));
                 }
                 Err(e) => return Err(e).context("looking up connection by name"),
             }
@@ -666,9 +677,7 @@ pub fn load_history(
                 let error: Option<String> = row.get(7)?;
 
                 let id = Uuid::parse_str(&id_str).unwrap_or_else(|_| Uuid::new_v4());
-                let connection_id = conn_id_str
-                    .as_deref()
-                    .and_then(|s| Uuid::parse_str(s).ok());
+                let connection_id = conn_id_str.as_deref().and_then(|s| Uuid::parse_str(s).ok());
                 let executed_at = executed_at_str
                     .parse::<chrono::DateTime<chrono::Utc>>()
                     .unwrap_or_else(|_| chrono::Utc::now());

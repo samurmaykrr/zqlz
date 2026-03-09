@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod edge_case_empty_results_tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::Value;
@@ -34,7 +34,10 @@ mod edge_case_empty_results_tests {
 
         // Update with impossible condition
         let result = conn
-            .execute("UPDATE actor SET first_name = 'TEST' WHERE actor_id = -999999", &[])
+            .execute(
+                "UPDATE actor SET first_name = 'TEST' WHERE actor_id = -999999",
+                &[],
+            )
             .await?;
 
         assert_eq!(
@@ -203,7 +206,11 @@ mod edge_case_empty_results_tests {
             )
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "GROUP BY on empty set should be empty");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "GROUP BY on empty set should be empty"
+        );
 
         Ok(())
     }
@@ -218,10 +225,17 @@ mod edge_case_empty_results_tests {
 
         // ORDER BY on empty set
         let result = conn
-            .query("SELECT * FROM actor WHERE actor_id = -999999 ORDER BY last_name ASC", &[])
+            .query(
+                "SELECT * FROM actor WHERE actor_id = -999999 ORDER BY last_name ASC",
+                &[],
+            )
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "ORDER BY on empty set should be empty");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "ORDER BY on empty set should be empty"
+        );
 
         Ok(())
     }
@@ -236,7 +250,10 @@ mod edge_case_empty_results_tests {
 
         // LIMIT/OFFSET on empty set
         let result = conn
-            .query("SELECT * FROM actor WHERE actor_id = -999999 LIMIT 10 OFFSET 5", &[])
+            .query(
+                "SELECT * FROM actor WHERE actor_id = -999999 LIMIT 10 OFFSET 5",
+                &[],
+            )
             .await?;
 
         assert_eq!(
@@ -258,10 +275,17 @@ mod edge_case_empty_results_tests {
 
         // DISTINCT on empty set
         let result = conn
-            .query("SELECT DISTINCT first_name FROM actor WHERE actor_id = -999999", &[])
+            .query(
+                "SELECT DISTINCT first_name FROM actor WHERE actor_id = -999999",
+                &[],
+            )
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "DISTINCT on empty set should be empty");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "DISTINCT on empty set should be empty"
+        );
 
         Ok(())
     }
@@ -282,7 +306,11 @@ mod edge_case_empty_results_tests {
             )
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "Subquery returning empty set should produce empty result");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "Subquery returning empty set should produce empty result"
+        );
 
         Ok(())
     }
@@ -298,7 +326,10 @@ mod edge_case_empty_results_tests {
         // Insert a test actor, then LEFT JOIN with film_actor (no matches)
         let actor_id = 99998;
         conn.execute(
-            &format!("INSERT INTO actor (actor_id, first_name, last_name) VALUES ({}, 'TEMP', 'ACTOR')", actor_id),
+            &format!(
+                "INSERT INTO actor (actor_id, first_name, last_name) VALUES ({}, 'TEMP', 'ACTOR')",
+                actor_id
+            ),
             &[],
         )
         .await?;
@@ -330,8 +361,11 @@ mod edge_case_empty_results_tests {
         assert!(matches!(title, Value::Null), "title should be NULL");
 
         // Cleanup
-        conn.execute(&format!("DELETE FROM actor WHERE actor_id = {}", actor_id), &[])
-            .await?;
+        conn.execute(
+            &format!("DELETE FROM actor WHERE actor_id = {}", actor_id),
+            &[],
+        )
+        .await?;
 
         Ok(())
     }
@@ -349,7 +383,11 @@ mod edge_case_empty_results_tests {
             .query("SELECT * FROM actor WHERE actor_id IN (-1, -2, -3)", &[])
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "IN clause with non-existent values should return empty result");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "IN clause with non-existent values should return empty result"
+        );
 
         Ok(())
     }
@@ -370,7 +408,11 @@ mod edge_case_empty_results_tests {
             )
             .await?;
 
-        assert_eq!(result.rows.len(), 0, "HAVING that matches no groups should return empty result");
+        assert_eq!(
+            result.rows.len(),
+            0,
+            "HAVING that matches no groups should return empty result"
+        );
 
         Ok(())
     }
@@ -394,7 +436,7 @@ mod edge_case_empty_results_tests {
                 "CREATE TEMPORARY TABLE test_empty_edge (id INTEGER PRIMARY KEY, name TEXT)"
             }
         };
-        
+
         conn.execute(create_sql, &[]).await?;
 
         // Query empty table
@@ -405,13 +447,19 @@ mod edge_case_empty_results_tests {
         let update_result = conn
             .execute("UPDATE test_empty_edge SET name = 'test' WHERE id = 1", &[])
             .await?;
-        assert_eq!(update_result.affected_rows, 0, "Update on empty table should affect zero rows");
+        assert_eq!(
+            update_result.affected_rows, 0,
+            "Update on empty table should affect zero rows"
+        );
 
         // Delete from empty table
         let delete_result = conn
             .execute("DELETE FROM test_empty_edge WHERE id = 1", &[])
             .await?;
-        assert_eq!(delete_result.affected_rows, 0, "Delete on empty table should affect zero rows");
+        assert_eq!(
+            delete_result.affected_rows, 0,
+            "Delete on empty table should affect zero rows"
+        );
 
         // Aggregate on empty table
         let agg_result = conn

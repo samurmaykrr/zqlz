@@ -426,7 +426,11 @@ impl AiProviderFactory {
             }
             AiProvider::Anthropic => {
                 let api_key = api_key?;
-                Some(Box::new(AnthropicProvider::new(api_key, model, temperature)))
+                Some(Box::new(AnthropicProvider::new(
+                    api_key,
+                    model,
+                    temperature,
+                )))
             }
             AiProvider::Local => {
                 // Local provider would require additional configuration
@@ -502,12 +506,13 @@ impl AiCompletionProvider for OpenAiProvider {
 
         // Build the prompt with schema context if available
         let mut prompt = String::new();
-        
+
         if let Some(ref schema) = request.schema_context {
             prompt.push_str("Database schema:\n");
             for table in &schema.tables {
                 prompt.push_str(&format!("- {} (", table.name));
-                let cols: Vec<String> = table.columns
+                let cols: Vec<String> = table
+                    .columns
                     .iter()
                     .map(|c| format!("{}: {}", c.name, c.data_type))
                     .collect();
@@ -516,10 +521,10 @@ impl AiCompletionProvider for OpenAiProvider {
             }
             prompt.push_str("\n");
         }
-        
+
         prompt.push_str("SQL query (complete the query):\n");
         prompt.push_str(&request.prefix);
-        
+
         let suffix = if request.suffix.is_empty() {
             None
         } else {
@@ -535,7 +540,8 @@ impl AiCompletionProvider for OpenAiProvider {
             stream: false,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://api.openai.com/v1/completions")
             .header("Authorization", format!("Bearer {}", self.api_key))
             .header("Content-Type", "application/json")
@@ -564,9 +570,10 @@ impl AiCompletionProvider for OpenAiProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(CompletionError::InvalidResponse(
-                format!("Status {}: {}", status, body),
-            ));
+            return Err(CompletionError::InvalidResponse(format!(
+                "Status {}: {}",
+                status, body
+            )));
         }
 
         let response: OpenAiResponse = response
@@ -576,19 +583,17 @@ impl AiCompletionProvider for OpenAiProvider {
 
         if let Some(choice) = response.choices.into_iter().next() {
             let suggestion = choice.text.trim().to_string();
-            
+
             // Calculate start/end offsets based on the suggestion
             // The suggestion is inserted after the prefix
             let start_offset = 0;
             let end_offset = suggestion.len() as isize;
 
-            Ok(CompletionResponse::new(
-                suggestion.into(),
-                start_offset,
-                end_offset,
+            Ok(
+                CompletionResponse::new(suggestion.into(), start_offset, end_offset)
+                    .with_confidence(0.8)
+                    .with_reason(SharedString::from("OpenAI completion")),
             )
-            .with_confidence(0.8)
-            .with_reason(SharedString::from("OpenAI completion")))
         } else {
             Err(CompletionError::InvalidResponse(
                 "No completion choices returned".to_string(),
@@ -672,12 +677,13 @@ impl AiCompletionProvider for AnthropicProvider {
 
         // Anthropic uses a special prompt format
         let mut prompt = String::from("\n\nHuman: ");
-        
+
         if let Some(ref schema) = request.schema_context {
             prompt.push_str("Database schema:\n");
             for table in &schema.tables {
                 prompt.push_str(&format!("- {} (", table.name));
-                let cols: Vec<String> = table.columns
+                let cols: Vec<String> = table
+                    .columns
                     .iter()
                     .map(|c| format!("{}: {}", c.name, c.data_type))
                     .collect();
@@ -686,14 +692,14 @@ impl AiCompletionProvider for AnthropicProvider {
             }
             prompt.push_str("\n");
         }
-        
+
         prompt.push_str("Complete the following SQL query:\n");
         prompt.push_str(&request.prefix);
-        
+
         if !request.suffix.is_empty() {
             prompt.push_str(request.suffix.as_ref());
         }
-        
+
         prompt.push_str("\n\nAssistant:");
 
         let req = AnthropicRequest {
@@ -704,7 +710,8 @@ impl AiCompletionProvider for AnthropicProvider {
             stream: false,
         };
 
-        let response = self.client
+        let response = self
+            .client
             .post("https://api.anthropic.com/v1/complete")
             .header("x-api-key", &self.api_key)
             .header("anthropic-version", "2023-06-01")
@@ -734,9 +741,10 @@ impl AiCompletionProvider for AnthropicProvider {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(CompletionError::InvalidResponse(
-                format!("Status {}: {}", status, body),
-            ));
+            return Err(CompletionError::InvalidResponse(format!(
+                "Status {}: {}",
+                status, body
+            )));
         }
 
         let response: AnthropicResponse = response
@@ -745,7 +753,7 @@ impl AiCompletionProvider for AnthropicProvider {
             .map_err(|e| CompletionError::InvalidResponse(e.to_string()))?;
 
         let suggestion = response.completion.trim().to_string();
-        
+
         if suggestion.is_empty() {
             return Err(CompletionError::InvalidResponse(
                 "Empty completion returned".to_string(),
@@ -755,13 +763,11 @@ impl AiCompletionProvider for AnthropicProvider {
         let start_offset = 0;
         let end_offset = suggestion.len() as isize;
 
-        Ok(CompletionResponse::new(
-            suggestion.into(),
-            start_offset,
-            end_offset,
+        Ok(
+            CompletionResponse::new(suggestion.into(), start_offset, end_offset)
+                .with_confidence(0.8)
+                .with_reason(SharedString::from("Anthropic completion")),
         )
-        .with_confidence(0.8)
-        .with_reason(SharedString::from("Anthropic completion")))
     }
 
     fn cancel(&self) {
@@ -842,9 +848,11 @@ mod tests {
     #[test]
     fn test_schema_context() {
         let ctx = SchemaContext::new()
-            .with_tables(vec![TableInfo::new("users")
-                .with_column(ColumnInfo::new("id", "INTEGER"))
-                .with_column(ColumnInfo::new("name", "VARCHAR"))])
+            .with_tables(vec![
+                TableInfo::new("users")
+                    .with_column(ColumnInfo::new("id", "INTEGER"))
+                    .with_column(ColumnInfo::new("name", "VARCHAR")),
+            ])
             .with_views(vec![ViewInfo::new("active_users")]);
 
         assert_eq!(ctx.tables.len(), 1);

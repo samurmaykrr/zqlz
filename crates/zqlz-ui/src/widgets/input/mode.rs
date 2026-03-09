@@ -304,7 +304,7 @@ mod tests {
 
     use crate::widgets::{
         highlighter::DiagnosticSet,
-        input::{mode::InputMode, TabSize},
+        input::{TabSize, mode::InputMode},
     };
 
     #[test]

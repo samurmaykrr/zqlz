@@ -47,7 +47,13 @@ async fn browse_table_builds_correct_sql() {
     let service = TableService::new(100);
 
     let result = service
-        .browse_table(conn.clone() as Arc<dyn Connection>, "users", None, None, None)
+        .browse_table(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            None,
+            None,
+        )
         .await
         .expect("should browse table");
 
@@ -282,12 +288,21 @@ async fn update_cell_succeeds() {
         column_name: "email".to_string(),
         new_value: Some("new@example.com".to_string()),
         all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-        all_row_values: vec!["1".to_string(), "Alice".to_string(), "old@example.com".to_string()],
+        all_row_values: vec![
+            "1".to_string(),
+            "Alice".to_string(),
+            "old@example.com".to_string(),
+        ],
         all_column_types: vec!["int4".to_string(), "text".to_string(), "text".to_string()],
     };
 
     service
-        .update_cell(conn.clone() as Arc<dyn Connection>, "users", None, cell_data)
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            cell_data,
+        )
         .await
         .expect("update should succeed");
 }
@@ -309,7 +324,12 @@ async fn insert_row_builds_correct_sql() {
     };
 
     service
-        .insert_row(conn.clone() as Arc<dyn Connection>, "users", None, insert_data)
+        .insert_row(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            insert_data,
+        )
         .await
         .expect("insert should succeed");
 }
@@ -329,7 +349,12 @@ async fn insert_row_uses_postgres_placeholders() {
     };
 
     service
-        .insert_row(conn.clone() as Arc<dyn Connection>, "users", None, insert_data)
+        .insert_row(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            insert_data,
+        )
         .await
         .expect("insert should succeed");
 
@@ -358,7 +383,12 @@ async fn insert_row_with_null_values() {
     };
 
     service
-        .insert_row(conn.clone() as Arc<dyn Connection>, "users", None, insert_data)
+        .insert_row(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            insert_data,
+        )
         .await
         .expect("insert with NULLs should succeed");
 }
@@ -375,7 +405,12 @@ async fn insert_row_with_empty_columns_fails() {
     };
 
     let result = service
-        .insert_row(conn.clone() as Arc<dyn Connection>, "users", None, insert_data)
+        .insert_row(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            insert_data,
+        )
         .await;
 
     assert!(result.is_err(), "should fail with no columns");
@@ -390,13 +425,20 @@ async fn delete_rows_with_primary_key() {
 
     let delete_data = RowDeleteData {
         all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
-        rows: vec![
-            vec!["1".to_string(), "Alice".to_string(), "alice@example.com".to_string()],
-        ],
+        rows: vec![vec![
+            "1".to_string(),
+            "Alice".to_string(),
+            "alice@example.com".to_string(),
+        ]],
     };
 
     let deleted = service
-        .delete_rows(conn.clone() as Arc<dyn Connection>, "users", None, delete_data)
+        .delete_rows(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            delete_data,
+        )
         .await
         .expect("delete should succeed");
 
@@ -414,7 +456,12 @@ async fn delete_zero_rows_returns_zero() {
     };
 
     let deleted = service
-        .delete_rows(conn.clone() as Arc<dyn Connection>, "users", None, delete_data)
+        .delete_rows(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            delete_data,
+        )
         .await
         .expect("delete of zero rows should succeed");
 
@@ -457,7 +504,12 @@ async fn browse_table_uses_estimated_count_for_slow_drivers() {
     );
 
     let log = conn.query_log();
-    assert_eq!(log.len(), 2, "should issue 2 queries (data + estimate): {:?}", log);
+    assert_eq!(
+        log.len(),
+        2,
+        "should issue 2 queries (data + estimate): {:?}",
+        log
+    );
     assert!(
         !log.iter().any(|q| q.contains("COUNT(*)")),
         "should NOT have a COUNT(*) query for mysql: {:?}",
@@ -492,7 +544,11 @@ async fn browse_table_runs_count_for_fast_drivers() {
         .await
         .expect("should browse with count");
 
-    assert_eq!(result.total_rows, Some(42), "fast drivers should have total_rows");
+    assert_eq!(
+        result.total_rows,
+        Some(42),
+        "fast drivers should have total_rows"
+    );
 
     let log = conn.query_log();
     assert!(log.len() >= 2, "should issue at least 2 queries: {:?}", log);
@@ -630,7 +686,12 @@ async fn browse_with_filters_skips_estimate_for_slow_drivers() {
     );
 
     let log = conn.query_log();
-    assert_eq!(log.len(), 1, "should only issue 1 query (data only): {:?}", log);
+    assert_eq!(
+        log.len(),
+        1,
+        "should only issue 1 query (data only): {:?}",
+        log
+    );
     assert!(
         !log.iter().any(|q| q.contains("COUNT(*)")),
         "should NOT run COUNT(*): {:?}",
@@ -675,13 +736,15 @@ async fn browse_with_filters_no_filters_uses_estimate_for_slow_drivers() {
         Some(10_000),
         "unfiltered queries on slow drivers should have estimated total"
     );
-    assert!(
-        result.is_estimated_total,
-        "should be flagged as estimated"
-    );
+    assert!(result.is_estimated_total, "should be flagged as estimated");
 
     let log = conn.query_log();
-    assert_eq!(log.len(), 2, "should issue 2 queries (data + estimate): {:?}", log);
+    assert_eq!(
+        log.len(),
+        2,
+        "should issue 2 queries (data + estimate): {:?}",
+        log
+    );
     assert!(
         log.iter().any(|q| q.contains("information_schema.TABLES")),
         "should use information_schema for estimate: {:?}",
@@ -715,18 +778,19 @@ async fn browse_with_filters_uses_cached_total_when_provided() {
         .await
         .expect("should browse with cached total");
 
-    assert_eq!(
-        result.total_rows,
-        Some(5000),
-        "should reuse cached total"
-    );
+    assert_eq!(result.total_rows, Some(5000), "should reuse cached total");
     assert!(
         !result.is_estimated_total,
         "cached totals are not marked as estimated"
     );
 
     let log = conn.query_log();
-    assert_eq!(log.len(), 1, "should only issue data query when cached total provided: {:?}", log);
+    assert_eq!(
+        log.len(),
+        1,
+        "should only issue data query when cached total provided: {:?}",
+        log
+    );
 }
 
 #[tokio::test]
@@ -744,7 +808,10 @@ async fn estimate_row_count_mysql_returns_estimated() {
         .expect("should estimate row count");
 
     assert_eq!(count, 54_305_000);
-    assert!(is_estimated, "mysql estimate should be flagged as estimated");
+    assert!(
+        is_estimated,
+        "mysql estimate should be flagged as estimated"
+    );
 }
 
 #[tokio::test]
@@ -757,16 +824,24 @@ async fn estimate_row_count_postgres_returns_estimated() {
     let service = TableService::new(100);
 
     let (count, is_estimated) = service
-        .estimate_row_count(conn.clone() as Arc<dyn Connection>, "events", Some("public"))
+        .estimate_row_count(
+            conn.clone() as Arc<dyn Connection>,
+            "events",
+            Some("public"),
+        )
         .await
         .expect("should estimate row count");
 
     assert_eq!(count, 2_000_000);
-    assert!(is_estimated, "postgres estimate should be flagged as estimated");
+    assert!(
+        is_estimated,
+        "postgres estimate should be flagged as estimated"
+    );
 
     let log = conn.query_log();
     assert!(
-        log.iter().any(|q| q.contains("pg_class") && q.contains("pg_namespace")),
+        log.iter()
+            .any(|q| q.contains("pg_class") && q.contains("pg_namespace")),
         "should query pg_class with namespace: {:?}",
         log
     );
@@ -787,7 +862,10 @@ async fn estimate_row_count_sqlite_falls_back_to_exact_count() {
         .expect("should count rows exactly");
 
     assert_eq!(count, 500);
-    assert!(!is_estimated, "sqlite should use exact count, not estimated");
+    assert!(
+        !is_estimated,
+        "sqlite should use exact count, not estimated"
+    );
 
     let log = conn.query_log();
     assert!(
@@ -812,9 +890,11 @@ async fn estimate_row_count_duckdb_falls_back_to_exact_count() {
         .expect("should count rows exactly");
 
     assert_eq!(count, 12345);
-    assert!(!is_estimated, "duckdb should use exact count, not estimated");
+    assert!(
+        !is_estimated,
+        "duckdb should use exact count, not estimated"
+    );
 }
-
 
 #[tokio::test]
 async fn count_rows_with_filters() {
@@ -1178,7 +1258,8 @@ async fn browse_last_page_runs_count_and_data_concurrently() {
         log
     );
     assert!(
-        log.iter().any(|q| q.contains("SELECT") && !q.contains("COUNT(*)")),
+        log.iter()
+            .any(|q| q.contains("SELECT") && !q.contains("COUNT(*)")),
         "should have a data query: {:?}",
         log
     );
@@ -1213,9 +1294,9 @@ async fn browse_near_end_page_reverses_rows_and_preserves_total() {
             vec![],
             vec![],
             vec![],
-            2,    // limit
-            96,   // offset (near the end of 100 rows)
-            100,  // total_rows
+            2,   // limit
+            96,  // offset (near the end of 100 rows)
+            100, // total_rows
             vec!["id".to_string()],
         )
         .await
@@ -1258,7 +1339,12 @@ async fn browse_near_end_page_computes_correct_reverse_offset() {
         .expect("should succeed");
 
     let log = conn.query_log();
-    assert_eq!(log.len(), 1, "should issue exactly 1 query (no COUNT): {:?}", log);
+    assert_eq!(
+        log.len(),
+        1,
+        "should issue exactly 1 query (no COUNT): {:?}",
+        log
+    );
     let query = &log[0];
     assert!(
         query.contains("ORDER BY `booking_id` DESC"),

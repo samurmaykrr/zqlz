@@ -2,8 +2,8 @@
 
 use async_trait::async_trait;
 use mysql_async::{
-    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row as MySqlRow,
-    consts::ColumnType, prelude::*,
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row as MySqlRow, consts::ColumnType,
+    prelude::*,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -81,7 +81,9 @@ impl MySqlConnection {
         }
 
         let constraints = PoolConstraints::new(1, 1).ok_or_else(|| {
-            ZqlzError::Connection("Failed to configure MySQL pool constraints (min=1, max=1)".into())
+            ZqlzError::Connection(
+                "Failed to configure MySQL pool constraints (min=1, max=1)".into(),
+            )
         })?;
 
         let pool_opts = PoolOpts::default()
@@ -104,9 +106,7 @@ impl MySqlConnection {
                 Ok::<Pool, ZqlzError>(pool)
             })
             .await
-            .map_err(|e| {
-                ZqlzError::Connection(format!("MySQL connection task failed: {}", e))
-            })??;
+            .map_err(|e| ZqlzError::Connection(format!("MySQL connection task failed: {}", e)))??;
 
         // Resolve the active database name so schema introspection can use a
         // concrete value instead of relying on DATABASE() at query time.
@@ -122,18 +122,14 @@ impl MySqlConnection {
                             e
                         ))
                     })?;
-                    let row: Option<(Option<String>,)> = conn
-                        .query_first("SELECT DATABASE()")
-                        .await
-                        .map_err(|e| {
+                    let row: Option<(Option<String>,)> =
+                        conn.query_first("SELECT DATABASE()").await.map_err(|e| {
                             ZqlzError::Query(format!("Failed to query DATABASE(): {}", e))
                         })?;
                     Ok::<Option<String>, ZqlzError>(row.and_then(|(db,)| db))
                 })
                 .await
-                .map_err(|e| {
-                    ZqlzError::Connection(format!("MySQL DATABASE() task failed: {}", e))
-                })?
+                .map_err(|e| ZqlzError::Connection(format!("MySQL DATABASE() task failed: {}", e)))?
                 .unwrap_or(None)
         };
 
@@ -151,9 +147,7 @@ impl MySqlConnection {
         get_mysql_runtime()
             .spawn(async move { pool.get_conn().await })
             .await
-            .map_err(|e| {
-                ZqlzError::Connection(format!("MySQL get_conn task failed: {}", e))
-            })?
+            .map_err(|e| ZqlzError::Connection(format!("MySQL get_conn task failed: {}", e)))?
             .map_err(|e| ZqlzError::Connection(format!("Failed to get MySQL connection: {}", e)))
     }
 
@@ -222,17 +216,20 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
                     | ColumnType::MYSQL_TYPE_LONG
                     | ColumnType::MYSQL_TYPE_LONGLONG
                     | ColumnType::MYSQL_TYPE_INT24
-                    | ColumnType::MYSQL_TYPE_YEAR => {
-                        s.parse::<i64>().map(Value::Int64).unwrap_or(Value::String(s))
-                    }
-                    ColumnType::MYSQL_TYPE_FLOAT => {
-                        s.parse::<f32>().map(Value::Float32).unwrap_or(Value::String(s))
-                    }
+                    | ColumnType::MYSQL_TYPE_YEAR => s
+                        .parse::<i64>()
+                        .map(Value::Int64)
+                        .unwrap_or(Value::String(s)),
+                    ColumnType::MYSQL_TYPE_FLOAT => s
+                        .parse::<f32>()
+                        .map(Value::Float32)
+                        .unwrap_or(Value::String(s)),
                     ColumnType::MYSQL_TYPE_DOUBLE
                     | ColumnType::MYSQL_TYPE_DECIMAL
-                    | ColumnType::MYSQL_TYPE_NEWDECIMAL => {
-                        s.parse::<f64>().map(Value::Float64).unwrap_or(Value::String(s))
-                    }
+                    | ColumnType::MYSQL_TYPE_NEWDECIMAL => s
+                        .parse::<f64>()
+                        .map(Value::Float64)
+                        .unwrap_or(Value::String(s)),
                     _ => Value::String(s),
                 }
             } else {
@@ -320,9 +317,9 @@ impl Connection for MySqlConnection {
 
         let affected_rows = get_mysql_runtime()
             .spawn(async move {
-                conn.query_drop(&final_sql).await.map_err(|e| {
-                    ZqlzError::Query(format!("Failed to execute statement: {}", e))
-                })?;
+                conn.query_drop(&final_sql)
+                    .await
+                    .map_err(|e| ZqlzError::Query(format!("Failed to execute statement: {}", e)))?;
                 Ok::<u64, ZqlzError>(conn.affected_rows())
             })
             .await
@@ -363,9 +360,10 @@ impl Connection for MySqlConnection {
         let cancelled = self.cancelled.clone();
         let (columns, _column_names, rows) = get_mysql_runtime()
             .spawn(async move {
-                let mysql_rows: Vec<MySqlRow> = conn.query(&final_sql).await.map_err(|e| {
-                    ZqlzError::Query(format!("Failed to execute query: {}", e))
-                })?;
+                let mysql_rows: Vec<MySqlRow> = conn
+                    .query(&final_sql)
+                    .await
+                    .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
 
                 let mut columns = Vec::new();
                 let mut column_names = Vec::new();
@@ -404,7 +402,10 @@ impl Connection for MySqlConnection {
                     for idx in 0..columns.len() {
                         let mysql_val: mysql_async::Value =
                             mysql_row.get(idx).unwrap_or(mysql_async::Value::NULL);
-                        let col_type = column_types.get(idx).copied().unwrap_or(ColumnType::MYSQL_TYPE_STRING);
+                        let col_type = column_types
+                            .get(idx)
+                            .copied()
+                            .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
                         let value = mysql_value_to_value(mysql_val, col_type);
                         values.push(value);
                     }
@@ -443,23 +444,23 @@ impl Connection for MySqlConnection {
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
         tracing::debug!("beginning MySQL transaction");
-        
+
         // Get a connection from the pool for the duration of the transaction
         let mut conn = self.get_conn().await?;
-        
+
         // Begin the transaction
         let conn = get_mysql_runtime()
             .spawn(async move {
-                conn.query_drop("START TRANSACTION").await.map_err(|e| {
-                    ZqlzError::Query(format!("Failed to begin transaction: {}", e))
-                })?;
+                conn.query_drop("START TRANSACTION")
+                    .await
+                    .map_err(|e| ZqlzError::Query(format!("Failed to begin transaction: {}", e)))?;
                 Ok::<Conn, ZqlzError>(conn)
             })
             .await
             .map_err(|e| {
                 ZqlzError::Connection(format!("MySQL begin transaction task failed: {}", e))
             })??;
-        
+
         tracing::debug!("MySQL transaction begun successfully");
         Ok(Box::new(MySqlTransaction {
             conn: Arc::new(tokio::sync::Mutex::new(Some(conn))),
@@ -474,9 +475,7 @@ impl Connection for MySqlConnection {
         get_mysql_runtime()
             .spawn(async move { pool.disconnect().await })
             .await
-            .map_err(|e| {
-                ZqlzError::Connection(format!("MySQL close task failed: {}", e))
-            })?
+            .map_err(|e| ZqlzError::Connection(format!("MySQL close task failed: {}", e)))?
             .map_err(|e| {
                 ZqlzError::Connection(format!("Failed to close MySQL connection: {}", e))
             })?;
@@ -562,9 +561,9 @@ impl Connection for MySqlConnection {
         let mut conn = self.get_conn().await?;
         let rows_affected = get_mysql_runtime()
             .spawn(async move {
-                conn.query_drop(&sql).await.map_err(|e| {
-                    ZqlzError::Query(format!("Failed to update cell: {}", e))
-                })?;
+                conn.query_drop(&sql)
+                    .await
+                    .map_err(|e| ZqlzError::Query(format!("Failed to update cell: {}", e)))?;
                 Ok::<u64, ZqlzError>(conn.affected_rows())
             })
             .await
@@ -621,7 +620,7 @@ impl Transaction for MySqlTransaction {
         }
 
         tracing::debug!("committing MySQL transaction");
-        
+
         let conn_mutex = self.conn.clone();
         get_mysql_runtime()
             .spawn(async move {
@@ -635,9 +634,7 @@ impl Transaction for MySqlTransaction {
                 Ok::<(), ZqlzError>(())
             })
             .await
-            .map_err(|e| {
-                ZqlzError::Connection(format!("MySQL commit task failed: {}", e))
-            })??;
+            .map_err(|e| ZqlzError::Connection(format!("MySQL commit task failed: {}", e)))??;
 
         self.committed = true;
         tracing::debug!("MySQL transaction committed");
@@ -653,7 +650,7 @@ impl Transaction for MySqlTransaction {
         }
 
         tracing::debug!("rolling back MySQL transaction");
-        
+
         let conn_mutex = self.conn.clone();
         get_mysql_runtime()
             .spawn(async move {
@@ -667,9 +664,7 @@ impl Transaction for MySqlTransaction {
                 Ok::<(), ZqlzError>(())
             })
             .await
-            .map_err(|e| {
-                ZqlzError::Connection(format!("MySQL rollback task failed: {}", e))
-            })??;
+            .map_err(|e| ZqlzError::Connection(format!("MySQL rollback task failed: {}", e)))??;
 
         self.rolled_back = true;
         tracing::debug!("MySQL transaction rolled back");
@@ -678,10 +673,14 @@ impl Transaction for MySqlTransaction {
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         if self.committed {
-            return Err(ZqlzError::Query("Cannot execute on committed transaction".into()));
+            return Err(ZqlzError::Query(
+                "Cannot execute on committed transaction".into(),
+            ));
         }
         if self.rolled_back {
-            return Err(ZqlzError::Query("Cannot execute on rolled back transaction".into()));
+            return Err(ZqlzError::Query(
+                "Cannot execute on rolled back transaction".into(),
+            ));
         }
 
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing statement in transaction");
@@ -694,7 +693,7 @@ impl Transaction for MySqlTransaction {
 
         let conn_mutex = self.conn.clone();
         let sql = sql.to_string();
-        
+
         let rows_affected = get_mysql_runtime()
             .spawn(async move {
                 let mut guard = conn_mutex.lock().await;
@@ -704,13 +703,18 @@ impl Transaction for MySqlTransaction {
                     })?;
                     Ok::<u64, ZqlzError>(conn.affected_rows())
                 } else {
-                    Err(ZqlzError::Query("Transaction connection no longer available".into()))
+                    Err(ZqlzError::Query(
+                        "Transaction connection no longer available".into(),
+                    ))
                 }
             })
             .await
             .map_err(|e| ZqlzError::Query(format!("MySQL execute task failed: {}", e)))??;
 
-        tracing::debug!(affected_rows = rows_affected, "statement executed in transaction");
+        tracing::debug!(
+            affected_rows = rows_affected,
+            "statement executed in transaction"
+        );
         Ok(StatementResult {
             is_query: false,
             result: None,
@@ -721,10 +725,14 @@ impl Transaction for MySqlTransaction {
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         if self.committed {
-            return Err(ZqlzError::Query("Cannot query on committed transaction".into()));
+            return Err(ZqlzError::Query(
+                "Cannot query on committed transaction".into(),
+            ));
         }
         if self.rolled_back {
-            return Err(ZqlzError::Query("Cannot query on rolled back transaction".into()));
+            return Err(ZqlzError::Query(
+                "Cannot query on rolled back transaction".into(),
+            ));
         }
 
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing query in transaction");
@@ -738,18 +746,19 @@ impl Transaction for MySqlTransaction {
         let conn_mutex = self.conn.clone();
         let sql = sql.to_string();
         let start_time = std::time::Instant::now();
-        
+
         let (rows_data, column_names, column_types) = get_mysql_runtime()
             .spawn(async move {
                 let mut guard = conn_mutex.lock().await;
                 if let Some(ref mut conn) = *guard {
-                    let rows: Vec<MySqlRow> = conn.query(&sql).await.map_err(|e| {
-                        ZqlzError::Query(format!("Failed to execute query: {}", e))
-                    })?;
+                    let rows: Vec<MySqlRow> = conn
+                        .query(&sql)
+                        .await
+                        .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
 
                     let mut column_names = Vec::new();
                     let mut column_types = Vec::new();
-                    
+
                     if let Some(first_row) = rows.first() {
                         for col in first_row.columns_ref().iter() {
                             column_names.push(col.name_str().to_string());
@@ -757,9 +766,15 @@ impl Transaction for MySqlTransaction {
                         }
                     }
 
-                    Ok::<(Vec<MySqlRow>, Vec<String>, Vec<ColumnType>), ZqlzError>((rows, column_names, column_types))
+                    Ok::<(Vec<MySqlRow>, Vec<String>, Vec<ColumnType>), ZqlzError>((
+                        rows,
+                        column_names,
+                        column_types,
+                    ))
                 } else {
-                    Err(ZqlzError::Query("Transaction connection no longer available".into()))
+                    Err(ZqlzError::Query(
+                        "Transaction connection no longer available".into(),
+                    ))
                 }
             })
             .await
@@ -789,7 +804,10 @@ impl Transaction for MySqlTransaction {
             for idx in 0..column_names.len() {
                 let mysql_val: mysql_async::Value =
                     mysql_row.get(idx).unwrap_or(mysql_async::Value::NULL);
-                let col_type = column_types.get(idx).copied().unwrap_or(ColumnType::MYSQL_TYPE_STRING);
+                let col_type = column_types
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
                 let value = mysql_value_to_value(mysql_val, col_type);
                 values.push(value);
             }
@@ -821,7 +839,9 @@ impl Transaction for MySqlTransaction {
 impl Drop for MySqlTransaction {
     fn drop(&mut self) {
         if !self.committed && !self.rolled_back {
-            tracing::warn!("MySQL transaction dropped without commit or rollback - will auto-rollback");
+            tracing::warn!(
+                "MySQL transaction dropped without commit or rollback - will auto-rollback"
+            );
             let conn_mutex = self.conn.clone();
             std::thread::spawn(move || {
                 get_mysql_runtime().block_on(async move {

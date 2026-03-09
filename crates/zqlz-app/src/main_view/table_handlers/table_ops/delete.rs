@@ -2,15 +2,12 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
 
-use crate::app::AppState;
-use crate::components::ObjectsPanelEvent;
 use crate::MainView;
+use crate::app::AppState;
+use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 
 impl MainView {
     #[allow(dead_code)]
@@ -38,14 +35,14 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let table_name_for_dialog = table_name.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let table_name = table_name_for_dialog.clone();
 
             dialog
@@ -73,8 +70,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let table_name = table_name.clone();
 
                     cx.spawn(async move |cx| {
@@ -83,17 +79,15 @@ impl MainView {
                             Ok(_) => {
                                 tracing::info!("Table '{}' deleted successfully", table_name);
 
-                                cx.update(|cx| {
-                                    _ = connection_sidebar.update(cx, |_, cx| {
-                                        cx.emit(crate::components::ConnectionSidebarEvent::RefreshSchema { 
-                                            connection_id 
-                                        });
+                                let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                    let _ = main_view.update(cx, |main_view, cx| {
+                                        main_view.refresh_connection_surfaces(
+                                            RefreshTarget::Connection(connection_id),
+                                            SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                            cx,
+                                        );
                                     });
-                                    _ = objects_panel.update(cx, |_, cx| {
-                                        cx.emit(ObjectsPanelEvent::Refresh);
-                                    });
-                                })
-;
+                                });
                             }
                             Err(e) => {
                                 tracing::error!("Failed to delete table: {}", e);
@@ -144,8 +138,8 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
 
         let continue_on_error = Rc::new(RefCell::new(false));
@@ -159,13 +153,16 @@ impl MainView {
         let message = if is_multi {
             format!("Are you sure you want to delete these {} tables?", count)
         } else {
-            format!("Are you sure you want to delete table '{}'?", table_names[0])
+            format!(
+                "Are you sure you want to delete table '{}'?",
+                table_names[0]
+            )
         };
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
             let continue_on_error = continue_on_error.clone();
@@ -211,8 +208,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
@@ -244,17 +240,15 @@ impl MainView {
                         if !deleted_tables.is_empty() {
                             schema_service.invalidate_connection_cache(connection_id);
 
-                            cx.update(|cx| {
-                                _ = connection_sidebar.update(cx, |_, cx| {
-                                    cx.emit(crate::components::ConnectionSidebarEvent::RefreshSchema { 
-                                        connection_id 
-                                    });
+                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                let _ = main_view.update(cx, |main_view, cx| {
+                                    main_view.refresh_connection_surfaces(
+                                        RefreshTarget::Connection(connection_id),
+                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                        cx,
+                                    );
                                 });
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
-                                });
-                            })
-;
+                            });
                         }
 
                         if !errors.is_empty() {

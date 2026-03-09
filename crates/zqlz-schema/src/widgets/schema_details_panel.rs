@@ -6,9 +6,10 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    button::Button,
+    ActiveTheme, Sizable,
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
-    h_flex, v_flex, ActiveTheme, Sizable,
+    h_flex, v_flex,
 };
 
 /// Column information for display
@@ -222,6 +223,7 @@ impl SchemaDetailsPanel {
                                     details.create_statement.clone().unwrap_or_default();
                                 this.child(
                                     Button::new("copy-create-statement")
+                                        .secondary_primary()
                                         .small()
                                         .label("Copy CREATE TABLE")
                                         .on_click(cx.listener(move |_this, _, _window, cx| {

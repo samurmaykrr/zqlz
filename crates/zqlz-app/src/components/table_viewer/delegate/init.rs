@@ -10,9 +10,11 @@ impl TableViewerDelegate {
     ) -> Self {
         // Create row number column as first column (fixed left)
         let row_num_width = Self::row_number_column_width(result.rows.len());
-        let mut columns: Vec<Column> = vec![Column::new("row-num", "#")
-            .width(row_num_width)
-            .fixed(ColumnFixed::Left)];
+        let mut columns: Vec<Column> = vec![
+            Column::new("row-num", "#")
+                .width(row_num_width)
+                .fixed(ColumnFixed::Left),
+        ];
 
         columns.extend(result.columns.iter().enumerate().map(|(idx, col_meta)| {
             Column::new(format!("col-{}", idx), col_meta.name.clone())
@@ -21,29 +23,7 @@ impl TableViewerDelegate {
                 .sortable()
         }));
 
-        let rows: Vec<Vec<String>> = result
-            .rows
-            .iter()
-            .map(|row| {
-                row.values
-                    .iter()
-                    .map(|val| match val {
-                        zqlz_core::Value::Bytes(_) => "BLOB".to_string(),
-                        other => other.to_string(),
-                    })
-                    .collect()
-            })
-            .collect();
-
-        // Retain raw bytes for binary/blob columns so the hex viewer can display them
-        let mut raw_bytes = HashMap::new();
-        for (row_idx, row) in result.rows.iter().enumerate() {
-            for (col_idx, val) in row.values.iter().enumerate() {
-                if let zqlz_core::Value::Bytes(bytes) = val {
-                    raw_bytes.insert((row_idx, col_idx), bytes.clone());
-                }
-            }
-        }
+        let rows: Vec<Vec<Value>> = result.rows.iter().map(|row| row.values.clone()).collect();
 
         Self {
             columns,
@@ -61,7 +41,6 @@ impl TableViewerDelegate {
             bulk_edit_cells: None,
             editing_cell_has_newlines: false,
             ignore_next_blur: false,
-            selected_rows: HashSet::new(),
             context_menu_selected_rows: Vec::new(),
             search_filter: None,
             filtered_row_indices: Vec::new(),
@@ -77,7 +56,11 @@ impl TableViewerDelegate {
             fk_values_cache: HashMap::new(),
             fk_select_state: None,
             fk_loading: false,
-            raw_bytes,
+            last_filter_conditions: Vec::new(),
+            last_filter_search_text: String::new(),
+            primary_key_columns: Vec::new(),
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
         }
     }
 
@@ -110,14 +93,18 @@ impl TableViewerDelegate {
         }
     }
 
-    pub fn append_rows(&mut self, new_rows: Vec<Vec<String>>, has_more: bool) {
+    pub fn set_primary_key_columns(&mut self, columns: Vec<String>) {
+        self.primary_key_columns = columns;
+    }
+
+    pub fn append_rows(&mut self, new_rows: Vec<Vec<Value>>, has_more: bool) {
         self.rows.extend(new_rows);
         self.has_more_data = has_more;
         self.is_loading_more = false;
         self.resize_row_number_column();
     }
 
-    pub fn replace_rows(&mut self, rows: Vec<Vec<String>>, has_more: bool) {
+    pub fn replace_rows(&mut self, rows: Vec<Vec<Value>>, has_more: bool) {
         self.rows = rows;
         self.has_more_data = has_more;
         self.is_loading_more = false;
@@ -144,8 +131,13 @@ impl TableViewerDelegate {
         cx: &mut Context<TableState<Self>>,
     ) {
         let column_meta = self.column_meta.get(data_col);
-        let current_value = self.rows.get(row).and_then(|r| r.get(data_col)).cloned();
-        let all_row_values: Vec<String> = self.rows.get(row).map(|r| r.clone()).unwrap_or_default();
+        let cell_value = self.rows.get(row).and_then(|r| r.get(data_col));
+        let current_value = cell_value.map(|v| v.display_for_table());
+        let all_row_values: Vec<String> = self
+            .rows
+            .get(row)
+            .map(|r| r.iter().map(|v| v.display_for_table()).collect())
+            .unwrap_or_default();
         let all_column_names: Vec<String> =
             self.column_meta.iter().map(|c| c.name.clone()).collect();
         let all_column_types: Vec<String> = self
@@ -154,7 +146,11 @@ impl TableViewerDelegate {
             .map(|c| c.data_type.clone())
             .collect();
 
-        let raw_bytes = self.raw_bytes.get(&(row, data_col)).cloned();
+        // Extract raw bytes directly from Value::Bytes
+        let raw_bytes = cell_value.and_then(|v| match v {
+            Value::Bytes(bytes) => Some(bytes.clone()),
+            _ => None,
+        });
 
         let viewer_panel = self.viewer_panel.clone();
         let table_name = self.table_name.clone();
@@ -163,7 +159,7 @@ impl TableViewerDelegate {
         if let Some(col_meta) = column_meta {
             let col_meta = col_meta.clone();
             cx.defer(move |cx| {
-                _ = viewer_panel.update(cx, |_panel, cx| {
+                if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                     cx.emit(TableViewerEvent::EditCell {
                         table_name,
                         connection_id,
@@ -177,7 +173,9 @@ impl TableViewerDelegate {
                         all_column_types,
                         raw_bytes,
                     });
-                });
+                }) {
+                    tracing::error!("Failed to emit EditCell event: {}", e);
+                }
             });
         }
     }

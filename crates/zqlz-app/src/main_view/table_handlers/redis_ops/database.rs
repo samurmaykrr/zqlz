@@ -5,10 +5,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
 
+use crate::MainView;
 use crate::app::AppState;
 use crate::components::{InspectorView, TableViewerEvent, TableViewerPanel};
 use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
-use crate::MainView;
 
 use super::super::{
     handle_became_active_event, handle_became_inactive_event, handle_delete_redis_keys_event,
@@ -36,23 +36,24 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(_connection) = app_state.connections.get(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let connection = connection.clone();
         let key_name_clone = key_name.clone();
+        let database_name = format!("db{}", database_index);
 
         cx.spawn_in(window, async move |this, cx| {
-            let select_cmd = format!("SELECT {}", database_index);
-            if let Err(e) = connection.execute(&select_cmd, &[]).await {
-                tracing::error!("Failed to select Redis database {}: {}", database_index, e);
-                return anyhow::Ok(());
-            }
-
             _ = this.update_in(cx, |this, window, cx| {
-                this.open_table_viewer(connection_id, key_name_clone, None, false, window, cx);
+                this.open_table_viewer(
+                    connection_id,
+                    key_name_clone,
+                    Some(database_name),
+                    false,
+                    window,
+                    cx,
+                );
             });
 
             anyhow::Ok(())
@@ -78,21 +79,14 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(_connection) = app_state.connections.get(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let connection = connection.clone();
         let db_name = format!("db{}", database_index);
 
         cx.spawn_in(window, async move |this, cx| {
-            let select_cmd = format!("SELECT {}", database_index);
-            if let Err(e) = connection.execute(&select_cmd, &[]).await {
-                tracing::error!("Failed to select Redis database {}: {}", database_index, e);
-                return anyhow::Ok(());
-            }
-
             _ = this.update_in(cx, |this, window, cx| {
                 this.open_redis_keys_viewer(connection_id, database_index, db_name, window, cx);
             });
@@ -115,16 +109,13 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
-
         let connection_name = app_state
             .connection_manager()
             .get_saved(connection_id)
             .map(|s| s.name.clone())
             .unwrap_or_else(|| "Redis".to_string());
+        let connections = app_state.connections.clone();
+        let event_db_name = db_name.clone();
 
         let viewer_entity = cx.new(|cx| TableViewerPanel::new(cx));
         let table_viewer: Arc<dyn zqlz_ui::widgets::dock::PanelView> =
@@ -139,155 +130,158 @@ impl MainView {
         let viewer_entity_for_events = viewer_entity.clone();
 
         cx.subscribe_in(&viewer_entity, window, {
-            move |_this, _viewer, event: &TableViewerEvent, window, cx| {
-                match event {
-                    TableViewerEvent::EditCell {
-                        connection_id,
+            let db_name = event_db_name.clone();
+            move |_this, _viewer, event: &TableViewerEvent, window, cx| match event {
+                TableViewerEvent::EditCell {
+                    connection_id,
+                    all_row_values,
+                    all_column_names,
+                    ..
+                } => {
+                    handle_redis_key_edit_event(
+                        *connection_id,
+                        db_name.clone(),
                         all_row_values,
                         all_column_names,
-                        ..
-                    } => {
-                        handle_redis_key_edit_event(
-                            *connection_id,
-                            all_row_values,
-                            all_column_names,
-                            &key_value_editor_panel,
-                            &dock_area,
-                            &inspector_panel,
-                            window,
-                            cx,
-                        );
-                    }
-                    TableViewerEvent::RefreshTable {
-                        connection_id,
+                        &key_value_editor_panel,
+                        &dock_area,
+                        &inspector_panel,
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::RefreshTable {
+                    connection_id,
+                    table_name,
+                    driver_category,
+                    database_name: _,
+                } => {
+                    handle_refresh_table_event(
+                        *connection_id,
                         table_name,
-                        driver_category,
-                        database_name: _,
-                    } => {
-                        handle_refresh_table_event(
-                            *connection_id,
-                            table_name,
-                            *driver_category,
-                            viewer_entity_for_refresh.clone(),
+                        *driver_category,
+                        viewer_entity_for_refresh.clone(),
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::AddRedisKey { connection_id } => {
+                    tracing::info!("AddRedisKey event: opening KeyValueEditor for new key");
+                    key_value_editor_panel.update(cx, |editor, cx| {
+                        editor.new_key(*connection_id, Some(db_name.clone()), window, cx);
+                    });
+
+                    inspector_panel.update(cx, |panel, cx| {
+                        panel.set_active_view(InspectorView::KeyEditor, cx);
+                    });
+
+                    dock_area.update(cx, |area, cx| {
+                        area.activate_panel(
+                            "InspectorPanel",
+                            zqlz_ui::widgets::dock::DockPlacement::Right,
                             window,
                             cx,
                         );
-                    }
-                    TableViewerEvent::AddRedisKey { connection_id } => {
-                        tracing::info!("AddRedisKey event: opening KeyValueEditor for new key");
-                        key_value_editor_panel.update(cx, |editor, cx| {
-                            editor.new_key(*connection_id, window, cx);
-                        });
-
-                        inspector_panel.update(cx, |panel, cx| {
-                            panel.set_active_view(InspectorView::KeyEditor, cx);
-                        });
-
-                        dock_area.update(cx, |area, cx| {
-                            area.activate_panel(
-                                "InspectorPanel",
-                                zqlz_ui::widgets::dock::DockPlacement::Right,
-                                window,
-                                cx,
-                            );
-                        });
-                    }
-                    TableViewerEvent::DeleteRows {
-                        connection_id,
-                        table_name: _,
+                    });
+                }
+                TableViewerEvent::DeleteRows {
+                    connection_id,
+                    table_name: _,
+                    all_column_names,
+                    rows_to_delete,
+                } => {
+                    handle_delete_redis_keys_event(
+                        *connection_id,
                         all_column_names,
                         rows_to_delete,
-                    } => {
-                        handle_delete_redis_keys_event(
-                            *connection_id,
-                            all_column_names,
-                            rows_to_delete,
-                            viewer_entity_for_events.clone(),
-                            window,
-                            cx,
-                        );
-                    }
-                    TableViewerEvent::BecameActive {
-                        connection_id,
+                        viewer_entity_for_events.clone(),
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::BecameActive {
+                    connection_id,
+                    table_name,
+                    database_name,
+                } => {
+                    handle_became_active_event(
+                        *connection_id,
                         table_name,
-                        database_name,
-                    } => {
-                        handle_became_active_event(
-                            *connection_id,
-                            table_name,
-                            database_name.as_deref(),
-                            schema_details_panel.clone(),
-                            results_panel.clone(),
-                            &dock_area,
-                            &inspector_panel,
-                            window,
-                            cx,
-                        );
-                    }
-                    TableViewerEvent::BecameInactive {
-                        connection_id,
+                        database_name.as_deref(),
+                        schema_details_panel.clone(),
+                        results_panel.clone(),
+                        &dock_area,
+                        &inspector_panel,
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::BecameInactive {
+                    connection_id,
+                    table_name,
+                } => {
+                    handle_became_inactive_event(
+                        *connection_id,
                         table_name,
-                    } => {
-                        handle_became_inactive_event(
-                            *connection_id,
-                            table_name,
-                            &schema_details_panel,
-                            cx,
-                        );
-                    }
-                    TableViewerEvent::HideColumn { column_name } => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.hide_column(column_name, cx);
-                        });
-                    }
-                    TableViewerEvent::FreezeColumn { col_ix } => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.freeze_column(*col_ix, cx);
-                        });
-                    }
-                    TableViewerEvent::UnfreezeColumn { col_ix } => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.unfreeze_column(*col_ix, cx);
-                        });
-                    }
-                    TableViewerEvent::SizeColumnToFit { col_ix } => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.size_column_to_fit(*col_ix, cx);
-                        });
-                    }
-                    TableViewerEvent::SizeAllColumnsToFit => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
-                            panel.size_all_columns_to_fit(cx);
-                        });
-                    }
-                    TableViewerEvent::ApplyFilters { .. }
-                    | TableViewerEvent::SortColumn { .. }
-                    | TableViewerEvent::InlineEditStarted
-                    | TableViewerEvent::MultiLineContentFlattened
-                    | TableViewerEvent::ColumnVisibilityChanged { .. }
-                    | TableViewerEvent::DiscardChanges
-                    | TableViewerEvent::SetToNull { .. }
-                    | TableViewerEvent::SetToEmpty { .. }
-                    | TableViewerEvent::MarkRowsForDeletion { .. } => {}
-                    TableViewerEvent::EditRow { .. }
-                    | TableViewerEvent::AddRowForm { .. }
-                    | TableViewerEvent::RowSelected { .. }
-                    | TableViewerEvent::CellSelected { .. }
-                    | TableViewerEvent::SaveCell { .. }
-                    | TableViewerEvent::AddRow { .. }
-                    | TableViewerEvent::SaveNewRow { .. }
-                    | TableViewerEvent::CommitChanges { .. }
-                    | TableViewerEvent::GenerateChangesSql { .. }
-                    | TableViewerEvent::PageChanged { .. }
-                    | TableViewerEvent::LimitChanged { .. }
-                    | TableViewerEvent::LimitEnabledChanged { .. }
-                    | TableViewerEvent::LoadMore { .. }
-                    | TableViewerEvent::LoadFkValues { .. }
-                    | TableViewerEvent::NavigateToFkTable { .. }
-                    | TableViewerEvent::AddQuickFilter { .. }
-                    | TableViewerEvent::LastPageRequested { .. } => {
-                        tracing::debug!("Ignoring SQL-specific event for KeyValue viewer");
-                    }
+                        &schema_details_panel,
+                        cx,
+                    );
+                }
+                TableViewerEvent::HideColumn { column_name } => {
+                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        panel.hide_column(column_name, cx);
+                    });
+                }
+                TableViewerEvent::FreezeColumn { col_ix } => {
+                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        panel.freeze_column(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::UnfreezeColumn { col_ix } => {
+                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        panel.unfreeze_column(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::SizeColumnToFit { col_ix } => {
+                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        panel.size_column_to_fit(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::SizeAllColumnsToFit => {
+                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        panel.size_all_columns_to_fit(cx);
+                    });
+                }
+                TableViewerEvent::ApplyFilters { .. }
+                | TableViewerEvent::SortColumn { .. }
+                | TableViewerEvent::InlineEditStarted
+                | TableViewerEvent::MultiLineContentFlattened
+                | TableViewerEvent::ValidationFailed { .. }
+                | TableViewerEvent::ColumnVisibilityChanged { .. }
+                | TableViewerEvent::DiscardChanges
+                | TableViewerEvent::SetToNull { .. }
+                | TableViewerEvent::SetToEmpty { .. }
+                | TableViewerEvent::MarkRowsForDeletion { .. } => {}
+                TableViewerEvent::EditRow { .. }
+                | TableViewerEvent::AddRowForm { .. }
+                | TableViewerEvent::RowSelected { .. }
+                | TableViewerEvent::CellSelected { .. }
+                | TableViewerEvent::SaveCell { .. }
+                | TableViewerEvent::AddRow { .. }
+                | TableViewerEvent::SaveNewRow { .. }
+                | TableViewerEvent::CommitChanges { .. }
+                | TableViewerEvent::GenerateChangesSql { .. }
+                | TableViewerEvent::PageChanged { .. }
+                | TableViewerEvent::LimitChanged { .. }
+                | TableViewerEvent::LimitEnabledChanged { .. }
+                | TableViewerEvent::LoadMore { .. }
+                | TableViewerEvent::LoadFkValues { .. }
+                | TableViewerEvent::NavigateToFkTable { .. }
+                | TableViewerEvent::AddQuickFilter { .. }
+                | TableViewerEvent::LastPageRequested { .. }
+                | TableViewerEvent::LoadDistinctValues { .. }
+                | TableViewerEvent::CountCompleted { .. } => {
+                    tracing::debug!("Ignoring SQL-specific event for KeyValue viewer");
                 }
             }
         })
@@ -304,14 +298,24 @@ impl MainView {
         });
 
         let viewer_weak = viewer_entity.downgrade();
-        let connection_clone = connection.clone();
+        let db_name_for_spawn = db_name.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            let select_cmd = format!("SELECT {}", database_index);
-            if let Err(e) = connection_clone.execute(&select_cmd, &[]).await {
-                tracing::error!("Failed to select Redis database {}: {}", database_index, e);
-                return anyhow::Ok(());
-            }
+            let connection_clone = match connections
+                .get_for_database(connection_id, &db_name_for_spawn)
+                .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database = %db_name_for_spawn,
+                        error = %error,
+                        "Failed to get Redis database-specific connection"
+                    );
+                    return anyhow::Ok(());
+                }
+            };
 
             let table_infos =
                 if let Some(schema_introspection) = connection_clone.as_schema_introspection() {
@@ -465,7 +469,7 @@ impl MainView {
                     connection_id,
                     connection_name,
                     db_name,
-                    None,
+                    Some(db_name_for_spawn),
                     true,
                     query_result,
                     DriverCategory::KeyValue,

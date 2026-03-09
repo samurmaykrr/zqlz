@@ -246,10 +246,13 @@ impl MainView {
                     );
                 });
 
-                // Refresh both schema (sidebar) and objects panel
+                // Refresh both schema-backed surfaces through the shared coordinator.
                 _ = this.update(cx, |main_view, cx| {
-                    main_view.refresh_schema(connection_id, window, cx);
-                    main_view.refresh_objects_panel(window, cx);
+                    main_view.refresh_connection_surfaces(
+                        crate::main_view::refresh::RefreshTarget::Connection(connection_id),
+                        crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                        cx,
+                    );
                 });
             });
 

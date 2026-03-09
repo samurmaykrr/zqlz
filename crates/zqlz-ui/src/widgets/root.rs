@@ -1,14 +1,15 @@
 use crate::widgets::{
+    ActiveTheme, ElementExt, Placement,
     dialog::Dialog,
     input::InputState,
     notification::{Notification, NotificationList},
     sheet::Sheet,
-    window_border, ActiveTheme, ElementExt, Placement,
+    window_border,
 };
 use gpui::{
-    actions, div, prelude::FluentBuilder as _, AnyView, App, AppContext, Context, DefiniteLength,
-    Entity, FocusHandle, InteractiveElement, IntoElement, KeyBinding, ParentElement as _, Render,
-    Styled, WeakFocusHandle, Window,
+    AnyView, App, AppContext, Context, DefiniteLength, Entity, FocusHandle, InteractiveElement,
+    IntoElement, KeyBinding, ParentElement as _, Render, Styled, WeakFocusHandle, Window, actions,
+    div, prelude::FluentBuilder as _,
 };
 use std::{any::TypeId, rc::Rc};
 
@@ -192,7 +193,9 @@ impl Root {
             })
             .collect::<Vec<_>>();
 
-        if let Some(ix) = show_overlay_ix && let Some(dialog) = dialogs.get_mut(ix) {
+        if let Some(ix) = show_overlay_ix
+            && let Some(dialog) = dialogs.get_mut(ix)
+        {
             dialog.overlay_visible = true;
         }
 

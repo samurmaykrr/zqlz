@@ -1,17 +1,18 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    actions, div, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    Styled, Subscription, Window,
+    Styled, Subscription, Window, actions, div,
 };
 
 use crate::find::FindOptions;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, IconName, Selectable, Sizable,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
     label::Label,
-    v_flex, ActiveTheme, Disableable, IconName, Selectable, Sizable,
+    v_flex,
 };
 
 const CONTEXT: &str = "FindReplacePanel";
@@ -31,18 +32,11 @@ pub fn init(cx: &mut App) {
 
 #[derive(Clone)]
 pub enum FindReplacePanelEvent {
-    QueryChanged {
-        query: String,
-        options: FindOptions,
-    },
+    QueryChanged { query: String, options: FindOptions },
     NextMatch,
     PrevMatch,
-    ReplaceCurrent {
-        replacement: String,
-    },
-    ReplaceAll {
-        replacement: String,
-    },
+    ReplaceCurrent { replacement: String },
+    ReplaceAll { replacement: String },
     SelectAllMatches,
     Closed,
 }
@@ -147,7 +141,10 @@ impl FindReplacePanel {
     }
 
     pub fn focus_search(&self, window: &mut Window, cx: &mut App) {
-        self.search_input.read(cx).focus_handle(cx).focus(window, cx);
+        self.search_input
+            .read(cx)
+            .focus_handle(cx)
+            .focus(window, cx);
     }
 
     pub fn set_replace_mode(&mut self, replace_mode: bool) {
@@ -331,9 +328,7 @@ impl Render for FindReplacePanel {
                     .when(show_label, |this| {
                         this.child(
                             Label::new(match_label)
-                                .when(label_is_error, |label| {
-                                    label.text_color(cx.theme().danger)
-                                })
+                                .when(label_is_error, |label| label.text_color(cx.theme().danger))
                                 .when(!label_is_error, |label| {
                                     label.text_color(cx.theme().muted_foreground)
                                 })
@@ -378,9 +373,7 @@ impl Render for FindReplacePanel {
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     let replacement =
                                         this.replace_input.read(cx).value().to_string();
-                                    cx.emit(FindReplacePanelEvent::ReplaceCurrent {
-                                        replacement,
-                                    });
+                                    cx.emit(FindReplacePanelEvent::ReplaceCurrent { replacement });
                                 })),
                         )
                         .child(

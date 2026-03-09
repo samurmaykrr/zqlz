@@ -664,7 +664,8 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
 
         // Store possible_keys if available
         if let Some(ref possible_keys) = row.possible_keys
-            && possible_keys != "NULL" && !possible_keys.is_empty()
+            && possible_keys != "NULL"
+            && !possible_keys.is_empty()
         {
             node.extra.insert(
                 "possible_keys".to_string(),
@@ -674,7 +675,8 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
 
         // Store key_len if available
         if let Some(ref key_len) = row.key_len
-            && key_len != "NULL" && !key_len.is_empty()
+            && key_len != "NULL"
+            && !key_len.is_empty()
         {
             node.extra
                 .insert("key_length".to_string(), Value::String(key_len.clone()));
@@ -682,7 +684,8 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
 
         // Store ref columns if available
         if let Some(ref ref_cols) = row.ref_cols
-            && ref_cols != "NULL" && !ref_cols.is_empty()
+            && ref_cols != "NULL"
+            && !ref_cols.is_empty()
         {
             node.extra
                 .insert("ref".to_string(), Value::String(ref_cols.clone()));

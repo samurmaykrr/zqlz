@@ -34,6 +34,7 @@
 
 mod connection_service;
 mod error;
+mod refresh_service;
 mod schema_service;
 mod table_design_service;
 mod table_service;
@@ -41,6 +42,10 @@ mod view_models;
 
 pub use connection_service::{ConnectionInfo, ConnectionService, TestResult};
 pub use error::{ServiceError, ServiceResult};
+pub use refresh_service::{
+    ConnectionRefresh, ConnectionRefreshPayload, RedisConnectionRefresh, RefreshRequest,
+    RefreshService, RelationalConnectionRefresh,
+};
 pub use schema_service::SchemaService;
 pub use table_service::{CellUpdateData, RowDeleteData, RowInsertData, TableService};
 pub use view_models::{ColumnInfo, DatabaseSchema, TableDetails};

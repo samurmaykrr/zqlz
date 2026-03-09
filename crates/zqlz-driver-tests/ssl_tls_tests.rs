@@ -4,8 +4,8 @@ mod ssl_tls_tests {
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::{ConnectionConfig, DatabaseDriver};
-    use zqlz_driver_postgres::PostgresDriver;
     use zqlz_driver_mysql::MySqlDriver;
+    use zqlz_driver_postgres::PostgresDriver;
 
     /// Test that basic connections work (SSL disabled or default mode)
     /// This validates that the drivers can connect without explicit SSL configuration
@@ -131,13 +131,13 @@ mod ssl_tls_tests {
         // 1. Set ssl_ca_cert_file to a nonexistent path
         // 2. Set ssl_mode to VERIFY_CA or VERIFY_IDENTITY
         // 3. Expect the connection to fail with certificate validation error
-        
+
         // For now, we just verify the connection works normally
         println!(
             "Note: SSL certificate validation tests require SSL configuration support in ConnectionConfig. \
             This test would verify that invalid CA certificates are rejected."
         );
-        
+
         test_ssl_disabled_mode(driver).await
     }
 
@@ -153,12 +153,12 @@ mod ssl_tls_tests {
         // 1. Set ssl_mode to VERIFY_FULL (Postgres) or VERIFY_IDENTITY (MySQL)
         // 2. Connect using IP address (127.0.0.1) instead of hostname
         // 3. Expect the connection to fail due to hostname mismatch
-        
+
         println!(
             "Note: SSL hostname verification tests require SSL configuration support in ConnectionConfig. \
             This test would verify that hostname mismatches are detected in verify-full mode."
         );
-        
+
         test_ssl_disabled_mode(driver).await
     }
 
@@ -169,17 +169,19 @@ mod ssl_tls_tests {
         config.password = Some("test_password".to_string());
 
         let connection_result = PostgresDriver::new().connect(&config).await;
-        
+
         match connection_result {
             Ok(conn) => {
                 // Query to check if SSL is enabled for this connection
                 // pg_stat_ssl view shows SSL information for all connections
-                let result = conn.query(
-                    "SELECT CASE WHEN ssl THEN 'SSL' ELSE 'No SSL' END as ssl_status \
+                let result = conn
+                    .query(
+                        "SELECT CASE WHEN ssl THEN 'SSL' ELSE 'No SSL' END as ssl_status \
                     FROM pg_stat_ssl \
                     WHERE pid = pg_backend_pid()",
-                    &[]
-                ).await;
+                        &[],
+                    )
+                    .await;
 
                 match result {
                     Ok(rows) => {

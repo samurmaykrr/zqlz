@@ -79,17 +79,13 @@ pub(in crate::panel) fn render_fields_tab(
     let header = this.render_column_header(cx).into_any_element();
 
     v_flex().size_full().child(toolbar).child(
-        div()
-            .id("fields-content")
-            .flex_1()
-            .overflow_scroll()
-            .child(
-                v_flex()
-                    .min_w(px(1200.0))
-                    .w_full()
-                    .p_2()
-                    .child(header)
-                    .children(column_row_elements),
-            ),
+        div().id("fields-content").flex_1().overflow_scroll().child(
+            v_flex()
+                .min_w(px(1200.0))
+                .w_full()
+                .p_2()
+                .child(header)
+                .children(column_row_elements),
+        ),
     )
 }

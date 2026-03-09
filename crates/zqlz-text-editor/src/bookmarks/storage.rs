@@ -1,7 +1,7 @@
 //! Query bookmarks storage with SQLite backend
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, Result as SqliteResult};
+use rusqlite::{Connection, Result as SqliteResult, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;

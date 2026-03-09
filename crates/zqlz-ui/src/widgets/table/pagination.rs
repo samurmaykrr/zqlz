@@ -10,9 +10,10 @@ use gpui::*;
 use serde::{Deserialize, Serialize};
 
 use crate::widgets::{
+    ActiveTheme, Disableable, Sizable,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
-    h_flex, ActiveTheme, Disableable, Sizable,
+    h_flex,
 };
 
 /// Pagination display mode

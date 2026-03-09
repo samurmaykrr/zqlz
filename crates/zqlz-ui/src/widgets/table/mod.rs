@@ -1,7 +1,4 @@
-use crate::widgets::{
-    ActiveTheme, Sizable, Size,
-    actions::Cancel,
-};
+use crate::widgets::{ActiveTheme, Sizable, Size, actions::Cancel};
 use gpui::{
     App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
     RenderOnce, Styled, Window, actions, div, prelude::FluentBuilder,
@@ -20,26 +17,35 @@ pub use pagination::*;
 pub use selection::*;
 pub use state::*;
 
-actions!(table, [
-    SelectPrevColumn,
-    SelectNextColumn,
-    SelectAll,
-    Copy,
-    Paste,
-    MoveSelectionUp,
-    MoveSelectionDown,
-    MoveSelectionLeft,
-    MoveSelectionRight,
-    ExtendSelectionUp,
-    ExtendSelectionDown,
-    ExtendSelectionLeft,
-    ExtendSelectionRight,
-    StartEditingCell,
-]);
+actions!(
+    table,
+    [
+        SelectPrevColumn,
+        SelectNextColumn,
+        SelectAll,
+        Copy,
+        Paste,
+        MoveSelectionUp,
+        MoveSelectionDown,
+        MoveSelectionLeft,
+        MoveSelectionRight,
+        ExtendSelectionUp,
+        ExtendSelectionDown,
+        ExtendSelectionLeft,
+        ExtendSelectionRight,
+        StartEditingCell,
+        MoveToFirstRow,
+        MoveToLastRow,
+        MoveToFirstColumn,
+        MoveToLastColumn,
+        TablePageUp,
+        TablePageDown,
+    ]
+);
 
 const CONTEXT: &str = "Table";
 pub(crate) fn init(cx: &mut App) {
-        cx.bind_keys([
+    cx.bind_keys([
         KeyBinding::new("escape", Cancel, Some(CONTEXT)),
         KeyBinding::new("cmd-a", SelectAll, Some(CONTEXT)),
         KeyBinding::new("cmd-c", Copy, Some(CONTEXT)),
@@ -59,6 +65,15 @@ pub(crate) fn init(cx: &mut App) {
         // Tab navigation across cells when table has focus (not when an Input is focused)
         KeyBinding::new("tab", MoveSelectionRight, Some(CONTEXT)),
         KeyBinding::new("shift-tab", MoveSelectionLeft, Some(CONTEXT)),
+        // Jump to first/last row
+        KeyBinding::new("cmd-up", MoveToFirstRow, Some(CONTEXT)),
+        KeyBinding::new("cmd-down", MoveToLastRow, Some(CONTEXT)),
+        // Jump to first/last column
+        KeyBinding::new("home", MoveToFirstColumn, Some(CONTEXT)),
+        KeyBinding::new("end", MoveToLastColumn, Some(CONTEXT)),
+        // Page up/down
+        KeyBinding::new("pageup", TablePageUp, Some(CONTEXT)),
+        KeyBinding::new("pagedown", TablePageDown, Some(CONTEXT)),
     ]);
 }
 
@@ -164,6 +179,12 @@ where
             .on_action(window.listener_for(&self.state, TableState::action_extend_selection_down))
             .on_action(window.listener_for(&self.state, TableState::action_extend_selection_left))
             .on_action(window.listener_for(&self.state, TableState::action_extend_selection_right))
+            .on_action(window.listener_for(&self.state, TableState::action_move_to_first_row))
+            .on_action(window.listener_for(&self.state, TableState::action_move_to_last_row))
+            .on_action(window.listener_for(&self.state, TableState::action_move_to_first_column))
+            .on_action(window.listener_for(&self.state, TableState::action_move_to_last_column))
+            .on_action(window.listener_for(&self.state, TableState::action_table_page_up))
+            .on_action(window.listener_for(&self.state, TableState::action_table_page_down))
             .on_key_down(window.listener_for(&self.state, TableState::on_key_down))
             .bg(cx.theme().table)
             .when(bordered, |this| {

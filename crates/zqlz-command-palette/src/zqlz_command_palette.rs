@@ -7,9 +7,10 @@ use std::time::SystemTime;
 use uuid::Uuid;
 use zqlz_fuzzy::{FuzzyMatcher, MatchQuality};
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
     kbd::Kbd,
     list::{ListDelegate, ListEvent, ListItem, ListState},
-    v_flex, ActiveTheme, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
+    v_flex,
 };
 
 // ── Persistence ─────────────────────────────────────────────────────────
@@ -123,23 +124,15 @@ fn icon_for_command(command_id: &str, category: &CommandCategory) -> Option<AnyE
         "execute-query" | "execute-selection" | "execute-current-statement" => {
             Some(Icon::new(ZqlzIcon::Play).small().into_any_element())
         }
-        "explain-query" | "explain-selection" => Some(
-            Icon::new(ZqlzIcon::Lightbulb)
-                .small()
-                .into_any_element(),
-        ),
+        "explain-query" | "explain-selection" => {
+            Some(Icon::new(ZqlzIcon::Lightbulb).small().into_any_element())
+        }
         "stop-query" => Some(Icon::new(ZqlzIcon::Stop).small().into_any_element()),
         "format-query" => Some(Icon::new(ZqlzIcon::MagicWand).small().into_any_element()),
-        "save-query" | "save-query-as" => Some(
-            Icon::new(ZqlzIcon::FloppyDisk)
-                .small()
-                .into_any_element(),
-        ),
-        "toggle-problems-panel" => Some(
-            Icon::new(ZqlzIcon::Warning)
-                .small()
-                .into_any_element(),
-        ),
+        "save-query" | "save-query-as" => {
+            Some(Icon::new(ZqlzIcon::FloppyDisk).small().into_any_element())
+        }
+        "toggle-problems-panel" => Some(Icon::new(ZqlzIcon::Warning).small().into_any_element()),
         "toggle-left-sidebar" => Some(Icon::new(IconName::PanelLeft).small().into_any_element()),
         "toggle-right-sidebar" => Some(Icon::new(IconName::PanelRight).small().into_any_element()),
         "toggle-bottom-panel" => Some(Icon::new(IconName::PanelBottom).small().into_any_element()),
@@ -154,7 +147,9 @@ fn icon_for_command(command_id: &str, category: &CommandCategory) -> Option<AnyE
         ),
         _ => match category {
             CommandCategory::Focus => None,
-            CommandCategory::Table(_) => Some(Icon::new(ZqlzIcon::Table).small().into_any_element()),
+            CommandCategory::Table(_) => {
+                Some(Icon::new(ZqlzIcon::Table).small().into_any_element())
+            }
             CommandCategory::View(_) => Some(Icon::new(ZqlzIcon::Eye).small().into_any_element()),
             CommandCategory::Connection => {
                 Some(Icon::new(ZqlzIcon::Plug).small().into_any_element())
@@ -339,7 +334,11 @@ struct CommandUsageStats {
 }
 
 impl CommandUsageStats {
-    fn record_usage(&mut self, command_id: &str, persistence: Option<&dyn CommandUsagePersistence>) {
+    fn record_usage(
+        &mut self,
+        command_id: &str,
+        persistence: Option<&dyn CommandUsagePersistence>,
+    ) {
         let now = SystemTime::now();
         *self
             .command_scores
@@ -370,9 +369,7 @@ impl CommandUsageStats {
 
         let recency_factor = match self.last_used.get(command_id) {
             Some(&last) => {
-                let elapsed = SystemTime::now()
-                    .duration_since(last)
-                    .unwrap_or_default();
+                let elapsed = SystemTime::now().duration_since(last).unwrap_or_default();
                 let hours = elapsed.as_secs_f32() / 3600.0;
                 1.0 / (1.0 + hours / 24.0)
             }
@@ -389,7 +386,8 @@ impl CommandUsageStats {
     /// Hydrate from persisted storage on startup.
     fn load_from(&mut self, entries: Vec<CommandUsageEntry>) {
         for entry in entries {
-            self.command_scores.insert(entry.command_id.clone(), entry.use_count);
+            self.command_scores
+                .insert(entry.command_id.clone(), entry.use_count);
             self.last_used.insert(entry.command_id, entry.last_used);
         }
     }
@@ -409,8 +407,7 @@ impl CommandUsageStats {
         entries.sort_by(|a, b| b.1.cmp(&a.1));
         entries.truncate(MAX_USAGE_ENTRIES);
 
-        let keep: std::collections::HashSet<String> =
-            entries.into_iter().map(|(k, _)| k).collect();
+        let keep: std::collections::HashSet<String> = entries.into_iter().map(|(k, _)| k).collect();
 
         self.last_used.retain(|k, _| keep.contains(k));
         self.command_scores.retain(|k, _| keep.contains(k));
@@ -503,17 +500,15 @@ impl CommandPaletteDelegate {
             .map(|(name, items)| (name.to_string(), items))
             .collect();
 
-        sections.sort_by_key(|(name, _)| {
-            match name.as_str() {
-                "Application" => 0,
-                "Connection" => 1,
-                "Query" => 2,
-                "Layout" => 3,
-                "Focus" => 4,
-                "Tables" => 5,
-                "Views" => 6,
-                _ => 7,
-            }
+        sections.sort_by_key(|(name, _)| match name.as_str() {
+            "Application" => 0,
+            "Connection" => 1,
+            "Query" => 2,
+            "Layout" => 3,
+            "Focus" => 4,
+            "Tables" => 5,
+            "Views" => 6,
+            _ => 7,
         });
 
         sections.retain(|(_, items)| !items.is_empty());
@@ -697,7 +692,11 @@ impl ListDelegate for CommandPaletteDelegate {
                         if !a.is_match() && !b.is_match() {
                             continue;
                         }
-                        if (a.quality, a.score) >= (b.quality, b.score) { a } else { b }
+                        if (a.quality, a.score) >= (b.quality, b.score) {
+                            a
+                        } else {
+                            b
+                        }
                     }
                     (Some(a), None) if a.is_match() => a,
                     (None, Some(b)) if b.is_match() => b,
@@ -788,7 +787,8 @@ impl ListDelegate for CommandPaletteDelegate {
         let label_element = if matched_indices.is_empty() {
             div().child(label_shared).into_any_element()
         } else {
-            let highlights = build_highlights_from_indices(&label, &matched_indices, highlight_color);
+            let highlights =
+                build_highlights_from_indices(&label, &matched_indices, highlight_color);
             div()
                 .child(StyledText::new(label_shared).with_highlights(highlights))
                 .into_any_element()
@@ -868,9 +868,7 @@ impl ListDelegate for CommandPaletteDelegate {
                 .pt_2()
                 .pb_1()
                 .when(!is_first, |this| {
-                    this.mt_1()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
+                    this.mt_1().border_t_1().border_color(cx.theme().border)
                 })
                 .text_xs()
                 .font_weight(FontWeight::SEMIBOLD)
@@ -944,10 +942,8 @@ impl ListDelegate for CommandPaletteDelegate {
         };
 
         let command_id = command.id.clone();
-        self.usage_stats.record_usage(
-            &command_id,
-            self.persistence.as_deref(),
-        );
+        self.usage_stats
+            .record_usage(&command_id, self.persistence.as_deref());
 
         // Dispatch the action if present.
         if let Some(action) = &command.action {

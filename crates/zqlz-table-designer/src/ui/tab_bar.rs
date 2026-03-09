@@ -1,12 +1,11 @@
 use gpui::*;
 use zqlz_ui::widgets::{
-    h_flex,
+    ActiveTheme, h_flex,
     tab::{Tab, TabBar},
-    ActiveTheme,
 };
 
-use crate::panel::TableDesignerPanel;
 use crate::DesignerTab;
+use crate::panel::TableDesignerPanel;
 
 /// Render the tab bar. This extracts the logic from panel.rs so the panel can
 /// call it without holding large render functions inline.

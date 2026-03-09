@@ -34,7 +34,11 @@ impl TableViewerDelegate {
         let viewer_panel = self.viewer_panel.clone();
         let table_name = self.table_name.clone();
         let connection_id = self.connection_id;
-        let all_row_values = self.rows.get(actual_row_ix).cloned().unwrap_or_default();
+        let all_row_values: Vec<String> = self
+            .rows
+            .get(actual_row_ix)
+            .map(|r| r.iter().map(|v| v.display_for_table()).collect())
+            .unwrap_or_default();
         let all_column_names: Vec<String> =
             self.column_meta.iter().map(|c| c.name.clone()).collect();
         let all_column_types: Vec<String> = self
@@ -50,12 +54,12 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.clone().unwrap_or_default();
+            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
             PopupMenuItem::new("Set to Empty String")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
                                 connection_id,
@@ -68,7 +72,9 @@ impl TableViewerDelegate {
                                 all_column_names: all_column_names.clone(),
                                 all_column_types: all_column_types.clone(),
                             });
-                        });
+                        }) {
+                            tracing::error!("Failed to emit SaveCell (Set to Empty String): {:?}", e);
+                        }
                     }
                 }))
         })
@@ -79,7 +85,7 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.clone().unwrap_or_default();
+            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
             PopupMenuItem::new("Set to NULL")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
@@ -109,13 +115,13 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.clone().unwrap_or_default();
+            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
             PopupMenuItem::new("Generate UUID")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
                         let uuid = Uuid::new_v4().to_string();
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
                                 connection_id,
@@ -128,7 +134,9 @@ impl TableViewerDelegate {
                                 all_column_names: all_column_names.clone(),
                                 all_column_types: all_column_types.clone(),
                             });
-                        });
+                        }) {
+                            tracing::error!("Failed to emit SaveCell (Generate UUID): {:?}", e);
+                        }
                     }
                 }))
         })
@@ -143,10 +151,13 @@ impl TableViewerDelegate {
                     let all_row_values = all_row_values.clone();
                     let all_column_names = all_column_names.clone();
                     let all_column_types = all_column_types.clone();
-                    let raw_bytes = self.raw_bytes.get(&(actual_row_ix, data_col_ix)).cloned();
+                    let raw_bytes = current_value.as_ref().and_then(|v| {
+                        if let Value::Bytes(b) = v { Some(b.clone()) } else { None }
+                    });
+                    let current_value_str = current_value.as_ref().map(|v| v.display_for_table());
                     window.listener_for(&menu_entity, move |_this, _, _, cx| {
                         if let Some(col_meta) = &column_meta {
-                            _ = viewer_panel.update(cx, |_panel, cx| {
+                            if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                                 cx.emit(TableViewerEvent::EditCell {
                                     table_name: table_name.clone(),
                                     connection_id,
@@ -154,13 +165,15 @@ impl TableViewerDelegate {
                                     col: data_col_ix,
                                     column_name: col_meta.name.clone(),
                                     column_type: col_meta.data_type.clone(),
-                                    current_value: current_value.clone(),
+                                    current_value: current_value_str.clone(),
                                     all_row_values: all_row_values.clone(),
                                     all_column_names: all_column_names.clone(),
                                     all_column_types: all_column_types.clone(),
                                     raw_bytes: raw_bytes.clone(),
                                 });
-                            });
+                            }) {
+                                tracing::error!("Failed to emit EditCell event: {:?}", e);
+                            }
                         }
                     })
                 }),
@@ -174,7 +187,7 @@ impl TableViewerDelegate {
             PopupMenuItem::new("Edit Row in Form").on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
-                    _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::EditRow {
                             connection_id,
                             table_name: table_name.clone(),
@@ -183,7 +196,9 @@ impl TableViewerDelegate {
                             column_meta: column_meta_vec.clone(),
                             all_column_names: all_column_names.clone(),
                         });
-                    });
+                    }) {
+                        tracing::error!("Failed to emit EditRow event: {:?}", e);
+                    }
                 },
             ))
         })
@@ -195,15 +210,32 @@ impl TableViewerDelegate {
             PopupMenuItem::new("Filter")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
-                    if let Some(col_meta) = &column_meta {
-                        let value = current_value.clone().unwrap_or_else(|| "NULL".to_string());
-                        _ = viewer_panel.update(cx, |_panel, cx| {
-                            cx.emit(TableViewerEvent::AddQuickFilter {
-                                column_name: col_meta.name.clone(),
-                                value,
-                            });
-                        });
-                    }
+                        if let Some(col_meta) = &column_meta {
+                            let is_null = current_value
+                                .as_ref()
+                                .map(|v| v.is_null())
+                                .unwrap_or(true);
+                            let (operator, value) = if is_null {
+                                (
+                                    crate::components::table_viewer::filter_types::FilterOperator::IsNull,
+                                    String::new(),
+                                )
+                            } else {
+                                (
+                                    crate::components::table_viewer::filter_types::FilterOperator::Equal,
+                                    current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default(),
+                                )
+                            };
+                            if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
+                                cx.emit(TableViewerEvent::AddQuickFilter {
+                                    column_name: col_meta.name.clone(),
+                                    operator,
+                                    value,
+                                });
+                            }) {
+                                tracing::error!("Failed to emit AddQuickFilter event: {:?}", e);
+                            }
+                        }
                 }))
         })
         .separator()
@@ -215,17 +247,17 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.clone().unwrap_or_default();
+            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
             PopupMenuItem::new("Cut")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Some(ref val) = current_value {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.clone()));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.display_for_table()));
                     } else {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
                     }
                     if let Some(col_meta) = &column_meta {
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
                                 connection_id,
@@ -238,7 +270,9 @@ impl TableViewerDelegate {
                                 all_column_names: all_column_names.clone(),
                                 all_column_types: all_column_types.clone(),
                             });
-                        });
+                        }) {
+                            tracing::error!("Failed to emit SaveCell (Cut): {:?}", e);
+                        }
                     }
                 }))
         })
@@ -248,7 +282,7 @@ impl TableViewerDelegate {
                 &menu_entity,
                 move |_this, _, _, cx| {
                     if let Some(ref val) = current_value {
-                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.clone()));
+                        cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.display_for_table()));
                     } else {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
                     }
@@ -309,14 +343,14 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.clone().unwrap_or_default();
+            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
             PopupMenuItem::new("Paste")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Some(clipboard_item) = cx.read_from_clipboard() {
                         if let Some(text) = clipboard_item.text() {
                             if let Some(col_meta) = &column_meta {
-                                _ = viewer_panel.update(cx, |_panel, cx| {
+                                if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                                     cx.emit(TableViewerEvent::SaveCell {
                                         table_name: table_name.clone(),
                                         connection_id,
@@ -329,7 +363,9 @@ impl TableViewerDelegate {
                                         all_column_names: all_column_names.clone(),
                                         all_column_types: all_column_types.clone(),
                                     });
-                                });
+                                }) {
+                                    tracing::error!("Failed to emit SaveCell (Paste): {:?}", e);
+                                }
                             }
                         }
                     }
@@ -355,11 +391,13 @@ impl TableViewerDelegate {
                 &menu_entity,
                 move |_this, _, _, cx| {
                     let rows = rows_to_delete.clone();
-                    _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::MarkRowsForDeletion {
                             rows_to_delete: rows,
                         });
-                    });
+                    }) {
+                        tracing::error!("Failed to emit MarkRowsForDeletion: {:?}", e);
+                    }
                 },
             ))
         })
@@ -396,7 +434,7 @@ impl TableViewerDelegate {
         let column_values: Vec<String> = self
             .rows
             .iter()
-            .filter_map(|row| row.get(data_col_ix).cloned())
+            .filter_map(|row| row.get(data_col_ix).map(|v| v.display_for_table()))
             .collect();
 
         menu.item({
@@ -424,11 +462,13 @@ impl TableViewerDelegate {
             PopupMenuItem::new("Hide Column").on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
-                    _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::HideColumn {
                             column_name: column_name.clone(),
                         });
-                    });
+                    }) {
+                        tracing::error!("Failed to emit HideColumn: {:?}", e);
+                    }
                 },
             ))
         })
@@ -438,18 +478,22 @@ impl TableViewerDelegate {
                 PopupMenuItem::new("Unfreeze Column").on_click(window.listener_for(
                     &menu_entity,
                     move |_this, _, _, cx| {
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::UnfreezeColumn { col_ix });
-                        });
+                        }) {
+                            tracing::error!("Failed to emit UnfreezeColumn: {:?}", e);
+                        }
                     },
                 ))
             } else {
                 PopupMenuItem::new("Freeze Column").on_click(window.listener_for(
                     &menu_entity,
                     move |_this, _, _, cx| {
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::FreezeColumn { col_ix });
-                        });
+                        }) {
+                            tracing::error!("Failed to emit FreezeColumn: {:?}", e);
+                        }
                     },
                 ))
             }
@@ -460,9 +504,11 @@ impl TableViewerDelegate {
             PopupMenuItem::new("Size Column to Fit").on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
-                    _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::SizeColumnToFit { col_ix });
-                    });
+                    }) {
+                        tracing::error!("Failed to emit SizeColumnToFit: {:?}", e);
+                    }
                 },
             ))
         })
@@ -471,9 +517,32 @@ impl TableViewerDelegate {
             PopupMenuItem::new("Size All Columns to Fit").on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
-                    _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::SizeAllColumnsToFit);
-                    });
+                    }) {
+                        tracing::error!("Failed to emit SizeAllColumnsToFit: {:?}", e);
+                    }
+                },
+            ))
+        })
+        .separator()
+        .item({
+            let viewer_panel = self.viewer_panel.clone();
+            let column_name = column_name.clone();
+            let connection_id = self.connection_id;
+            let table_name = self.table_name.clone();
+            PopupMenuItem::new("Filter by Distinct Values").on_click(window.listener_for(
+                &menu_entity,
+                move |_this, _, _, cx| {
+                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
+                        cx.emit(TableViewerEvent::LoadDistinctValues {
+                            connection_id,
+                            table_name: table_name.clone(),
+                            column_name: column_name.clone(),
+                        });
+                    }) {
+                        tracing::error!("Failed to emit LoadDistinctValues: {:?}", e);
+                    }
                 },
             ))
         })

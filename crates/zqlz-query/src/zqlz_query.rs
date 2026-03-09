@@ -11,10 +11,10 @@ mod history;
 pub mod parameters;
 mod schema_metadata;
 mod service;
-mod view_models;
-pub mod widgets;
 #[cfg(test)]
 mod test_helpers;
+mod view_models;
+pub mod widgets;
 
 pub use engine::{DestructiveOperationType, DestructiveOperationWarning, QueryEngine};
 pub use error::{QueryServiceError, QueryServiceResult};
@@ -24,14 +24,15 @@ pub use service::QueryService;
 pub use view_models::StatementExecution;
 // Re-export widgets for convenient access
 pub use widgets::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp,
-    DeleteLine, DismissInlineSuggestion, DiagnosticInfo, DiagnosticInfoSeverity, DuplicateLine, EditorMode,
-    EditorObjectType, ExplainResult, FindNext, FindPrevious, FindReferences, FormatQuery, GoToDefinition,
-    MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, ProblemEntry, ProblemsPanel,
-    ProblemsPanelEvent, ProblemSeverity, QueryEditor, QueryEditorEvent, QueryExecution, QueryHistoryPanel,
-    QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, RenameSymbol, ResultsPanel,
-    ResultsPanelEvent, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult,
-    ToggleLineComment, ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints, UncommentSelection,
+    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown,
+    CopyLineUp, DeleteLine, DiagnosticInfo, DiagnosticInfoSeverity, DismissInlineSuggestion,
+    DuplicateLine, EditorMode, EditorObjectType, ExplainResult, FindNext, FindPrevious,
+    FindReferences, FormatQuery, GoToDefinition, MoveLineDown, MoveLineUp, NextProblem,
+    PreviousProblem, ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryEditor,
+    QueryEditorEvent, QueryExecution, QueryHistoryPanel, QueryHistoryPanelEvent, QueryTabsPanel,
+    QueryTabsPanelEvent, RenameSymbol, ResultsPanel, ResultsPanelEvent, SaveQuery, SaveQueryAs,
+    ShowCodeActions, ShowHover, StatementResult, ToggleLineComment, ToggleProblemsPanel,
+    TriggerCompletion, TriggerParameterHints, UncommentSelection,
 };
 
 // Re-export batch execution types
@@ -54,7 +55,7 @@ pub use ai_completion::{
 };
 
 /// Performance configuration constants and tests
-/// 
+///
 /// These values are verified to be within acceptable ranges for responsive UI interaction.
 /// The acceptance criteria from task-8.3 (Performance validation) requires:
 /// - LSP responses remain fast
@@ -62,17 +63,17 @@ pub use ai_completion::{
 #[allow(dead_code)]
 mod performance {
     /// Completion debounce in milliseconds
-    /// 
+    ///
     /// Target: 150ms - fast enough for responsive UI while avoiding excessive requests
     pub const COMPLETION_DEBOUNCE_MS: u64 = 150;
 
     /// Diagnostics debounce in milliseconds
-    /// 
+    ///
     /// Target: 300ms - balances responsiveness with reducing server load
     pub const DIAGNOSTICS_DEBOUNCE_MS: u64 = 300;
 
     /// Maximum recommended debounce for interactive features (ms)
-    /// 
+    ///
     /// Beyond this threshold, users perceive lag
     pub const MAX_INTERACTIVE_DEBOUNCE_MS: u64 = 500;
 
@@ -118,10 +119,22 @@ mod performance {
         #[test]
         fn test_debounce_values_are_reasonable() {
             // Both debounce values should be non-zero and within reasonable bounds
-            assert!(COMPLETION_DEBOUNCE_MS > 0, "Completion debounce must be positive");
-            assert!(DIAGNOSTICS_DEBOUNCE_MS > 0, "Diagnostics debounce must be positive");
-            assert!(COMPLETION_DEBOUNCE_MS < 1000, "Completion debounce should be < 1s");
-            assert!(DIAGNOSTICS_DEBOUNCE_MS < 1000, "Diagnostics debounce should be < 1s");
+            assert!(
+                COMPLETION_DEBOUNCE_MS > 0,
+                "Completion debounce must be positive"
+            );
+            assert!(
+                DIAGNOSTICS_DEBOUNCE_MS > 0,
+                "Diagnostics debounce must be positive"
+            );
+            assert!(
+                COMPLETION_DEBOUNCE_MS < 1000,
+                "Completion debounce should be < 1s"
+            );
+            assert!(
+                DIAGNOSTICS_DEBOUNCE_MS < 1000,
+                "Diagnostics debounce should be < 1s"
+            );
         }
     }
 }

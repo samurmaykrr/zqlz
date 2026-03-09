@@ -6,9 +6,10 @@ use std::collections::HashMap;
 use uuid::Uuid;
 
 /// A database value that can represent any SQL type
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Value {
     /// NULL value
+    #[default]
     Null,
     /// Boolean
     Bool(bool),
@@ -46,7 +47,32 @@ pub enum Value {
     Array(Vec<Value>),
 }
 
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::String(s)
+    }
+}
+
 impl Value {
+    fn is_string_data_type(base_type: &str) -> bool {
+        matches!(
+            base_type,
+            "text"
+                | "varchar"
+                | "char"
+                | "bpchar"
+                | "name"
+                | "citext"
+                | "character varying"
+                | "character"
+                | "nvarchar"
+                | "nchar"
+                | "longtext"
+                | "mediumtext"
+                | "tinytext"
+        )
+    }
+
     /// Check if the value is NULL
     pub fn is_null(&self) -> bool {
         matches!(self, Value::Null)
@@ -101,6 +127,82 @@ impl Value {
             _ => None,
         }
     }
+
+    /// Return a display-ready string for rendering in the UI.
+    ///
+    /// Unlike `Display`, which returns "NULL" for null and "<N bytes>" for
+    /// binary data, this method returns specialized placeholder strings that
+    /// the table renderer can detect (e.g. `"BLOB"` for bytes).
+    pub fn display_for_table(&self) -> String {
+        match self {
+            Value::Null => "NULL".to_string(),
+            Value::Bytes(b) => format!("<{} bytes>", b.len()),
+            other => other.to_string(),
+        }
+    }
+
+    /// Parse a user-entered string back into a typed `Value` based on column
+    /// metadata. The `data_type` parameter is the database column type (e.g.
+    /// "integer", "boolean", "varchar", "timestamp", etc.).
+    ///
+    /// Empty strings and the literal "NULL" (case-insensitive) produce `Value::Null`
+    /// for non-string columns. String-like columns preserve the literal input.
+    pub fn parse_from_string(input: &str, data_type: &str) -> Value {
+        let lower = data_type.to_lowercase();
+        let base_type = match lower.find('(') {
+            Some(idx) => &lower[..idx],
+            None => &lower,
+        };
+
+        if input.is_empty() || input.eq_ignore_ascii_case("null") {
+            if Self::is_string_data_type(base_type) {
+                return Value::String(input.to_string());
+            }
+
+            return Value::Null;
+        }
+
+        match base_type {
+            "boolean" | "bool" | "bit" | "tinyint"
+                if lower == "tinyint(1)"
+                    || base_type == "boolean"
+                    || base_type == "bool"
+                    || base_type == "bit" =>
+            {
+                match input.to_lowercase().as_str() {
+                    "true" | "t" | "1" | "yes" | "y" | "on" => Value::Bool(true),
+                    "false" | "f" | "0" | "no" | "n" | "off" => Value::Bool(false),
+                    _ => Value::String(input.to_string()),
+                }
+            }
+            "int2" | "smallint" | "smallserial" => input
+                .parse::<i16>()
+                .map(Value::Int16)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "int4" | "integer" | "int" | "mediumint" | "serial" => input
+                .parse::<i32>()
+                .map(Value::Int32)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "int8" | "bigint" | "bigserial" => input
+                .parse::<i64>()
+                .map(Value::Int64)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "tinyint" => input
+                .parse::<i8>()
+                .map(Value::Int8)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "float4" | "real" | "float" => input
+                .parse::<f32>()
+                .map(Value::Float32)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "float8" | "double precision" | "double" => input
+                .parse::<f64>()
+                .map(Value::Float64)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "numeric" | "decimal" | "money" => Value::Decimal(input.to_string()),
+            _ => Value::String(input.to_string()),
+        }
+    }
 }
 
 impl std::fmt::Display for Value {
@@ -125,6 +227,29 @@ impl std::fmt::Display for Value {
             Value::Json(v) => write!(f, "{}", v),
             Value::Array(v) => write!(f, "[{} items]", v.len()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Value;
+
+    #[test]
+    fn parse_from_string_preserves_literal_empty_and_null_for_text_columns() {
+        assert_eq!(
+            Value::parse_from_string("", "text"),
+            Value::String(String::new())
+        );
+        assert_eq!(
+            Value::parse_from_string("NULL", "varchar(255)"),
+            Value::String("NULL".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_from_string_still_maps_empty_and_null_to_null_for_non_string_columns() {
+        assert_eq!(Value::parse_from_string("", "integer"), Value::Null);
+        assert_eq!(Value::parse_from_string("NULL", "boolean"), Value::Null);
     }
 }
 

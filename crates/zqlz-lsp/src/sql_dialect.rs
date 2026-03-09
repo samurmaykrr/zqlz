@@ -15,7 +15,7 @@
 use sqlparser::dialect::{
     Dialect as SqlParserDialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
 };
-use zqlz_core::{dialects::SqlDialect as CoreSqlDialect, DialectInfo};
+use zqlz_core::{DialectInfo, dialects::SqlDialect as CoreSqlDialect};
 use zqlz_drivers::get_dialect_info;
 
 /// SQL dialect parser configuration

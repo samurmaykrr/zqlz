@@ -6,9 +6,14 @@ use zqlz_core::DriverCategory;
 use zqlz_services::TableService;
 
 use crate::app::AppState;
+use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
+
+fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
+    viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
+}
 
 pub(in crate::main_view) fn handle_refresh_table_event(
     connection_id: Uuid,
@@ -51,9 +56,7 @@ pub(in crate::main_view) fn handle_refresh_table_event(
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
 
-    _ = viewer_entity.update(cx, |viewer, cx| {
-        viewer.set_loading(true, cx);
-    });
+    let request_generation = begin_viewer_request(&viewer_entity, cx);
 
     match driver_category {
         DriverCategory::KeyValue => {
@@ -63,6 +66,7 @@ pub(in crate::main_view) fn handle_refresh_table_event(
                 connection_name,
                 table_name,
                 driver_category,
+                request_generation,
                 viewer_entity,
                 window,
                 cx,
@@ -78,6 +82,7 @@ pub(in crate::main_view) fn handle_refresh_table_event(
                 is_view,
                 driver_category,
                 table_service,
+                request_generation,
                 viewer_entity,
                 window,
                 cx,
@@ -95,32 +100,43 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
     is_view: bool,
     driver_category: DriverCategory,
     table_service: std::sync::Arc<TableService>,
+    request_generation: u64,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
 ) {
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
-    
+
+    // Determine if we need a background count after the data loads.
+    let needs_background_count = !TableService::supports_fast_count(connection.driver_name());
+
     // Preserve active filters and sorts when refreshing
-    let (filters, sorts, visible_columns, search_text) = viewer_entity.read_with(cx, |viewer, cx| {
-        let (filters, sorts) = viewer.filter_panel_state
-            .as_ref()
-            .map(|state| state.read_with(cx, |s, _| (s.get_filter_conditions(), s.get_sort_criteria())))
-            .unwrap_or_else(|| (Vec::new(), Vec::new()));
-        
-        let visible_columns = viewer.column_visibility_state
-            .as_ref()
-            .map(|state| state.read(cx).visible_columns())
-            .unwrap_or_else(|| viewer.column_meta.iter().map(|c| c.name.clone()).collect());
-        
-        let search_text = viewer.search_text.clone();
-        
-        (filters, sorts, visible_columns, search_text)
-    });
-    
+    let (filters, sorts, visible_columns, search_text) =
+        viewer_entity.read_with(cx, |viewer, cx| {
+            let (filters, sorts) = viewer
+                .filter_panel_state
+                .as_ref()
+                .map(|state| {
+                    state.read_with(cx, |s, _| {
+                        (s.get_filter_conditions(), s.get_sort_criteria())
+                    })
+                })
+                .unwrap_or_else(|| (Vec::new(), Vec::new()));
+
+            let visible_columns = viewer
+                .column_visibility_state
+                .as_ref()
+                .map(|state| state.read(cx).visible_columns())
+                .unwrap_or_else(|| viewer.column_meta.iter().map(|c| c.name.clone()).collect());
+
+            let search_text = viewer.search_text.clone();
+
+            (filters, sorts, visible_columns, search_text)
+        });
+
     // Build WHERE clauses from filters
     let mut where_clauses: Vec<String> = filters.iter().filter_map(|f| f.to_sql()).collect();
-    
+
     // Build search WHERE clause if search text is present
     if !search_text.is_empty() {
         let column_meta = viewer_entity.read(cx).column_meta.clone();
@@ -131,28 +147,30 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
             .collect();
 
         if !searchable_columns.is_empty() {
-            let escaped_search = search_text.replace("'", "''").replace("%", "\\%").replace("_", "\\_");
+            let escaped_search = search_text
+                .replace("'", "''")
+                .replace("%", "\\%")
+                .replace("_", "\\_");
             let column_conditions: Vec<String> = searchable_columns
                 .iter()
                 .map(|col_name| {
                     let escaped_col = format!("\"{}\"", col_name.replace("\"", "\"\""));
                     format!(
                         "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                        escaped_col,
-                        escaped_search
+                        escaped_col, escaped_search
                     )
                 })
                 .collect();
             where_clauses.push(format!("({})", column_conditions.join(" OR ")));
         }
     }
-    
+
     // Build ORDER BY clauses from sorts
     let order_by_clauses: Vec<String> = sorts.iter().map(|s| s.to_sql()).collect();
-    
+
     let filter_count = where_clauses.len();
     let sort_count = order_by_clauses.len();
-    
+
     tracing::info!(
         "Refreshing table '{}' with {} filter(s), {} sort(s), search='{}'",
         table_name,
@@ -160,9 +178,17 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
         sort_count,
         search_text
     );
-    
+
     window
         .spawn(cx, async move |cx| {
+            // Clone the connection before the browse call consumes the Arc,
+            // so it remains available for the background count task below.
+            let connection_for_count = if needs_background_count {
+                Some(connection.clone())
+            } else {
+                None
+            };
+
             let result = if where_clauses.is_empty() && order_by_clauses.is_empty() && visible_columns.is_empty() {
                 // No filters/sorts - use simple browse_table
                 table_service
@@ -184,7 +210,7 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
                     )
                     .await
             };
-            
+
             match result {
                 Ok(result) => {
                     tracing::info!(
@@ -195,6 +221,16 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
                     );
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if !viewer.is_current_request(request_generation) {
+                            tracing::debug!(
+                                "Discarding stale refresh result for '{}' (generation={}, current={})",
+                                table_name,
+                                request_generation,
+                                viewer.current_request_generation()
+                            );
+                            return;
+                        }
+
                         viewer.load_table(
                             connection_id,
                             connection_name.clone(),
@@ -207,12 +243,53 @@ pub(in crate::main_view) fn handle_refresh_sql_table(
                             cx,
                         );
                     });
+
+                    // For slow-count drivers, fetch the row count in the
+                    // background now that data is displayed to the user.
+                    if let Some(count_conn) = connection_for_count {
+                        let count_table = table_name.clone();
+                        let count_schema = schema_qualifier.clone();
+                        let count_service = table_service.clone();
+                        let count_result = cx
+                            .background_spawn(async move {
+                                count_service
+                                    .estimate_row_count(
+                                        count_conn,
+                                        &count_table,
+                                        count_schema.as_deref(),
+                                    )
+                                    .await
+                            })
+                            .await;
+                        match count_result {
+                            Ok((total, is_estimated)) => {
+                                _ = viewer_entity.update(cx, |_viewer, cx| {
+                                    cx.emit(TableViewerEvent::CountCompleted {
+                                        connection_id,
+                                        table_name: table_name.clone(),
+                                        request_generation,
+                                        total_rows: total,
+                                        is_estimated,
+                                    });
+                                });
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Background row count failed for {}: {}",
+                                    table_name,
+                                    e
+                                );
+                            }
+                        }
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to refresh table: {}", e);
 
                     _ = viewer_entity.update(cx, |viewer, cx| {
-                        viewer.set_loading(false, cx);
+                        if viewer.is_current_request(request_generation) {
+                            viewer.set_loading(false, cx);
+                        }
                     });
                 }
             }
@@ -228,6 +305,7 @@ pub(in crate::main_view) fn handle_refresh_keyvalue_table(
     connection_name: String,
     table_name: String,
     driver_category: DriverCategory,
+    request_generation: u64,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -241,7 +319,9 @@ pub(in crate::main_view) fn handle_refresh_keyvalue_table(
                         Err(e) => {
                             tracing::error!("Failed to list keys: {}", e);
                             _ = viewer_entity.update(cx, |viewer, cx| {
-                                viewer.set_loading(false, cx);
+                                if viewer.is_current_request(request_generation) {
+                                    viewer.set_loading(false, cx);
+                                }
                             });
                             return anyhow::Ok(());
                         }
@@ -249,7 +329,9 @@ pub(in crate::main_view) fn handle_refresh_keyvalue_table(
                 } else {
                     tracing::error!("Connection does not support schema introspection");
                     _ = viewer_entity.update(cx, |viewer, cx| {
-                        viewer.set_loading(false, cx);
+                        if viewer.is_current_request(request_generation) {
+                            viewer.set_loading(false, cx);
+                        }
                     });
                     return anyhow::Ok(());
                 };
@@ -384,6 +466,16 @@ pub(in crate::main_view) fn handle_refresh_keyvalue_table(
             };
 
             _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                if !viewer.is_current_request(request_generation) {
+                    tracing::debug!(
+                        "Discarding stale key-value refresh result for '{}' (generation={}, current={})",
+                        table_name,
+                        request_generation,
+                        viewer.current_request_generation()
+                    );
+                    return;
+                }
+
                 viewer.load_table(
                     connection_id,
                     connection_name,

@@ -1,17 +1,17 @@
 use std::{cell::RefCell, ops::Range, rc::Rc};
 
 use gpui::{
-    div, prelude::FluentBuilder as _, uniform_list, App, Context, ElementId, Entity, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyBinding, ListSizingBehavior, MouseButton,
-    ParentElement, Render, RenderOnce, SharedString, StyleRefinement, Styled,
-    UniformListScrollHandle, Window,
+    App, Context, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding,
+    ListSizingBehavior, MouseButton, ParentElement, Render, RenderOnce, SharedString,
+    StyleRefinement, Styled, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _,
+    uniform_list,
 };
 
 use crate::widgets::{
+    StyledExt,
     actions::{Confirm, SelectDown, SelectLeft, SelectRight, SelectUp},
     list::ListItem,
     scroll::ScrollableElement,
-    StyledExt,
 };
 
 const CONTEXT: &str = "Tree";

@@ -83,6 +83,7 @@ impl TableViewerPanel {
 
         delegate.set_auto_commit_mode(self.auto_commit_mode);
         delegate.set_driver_category(driver_category);
+        delegate.set_primary_key_columns(self.primary_key_columns.clone());
 
         let table_state = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -103,15 +104,10 @@ impl TableViewerPanel {
                 match event {
                     TableEvent::SelectRow(row) => {
                         let row = *row;
-                        let viewer_panel = viewer_panel.clone();
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
-                            _ = viewer_panel.update(cx, |panel, cx| {
-                                panel.toggle_row_selection(row, cx);
-                            });
-
-                            _ = table_state_weak.update(cx, |table, cx| {
+                            if let Err(e) = table_state_weak.update(cx, |table, cx| {
                                 let delegate = table.delegate();
                                 let actual_row = delegate.get_actual_row_index(row);
                                 if let Some(row_values) = delegate.rows.get(actual_row) {
@@ -119,7 +115,7 @@ impl TableViewerPanel {
                                         connection_id: delegate.connection_id,
                                         table_name: delegate.table_name.clone(),
                                         row_index: actual_row,
-                                        row_values: row_values.clone(),
+                                        row_values: row_values.iter().map(|v| v.display_for_table()).collect(),
                                         column_meta: delegate.column_meta.clone(),
                                         all_column_names: delegate
                                             .column_meta
@@ -133,7 +129,9 @@ impl TableViewerPanel {
                                         });
                                     }
                                 }
-                            });
+                            }) {
+                                tracing::error!("Failed to emit RowSelected event: {:?}", e);
+                            }
 
                             anyhow::Ok(())
                         })
@@ -146,9 +144,11 @@ impl TableViewerPanel {
                         let _viewer_panel = viewer_panel.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
-                            _ = table_state_weak.update_in(cx, |table, window, cx| {
+                            if let Err(e) = table_state_weak.update_in(cx, |table, window, cx| {
                                 table.delegate_mut().start_editing(row, col, window, cx);
-                            });
+                            }) {
+                                tracing::error!("Failed to start editing cell ({}, {}): {:?}", row, col, e);
+                            }
 
                             anyhow::Ok(())
                         })
@@ -171,11 +171,21 @@ impl TableViewerPanel {
                                 return anyhow::Ok(());
                             }
 
-                            _ = table_state_weak.update_in(cx, |table, _window, cx| {
+                            if col == 0 {
+                                tracing::debug!(
+                                    "Ignoring double-click edit request for row-number column at row {}",
+                                    row
+                                );
+                                return anyhow::Ok(());
+                            }
+
+                            if let Err(e) = table_state_weak.update_in(cx, |table, _window, cx| {
                                 table.delegate_mut().stop_editing(false, cx);
                                 // Ask the delegate to emit the EditCell event which opens the CellEditorPanel
                                 table.delegate_mut().emit_edit_cell_event(row, col, col - 1, cx);
-                            });
+                            }) {
+                                tracing::error!("Failed to emit EditCell event on double-click: {:?}", e);
+                            }
                             anyhow::Ok(())
                         })
                         .detach();
@@ -186,9 +196,11 @@ impl TableViewerPanel {
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
-                            _ = table_state_weak.update_in(cx, |table, window, cx| {
+                            if let Err(e) = table_state_weak.update_in(cx, |table, window, cx| {
                                 table.delegate_mut().handle_paste(anchor, &data, window, cx);
-                            });
+                            }) {
+                                tracing::error!("Failed to handle paste: {:?}", e);
+                            }
                             anyhow::Ok(())
                         })
                         .detach();
@@ -198,10 +210,10 @@ impl TableViewerPanel {
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
-                            _ = table_state_weak.update_in(cx, |table, window, cx| {
+                            if let Err(e) = table_state_weak.update_in(cx, |table, window, cx| {
                                 let anchor = table.cell_selection().anchor();
                                 let cells = table.cell_selection().selected_cells();
-                                
+
                                 if let Some(anchor) = anchor {
                                     table.delegate_mut().start_bulk_editing(
                                         anchor,
@@ -211,7 +223,9 @@ impl TableViewerPanel {
                                         cx,
                                     );
                                 }
-                            });
+                            }) {
+                                tracing::error!("Failed to start bulk editing: {:?}", e);
+                            }
                             anyhow::Ok(())
                         })
                         .detach();
@@ -222,22 +236,27 @@ impl TableViewerPanel {
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
-                            _ = table_state_weak.update_in(cx, |table, window, cx| {
+                            if let Err(e) = table_state_weak.update_in(cx, |table, window, cx| {
                                 table.delegate_mut().handle_bulk_paste(cells, value, window, cx);
-                            });
+                            }) {
+                                tracing::error!("Failed to handle bulk paste: {:?}", e);
+                            }
                             anyhow::Ok(())
                         })
                         .detach();
                     }
                     TableEvent::CellSelectionChanged(selection) => {
+                        cx.notify();
                         let cell_count = selection.cell_count();
                         if cell_count > 1 {
                             tracing::debug!("Multi-cell selection: {} cells selected", cell_count);
                             let table_state_weak = table_state_weak.clone();
                             cx.spawn_in(window, async move |_this, cx| {
-                                _ = table_state_weak.update_in(cx, |table, _window, cx| {
+                                if let Err(e) = table_state_weak.update_in(cx, |table, _window, cx| {
                                     table.delegate_mut().stop_editing(false, cx);
-                                });
+                                }) {
+                                    tracing::error!("Failed to stop editing on multi-cell selection: {:?}", e);
+                                }
                                 anyhow::Ok(())
                             })
                             .detach();
@@ -250,6 +269,22 @@ impl TableViewerPanel {
         .detach();
 
         self.table_state = Some(table_state.clone());
+
+        // Auto-expand the transaction panel as soon as unsaved edits appear.
+        // Doing this in render() would be a side-effecting mutation during rendering,
+        // so we use an observe callback instead.
+        if !self.auto_commit_mode {
+            cx.observe(&table_state, |this, table_state, cx| {
+                if !this.transaction_panel_expanded
+                    && table_state.read(cx).delegate().has_pending_changes()
+                {
+                    this.transaction_panel_expanded = true;
+                    cx.notify();
+                }
+            })
+            .detach();
+        }
+
         self.set_loading(false, cx);
 
         if !self.foreign_keys.is_empty() {
@@ -293,17 +328,15 @@ impl TableViewerPanel {
             let connection_id_for_filter = connection_id;
             let table_name_for_filter = table_name.clone();
             cx.subscribe_in(&filter_panel_state, window, {
-                move |this, _filter_state, event: &FilterPanelEvent, _window, cx| {
-                    match event {
-                        FilterPanelEvent::Apply => {
-                            this.apply_filters(
-                                connection_id_for_filter,
-                                table_name_for_filter.clone(),
-                                cx,
-                            );
-                        }
-                        FilterPanelEvent::Changed => {}
+                move |this, _filter_state, event: &FilterPanelEvent, _window, cx| match event {
+                    FilterPanelEvent::Apply => {
+                        this.apply_filters(
+                            connection_id_for_filter,
+                            table_name_for_filter.clone(),
+                            cx,
+                        );
                     }
+                    FilterPanelEvent::Changed => {}
                 }
             })
             .detach();
@@ -386,7 +419,10 @@ impl TableViewerPanel {
                                 table_state.update(cx, |table, _cx| {
                                     let delegate = table.delegate_mut();
                                     delegate.replace_rows(Vec::new(), true);
-                                    let is_infinite = matches!(mode, zqlz_ui::widgets::table::PaginationMode::InfiniteScroll);
+                                    let is_infinite = matches!(
+                                        mode,
+                                        zqlz_ui::widgets::table::PaginationMode::InfiniteScroll
+                                    );
                                     delegate.set_infinite_scroll_enabled(is_infinite);
                                 });
                             }
@@ -441,7 +477,10 @@ impl TableViewerPanel {
                 });
 
                 let (is_infinite_mode, limit) = pagination_state.read_with(cx, |state, _cx| {
-                    let is_infinite = matches!(state.pagination_mode, zqlz_ui::widgets::table::PaginationMode::InfiniteScroll);
+                    let is_infinite = matches!(
+                        state.pagination_mode,
+                        zqlz_ui::widgets::table::PaginationMode::InfiniteScroll
+                    );
                     (is_infinite, state.records_per_page)
                 });
 

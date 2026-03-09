@@ -936,7 +936,9 @@ impl Drop for SqliteTransaction {
         // If the transaction is abandoned without an explicit commit/rollback, issue a
         // best-effort rollback so the connection is left in a clean state.
         if !self.committed && !self.rolled_back {
-            tracing::warn!("SQLite transaction dropped without commit or rollback, issuing automatic rollback");
+            tracing::warn!(
+                "SQLite transaction dropped without commit or rollback, issuing automatic rollback"
+            );
             let conn = self.conn.lock();
             if let Err(e) = conn.execute_batch("ROLLBACK") {
                 tracing::error!(error = %e, "automatic rollback on drop failed");
@@ -1061,7 +1063,10 @@ impl Transaction for SqliteTransaction {
             .execute(sql, params_from_iter(rusqlite_params.iter()))
             .map_err(|e| ZqlzError::Query(format!("Failed to execute statement: {}", e)))?;
 
-        tracing::debug!(affected_rows = rows_affected, "statement executed in SQLite transaction");
+        tracing::debug!(
+            affected_rows = rows_affected,
+            "statement executed in SQLite transaction"
+        );
         Ok(StatementResult {
             is_query: false,
             result: None,

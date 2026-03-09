@@ -6,11 +6,18 @@ impl TableDelegate for TableViewerDelegate {
     }
 
     fn rows_count(&self, _cx: &App) -> usize {
-        if self.is_filtering { self.filtered_row_indices.len() } else { self.rows.len() }
+        if self.is_filtering {
+            self.filtered_row_indices.len()
+        } else {
+            self.rows.len()
+        }
     }
 
     fn column(&self, col_ix: usize, _cx: &App) -> Column {
-        self.columns.get(col_ix).cloned().unwrap_or_else(|| Column::new(format!("col-{}", col_ix), format!("Column {}", col_ix)))
+        self.columns
+            .get(col_ix)
+            .cloned()
+            .unwrap_or_else(|| Column::new(format!("col-{}", col_ix), format!("Column {}", col_ix)))
     }
 
     fn set_context_menu_selection(&mut self, selected_rows: Vec<usize>) {
@@ -68,14 +75,12 @@ impl TableDelegate for TableViewerDelegate {
                     .when(is_popover_open, |this| {
                         this.child(
                             deferred(
-                                anchored()
-                                    .snap_to_window_with_margin(px(8.))
-                                    .child(
-                                        div()
-                                            .occlude()
-                                            .mt_1()
-                                            .child(DatePickerPopover::new(&date_picker_clone)),
-                                    ),
+                                anchored().snap_to_window_with_margin(px(8.)).child(
+                                    div()
+                                        .occlude()
+                                        .mt_1()
+                                        .child(DatePickerPopover::new(&date_picker_clone)),
+                                ),
                             )
                             .with_priority(1),
                         )
@@ -92,10 +97,10 @@ impl TableDelegate for TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                let display_value = if value.eq_ignore_ascii_case("null") {
+                let display_value = if value.is_null() {
                     "NULL".to_string()
                 } else {
-                    value
+                    value.display_for_table()
                 };
 
                 return div()
@@ -103,7 +108,8 @@ impl TableDelegate for TableViewerDelegate {
                     .flex()
                     .items_center()
                     .w_full()
-                    .px_1()
+                    // No container padding — Select's internal padding handles alignment,
+                    // consistent with the cell_input branch.
                     .child(
                         Select::new(enum_select)
                             .w_full()
@@ -124,10 +130,10 @@ impl TableDelegate for TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                let display_value = if value.eq_ignore_ascii_case("null") {
+                let display_value = if value.is_null() {
                     "NULL".to_string()
                 } else {
-                    value
+                    value.display_for_table()
                 };
 
                 return div()
@@ -149,18 +155,15 @@ impl TableDelegate for TableViewerDelegate {
                                     .text_color(theme.accent),
                             )
                             .child(
-                                div()
-                                    .flex_1()
-                                    .overflow_hidden()
-                                    .child(
-                                        Select::new(fk_select)
-                                            .w_full()
-                                            .with_size(Size::Small)
-                                            .appearance(false)
-                                            .focus_border(false)
-                                            .menu_min_width(px(120.))
-                                            .placeholder(display_value),
-                                    ),
+                                div().flex_1().overflow_hidden().child(
+                                    Select::new(fk_select)
+                                        .w_full()
+                                        .with_size(Size::Small)
+                                        .appearance(false)
+                                        .focus_border(false)
+                                        .menu_min_width(px(120.))
+                                        .placeholder(display_value),
+                                ),
                             ),
                     )
                     .into_any_element();
@@ -173,9 +176,18 @@ impl TableDelegate for TableViewerDelegate {
                     .flex()
                     .items_center()
                     .w_full()
-                    .px_1()
-                    .gap_1()
-                    .child(Input::new(input).w_full())
+                    // No container padding — the Input's own px (Size::Small = 8px) aligns
+                    // text at the same position as non-editing cells (.px_2 = 8px).
+                    .when(has_newlines, |this| this.pr_1())
+                    .child(
+                        Input::new(input)
+                            .w_full()
+                            // Strip all visual chrome so the cell's selection ring (painted by
+                            // the table as an absolute overlay) is the sole editing indicator,
+                            // matching how Excel/Sheets handle inline cell editing.
+                            .appearance(false)
+                            .with_size(Size::Small),
+                    )
                     .when(has_newlines, |this| {
                         this.child(Icon::new(IconName::Info).size_4().text_color(theme.info))
                     })
@@ -200,6 +212,25 @@ impl TableDelegate for TableViewerDelegate {
         let is_new_row = actual_row_ix >= original_row_count;
         let matches_search = self.cell_matches_search(&value);
 
+        // Auto-increment columns on new rows display a muted placeholder
+        let value_str = value.display_for_table();
+        if is_new_row
+            && self.is_auto_increment_column(data_col_ix)
+            && (value.is_null() || value_str == super::inline_edit::AUTO_INCREMENT_PLACEHOLDER)
+        {
+            return div()
+                .h_full()
+                .flex()
+                .items_center()
+                .px_2()
+                .text_sm()
+                .text_color(theme.muted_foreground.opacity(0.5))
+                .italic()
+                .bg(theme.success.opacity(0.15))
+                .child(super::inline_edit::AUTO_INCREMENT_PLACEHOLDER)
+                .into_any_element();
+        }
+
         // Boolean columns get a checkbox
         if self.is_boolean_column(data_col_ix) {
             let bool_value = self.parse_boolean_value(&value);
@@ -215,9 +246,7 @@ impl TableDelegate for TableViewerDelegate {
                 .justify_center()
                 .w_full()
                 .cursor_pointer()
-                .when(is_deleted, |this| {
-                    this.bg(theme.danger.opacity(0.15))
-                })
+                .when(is_deleted, |this| this.bg(theme.danger.opacity(0.15)))
                 .when(!is_deleted && is_new_row, |this| {
                     this.bg(theme.success.opacity(0.15))
                 })
@@ -232,18 +261,23 @@ impl TableDelegate for TableViewerDelegate {
                 .into_any_element();
         }
 
-        let display_value = if value.contains('\n') || value.contains('\r') {
-            value
+        let display_value = if value_str.contains('\n') || value_str.contains('\r') {
+            value_str
                 .replace("\r\n", " ")
                 .replace('\n', " ")
                 .replace('\r', " ")
         } else {
-            value.clone()
+            value_str.clone()
         };
 
         let fk_info = self.get_fk_info(data_col_ix).cloned();
+        let is_null = value.is_null();
 
         div()
+            .id(ElementId::NamedInteger(
+                "td-tip".into(),
+                (actual_row_ix * 10000 + col_ix) as u64,
+            ))
             .h_full()
             .flex()
             .items_center()
@@ -266,10 +300,10 @@ impl TableDelegate for TableViewerDelegate {
                 !is_deleted && !is_new_row && !is_modified && matches_search,
                 |this| this.bg(theme.warning.opacity(0.15)),
             )
-            .when(value.eq_ignore_ascii_case("null"), |this| {
+            .when(is_null, |this| {
                 this.text_color(theme.muted_foreground).child("NULL")
             })
-            .when(!value.eq_ignore_ascii_case("null"), |this| {
+            .when(!is_null, |this| {
                 this.child(
                     div()
                         .flex()
@@ -293,31 +327,89 @@ impl TableDelegate for TableViewerDelegate {
                                             .text_color(theme.muted_foreground.opacity(0.6)),
                                     )
                                     .on_click(move |_, _window, cx| {
-                                        // WeakEntity update is expected to fail silently if the panel
-                                        // was dropped before the click event fires.
-                                        let _ = viewer_panel.update(cx, |panel, cx| {
+                                        if let Err(e) = viewer_panel.update(cx, |panel, cx| {
                                             cx.emit(TableViewerEvent::NavigateToFkTable {
                                                 connection_id,
                                                 referenced_table: referenced_table.clone(),
                                                 database_name: panel.database_name.clone(),
                                             });
-                                        });
+                                        }) {
+                                            tracing::error!(
+                                                "Failed to emit NavigateToFkTable: {:?}",
+                                                e
+                                            );
+                                        }
                                     }),
                             )
                         })
-                        .child(
-                            div()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .child(display_value),
-                        ),
+                        .child(div().overflow_hidden().text_ellipsis().child(display_value)),
                 )
+            })
+            .when(value_str.len() > 20 && !is_null, |this| {
+                let tooltip_text = value_str.clone();
+                this.tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
             })
             .into_any_element()
     }
 
     fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
         self.cell_text(row_ix, col_ix, _cx)
+    }
+
+    fn render_th(
+        &mut self,
+        col_ix: usize,
+        _window: &mut Window,
+        cx: &mut Context<TableState<TableViewerDelegate>>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        let column = self.columns.get(col_ix).cloned().unwrap_or_else(|| {
+            Column::new(format!("col-{}", col_ix), format!("Column {}", col_ix))
+        });
+
+        if col_ix == 0 {
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .child(column.name.clone())
+                .into_any_element();
+        }
+
+        let data_col_ix = col_ix - 1;
+        let meta = self.column_meta.get(data_col_ix);
+
+        let is_primary_key = meta
+            .as_ref()
+            .map_or(false, |m| self.primary_key_columns.contains(&m.name));
+        let is_foreign_key = self.fk_by_column.contains_key(&data_col_ix);
+        let is_nullable = meta.as_ref().map_or(false, |m| m.nullable);
+
+        div()
+            .size_full()
+            .flex()
+            .items_center()
+            .gap_1()
+            .when(is_primary_key, |this| {
+                this.child(Icon::new(ZqlzIcon::Key).size_3().text_color(theme.warning))
+            })
+            .when(is_foreign_key, |this| {
+                this.child(
+                    Icon::new(IconName::ExternalLink)
+                        .size_3()
+                        .text_color(theme.accent),
+                )
+            })
+            .child(column.name.clone())
+            .when(is_nullable, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground.opacity(0.6))
+                        .child("∅"),
+                )
+            })
+            .into_any_element()
     }
 
     fn perform_sort(
@@ -356,20 +448,35 @@ impl TableDelegate for TableViewerDelegate {
     }
 
     fn load_more(&mut self, _window: &mut Window, cx: &mut Context<TableState<Self>>) {
-        if self.is_loading_more { return; }
+        if self.is_loading_more {
+            return;
+        }
         self.is_loading_more = true;
         let viewer_panel = self.viewer_panel.clone();
         let current_row_count = self.rows.len();
         cx.spawn_in(_window, async move |_this, cx| {
-            _ = viewer_panel.update_in(cx, |_panel, _window, cx| {
-                cx.emit(TableViewerEvent::LoadMore { current_offset: current_row_count });
-            });
+            if let Err(e) = viewer_panel.update_in(cx, |_panel, _window, cx| {
+                cx.emit(TableViewerEvent::LoadMore {
+                    current_offset: current_row_count,
+                });
+            }) {
+                tracing::error!("Failed to emit LoadMore event: {:?}", e);
+            }
             anyhow::Ok(())
-        }).detach();
+        })
+        .detach();
     }
 
     fn is_editing(&self, _cx: &App) -> bool {
-        self.editing_cell.is_some() || self.cell_input.is_some() || self.date_picker_state.is_some() || self.enum_select_state.is_some() || self.fk_select_state.is_some()
+        self.editing_cell.is_some()
+            || self.cell_input.is_some()
+            || self.date_picker_state.is_some()
+            || self.enum_select_state.is_some()
+            || self.fk_select_state.is_some()
+    }
+
+    fn calculate_auto_fit_width(&self, col_ix: usize, _cx: &App) -> f32 {
+        self.calculate_column_width(col_ix)
     }
 }
 

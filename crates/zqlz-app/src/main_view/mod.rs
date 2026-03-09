@@ -42,6 +42,8 @@ mod connection_handlers;
 mod connection_window;
 mod event_handlers;
 mod query_handlers;
+mod refresh;
+mod rename_window;
 mod saved_query_handlers;
 mod tab_menu;
 mod table_handlers;
@@ -49,8 +51,6 @@ mod table_handlers_utils;
 mod ui_components;
 mod versioning_handlers;
 mod view_handlers;
-
-
 use gpui::*;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -68,12 +68,11 @@ use zqlz_versioning::{
 
 use crate::app::AppState;
 use crate::components::{
-    CellEditorPanel, CommandPalette, ConnectionEntry, ConnectionSidebar,
-    ConnectionSidebarEvent, InspectorPanel, KeyValueEditorEvent,
-    KeyValueEditorPanel, ObjectsPanel, ObjectsPanelEvent, ProblemEntry, ProblemsPanel,
-    ProblemsPanelEvent, ProblemSeverity,
-    QueryHistoryPanel, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent,
-    SchemaDetailsPanel, SettingsPanel,
+    CellEditorPanel, CommandPalette, ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent,
+    InspectorPanel, KeyValueEditorEvent, KeyValueEditorPanel, ObjectsPanel, ObjectsPanelEvent,
+    ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryHistoryPanel,
+    QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent, SchemaDetailsPanel,
+    SettingsPanel,
 };
 use crate::workspace_state::{
     DiagnosticSeverity, EditorDiagnostic, WorkspaceState, WorkspaceStateEvent,
@@ -259,16 +258,15 @@ impl MainView {
                     DockItem::tab(objects_panel.clone(), &weak_dock_area, window, cx);
 
                 // Create bottom dock with tabs for Results and Problems panels
-                let bottom_panel =
-                    DockItem::tabs(
-                        vec![
-                            Arc::new(results_panel.clone()) as Arc<dyn PanelView>,
-                            Arc::new(problems_panel.clone()) as Arc<dyn PanelView>,
-                        ],
-                        &weak_dock_area,
-                        window,
-                        cx,
-                    );
+                let bottom_panel = DockItem::tabs(
+                    vec![
+                        Arc::new(results_panel.clone()) as Arc<dyn PanelView>,
+                        Arc::new(problems_panel.clone()) as Arc<dyn PanelView>,
+                    ],
+                    &weak_dock_area,
+                    window,
+                    cx,
+                );
 
                 let right_panel = DockItem::panel(Arc::new(inspector_panel.clone()));
 
@@ -539,7 +537,7 @@ impl MainView {
         &mut self,
         event: &WorkspaceStateEvent,
         _objects_panel: &Entity<ObjectsPanel>,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         match event {
@@ -554,9 +552,18 @@ impl MainView {
                     sidebar.set_selected(*connection_id, cx);
                 });
 
-                // Refresh objects panel for the new connection
+                // Refresh connected metadata surfaces for the new connection so the
+                // sidebar and objects panel stay in lockstep after selection changes.
                 if connection_id.is_some() {
-                    self.refresh_objects_panel(window, cx);
+                    self.refresh_connection_surfaces(
+                        crate::main_view::refresh::RefreshTarget::ActiveConnection,
+                        crate::main_view::refresh::SurfaceRefreshOptions {
+                            invalidate_schema_cache: false,
+                            refresh_sidebar: false,
+                            refresh_objects_panel: true,
+                        },
+                        cx,
+                    );
                 }
             }
 
@@ -627,7 +634,7 @@ impl MainView {
 
                 // Only update the ResultsPanel if the diagnostics are for the active editor
                 let active_editor_id = self.workspace_state.read(cx).active_editor_id();
-                
+
                 if Some(*editor_id) == active_editor_id {
                     // Get diagnostics from WorkspaceState and push to ResultsPanel
                     let diagnostics = self
@@ -702,14 +709,7 @@ impl MainView {
 
                         // Navigate to the problem position
                         editor.update(cx, |editor, cx| {
-                            editor.navigate_to(
-                                *line,
-                                *column,
-                                *end_line,
-                                *end_column,
-                                window,
-                                cx,
-                            );
+                            editor.navigate_to(*line, *column, *end_line, *end_column, window, cx);
                         });
 
                         tracing::debug!(

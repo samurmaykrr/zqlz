@@ -11,17 +11,18 @@ use uuid::Uuid;
 use zqlz_templates::dbt::QuotingConfig;
 use zqlz_templates::project::{Model, Project, SourceDefinition, SourceTable};
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
     scroll::ScrollableElement,
     typography::{body_small, caption, label, muted_small},
-    v_flex, ActiveTheme, Icon, Sizable, ZqlzIcon,
+    v_flex,
 };
 
-use crate::storage::LocalStorage;
 use crate::AppState;
+use crate::storage::LocalStorage;
 use zqlz_query::QueryEditor;
 
 /// Events emitted by the Project Manager Panel

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SavedConnection};
 use zqlz_query::{HistoryPersistence, QueryHistory, QueryService};
-use zqlz_services::{ConnectionService, SchemaService, TableService};
+use zqlz_services::{ConnectionService, RefreshService, SchemaService, TableService};
 use zqlz_versioning::VersionRepository;
 
 use crate::storage::LocalStorage;
@@ -53,6 +53,9 @@ pub struct AppState {
 
     /// Table operations service
     pub table_service: Arc<TableService>,
+
+    /// Refresh orchestration service
+    pub refresh_service: Arc<RefreshService>,
 
     /// Version control repository for database objects
     pub version_repository: Arc<VersionRepository>,
@@ -106,6 +109,10 @@ impl AppState {
         let query_service = Arc::new(QueryService::with_shared_history(query_history.clone()));
         let schema_service = Arc::new(SchemaService::new());
         let table_service = Arc::new(TableService::new(default_query_limit));
+        let refresh_service = Arc::new(RefreshService::new(
+            connections.clone(),
+            schema_service.clone(),
+        ));
         let connection_service = Arc::new(ConnectionService::new(
             connections.clone(),
             schema_service.clone(),
@@ -127,6 +134,7 @@ impl AppState {
             schema_service,
             connection_service,
             table_service,
+            refresh_service,
             version_repository,
             query_history,
         }

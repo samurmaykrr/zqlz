@@ -10,8 +10,8 @@
 //! - SQL drivers specify their specific SQL dialect and parser
 //! - All capabilities are declared upfront for clear behavior
 
-use crate::dialect_config::{DialectBundle, LanguageType};
 use crate::DialectInfo;
+use crate::dialect_config::{DialectBundle, LanguageType};
 use std::collections::HashMap;
 use std::sync::{Arc, LazyLock};
 

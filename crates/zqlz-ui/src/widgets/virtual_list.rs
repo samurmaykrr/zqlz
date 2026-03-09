@@ -18,15 +18,15 @@ use std::{
 };
 
 use gpui::{
-    div, point, px, size, Along, AnyElement, App, AvailableSpace, Axis, Bounds, ContentMask,
-    Context, DeferredScrollToItem, Div, Element, ElementId, Entity, GlobalElementId, Half, Hitbox,
+    Along, AnyElement, App, AvailableSpace, Axis, Bounds, ContentMask, Context,
+    DeferredScrollToItem, Div, Element, ElementId, Entity, GlobalElementId, Half, Hitbox,
     InteractiveElement, IntoElement, IsZero as _, ListSizingBehavior, Pixels, Point, Render,
     ScrollHandle, ScrollStrategy, Size, Stateful, StatefulInteractiveElement, StyleRefinement,
-    Styled, Window,
+    Styled, Window, div, point, px, size,
 };
 use smallvec::SmallVec;
 
-use crate::widgets::{scroll::ScrollbarHandle, AxisExt, PixelsExt};
+use crate::widgets::{AxisExt, PixelsExt, scroll::ScrollbarHandle};
 
 type RenderItemsFn =
     Box<dyn for<'a> Fn(Range<usize>, &'a mut Window, &'a mut App) -> SmallVec<[AnyElement; 64]>>;

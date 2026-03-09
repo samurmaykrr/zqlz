@@ -1,20 +1,21 @@
 use std::{rc::Rc, time::Duration};
 
 use gpui::{
-    anchored, div, point, prelude::FluentBuilder as _, px, Animation, AnimationExt as _,
-    AnyElement, App, ClickEvent, DefiniteLength, DismissEvent, Edges, EventEmitter, FocusHandle,
-    InteractiveElement as _, IntoElement, KeyBinding, MouseButton, ParentElement, Pixels,
-    RenderOnce, StyleRefinement, Styled, Window,
+    Animation, AnimationExt as _, AnyElement, App, ClickEvent, DefiniteLength, DismissEvent, Edges,
+    EventEmitter, FocusHandle, InteractiveElement as _, IntoElement, KeyBinding, MouseButton,
+    ParentElement, Pixels, RenderOnce, StyleRefinement, Styled, Window, anchored, div, point,
+    prelude::FluentBuilder as _, px,
 };
 
 use crate::widgets::{
+    ActiveTheme, IconName, Placement, Sizable, StyledExt as _, WindowExt as _,
     actions::Cancel,
     button::{Button, ButtonVariants as _},
     dialog::overlay_color,
     h_flex,
     scroll::ScrollableElement as _,
     title_bar::TITLE_BAR_HEIGHT,
-    v_flex, ActiveTheme, IconName, Placement, Sizable, StyledExt as _, WindowExt as _,
+    v_flex,
 };
 
 const CONTEXT: &str = "Sheet";

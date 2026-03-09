@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::Context;
     use rstest::rstest;
     use zqlz_core::{Connection, Row, Value};
@@ -16,9 +16,7 @@ mod tests {
             TestDriver::Postgres => format!("EXPLAIN {}", query),
             TestDriver::Mysql => format!("EXPLAIN {}", query),
             TestDriver::Sqlite => format!("EXPLAIN QUERY PLAN {}", query),
-            TestDriver::Redis => {
-                return Err(anyhow::anyhow!("EXPLAIN not supported for Redis"))
-            }
+            TestDriver::Redis => return Err(anyhow::anyhow!("EXPLAIN not supported for Redis")),
         };
 
         let result = conn
@@ -44,9 +42,7 @@ mod tests {
                 // Fall back to EXPLAIN QUERY PLAN
                 format!("EXPLAIN QUERY PLAN {}", query)
             }
-            TestDriver::Redis => {
-                return Err(anyhow::anyhow!("EXPLAIN not supported for Redis"))
-            }
+            TestDriver::Redis => return Err(anyhow::anyhow!("EXPLAIN not supported for Redis")),
         };
 
         let result = conn
@@ -282,7 +278,7 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
                     .join(" ");
-                
+
                 // For a primary key lookup, we expect index usage
                 // But we won't strictly enforce this in case of small tables
                 assert!(

@@ -41,7 +41,7 @@
 use once_cell::sync::Lazy;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use testcontainers::{runners::AsyncRunner, ContainerAsync};
+use testcontainers::{ContainerAsync, runners::AsyncRunner};
 use testcontainers_modules::{mysql::Mysql, postgres::Postgres, redis::Redis};
 
 /// Information about a running test container
@@ -107,7 +107,7 @@ async fn init_postgres_data(info: &ContainerInfo) -> anyhow::Result<()> {
     } else {
         current_dir.join("crates/zqlz-driver-tests/docker/postgres")
     };
-    
+
     let schema_path = base_path.join("pagila-schema.sql");
     let data_path = base_path.join("pagila-data.sql");
 
@@ -135,16 +135,16 @@ async fn init_postgres_data(info: &ContainerInfo) -> anyhow::Result<()> {
         &info.host,
         info.port,
         info.database.as_ref().unwrap(),
-        info.username.as_ref().unwrap()
+        info.username.as_ref().unwrap(),
     );
     config.password = info.password.clone();
 
     let driver = PostgresDriver::new();
-    
+
     // Retry connection with exponential backoff
     let max_retries = 10;
     let mut conn = None;
-    
+
     for attempt in 1..=max_retries {
         match driver.connect(&config).await {
             Ok(c) => {
@@ -161,84 +161,135 @@ async fn init_postgres_data(info: &ContainerInfo) -> anyhow::Result<()> {
                 );
                 tokio::time::sleep(delay).await;
             }
-            Err(e) => return Err(anyhow::anyhow!("failed to connect to PostgreSQL after {} attempts: {}", max_retries, e)),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to connect to PostgreSQL after {} attempts: {}",
+                    max_retries,
+                    e
+                ));
+            }
         }
     }
 
     let conn = conn.unwrap();
 
     tracing::info!("loading Pagila schema (this may take 5-10 seconds)...");
-    
+
     // Use ZQLZ transaction API for proper transaction management
-    let txn = conn.begin_transaction().await
+    let txn = conn
+        .begin_transaction()
+        .await
         .map_err(|e| anyhow::anyhow!("failed to begin transaction: {}", e))?;
 
-     // Parse and execute schema statements
+    // Parse and execute schema statements
     let schema_statements = parse_sql_statements(&schema_sql);
-    tracing::info!(total_schema_statements = schema_statements.len(), "Parsed schema statements");
-    
+    tracing::info!(
+        total_schema_statements = schema_statements.len(),
+        "Parsed schema statements"
+    );
+
     for (idx, stmt) in schema_statements.iter().enumerate() {
         if idx % 10 == 0 {
-            tracing::info!(progress = idx, total = schema_statements.len(), "loading schema...");
+            tracing::info!(
+                progress = idx,
+                total = schema_statements.len(),
+                "loading schema..."
+            );
         }
-        
+
         // Skip DELIMITER commands (MySQL client-only command, not SQL)
         if stmt.trim().to_uppercase().starts_with("DELIMITER") {
             continue;
         }
-        
-        txn.execute(stmt, &[]).await
-            .map_err(|e| anyhow::anyhow!("failed to execute schema statement {}: {} - Statement: {}", idx, e, &stmt[..stmt.len().min(100)]))?;
+
+        txn.execute(stmt, &[]).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to execute schema statement {}: {} - Statement: {}",
+                idx,
+                e,
+                &stmt[..stmt.len().min(100)]
+            )
+        })?;
     }
 
-    tracing::info!(statements = schema_statements.len(), "Schema statements executed");
+    tracing::info!(
+        statements = schema_statements.len(),
+        "Schema statements executed"
+    );
 
     tracing::info!("loading Pagila data (this may take 30-60 seconds)...");
-    
+
     // Parse and execute data statements
     let data_statements = parse_sql_statements(&data_sql);
     for (idx, stmt) in data_statements.iter().enumerate() {
         if idx % 100 == 0 && idx > 0 {
-            tracing::debug!(progress = idx, total = data_statements.len(), "loading data...");
+            tracing::debug!(
+                progress = idx,
+                total = data_statements.len(),
+                "loading data..."
+            );
         }
-        txn.execute(stmt, &[]).await
-            .map_err(|e| anyhow::anyhow!("failed to execute data statement {}: {} - Statement: {}", idx, e, &stmt[..stmt.len().min(100)]))?;
+        txn.execute(stmt, &[]).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to execute data statement {}: {} - Statement: {}",
+                idx,
+                e,
+                &stmt[..stmt.len().min(100)]
+            )
+        })?;
     }
-    
-    tracing::info!(statements = data_statements.len(), "Data statements executed");
+
+    tracing::info!(
+        statements = data_statements.len(),
+        "Data statements executed"
+    );
 
     // Verify data inside the transaction before committing
     // Use fully qualified table name since search_path may not be set in transaction context
     tracing::info!("Verifying actor table before commit (within transaction)...");
-    
-    let result_before_commit = txn.query("SELECT COUNT(*) FROM public.actor", &[]).await
+
+    let result_before_commit = txn
+        .query("SELECT COUNT(*) FROM public.actor", &[])
+        .await
         .map_err(|e| anyhow::anyhow!("failed to verify actor table before commit: {}", e))?;
-    
-    let actor_count_before = result_before_commit.rows.first()
+
+    let actor_count_before = result_before_commit
+        .rows
+        .first()
         .and_then(|row| row.get(0))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
-    
-    tracing::info!(actor_count = actor_count_before, "Actor count BEFORE commit");
-    
+
+    tracing::info!(
+        actor_count = actor_count_before,
+        "Actor count BEFORE commit"
+    );
+
     if actor_count_before == 0 {
         txn.rollback().await.ok();
-        return Err(anyhow::anyhow!("Pagila data not loaded properly - actor table is empty before commit"));
+        return Err(anyhow::anyhow!(
+            "Pagila data not loaded properly - actor table is empty before commit"
+        ));
     }
 
     // Commit the transaction explicitly
     tracing::info!("Committing transaction...");
-    txn.commit().await
+    txn.commit()
+        .await
         .map_err(|e| anyhow::anyhow!("failed to commit transaction: {}", e))?;
 
     // Verify data loaded successfully using a NEW query (not in transaction)
     // Use fully qualified table name since search_path may not persist
     tracing::info!("Verifying actor table AFTER commit...");
-    
-    let result = conn.query("SELECT COUNT(*) FROM public.actor", &[]).await
+
+    let result = conn
+        .query("SELECT COUNT(*) FROM public.actor", &[])
+        .await
         .map_err(|e| anyhow::anyhow!("failed to verify actor table: {}", e))?;
-    
-    let actor_count = result.rows.first()
+
+    let actor_count = result
+        .rows
+        .first()
         .and_then(|row| row.get(0))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
@@ -249,7 +300,9 @@ async fn init_postgres_data(info: &ContainerInfo) -> anyhow::Result<()> {
     );
 
     if actor_count == 0 {
-        return Err(anyhow::anyhow!("Pagila data not loaded properly - actor table is empty"));
+        return Err(anyhow::anyhow!(
+            "Pagila data not loaded properly - actor table is empty"
+        ));
     }
 
     Ok(())
@@ -258,7 +311,7 @@ async fn init_postgres_data(info: &ContainerInfo) -> anyhow::Result<()> {
 /// Parse SQL file into individual statements
 ///
 /// This function splits SQL content by semicolons, handling:
-/// - Single-line comments (--) 
+/// - Single-line comments (--)
 /// - Multi-line comments (/* */)
 /// - Empty statements
 /// - String literals that may contain semicolons (single quotes)
@@ -273,17 +326,23 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
     let mut dollar_quote_tag = String::new();
     let bytes = sql.as_bytes();
     let mut i = 0;
-    
+
     while i < bytes.len() {
         let ch = bytes[i] as char;
-        
+
         // Handle single-line comments
-        if !in_string && !in_multi_line_comment && !in_dollar_quote && ch == '-' && i + 1 < bytes.len() && bytes[i + 1] as char == '-' {
+        if !in_string
+            && !in_multi_line_comment
+            && !in_dollar_quote
+            && ch == '-'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] as char == '-'
+        {
             in_single_line_comment = true;
             i += 2;
             continue;
         }
-        
+
         if in_single_line_comment {
             if ch == '\n' {
                 in_single_line_comment = false;
@@ -292,14 +351,19 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        
+
         // Handle multi-line comments
-        if !in_string && !in_dollar_quote && ch == '/' && i + 1 < bytes.len() && bytes[i + 1] as char == '*' {
+        if !in_string
+            && !in_dollar_quote
+            && ch == '/'
+            && i + 1 < bytes.len()
+            && bytes[i + 1] as char == '*'
+        {
             in_multi_line_comment = true;
             i += 2;
             continue;
         }
-        
+
         if in_multi_line_comment {
             if ch == '*' && i + 1 < bytes.len() && bytes[i + 1] as char == '/' {
                 in_multi_line_comment = false;
@@ -309,18 +373,18 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        
+
         // Handle dollar-quoted strings (PostgreSQL feature like $_$, $$, $body$, etc.)
         if !in_string && !in_multi_line_comment && ch == '$' {
             let mut tag_end = i + 1;
-            
+
             // Collect the tag characters (alphanumeric or underscore)
             while tag_end < bytes.len() {
                 let tag_ch = bytes[tag_end] as char;
                 if tag_ch == '$' {
                     // Found closing dollar sign
                     let tag = &sql[i..=tag_end];
-                    
+
                     if in_dollar_quote && tag == dollar_quote_tag {
                         // This is the closing tag
                         current_stmt.push_str(tag);
@@ -350,7 +414,7 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
                     break;
                 }
             }
-            
+
             if tag_end >= bytes.len() {
                 // Reached end of string without completing the tag
                 current_stmt.push(ch);
@@ -358,7 +422,7 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
             }
             continue;
         }
-        
+
         // Handle string literals (single quotes)
         if ch == '\'' && !in_multi_line_comment && !in_dollar_quote {
             in_string = !in_string;
@@ -366,9 +430,14 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        
+
         // Handle statement terminators
-        if ch == ';' && !in_string && !in_multi_line_comment && !in_single_line_comment && !in_dollar_quote {
+        if ch == ';'
+            && !in_string
+            && !in_multi_line_comment
+            && !in_single_line_comment
+            && !in_dollar_quote
+        {
             let trimmed = current_stmt.trim();
             if !trimmed.is_empty() {
                 statements.push(trimmed.to_string());
@@ -377,17 +446,17 @@ fn parse_sql_statements(sql: &str) -> Vec<String> {
             i += 1;
             continue;
         }
-        
+
         current_stmt.push(ch);
         i += 1;
     }
-    
+
     // Add final statement if any
     let trimmed = current_stmt.trim();
     if !trimmed.is_empty() {
         statements.push(trimmed.to_string());
     }
-    
+
     statements
 }
 
@@ -404,7 +473,7 @@ async fn init_mysql_data(info: &ContainerInfo) -> anyhow::Result<()> {
     } else {
         current_dir.join("crates/zqlz-driver-tests/docker/mysql")
     };
-    
+
     let schema_path = base_path.join("sakila-schema.sql");
     let data_path = base_path.join("sakila-data.sql");
 
@@ -425,16 +494,16 @@ async fn init_mysql_data(info: &ContainerInfo) -> anyhow::Result<()> {
         &info.host,
         info.port,
         info.database.as_ref().unwrap(),
-        info.username.as_ref().unwrap()
+        info.username.as_ref().unwrap(),
     );
     config.password = info.password.clone();
 
     let driver = MySqlDriver::new();
-    
+
     // Retry connection with exponential backoff
     let max_retries = 10;
     let mut conn = None;
-    
+
     for attempt in 1..=max_retries {
         match driver.connect(&config).await {
             Ok(c) => {
@@ -451,68 +520,109 @@ async fn init_mysql_data(info: &ContainerInfo) -> anyhow::Result<()> {
                 );
                 tokio::time::sleep(delay).await;
             }
-            Err(e) => return Err(anyhow::anyhow!("failed to connect to MySQL after {} attempts: {}", max_retries, e)),
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "failed to connect to MySQL after {} attempts: {}",
+                    max_retries,
+                    e
+                ));
+            }
         }
     }
 
     let conn = conn.unwrap();
 
     tracing::info!("loading Sakila schema (this may take 5-10 seconds)...");
-    
+
     // Disable foreign key checks during schema loading to avoid constraint order issues
     // This must be done before the transaction starts
-    conn.execute("SET FOREIGN_KEY_CHECKS=0", &[]).await
+    conn.execute("SET FOREIGN_KEY_CHECKS=0", &[])
+        .await
         .map_err(|e| anyhow::anyhow!("failed to disable foreign key checks: {}", e))?;
-    
+
     // Use ZQLZ transaction API for proper transaction management
-    let txn = conn.begin_transaction().await
+    let txn = conn
+        .begin_transaction()
+        .await
         .map_err(|e| anyhow::anyhow!("failed to begin transaction: {}", e))?;
 
     // Parse and execute schema statements
     let schema_statements = parse_sql_statements(&schema_sql);
     for (idx, stmt) in schema_statements.iter().enumerate() {
         if idx % 10 == 0 && idx > 0 {
-            tracing::debug!(progress = idx, total = schema_statements.len(), "loading schema...");
+            tracing::debug!(
+                progress = idx,
+                total = schema_statements.len(),
+                "loading schema..."
+            );
         }
-        
+
         // Skip DELIMITER commands (MySQL client-only command, not SQL)
         if stmt.trim().to_uppercase().starts_with("DELIMITER") {
             continue;
         }
-        
-        txn.execute(stmt, &[]).await
-            .map_err(|e| anyhow::anyhow!("failed to execute schema statement {}: {} - Statement: {}", idx, e, &stmt[..stmt.len().min(100)]))?;
+
+        txn.execute(stmt, &[]).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to execute schema statement {}: {} - Statement: {}",
+                idx,
+                e,
+                &stmt[..stmt.len().min(100)]
+            )
+        })?;
     }
 
-    tracing::info!(statements = schema_statements.len(), "Schema statements executed");
+    tracing::info!(
+        statements = schema_statements.len(),
+        "Schema statements executed"
+    );
 
     tracing::info!("loading Sakila data (this may take 30-60 seconds)...");
-    
+
     // Parse and execute data statements
     let data_statements = parse_sql_statements(&data_sql);
     for (idx, stmt) in data_statements.iter().enumerate() {
         if idx % 100 == 0 && idx > 0 {
-            tracing::debug!(progress = idx, total = data_statements.len(), "loading data...");
+            tracing::debug!(
+                progress = idx,
+                total = data_statements.len(),
+                "loading data..."
+            );
         }
-        txn.execute(stmt, &[]).await
-            .map_err(|e| anyhow::anyhow!("failed to execute data statement {}: {} - Statement: {}", idx, e, &stmt[..stmt.len().min(100)]))?;
+        txn.execute(stmt, &[]).await.map_err(|e| {
+            anyhow::anyhow!(
+                "failed to execute data statement {}: {} - Statement: {}",
+                idx,
+                e,
+                &stmt[..stmt.len().min(100)]
+            )
+        })?;
     }
-    
-    tracing::info!(statements = data_statements.len(), "Data statements executed");
+
+    tracing::info!(
+        statements = data_statements.len(),
+        "Data statements executed"
+    );
 
     // Commit the transaction explicitly
-    txn.commit().await
+    txn.commit()
+        .await
         .map_err(|e| anyhow::anyhow!("failed to commit transaction: {}", e))?;
-    
+
     // Re-enable foreign key checks after commit
-    conn.execute("SET FOREIGN_KEY_CHECKS=1", &[]).await
+    conn.execute("SET FOREIGN_KEY_CHECKS=1", &[])
+        .await
         .map_err(|e| anyhow::anyhow!("failed to re-enable foreign key checks: {}", e))?;
 
     // Verify data loaded successfully
-    let result = conn.query("SELECT COUNT(*) FROM actor", &[]).await
+    let result = conn
+        .query("SELECT COUNT(*) FROM actor", &[])
+        .await
         .map_err(|e| anyhow::anyhow!("failed to verify actor table: {}", e))?;
-    
-    let actor_count = result.rows.first()
+
+    let actor_count = result
+        .rows
+        .first()
         .and_then(|row| row.get(0))
         .and_then(|v| v.as_i64())
         .unwrap_or(0);
@@ -523,7 +633,9 @@ async fn init_mysql_data(info: &ContainerInfo) -> anyhow::Result<()> {
     );
 
     if actor_count == 0 {
-        return Err(anyhow::anyhow!("Sakila data not loaded properly - actor table is empty"));
+        return Err(anyhow::anyhow!(
+            "Sakila data not loaded properly - actor table is empty"
+        ));
     }
 
     Ok(())
@@ -705,7 +817,10 @@ pub async fn redis_container() -> anyhow::Result<ContainerInfo> {
         initialized: true,
     };
 
-    tracing::info!(port = host_port, "Redis test container started successfully");
+    tracing::info!(
+        port = host_port,
+        "Redis test container started successfully"
+    );
 
     {
         let mut guard = REDIS_CONTAINER
@@ -729,11 +844,8 @@ pub async fn redis_container() -> anyhow::Result<ContainerInfo> {
 pub async fn init_all_containers() -> anyhow::Result<()> {
     tracing::info!("initializing all test containers");
 
-    let (postgres_result, mysql_result, redis_result) = tokio::join!(
-        postgres_container(),
-        mysql_container(),
-        redis_container()
-    );
+    let (postgres_result, mysql_result, redis_result) =
+        tokio::join!(postgres_container(), mysql_container(), redis_container());
 
     postgres_result?;
     mysql_result?;

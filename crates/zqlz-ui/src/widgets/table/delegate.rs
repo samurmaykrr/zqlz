@@ -1,15 +1,14 @@
 use std::ops::Range;
 
 use gpui::{
-    div, App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
-    Styled as _, Window,
+    App, Context, Div, InteractiveElement as _, IntoElement, ParentElement as _, Stateful,
+    Styled as _, Window, div,
 };
 
 use crate::widgets::{
-    h_flex,
+    ActiveTheme as _, Icon, IconName, Size, h_flex,
     menu::PopupMenu,
-    table::{loading::Loading, Column, ColumnSort, TableState},
-    ActiveTheme as _, Icon, IconName, Size,
+    table::{Column, ColumnSort, TableState, loading::Loading},
 };
 
 /// A delegate trait for providing data and rendering for a table.
@@ -216,6 +215,13 @@ pub trait TableDelegate: Sized + 'static {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
+    }
+
+    /// Calculate the optimal auto-fit width for a column in pixels.
+    /// Called when the user double-clicks the column resize handle.
+    /// Default returns 120.0.
+    fn calculate_auto_fit_width(&self, _col_ix: usize, _cx: &App) -> f32 {
+        120.0
     }
 
     /// Returns true if the delegate is currently in editing mode.

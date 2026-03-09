@@ -1,7 +1,7 @@
 use crate::widgets::styled::StyledExt;
 use crate::widgets::theme::ActiveTheme;
 use crate::widgets::{Sizable, Size};
-use gpui::{div, px, App, Hsla, IntoElement, RenderOnce, StyleRefinement, Styled, Window};
+use gpui::{App, Hsla, IntoElement, RenderOnce, StyleRefinement, Styled, Window, div, px};
 
 /// Simple status indicator dot used for connection status and similar small indicators.
 #[derive(IntoElement)]

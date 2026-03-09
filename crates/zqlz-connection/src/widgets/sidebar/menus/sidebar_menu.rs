@@ -3,7 +3,6 @@
 //! Provides a context menu for the sidebar background area with options for:
 //! - Creating new connections
 //! - Closing all active connections
-//! - Creating new connection groups
 //! - Refreshing the connections list
 
 use gpui::*;
@@ -19,7 +18,6 @@ impl ConnectionSidebar {
     /// Displays a menu with the following items:
     /// - **New Connection**: Emits `AddConnection` to create a new database connection
     /// - **Close All Connections**: Emits `CloseAllConnections` (disabled if no active connections)
-    /// - **New Group**: Emits `NewGroup` to create a connection group
     /// - **Refresh**: Emits `RefreshConnections` to reload the connections list
     ///
     /// This menu appears when right-clicking on empty space in the sidebar.
@@ -60,15 +58,6 @@ impl ConnectionSidebar {
                                 }
                             }),
                     )
-                    .separator()
-                    .item(PopupMenuItem::new("New Group").on_click({
-                        let sidebar = sidebar_weak.clone();
-                        move |_event, _window, cx| {
-                            _ = sidebar.update(cx, |_sidebar, cx| {
-                                cx.emit(ConnectionSidebarEvent::NewGroup);
-                            });
-                        }
-                    }))
                     .separator()
                     .item(PopupMenuItem::new("Refresh").on_click({
                         let sidebar = sidebar_weak.clone();

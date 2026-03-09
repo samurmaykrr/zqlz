@@ -4,9 +4,9 @@ use anyhow::Result;
 use gpui::{Context, Task, Window};
 use parking_lot::RwLock;
 use std::sync::Arc;
-use zqlz_ui::widgets::input::lsp::CompletionProvider;
-use zqlz_ui::widgets::input::InputState;
 use zqlz_ui::widgets::Rope;
+use zqlz_ui::widgets::input::InputState;
+use zqlz_ui::widgets::input::lsp::CompletionProvider;
 
 use super::SqlLsp;
 

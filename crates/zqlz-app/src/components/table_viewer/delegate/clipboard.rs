@@ -53,6 +53,13 @@ impl TableViewerDelegate {
                     break;
                 }
 
+                let data_type = self
+                    .column_meta
+                    .get(data_col)
+                    .map(|c| c.data_type.as_str())
+                    .unwrap_or("text");
+                let typed_value = Value::parse_from_string(paste_value, data_type);
+
                 let original_value = self
                     .rows
                     .get(actual_row)
@@ -60,13 +67,15 @@ impl TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                if paste_value != &original_value {
-                    modified_cells.push((actual_row, target_col, paste_value.clone()));
+                if typed_value != original_value {
+                    modified_cells.push((actual_row, target_col, typed_value));
                 }
             }
         }
 
         let cells_count = modified_cells.len();
+
+        let mut undo_edits = Vec::new();
 
         if self.auto_commit_mode {
             for (row, col, new_value) in modified_cells {
@@ -79,43 +88,7 @@ impl TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                let table_name = self.table_name.clone();
-                let connection_id = self.connection_id;
-                let all_row_values = self.rows.get(row).cloned().unwrap_or_default();
-                let all_column_names: Vec<String> =
-                    self.column_meta.iter().map(|c| c.name.clone()).collect();
-                let all_column_types: Vec<String> = self
-                    .column_meta
-                    .iter()
-                    .map(|c| c.data_type.clone())
-                    .collect();
-                let column_name = self
-                    .column_meta
-                    .get(data_col)
-                    .map(|c| c.name.clone())
-                    .unwrap_or_default();
-
-                if let Some(row_data) = self.rows.get_mut(row) {
-                    if let Some(cell) = row_data.get_mut(data_col) {
-                        *cell = new_value.clone();
-                    }
-                }
-
-                let viewer_panel = self.viewer_panel.clone();
-                _ = viewer_panel.update(cx, |_panel, cx| {
-                    cx.emit(TableViewerEvent::SaveCell {
-                        table_name,
-                        connection_id,
-                        row,
-                        col,
-                        column_name,
-                        new_value,
-                        original_value,
-                        all_row_values,
-                        all_column_names,
-                        all_column_types,
-                    });
-                });
+                self.save_existing_cell_or_queue(row, data_col, new_value, &original_value, cx);
             }
         } else {
             for (row, col, new_value) in modified_cells {
@@ -128,22 +101,18 @@ impl TableViewerDelegate {
                     .cloned()
                     .unwrap_or_default();
 
-                if let Some(row_data) = self.rows.get_mut(row) {
-                    if let Some(cell) = row_data.get_mut(data_col) {
-                        *cell = new_value.clone();
-                    }
-                }
+                undo_edits.push(UndoCellEdit {
+                    row,
+                    data_col,
+                    old_value: original_value.clone(),
+                    new_value: new_value.clone(),
+                });
 
-                self.pending_changes.modified_cells.insert(
-                    (row, col),
-                    PendingCellChange {
-                        original_value,
-                        new_value,
-                    },
-                );
+                self.store_pending_cell_change(row, data_col, new_value.clone(), &original_value);
             }
         }
 
+        self.push_undo(UndoEntry { edits: undo_edits });
         cx.notify();
         tracing::info!("Pasted {} cell(s)", cells_count);
     }

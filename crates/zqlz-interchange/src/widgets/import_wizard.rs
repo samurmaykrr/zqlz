@@ -316,9 +316,7 @@ impl ImportWizard {
             .target_configs
             .iter()
             .map(|config| {
-                cx.new(|cx| {
-                    InputState::new(window, cx).default_value(config.target_table.clone())
-                })
+                cx.new(|cx| InputState::new(window, cx).default_value(config.target_table.clone()))
             })
             .collect();
 
@@ -524,16 +522,18 @@ impl ImportWizard {
         // Subscribe to target table name inputs; each input maps to the config at its index.
         // The validation error is cleared on any edit so the user gets immediate feedback.
         for (idx, input) in target_table_inputs.iter().enumerate() {
-            subscriptions.push(cx.subscribe(input, move |this, state, event: &InputEvent, cx| {
-                if let InputEvent::Change = event {
-                    let value = state.read(cx).value().to_string();
-                    if let Some(config) = this.state.target_configs.get_mut(idx) {
-                        config.target_table = value;
-                        this.state.target_table_validation_error = None;
+            subscriptions.push(
+                cx.subscribe(input, move |this, state, event: &InputEvent, cx| {
+                    if let InputEvent::Change = event {
+                        let value = state.read(cx).value().to_string();
+                        if let Some(config) = this.state.target_configs.get_mut(idx) {
+                            config.target_table = value;
+                            this.state.target_table_validation_error = None;
+                        }
+                        cx.notify();
                     }
-                    cx.notify();
-                }
-            }));
+                }),
+            );
         }
 
         Self {
@@ -960,7 +960,8 @@ impl ImportWizard {
                             .map(|s| s.source_name.as_str())
                             .unwrap_or("unknown");
                         if let Ok(path) =
-                            this.state.write_log_file(source_label, &driver_name, source_label)
+                            this.state
+                                .write_log_file(source_label, &driver_name, source_label)
                         {
                             this.state.log_file_path = Some(path);
                         }
@@ -1053,7 +1054,8 @@ impl ImportWizard {
                             .map(|c| c.target_table.as_str())
                             .unwrap_or("unknown");
                         if let Ok(path) =
-                            this.state.write_log_file(source_label, &driver_name, target_label)
+                            this.state
+                                .write_log_file(source_label, &driver_name, target_label)
                         {
                             this.state.log_file_path = Some(path);
                         }
@@ -1461,6 +1463,7 @@ impl ImportWizard {
                     .child(
                         Button::new("add-file")
                             .child("Add File...")
+                            .primary()
                             .small()
                             .on_click(cx.listener(|_this, _: &ClickEvent, window, cx| {
                                 let view = cx.entity().clone();
@@ -1487,7 +1490,7 @@ impl ImportWizard {
                                 .detach();
                             })),
                     )
-                    .child(Button::new("add-url").child("Add URL...").small()),
+                    .child(Button::new("add-url").child("Add URL...").primary().small()),
             )
             // Show detected format
             .when_some(detected_format, |this, format| {
@@ -1564,15 +1567,17 @@ impl ImportWizard {
                                                 .child(source_display),
                                         ),
                                 )
-                                 .child(
+                                .child(
                                     Button::new(format!("remove-{}", idx))
                                         .child("Remove")
                                         .small()
                                         .ghost()
-                                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                            this.remove_file(idx, window, cx);
-                                        })),
-                                 )
+                                        .on_click(cx.listener(
+                                            move |this, _: &ClickEvent, window, cx| {
+                                                this.remove_file(idx, window, cx);
+                                            },
+                                        )),
+                                )
                         },
                     ))),
             )
@@ -1583,12 +1588,7 @@ impl ImportWizard {
                     h_flex()
                         .gap_2()
                         .items_center()
-                        .child(
-                            div()
-                                .text_sm()
-                                .text_color(theme.danger)
-                                .child(error),
-                        ),
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
                 )
             })
     }
@@ -1636,9 +1636,7 @@ impl ImportWizard {
                     ))
                     .child(self.render_format_row(
                         "Field Delimiter:",
-                        Input::new(&self.field_delimiter_input)
-                            .small()
-                            .w(px(60.0)),
+                        Input::new(&self.field_delimiter_input).small().w(px(60.0)),
                         cx,
                     )),
             )
@@ -1923,11 +1921,14 @@ impl ImportWizard {
                                                     move |this, _new_checked: &bool, _, cx| {
                                                         let source_idx =
                                                             this.state.selected_mapping_index;
-                                                        if let Some(mappings) =
-                                                            this.state.field_mappings.get_mut(&source_idx)
+                                                        if let Some(mappings) = this
+                                                            .state
+                                                            .field_mappings
+                                                            .get_mut(&source_idx)
                                                         {
                                                             if let Some(m) = mappings.get_mut(idx) {
-                                                                m.is_primary_key = !m.is_primary_key;
+                                                                m.is_primary_key =
+                                                                    !m.is_primary_key;
                                                             }
                                                         }
                                                         cx.notify();
@@ -1943,8 +1944,10 @@ impl ImportWizard {
                                                     move |this, _new_checked: &bool, _, cx| {
                                                         let source_idx =
                                                             this.state.selected_mapping_index;
-                                                        if let Some(mappings) =
-                                                            this.state.field_mappings.get_mut(&source_idx)
+                                                        if let Some(mappings) = this
+                                                            .state
+                                                            .field_mappings
+                                                            .get_mut(&source_idx)
                                                         {
                                                             if let Some(m) = mappings.get_mut(idx) {
                                                                 m.skip = !m.skip;
@@ -2075,7 +2078,10 @@ impl ImportWizard {
                         let mode = *mode;
                         // Each row needs an id to receive click events.
                         div()
-                            .id(SharedString::from(format!("import-mode-{}", mode.short_name())))
+                            .id(SharedString::from(format!(
+                                "import-mode-{}",
+                                mode.short_name()
+                            )))
                             .w_full()
                             .px_2()
                             .py_1()
@@ -2603,9 +2609,11 @@ impl ImportWizard {
                 s.child(Button::new("view-log").child("View Log").small().when_some(
                     self.state.log_file_path.clone(),
                     |button, path| {
-                        button.on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
-                            cx.open_url(&format!("file://{}", path.display()));
-                        }))
+                        button
+                            .ghost()
+                            .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
+                                cx.open_url(&format!("file://{}", path.display()));
+                            }))
                     },
                 ))
             })

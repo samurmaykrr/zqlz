@@ -9,7 +9,7 @@ use uuid::Uuid;
 use zqlz_core::{ColumnMeta, DriverCategory};
 
 use super::delegate::PendingCellChange;
-use super::filter_types::{FilterCondition, SortCriterion};
+use super::filter_types::{FilterCondition, FilterOperator, SortCriterion};
 
 /// Events emitted by the table viewer panel
 ///
@@ -241,7 +241,9 @@ pub enum TableViewerEvent {
     AddQuickFilter {
         /// Column name to filter on
         column_name: String,
-        /// Value to filter for (equals comparison)
+        /// The filter operator to use (Equal for normal values, IsNull for NULL cells)
+        operator: FilterOperator,
+        /// Filter value (empty string when operator is IsNull)
         value: String,
     },
 
@@ -433,5 +435,39 @@ pub enum TableViewerEvent {
         row_values: Vec<String>,
         column_meta: Vec<ColumnMeta>,
         all_column_names: Vec<String>,
+    },
+
+    /// Cell validation failed — the user entered a value that doesn't match the column type
+    ///
+    /// Emitted when inline editing produces a value that fails type validation
+    /// (e.g. non-numeric text in an integer column). The edit is rejected and the
+    /// cell reverts to its previous value.
+    ValidationFailed { message: String },
+
+    /// Load distinct values for a column (for "Filter by Distinct Values" feature)
+    ///
+    /// Emitted when user selects "Filter by Distinct Values" from column context menu.
+    /// MainView handles this by querying SELECT DISTINCT and presenting a checklist.
+    LoadDistinctValues {
+        connection_id: Uuid,
+        table_name: String,
+        column_name: String,
+    },
+
+    /// Background row count completed for a table.
+    ///
+    /// Emitted after the UI layer fetches the row count in a background task
+    /// (for slow-count drivers like MySQL/PostgreSQL/MSSQL/ClickHouse where
+    /// the count is decoupled from the initial data load for faster display).
+    /// The pagination state is updated with the total when this arrives.
+    CountCompleted {
+        connection_id: Uuid,
+        table_name: String,
+        /// The load generation that scheduled this count.
+        request_generation: u64,
+        /// The total row count (exact or estimated)
+        total_rows: u64,
+        /// Whether the count is an estimate from database metadata
+        is_estimated: bool,
     },
 }

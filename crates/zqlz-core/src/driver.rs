@@ -152,9 +152,13 @@ impl ConnectionField {
             tab: None,
         }
     }
-    
+
     /// Create a new select field
-    pub fn select(id: &'static str, label: &'static str, options: Vec<ConnectionFieldOption>) -> Self {
+    pub fn select(
+        id: &'static str,
+        label: &'static str,
+        options: Vec<ConnectionFieldOption>,
+    ) -> Self {
         Self {
             id: Cow::Borrowed(id),
             label: Cow::Borrowed(label),
@@ -212,7 +216,7 @@ impl ConnectionField {
         }
         self
     }
-    
+
     pub fn tab(mut self, tab: &'static str) -> Self {
         self.tab = Some(Cow::Borrowed(tab));
         self

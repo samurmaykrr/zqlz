@@ -81,7 +81,9 @@ fn test_references_for_qualified_column() {
     let mut lsp = create_test_lsp();
 
     // Test finding references for a qualified column (table.column)
-    let text = Rope::from("SELECT users.user_id, users.user_name FROM users JOIN orders ON users.user_id = orders.user_id");
+    let text = Rope::from(
+        "SELECT users.user_id, users.user_name FROM users JOIN orders ON users.user_id = orders.user_id",
+    );
     let offset = text.to_string().find("users.user_id").unwrap() + 6; // Middle of "user_id"
 
     let result = lsp.get_references(&text, offset);

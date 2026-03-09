@@ -12,10 +12,10 @@ use zqlz_ui::widgets::{
     v_flex,
 };
 
-use crate::app::AppState;
-use crate::components::ObjectsPanelEvent;
-use crate::main_view::table_handlers_utils::validation::validate_table_name;
 use crate::MainView;
+use crate::app::AppState;
+use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use crate::main_view::table_handlers_utils::validation::validate_table_name;
 
 impl MainView {
     /// Duplicates a table (creates a copy with a new name)
@@ -43,8 +43,8 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let source_table_name = table_name.clone();
 
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("New table name"));
@@ -76,8 +76,8 @@ impl MainView {
 
             move |dialog, _window, cx| {
                 let connection = connection.clone();
-                let connection_sidebar = connection_sidebar.clone();
-                let objects_panel = objects_panel.clone();
+                let window_handle = window_handle;
+                let main_view = main_view.clone();
                 let source_table_name = source_table_name.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
@@ -128,8 +128,7 @@ impl MainView {
                         }
 
                         let connection = connection.clone();
-                        let connection_sidebar = connection_sidebar.clone();
-                        let objects_panel = objects_panel.clone();
+                        let main_view = main_view.clone();
                         let source_table_name = source_table_name.clone();
 
                         cx.spawn(async move |cx| {
@@ -146,12 +145,13 @@ impl MainView {
                                         new_table_name
                                     );
 
-                                    cx.update(|cx| {
-                                        _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                            sidebar.add_table(connection_id, new_table_name.clone(), cx);
-                                        });
-                                        _ = objects_panel.update(cx, |_, cx| {
-                                            cx.emit(ObjectsPanelEvent::Refresh);
+                                    let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                        let _ = main_view.update(cx, |main_view, cx| {
+                                            main_view.refresh_connection_surfaces(
+                                                RefreshTarget::Connection(connection_id),
+                                                SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                                cx,
+                                            );
                                         });
                                     })
 ;
@@ -185,7 +185,12 @@ impl MainView {
         }
 
         if table_names.len() == 1 {
-            self.duplicate_table(connection_id, table_names.into_iter().next().unwrap(), window, cx);
+            let Some(table_name) = table_names.into_iter().next() else {
+                tracing::error!("Single-table duplicate requested without a table name");
+                return;
+            };
+
+            self.duplicate_table(connection_id, table_name, window, cx);
             return;
         }
 
@@ -208,16 +213,16 @@ impl MainView {
         };
 
         let connection = connection.clone();
-        let connection_sidebar = self.connection_sidebar.downgrade();
-        let objects_panel = self.objects_panel.downgrade();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
         let schema_service = app_state.schema_service.clone();
         let continue_on_error = Rc::new(RefCell::new(true));
         let new_names: Vec<String> = table_names.iter().map(|n| format!("{}_copy", n)).collect();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
-            let connection_sidebar = connection_sidebar.clone();
-            let objects_panel = objects_panel.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
             let schema_service = schema_service.clone();
             let table_names = table_names.clone();
             let continue_on_error = continue_on_error.clone();
@@ -251,8 +256,7 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
-                    let connection_sidebar = connection_sidebar.clone();
-                    let objects_panel = objects_panel.clone();
+                    let main_view = main_view.clone();
                     let schema_service = schema_service.clone();
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
@@ -278,12 +282,11 @@ impl MainView {
                                     );
                                     duplicated_tables.push(new_name.clone());
 
-                                    cx.update(|cx| {
-                                        _ = connection_sidebar.update(cx, |sidebar, cx| {
-                                            sidebar.add_table(connection_id, new_name, cx);
-                                        });
-                                    })
-;
+                                    tracing::debug!(
+                                        connection_id = %connection_id,
+                                        table_name = %new_name,
+                                        "Queued refresh after table duplication"
+                                    );
                                 }
                                 Err(e) => {
                                     let error_msg = format!("'{}': {}", table_name, e);
@@ -301,12 +304,15 @@ impl MainView {
                         if !duplicated_tables.is_empty() {
                             schema_service.invalidate_connection_cache(connection_id);
 
-                            cx.update(|cx| {
-                                _ = objects_panel.update(cx, |_, cx| {
-                                    cx.emit(ObjectsPanelEvent::Refresh);
+                            let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                let _ = main_view.update(cx, |main_view, cx| {
+                                    main_view.refresh_connection_surfaces(
+                                        RefreshTarget::Connection(connection_id),
+                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                        cx,
+                                    );
                                 });
-                            })
-;
+                            });
                         }
 
                         if errors.is_empty() {

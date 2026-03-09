@@ -12,8 +12,8 @@ use gpui::{
     App, Div, ElementId, Entity, InteractiveElement as _, IntoElement, Stateful, Styled as _, div,
 };
 
-use crate::widgets::StyledExt as _;
 use super::InputState;
+use crate::widgets::StyledExt as _;
 
 pub(crate) enum ContextMenu {
     Completion(Entity<CompletionMenu<InputState>>),

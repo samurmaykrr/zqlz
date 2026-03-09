@@ -513,12 +513,10 @@ impl Element for EditorElement {
                 .map(|(text, offset)| (text.clone(), *offset));
 
             // Snapshot the find state so we can build match highlight rects below
-            let find_info = editor.find_state.as_ref().map(|fs| {
-                (
-                    fs.matches.clone(),
-                    fs.current_match,
-                )
-            });
+            let find_info = editor
+                .find_state
+                .as_ref()
+                .map(|fs| (fs.matches.clone(), fs.current_match));
 
             // Snapshot go-to-line dialog state so we can paint the overlay
             let goto_line_info = editor
@@ -646,8 +644,8 @@ impl Element for EditorElement {
                     break;
                 }
 
-                let run_start =
-                    line_text.floor_char_boundary(highlight.start.saturating_sub(line_start_offset));
+                let run_start = line_text
+                    .floor_char_boundary(highlight.start.saturating_sub(line_start_offset));
                 let run_end = line_text
                     .ceil_char_boundary((highlight.end - line_start_offset).min(line_text.len()));
 
@@ -934,10 +932,7 @@ impl Element for EditorElement {
                                 bounds.origin.x + gutter_width + char_width * (*start_col as f32),
                                 bounds.origin.y + slot_y(display_slot),
                             ),
-                            size(
-                                char_width * ((*end_col - *start_col) as f32),
-                                line_height,
-                            ),
+                            size(char_width * ((*end_col - *start_col) as f32), line_height),
                         ));
                     }
                 }
@@ -1014,7 +1009,11 @@ impl Element for EditorElement {
         let wrap_col = if soft_wrap {
             let text_area = f32::from(bounds.size.width - gutter_width);
             let cw = f32::from(char_width);
-            if cw > 0.0 { (text_area / cw).floor() as usize } else { 0 }
+            if cw > 0.0 {
+                (text_area / cw).floor() as usize
+            } else {
+                0
+            }
         } else {
             0
         };
@@ -1240,51 +1239,43 @@ impl Element for EditorElement {
         };
 
         // Build find match highlight render data if the panel is open
-        let find_panel = find_info.map(
-            |(
-                matches,
-                current_match,
-            )| {
-                // Compute pixel rects for each match that is within the visible viewport,
-                // paired with a flag marking the currently-selected match.
-                let mut match_rects: Vec<(Bounds<Pixels>, bool)> = Vec::new();
+        let find_panel = find_info.map(|(matches, current_match)| {
+            // Compute pixel rects for each match that is within the visible viewport,
+            // paired with a flag marking the currently-selected match.
+            let mut match_rects: Vec<(Bounds<Pixels>, bool)> = Vec::new();
 
-                for (idx, m) in matches.iter().enumerate() {
-                    let is_current = idx == current_match;
-                    if let (Ok(start_pos), Ok(end_pos)) = (
-                        buffer.offset_to_position(m.start),
-                        buffer.offset_to_position(m.end),
-                    ) {
-                        // Only render matches that are on the same line and on a visible (non-folded) line
-                        if start_pos.line == end_pos.line {
-                            if let Some(&display_slot) = buf_to_display.get(&start_pos.line) {
-                                let rect = Bounds::new(
-                                    point(
-                                        bounds.origin.x
-                                            + gutter_width
-                                            + char_width * (start_pos.column as f32),
-                                        bounds.origin.y
-                                            + line_height * (display_slot as f32 - scroll_offset),
-                                    ),
-                                    size(
-                                        char_width
-                                            * (end_pos.column.saturating_sub(start_pos.column)
-                                                as f32)
-                                                .max(1.0),
-                                        line_height,
-                                    ),
-                                );
-                                match_rects.push((rect, is_current));
-                            }
+            for (idx, m) in matches.iter().enumerate() {
+                let is_current = idx == current_match;
+                if let (Ok(start_pos), Ok(end_pos)) = (
+                    buffer.offset_to_position(m.start),
+                    buffer.offset_to_position(m.end),
+                ) {
+                    // Only render matches that are on the same line and on a visible (non-folded) line
+                    if start_pos.line == end_pos.line {
+                        if let Some(&display_slot) = buf_to_display.get(&start_pos.line) {
+                            let rect = Bounds::new(
+                                point(
+                                    bounds.origin.x
+                                        + gutter_width
+                                        + char_width * (start_pos.column as f32),
+                                    bounds.origin.y
+                                        + line_height * (display_slot as f32 - scroll_offset),
+                                ),
+                                size(
+                                    char_width
+                                        * (end_pos.column.saturating_sub(start_pos.column) as f32)
+                                            .max(1.0),
+                                    line_height,
+                                ),
+                            );
+                            match_rects.push((rect, is_current));
                         }
                     }
                 }
+            }
 
-                FindPanelData {
-                    match_rects,
-                }
-            },
-        );
+            FindPanelData { match_rects }
+        });
 
         // Compute inline suggestion render data — the ghost text is painted right
         // after the real text on the cursor's line, at the cursor X position.
@@ -1556,7 +1547,9 @@ impl Element for EditorElement {
         let gutter_text_area_width =
             gutter_width - GUTTER_SEPARATOR_WIDTH - FOLD_CHEVRON_ZONE - GUTTER_PADDING * 2.0;
         for (slot_idx, gutter_line) in prepaint.gutter_lines.iter().enumerate() {
-            let line_y = if !prepaint.line_y_offsets.is_empty() && slot_idx < prepaint.line_y_offsets.len() {
+            let line_y = if !prepaint.line_y_offsets.is_empty()
+                && slot_idx < prepaint.line_y_offsets.len()
+            {
                 prepaint.bounds.origin.y + prepaint.line_y_offsets[slot_idx]
             } else {
                 prepaint.bounds.origin.y + prepaint.line_height * (slot_idx as f32)
@@ -1696,7 +1689,11 @@ impl Element for EditorElement {
 
         if let Some(ref wrapped_lines) = prepaint.wrapped_shaped_lines {
             for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
-                let y = prepaint.line_y_offsets.get(i).copied().unwrap_or(gpui::px(0.0));
+                let y = prepaint
+                    .line_y_offsets
+                    .get(i)
+                    .copied()
+                    .unwrap_or(gpui::px(0.0));
                 let line_origin = point(text_origin_x, origin_y + y);
                 _ = wrapped_line.paint(
                     line_origin,
@@ -2022,11 +2019,14 @@ impl EditorElement {
                         text_system.shape_line(text.into(), font_size * 0.93, &[run], None)
                     });
 
-                    (visible_start + i, ShapedCompletionItem {
-                        label,
-                        detail,
-                        accent,
-                    })
+                    (
+                        visible_start + i,
+                        ShapedCompletionItem {
+                            label,
+                            detail,
+                            accent,
+                        },
+                    )
                 })
                 .collect()
         }; // text_system borrow released; window is exclusively ours again.
@@ -2324,7 +2324,6 @@ impl EditorElement {
             current_y = current_y + row.height;
         }
     }
-
 
     /// Helper: shape and paint a single-line text string inside an overlay panel.
     fn paint_panel_text(

@@ -97,6 +97,7 @@ impl TableViewerPanel {
     pub fn add_quick_filter(
         &mut self,
         column_name: String,
+        operator: super::super::filter_types::FilterOperator,
         value: String,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -105,7 +106,7 @@ impl TableViewerPanel {
 
         if let Some(filter_state) = &self.filter_panel_state {
             filter_state.update(cx, |state, cx| {
-                state.add_quick_filter(column_name, value, window, cx);
+                state.add_quick_filter(column_name, operator, value, window, cx);
             });
         }
 
@@ -118,8 +119,6 @@ impl TableViewerPanel {
         direction: super::super::filter_types::SortDirection,
         cx: &mut Context<Self>,
     ) {
-        
-
         if let Some(filter_state) = &self.filter_panel_state {
             filter_state.update(cx, |state, cx| {
                 state.clear_sorts(cx);

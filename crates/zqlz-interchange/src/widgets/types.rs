@@ -1498,8 +1498,11 @@ impl ImportWizardState {
     /// Separated from `add_file` so that the GPUI wizard can spawn the async `detect` call
     /// and then apply the result synchronously on the foreground thread without holding a
     /// mutable borrow across an await point.
-    pub fn add_file_with_format(&mut self, path: PathBuf, new_format: ImportFormat) -> anyhow::Result<()> {
-
+    pub fn add_file_with_format(
+        &mut self,
+        path: PathBuf,
+        new_format: ImportFormat,
+    ) -> anyhow::Result<()> {
         if let Some(existing) = self.detected_format {
             // Unknown-format files can always be added alongside any other format;
             // the user may be intentionally mixing in supplementary files.
@@ -1892,7 +1895,10 @@ mod tests {
             .expect("first file accepted");
         // Trigger a conflict error — we assert it is an error but don't need the message.
         assert!(
-            state.add_file(PathBuf::from("/tmp/data.csv")).await.is_err(),
+            state
+                .add_file(PathBuf::from("/tmp/data.csv"))
+                .await
+                .is_err(),
             "conflicting format must be rejected"
         );
         assert!(
@@ -2424,7 +2430,8 @@ mod tests {
     async fn detect_udif_json_by_extension_without_opening_file() {
         // .udif.json is unambiguous by extension — detect() must return Udif without
         // attempting to open the file (the path does not exist on disk).
-        let format = ImportFormat::detect(std::path::Path::new("/nonexistent/export.udif.json")).await;
+        let format =
+            ImportFormat::detect(std::path::Path::new("/nonexistent/export.udif.json")).await;
         assert_eq!(format, ImportFormat::Udif);
     }
 
@@ -2455,8 +2462,11 @@ mod tests {
         // A .json file whose content is a plain JSON array (no UDIF marker keys) must return Unknown.
         use std::io::Write;
         let mut temp = tempfile::NamedTempFile::new().expect("temp file");
-        write!(temp, r#"[{{"id": 1, "name": "Alice"}}, {{"id": 2, "name": "Bob"}}]"#)
-            .expect("write temp");
+        write!(
+            temp,
+            r#"[{{"id": 1, "name": "Alice"}}, {{"id": 2, "name": "Bob"}}]"#
+        )
+        .expect("write temp");
         let path = temp.path().to_path_buf();
         let json_path = path.with_extension("json");
         std::fs::copy(&path, &json_path).expect("copy to .json");

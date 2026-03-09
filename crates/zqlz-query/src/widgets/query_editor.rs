@@ -111,7 +111,10 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
     }
 }
 
-fn byte_offset_for_lsp_position(text: &ropey::Rope, position: lsp_types::Position) -> Option<usize> {
+fn byte_offset_for_lsp_position(
+    text: &ropey::Rope,
+    position: lsp_types::Position,
+) -> Option<usize> {
     let line = usize::try_from(position.line).ok()?;
     if line >= text.len_lines() {
         return None;
@@ -134,10 +137,12 @@ fn first_location_from_definition_response(
     match response {
         lsp_types::GotoDefinitionResponse::Scalar(location) => Some(location.clone()),
         lsp_types::GotoDefinitionResponse::Array(locations) => locations.first().cloned(),
-        lsp_types::GotoDefinitionResponse::Link(links) => links.first().map(|link| lsp_types::Location {
-            uri: link.target_uri.clone(),
-            range: link.target_selection_range,
-        }),
+        lsp_types::GotoDefinitionResponse::Link(links) => {
+            links.first().map(|link| lsp_types::Location {
+                uri: link.target_uri.clone(),
+                range: link.target_selection_range,
+            })
+        }
     }
 }
 
@@ -159,7 +164,9 @@ impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
 
         if let Some(definition) = self.sql_lsp.read().get_definition(&ui_rope, offset) {
             if let Some(location) = first_location_from_definition_response(&definition) {
-                if let Some(target_offset) = byte_offset_for_lsp_position(text, location.range.start) {
+                if let Some(target_offset) =
+                    byte_offset_for_lsp_position(text, location.range.start)
+                {
                     return Some(target_offset);
                 }
             }
@@ -681,13 +688,15 @@ impl QueryEditor {
 
         // Wire up go-to-definition / references providers for TextEditor context actions.
         {
-            let definition_adapter = std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
+            let definition_adapter =
+                std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
             editor.update(cx, |text_editor, _cx| {
                 text_editor.set_definition_provider(definition_adapter);
             });
         }
         {
-            let references_adapter = std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
+            let references_adapter =
+                std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
             editor.update(cx, |text_editor, _cx| {
                 text_editor.set_references_provider(references_adapter);
             });
@@ -802,13 +811,15 @@ impl QueryEditor {
 
         // Wire up go-to-definition / references providers for TextEditor context actions.
         {
-            let definition_adapter = std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
+            let definition_adapter =
+                std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
             editor.update(cx, |text_editor, _cx| {
                 text_editor.set_definition_provider(definition_adapter);
             });
         }
         {
-            let references_adapter = std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
+            let references_adapter =
+                std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
             editor.update(cx, |text_editor, _cx| {
                 text_editor.set_references_provider(references_adapter);
             });
@@ -2687,11 +2698,13 @@ impl QueryEditor {
 
                     if let Some(arguments) = cmd.arguments {
                         for argument in arguments {
-                            let workspace_edit =
-                                match serde_json::from_value::<lsp_types::WorkspaceEdit>(argument) {
-                                    Ok(edit) => edit,
-                                    Err(_) => continue,
-                                };
+                            let workspace_edit = match serde_json::from_value::<
+                                lsp_types::WorkspaceEdit,
+                            >(argument)
+                            {
+                                Ok(edit) => edit,
+                                Err(_) => continue,
+                            };
 
                             tracing::info!("Applying command-based code action: {}", command_title);
                             let result = self.editor.update(cx, |editor, cx| {
@@ -2703,7 +2716,9 @@ impl QueryEditor {
                                     self.is_dirty = true;
                                     self.update_diagnostics(cx);
                                     applied = true;
-                                    tracing::info!("Command-based code action applied successfully");
+                                    tracing::info!(
+                                        "Command-based code action applied successfully"
+                                    );
                                     break;
                                 }
                                 Err(err) => {
@@ -3750,7 +3765,8 @@ impl QueryEditor {
                                         let focus_handle = this.editor.read(cx).focus_handle(cx);
                                         focus_handle.focus(window, cx);
                                         this.editor.update(cx, |editor, cx| {
-                                            editor.navigate_to(line, column, None, None, window, cx);
+                                            editor
+                                                .navigate_to(line, column, None, None, window, cx);
                                         });
                                         this.clear_references(cx);
                                     }),

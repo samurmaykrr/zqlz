@@ -725,16 +725,18 @@ impl GenericImporter {
             return vec![];
         };
         match default {
-            crate::document::DefaultValue::CurrentUser if driver == "sqlite" => vec![ImportWarning {
-                table: Some(table_name.to_owned()),
-                column: Some(col.name.clone()),
-                message: format!(
-                    "Column '{}' in table '{}' had DEFAULT CURRENT_USER which is not \
+            crate::document::DefaultValue::CurrentUser if driver == "sqlite" => {
+                vec![ImportWarning {
+                    table: Some(table_name.to_owned()),
+                    column: Some(col.name.clone()),
+                    message: format!(
+                        "Column '{}' in table '{}' had DEFAULT CURRENT_USER which is not \
                      supported on SQLite; defaulting to NULL",
-                    col.name, table_name
-                ),
-                kind: ImportWarningKind::DefaultModified,
-            }],
+                        col.name, table_name
+                    ),
+                    kind: ImportWarningKind::DefaultModified,
+                }]
+            }
             crate::document::DefaultValue::GeneratedUuid if driver == "sqlite" => {
                 vec![ImportWarning {
                     table: Some(table_name.to_owned()),
@@ -884,8 +886,7 @@ impl GenericImporter {
                         table_name.to_ascii_lowercase().replace(' ', "_"),
                         col.name.to_ascii_lowercase().replace(' ', "_")
                     );
-                    synthesized
-                        .insert((table_name.clone(), col.name.clone()), type_name.clone());
+                    synthesized.insert((table_name.clone(), col.name.clone()), type_name.clone());
                     // Prefer the first definition if the same name somehow appears twice
                     // (e.g. two tables with identical column names).
                     enum_map.entry(type_name.clone()).or_insert(EnumDefinition {
@@ -979,7 +980,8 @@ impl GenericImporter {
         self.generate_column_sql(col)
     }
 
-    fn generate_primary_key_sql(&self, pk: &PrimaryKeyConstraint) -> String {        let cols: Vec<String> = pk
+    fn generate_primary_key_sql(&self, pk: &PrimaryKeyConstraint) -> String {
+        let cols: Vec<String> = pk
             .columns
             .iter()
             .map(|c| self.quote_identifier(c))
@@ -1444,15 +1446,15 @@ impl GenericImporter {
                 // When the table has any AUTOINCREMENT column, resetting
                 // sqlite_sequence ensures the next INSERT starts from 1 rather
                 // than continuing from the previous high-water mark.
-                let has_autoincrement = table_def
-                    .columns
-                    .iter()
-                    .any(|c| c.auto_increment || matches!(
-                        c.canonical_type,
-                        crate::CanonicalType::Serial
-                            | crate::CanonicalType::SmallSerial
-                            | crate::CanonicalType::BigSerial
-                    ));
+                let has_autoincrement = table_def.columns.iter().any(|c| {
+                    c.auto_increment
+                        || matches!(
+                            c.canonical_type,
+                            crate::CanonicalType::Serial
+                                | crate::CanonicalType::SmallSerial
+                                | crate::CanonicalType::BigSerial
+                        )
+                });
 
                 if has_autoincrement {
                     // sqlite_sequence may not exist if no AUTOINCREMENT table has
@@ -1499,8 +1501,7 @@ impl GenericImporter {
         tables: &[(&'a String, &'a TableDefinition)],
         options: &ImportOptions,
     ) -> Vec<(&'a String, &'a TableDefinition)> {
-        let table_names: HashSet<&str> =
-            tables.iter().map(|(name, _)| name.as_str()).collect();
+        let table_names: HashSet<&str> = tables.iter().map(|(name, _)| name.as_str()).collect();
 
         // Build adjacency list: node A depends on node B (B must come first).
         // Only include edges where the referenced table is in our import set.
@@ -1576,8 +1577,10 @@ impl GenericImporter {
         }
 
         // Rebuild the output vec in the computed order.
-        let lookup: HashMap<&str, (&String, &TableDefinition)> =
-            tables.iter().map(|(name, def)| (name.as_str(), (*name, *def))).collect();
+        let lookup: HashMap<&str, (&String, &TableDefinition)> = tables
+            .iter()
+            .map(|(name, def)| (name.as_str(), (*name, *def)))
+            .collect();
 
         sorted_names
             .iter()
@@ -1670,10 +1673,9 @@ impl GenericImporter {
                     Ok(_) => {}
                     Err(e) => {
                         if options.continue_on_error {
-                            result.errors.push(format!(
-                                "Failed to restore sequence '{}': {}",
-                                seq.name, e
-                            ));
+                            result
+                                .errors
+                                .push(format!("Failed to restore sequence '{}': {}", seq.name, e));
                         } else {
                             return Err(ImportError::QueryError(format!(
                                 "Failed to restore sequence '{}': {}",
@@ -1925,10 +1927,8 @@ impl Importer for GenericImporter {
                 }
 
                 if !exists || options.if_exists == IfTableExists::Replace {
-                    let create_sql = self.generate_create_table_sql_with_enums(
-                        table_def,
-                        &synthesized_enum_columns,
-                    );
+                    let create_sql = self
+                        .generate_create_table_sql_with_enums(table_def, &synthesized_enum_columns);
                     self.connection
                         .execute(&create_sql, &[])
                         .await
@@ -1947,19 +1947,13 @@ impl Importer for GenericImporter {
                             "mysql" => format!(
                                 "CHECK constraint '{}' on table '{}' is parsed but NOT enforced \
                                  on MySQL < 8.0.16; verify your MySQL version supports enforcement",
-                                check
-                                    .name
-                                    .as_deref()
-                                    .unwrap_or("<unnamed>"),
+                                check.name.as_deref().unwrap_or("<unnamed>"),
                                 table_name
                             ),
                             "sqlite" => format!(
                                 "CHECK constraint '{}' on table '{}' requires SQLite >= 3.25.2 \
                                  for enforcement; verify your SQLite version",
-                                check
-                                    .name
-                                    .as_deref()
-                                    .unwrap_or("<unnamed>"),
+                                check.name.as_deref().unwrap_or("<unnamed>"),
                                 table_name
                             ),
                             _ => continue,
@@ -2025,8 +2019,7 @@ impl Importer for GenericImporter {
                     // Emit per-column enum degradation warnings when the target driver
                     // cannot natively preserve a named or inline enum type.
                     for col in &table_def.columns {
-                        let enum_warnings =
-                            self.generate_enum_column_warnings(table_name, col);
+                        let enum_warnings = self.generate_enum_column_warnings(table_name, col);
                         for w in enum_warnings {
                             let object = w.column.clone();
                             let source = w.message.clone();
@@ -2093,10 +2086,8 @@ impl Importer for GenericImporter {
                     // driver's bound-parameter limit.  A table with many
                     // columns would otherwise produce statements that exceed
                     // the limit at the requested batch_size.
-                    let safe_batch = self.effective_batch_size(
-                        options.batch_size as usize,
-                        insertable_cols.len(),
-                    );
+                    let safe_batch = self
+                        .effective_batch_size(options.batch_size as usize, insertable_cols.len());
 
                     for chunk in table_data.rows.chunks(safe_batch) {
                         // Decode all rows in the chunk and collect the flat
@@ -2108,12 +2099,8 @@ impl Importer for GenericImporter {
                         for row in chunk {
                             let all_values = self.decode_row(&row.values)?;
                             for &col_idx in &insertable_indices {
-                                batch_values.push(
-                                    all_values
-                                        .get(col_idx)
-                                        .cloned()
-                                        .unwrap_or(Value::Null),
-                                );
+                                batch_values
+                                    .push(all_values.get(col_idx).cloned().unwrap_or(Value::Null));
                             }
                             chunk_rows_decoded += 1;
                         }
@@ -2207,32 +2194,30 @@ impl Importer for GenericImporter {
                 let target_name = self.get_target_table_name(table_name, options);
                 for index in &table_def.indexes {
                     match self.map_index_to_sql(&target_name, index) {
-                        Ok(sql) => {
-                            match self.connection.execute(&sql, &[]).await {
-                                Ok(_) => {
-                                    result.indexes_created += 1;
-                                }
-                                Err(e) => {
-                                    if options.continue_on_error {
-                                        result.push_warning(
-                                            ImportWarning {
-                                                table: Some(table_name.to_string()),
-                                                column: None,
-                                                message: format!("Failed to create index: {}", e),
-                                                kind: ImportWarningKind::IndexSkipped,
-                                            },
-                                            DegradationCategory::Index,
-                                            Some(index.name.clone()),
-                                            "index",
-                                            "dropped due to creation failure",
-                                            DegradationSeverity::Dropped,
-                                        );
-                                    } else {
-                                        return Err(ImportError::QueryError(e.to_string()));
-                                    }
+                        Ok(sql) => match self.connection.execute(&sql, &[]).await {
+                            Ok(_) => {
+                                result.indexes_created += 1;
+                            }
+                            Err(e) => {
+                                if options.continue_on_error {
+                                    result.push_warning(
+                                        ImportWarning {
+                                            table: Some(table_name.to_string()),
+                                            column: None,
+                                            message: format!("Failed to create index: {}", e),
+                                            kind: ImportWarningKind::IndexSkipped,
+                                        },
+                                        DegradationCategory::Index,
+                                        Some(index.name.clone()),
+                                        "index",
+                                        "dropped due to creation failure",
+                                        DegradationSeverity::Dropped,
+                                    );
+                                } else {
+                                    return Err(ImportError::QueryError(e.to_string()));
                                 }
                             }
-                        }
+                        },
                         Err(IndexMappingOutcome::Degraded { sql, messages }) => {
                             // The index can still be created, but with reduced fidelity.
                             // Emit all degradation warnings before attempting the CREATE.
@@ -2344,7 +2329,8 @@ impl Importer for GenericImporter {
                 for fk in &table_def.foreign_keys {
                     // Map the referenced table through any table renaming so
                     // the ALTER TABLE statement uses the actual target name.
-                    let referenced_target = self.get_target_table_name(&fk.referenced_table, options);
+                    let referenced_target =
+                        self.get_target_table_name(&fk.referenced_table, options);
 
                     // If the referenced table is not part of this import (an
                     // external dependency), skip the FK and leave a warning
@@ -2635,8 +2621,8 @@ mod tests {
     }
 
     fn make_table_def_with_autoincrement() -> TableDefinition {
-        let col = ColumnDefinition::new("id", crate::CanonicalType::BigInt, "bigint")
-            .auto_increment();
+        let col =
+            ColumnDefinition::new("id", crate::CanonicalType::BigInt, "bigint").auto_increment();
         let mut table = TableDefinition::new("users");
         table.add_column(col);
         table
@@ -2690,7 +2676,12 @@ mod tests {
         let table_def = make_table_def_with_autoincrement();
         importer.truncate_table("users", &table_def).await.unwrap();
         let sqls = conn.executed_sql();
-        assert_eq!(sqls.len(), 2, "SQLite must issue DELETE FROM and a sequence reset, got: {:?}", sqls);
+        assert_eq!(
+            sqls.len(),
+            2,
+            "SQLite must issue DELETE FROM and a sequence reset, got: {:?}",
+            sqls
+        );
         assert!(
             sqls[0].starts_with("DELETE FROM"),
             "first SQL must be DELETE FROM, got: {}",
@@ -2711,7 +2702,12 @@ mod tests {
         let table_def = make_table_def_no_autoincrement();
         importer.truncate_table("logs", &table_def).await.unwrap();
         let sqls = conn.executed_sql();
-        assert_eq!(sqls.len(), 1, "no sequence reset needed for plain tables, got: {:?}", sqls);
+        assert_eq!(
+            sqls.len(),
+            1,
+            "no sequence reset needed for plain tables, got: {:?}",
+            sqls
+        );
         assert!(
             sqls[0].starts_with("DELETE FROM"),
             "SQLite without autoincrement must use DELETE FROM, got: {}",
@@ -2730,7 +2726,12 @@ mod tests {
         table_def.add_column(col);
         importer.truncate_table("events", &table_def).await.unwrap();
         let sqls = conn.executed_sql();
-        assert_eq!(sqls.len(), 2, "Serial type must trigger sequence reset, got: {:?}", sqls);
+        assert_eq!(
+            sqls.len(),
+            2,
+            "Serial type must trigger sequence reset, got: {:?}",
+            sqls
+        );
         assert!(sqls[1].contains("sqlite_sequence"));
     }
 
@@ -2820,8 +2821,8 @@ mod tests {
 
     #[test]
     fn test_is_db_generated_explicit_auto_increment_flag() {
-        let col = ColumnDefinition::new("id", crate::CanonicalType::Integer, "INT")
-            .auto_increment();
+        let col =
+            ColumnDefinition::new("id", crate::CanonicalType::Integer, "INT").auto_increment();
         assert!(
             col.is_db_generated(),
             "auto_increment flag must mark column as db-generated"
@@ -2922,10 +2923,7 @@ mod tests {
     #[test]
     fn test_build_batch_insert_sql_postgres_numbered_placeholders() {
         let importer = make_importer("postgresql");
-        let cols = vec![
-            "\"name\"".to_string(),
-            "\"age\"".to_string(),
-        ];
+        let cols = vec!["\"name\"".to_string(), "\"age\"".to_string()];
         let sql = importer.build_batch_insert_sql("users", &cols, 3);
         // Row 0: $1, $2  |  Row 1: $3, $4  |  Row 2: $5, $6
         assert!(
@@ -3008,11 +3006,14 @@ mod tests {
         let name_c = "c".to_string();
         let table_a = make_table_def("a", &["b"]); // a depends on b
         let table_b = make_table_def("b", &["c"]); // b depends on c
-        let table_c = make_table_def("c", &[]);    // c has no deps
+        let table_c = make_table_def("c", &[]); // c has no deps
 
         // Pass in reverse order to show sorting is not just order-preserving.
-        let tables: Vec<(&String, &TableDefinition)> =
-            vec![(&name_a, &table_a), (&name_b, &table_b), (&name_c, &table_c)];
+        let tables: Vec<(&String, &TableDefinition)> = vec![
+            (&name_a, &table_a),
+            (&name_b, &table_b),
+            (&name_c, &table_c),
+        ];
 
         let sorted = importer.topological_sort_tables(&tables, &options);
         let names: Vec<&str> = sorted.iter().map(|(n, _)| n.as_str()).collect();
@@ -3036,12 +3037,8 @@ mod tests {
             .iter()
             .map(|s| s.to_string())
             .collect();
-        let defs: Vec<TableDefinition> = names
-            .iter()
-            .map(|n| make_table_def(n, &[]))
-            .collect();
-        let tables: Vec<(&String, &TableDefinition)> =
-            names.iter().zip(defs.iter()).collect();
+        let defs: Vec<TableDefinition> = names.iter().map(|n| make_table_def(n, &[])).collect();
+        let tables: Vec<(&String, &TableDefinition)> = names.iter().zip(defs.iter()).collect();
 
         let sorted = importer.topological_sort_tables(&tables, &options);
         assert_eq!(sorted.len(), 3, "all tables must be present in output");
@@ -3097,7 +3094,11 @@ mod tests {
         let tables: Vec<(&String, &TableDefinition)> = vec![(&name_orders, &table_orders)];
 
         let sorted = importer.topological_sort_tables(&tables, &options);
-        assert_eq!(sorted.len(), 1, "orders must still appear despite external FK");
+        assert_eq!(
+            sorted.len(),
+            1,
+            "orders must still appear despite external FK"
+        );
     }
 
     /// generate_foreign_key_sql must produce an ALTER TABLE ADD CONSTRAINT
@@ -3263,7 +3264,10 @@ mod tests {
 
     // ===== generate_column_sql semantic DefaultValue tests =====
 
-    fn make_col_with_default(name: &str, default: crate::document::DefaultValue) -> ColumnDefinition {
+    fn make_col_with_default(
+        name: &str,
+        default: crate::document::DefaultValue,
+    ) -> ColumnDefinition {
         let mut col = ColumnDefinition::new(name, crate::CanonicalType::Text, "TEXT");
         col.default_value = Some(default);
         col
@@ -3290,7 +3294,10 @@ mod tests {
             let importer = make_importer(driver);
             let col = make_col_with_default("day", DefaultValue::CurrentDate);
             let sql = importer.generate_column_sql(&col);
-            assert!(sql.contains("DEFAULT CURRENT_DATE"), "driver={driver}: {sql}");
+            assert!(
+                sql.contains("DEFAULT CURRENT_DATE"),
+                "driver={driver}: {sql}"
+            );
         }
     }
 
@@ -3301,7 +3308,10 @@ mod tests {
             let importer = make_importer(driver);
             let col = make_col_with_default("ts", DefaultValue::CurrentTime);
             let sql = importer.generate_column_sql(&col);
-            assert!(sql.contains("DEFAULT CURRENT_TIME"), "driver={driver}: {sql}");
+            assert!(
+                sql.contains("DEFAULT CURRENT_TIME"),
+                "driver={driver}: {sql}"
+            );
         }
     }
 
@@ -3326,7 +3336,10 @@ mod tests {
             let importer = make_importer(driver);
             let col = make_col_with_default("owner", DefaultValue::CurrentUser);
             let sql = importer.generate_column_sql(&col);
-            assert!(sql.contains("DEFAULT CURRENT_USER"), "driver={driver}: {sql}");
+            assert!(
+                sql.contains("DEFAULT CURRENT_USER"),
+                "driver={driver}: {sql}"
+            );
             let warnings = importer.generate_column_default_warnings("t", &col);
             assert!(warnings.is_empty(), "no warning expected for {driver}");
         }
@@ -3353,7 +3366,10 @@ mod tests {
         let sq = make_importer("sqlite");
         let col = make_col_with_default("id", DefaultValue::GeneratedUuid);
         let sql = sq.generate_column_sql(&col);
-        assert!(!sql.contains("DEFAULT"), "sqlite: no default expected: {sql}");
+        assert!(
+            !sql.contains("DEFAULT"),
+            "sqlite: no default expected: {sql}"
+        );
         let warnings = sq.generate_column_default_warnings("t", &col);
         assert_eq!(warnings.len(), 1);
         assert_eq!(warnings[0].kind, ImportWarningKind::DefaultModified);
@@ -3417,8 +3433,14 @@ mod tests {
         let index = make_index_with_method("idx_name", &["name"], false, Some(IndexMethod::Btree));
         let outcome = importer.map_index_to_sql("users", &index);
         let sql = outcome.expect("BTREE must succeed");
-        assert!(!sql.contains("USING"), "BTREE must omit USING clause: {sql}");
-        assert!(sql.starts_with("CREATE INDEX"), "must be CREATE INDEX: {sql}");
+        assert!(
+            !sql.contains("USING"),
+            "BTREE must omit USING clause: {sql}"
+        );
+        assert!(
+            sql.starts_with("CREATE INDEX"),
+            "must be CREATE INDEX: {sql}"
+        );
     }
 
     /// UNIQUE BTREE on MySQL must use backtick quoting and no USING clause.
@@ -3428,8 +3450,14 @@ mod tests {
         let index = make_index_with_method("idx_email", &["email"], true, Some(IndexMethod::Btree));
         let sql = importer.generate_index_sql("users", &index);
         assert!(sql.contains("CREATE UNIQUE INDEX"), "must be UNIQUE: {sql}");
-        assert!(sql.contains("`email`"), "MySQL must use backtick quoting: {sql}");
-        assert!(!sql.contains("USING"), "BTREE must omit USING clause: {sql}");
+        assert!(
+            sql.contains("`email`"),
+            "MySQL must use backtick quoting: {sql}"
+        );
+        assert!(
+            !sql.contains("USING"),
+            "BTREE must omit USING clause: {sql}"
+        );
     }
 
     /// GIN on PostgreSQL must emit `USING GIN`.
@@ -3450,10 +3478,7 @@ mod tests {
         let index = make_index_with_method("idx_tags", &["tags"], false, Some(IndexMethod::Gin));
         match importer.map_index_to_sql("articles", &index) {
             Err(IndexMappingOutcome::Skipped(msg)) => {
-                assert!(
-                    msg.contains("GIN"),
-                    "skip message must mention GIN: {msg}"
-                );
+                assert!(msg.contains("GIN"), "skip message must mention GIN: {msg}");
                 assert!(
                     msg.contains("MySQL") || msg.contains("mysql"),
                     "skip message must mention MySQL: {msg}"
@@ -3488,7 +3513,10 @@ mod tests {
                     !sql.contains("USING"),
                     "degraded hash must fall back to default (no USING): {sql}"
                 );
-                assert!(!messages.is_empty(), "must have at least one degradation message");
+                assert!(
+                    !messages.is_empty(),
+                    "must have at least one degradation message"
+                );
                 assert!(
                     messages[0].contains("MEMORY") || messages[0].contains("BTREE"),
                     "message must explain the HASH limitation: {}",
@@ -3523,7 +3551,9 @@ mod tests {
         match importer.map_index_to_sql("posts", &index) {
             Err(IndexMappingOutcome::Degraded { messages, .. }) => {
                 assert!(
-                    messages.iter().any(|m| m.contains("GIN") || m.contains("tsvector")),
+                    messages
+                        .iter()
+                        .any(|m| m.contains("GIN") || m.contains("tsvector")),
                     "degradation message must hint at GIN/tsvector: {:?}",
                     messages
                 );
@@ -3592,7 +3622,9 @@ mod tests {
                     "MySQL degraded index must not contain WHERE: {sql}"
                 );
                 assert!(
-                    messages.iter().any(|m| m.contains("partial") || m.contains("WHERE")),
+                    messages
+                        .iter()
+                        .any(|m| m.contains("partial") || m.contains("WHERE")),
                     "degradation message must mention partial index: {:?}",
                     messages
                 );
@@ -3633,7 +3665,9 @@ mod tests {
                     "MySQL must not emit INCLUDE: {sql}"
                 );
                 assert!(
-                    messages.iter().any(|m| m.contains("INCLUDE") || m.contains("covering")),
+                    messages
+                        .iter()
+                        .any(|m| m.contains("INCLUDE") || m.contains("covering")),
                     "degradation message must mention INCLUDE/covering: {:?}",
                     messages
                 );
@@ -3706,7 +3740,8 @@ mod tests {
 
     /// Helper that builds a minimal ColumnDefinition with a generation expression.
     fn make_generated_col(name: &str, expr: &str, stored: bool) -> ColumnDefinition {
-        ColumnDefinition::new(name, crate::CanonicalType::Integer, "INTEGER").generated(expr, stored)
+        ColumnDefinition::new(name, crate::CanonicalType::Integer, "INTEGER")
+            .generated(expr, stored)
     }
 
     #[test]
@@ -3734,7 +3769,10 @@ mod tests {
             sql.contains("GENERATED ALWAYS AS"),
             "must contain GENERATED ALWAYS AS: {sql}"
         );
-        assert!(sql.contains("VIRTUAL"), "must contain VIRTUAL on MySQL: {sql}");
+        assert!(
+            sql.contains("VIRTUAL"),
+            "must contain VIRTUAL on MySQL: {sql}"
+        );
     }
 
     #[test]
@@ -3808,8 +3846,7 @@ mod tests {
     fn test_generated_column_virtual_to_stored_coercion_warning_on_postgresql() {
         let importer = make_importer("postgresql");
         let col = make_generated_col("computed", "a + b", false); // VIRTUAL
-        let warnings =
-            importer.generate_generated_column_warnings("tbl", &col, Some("postgresql"));
+        let warnings = importer.generate_generated_column_warnings("tbl", &col, Some("postgresql"));
         assert!(
             warnings.iter().any(|w| {
                 w.kind == ImportWarningKind::GeneratedColumnDegraded
@@ -3825,8 +3862,7 @@ mod tests {
     fn test_non_generated_column_produces_no_generated_warnings() {
         let importer = make_importer("postgresql");
         let col = ColumnDefinition::new("email", crate::CanonicalType::Text, "TEXT");
-        let warnings =
-            importer.generate_generated_column_warnings("users", &col, Some("mysql"));
+        let warnings = importer.generate_generated_column_warnings("users", &col, Some("mysql"));
         assert!(
             warnings.is_empty(),
             "plain column must not produce generated-column warnings"
@@ -3864,7 +3900,11 @@ mod tests {
             DegradationSeverity::Warning,
         );
 
-        assert_eq!(result.warnings.len(), 1, "must have exactly one ImportWarning");
+        assert_eq!(
+            result.warnings.len(),
+            1,
+            "must have exactly one ImportWarning"
+        );
         assert_eq!(
             result.degradation_warnings.len(),
             1,
@@ -3901,7 +3941,10 @@ mod tests {
         );
 
         let dw = &result.degradation_warnings[0];
-        assert_eq!(dw.table_name, "<unknown>", "missing table must use sentinel");
+        assert_eq!(
+            dw.table_name, "<unknown>",
+            "missing table must use sentinel"
+        );
     }
 
     /// `ImportWizardStep::Summary` must not allow forward or backward navigation
@@ -3955,7 +3998,12 @@ mod tests {
 
     // ── enum type DDL tests ──────────────────────────────────────────────────
 
-    fn make_enum_col(_table_name: &str, col_name: &str, values: &[&str], named: Option<&str>) -> ColumnDefinition {
+    fn make_enum_col(
+        _table_name: &str,
+        col_name: &str,
+        values: &[&str],
+        named: Option<&str>,
+    ) -> ColumnDefinition {
         ColumnDefinition::new(
             col_name,
             crate::CanonicalType::Enum {
@@ -4025,7 +4073,12 @@ mod tests {
     fn test_generate_create_table_sql_enum_sqlite_includes_check() {
         let importer = make_importer("sqlite");
         let mut table = TableDefinition::new("people");
-        table.add_column(make_enum_col("people", "mood", &["happy", "sad", "angry"], Some("mood")));
+        table.add_column(make_enum_col(
+            "people",
+            "mood",
+            &["happy", "sad", "angry"],
+            Some("mood"),
+        ));
         let sql = importer.generate_create_table_sql(&table);
         assert!(
             sql.contains("CHECK"),
@@ -4084,7 +4137,12 @@ mod tests {
         let mut doc = UdifDocument::new(crate::document::SourceInfo::new("mysql"));
 
         let mut table = TableDefinition::new("orders");
-        table.add_column(make_enum_col("orders", "status", &["pending", "shipped"], None));
+        table.add_column(make_enum_col(
+            "orders",
+            "status",
+            &["pending", "shipped"],
+            None,
+        ));
         doc.add_table(table);
 
         let (enum_map, synthesized) = importer.resolve_enum_types(&doc);
@@ -4168,7 +4226,8 @@ mod tests {
             "named PG enum targeting MySQL must produce a degradation warning"
         );
         assert!(
-            warnings[0].message.to_lowercase().contains("inline") || warnings[0].message.to_lowercase().contains("named"),
+            warnings[0].message.to_lowercase().contains("inline")
+                || warnings[0].message.to_lowercase().contains("named"),
             "warning must mention named-type loss: {}",
             warnings[0].message
         );

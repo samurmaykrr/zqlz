@@ -155,10 +155,7 @@ impl ConnectionService {
     ///
     /// A `DatabaseSchema` containing all discovered objects
     #[tracing::instrument(skip(self), fields(connection_id = %connection_id))]
-    pub async fn load_schema(
-        &self,
-        connection_id: Uuid,
-    ) -> ServiceResult<DatabaseSchema> {
+    pub async fn load_schema(&self, connection_id: Uuid) -> ServiceResult<DatabaseSchema> {
         tracing::info!("Loading schema for connection: {}", connection_id);
 
         let connection = self.manager.get(connection_id).ok_or_else(|| {

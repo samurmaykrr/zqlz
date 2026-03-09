@@ -3,10 +3,7 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt,
-    button::ButtonVariant,
-    dialog::DialogButtonProps,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
 
 use crate::app::AppState;
@@ -49,10 +46,10 @@ pub(in crate::main_view) fn handle_save_cell_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        database_name.as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connections
+        .get_for_database_cached(connection_id, database_name.as_deref())
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -185,7 +182,7 @@ pub(in crate::main_view) fn update_pending_new_row_cell(
             .update_new_row_cell(new_row_index, col, new_value.to_string());
         if let Some(row_data) = delegate.rows.get_mut(actual_row) {
             if let Some(cell) = row_data.get_mut(col) {
-                *cell = new_value.to_string();
+                *cell = new_value.to_string().into();
             }
         }
         cx.notify();
@@ -256,6 +253,7 @@ pub(in crate::main_view) fn handle_edit_cell_event(
 
 pub(in crate::main_view) fn handle_redis_key_edit_event(
     connection_id: Uuid,
+    database_name: String,
     all_row_values: &[String],
     all_column_names: &[String],
     key_value_editor_panel: &Entity<KeyValueEditorPanel>,
@@ -300,7 +298,10 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get(connection_id) else {
+    let Some(connection) = app_state
+        .connections
+        .get_for_database_cached(connection_id, Some(&database_name))
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -323,6 +324,7 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
                     ttl,
                     size_bytes: None,
                     connection_id,
+                    database_name: Some(database_name.clone()),
                     is_new: false,
                 };
 

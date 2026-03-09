@@ -82,9 +82,10 @@ mod tree_format_tests {
 `--USE TEMP B-TREE FOR GROUP BY"#;
 
         let plan = parse_sqlite_explain(output).unwrap();
-        assert!(plan
-            .iter_nodes()
-            .any(|n| n.node_type == NodeType::HashAggregate));
+        assert!(
+            plan.iter_nodes()
+                .any(|n| n.node_type == NodeType::HashAggregate)
+        );
     }
 
     #[test]
@@ -517,14 +518,16 @@ mod integration_tests {
         let plan = parse_sqlite_explain(output).unwrap();
 
         // Should have subquery
-        assert!(plan
-            .iter_nodes()
-            .any(|n| n.node_type == NodeType::SubqueryScan));
+        assert!(
+            plan.iter_nodes()
+                .any(|n| n.node_type == NodeType::SubqueryScan)
+        );
 
         // Should have aggregate
-        assert!(plan
-            .iter_nodes()
-            .any(|n| n.node_type == NodeType::HashAggregate));
+        assert!(
+            plan.iter_nodes()
+                .any(|n| n.node_type == NodeType::HashAggregate)
+        );
     }
 
     #[test]
@@ -588,9 +591,10 @@ mod real_world_tests {
 
         let plan = parse_sqlite_explain(output).unwrap();
 
-        assert!(plan
-            .iter_nodes()
-            .any(|n| n.node_type == NodeType::HashAggregate));
+        assert!(
+            plan.iter_nodes()
+                .any(|n| n.node_type == NodeType::HashAggregate)
+        );
         assert!(plan.iter_nodes().any(|n| n.node_type == NodeType::Sort));
     }
 

@@ -1,15 +1,15 @@
 use std::ops::Range;
 
 use gpui::{
-    anchored, deferred, div, point, px, App, Entity, IntoElement, ParentElement as _, Pixels,
-    Point, RenderOnce, StatefulInteractiveElement as _, Styled as _, Window,
+    App, Entity, IntoElement, ParentElement as _, Pixels, Point, RenderOnce,
+    StatefulInteractiveElement as _, Styled as _, Window, anchored, deferred, div, point, px,
 };
 
 use crate::widgets::{
+    Anchor,
     highlighter::{DiagnosticEntry, DiagnosticSeverity},
     input::popovers::editor_popover,
     text::{TextView, TextViewState},
-    Anchor,
 };
 
 const MAX_POPOVER_WIDTH: Pixels = px(500.);

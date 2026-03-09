@@ -9,6 +9,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_templates::{DbtContext, DbtTemplateEngine};
 use zqlz_ui::widgets::{
+    ActiveTheme, Icon, IndexPath, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
@@ -16,11 +17,11 @@ use zqlz_ui::widgets::{
     scroll::ScrollableElement,
     select::{Select, SelectItem, SelectState},
     typography::{body_small, caption, label, muted_small},
-    v_flex, ActiveTheme, Icon, IndexPath, Sizable, ZqlzIcon,
+    v_flex,
 };
 
-use crate::storage::{LocalStorage, SavedTemplate, TemplateType};
 use crate::AppState;
+use crate::storage::{LocalStorage, SavedTemplate, TemplateType};
 use zqlz_query::QueryEditor;
 
 /// Events emitted by the template library panel

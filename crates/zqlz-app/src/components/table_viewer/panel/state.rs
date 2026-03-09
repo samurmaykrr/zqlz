@@ -11,7 +11,6 @@ impl TableViewerPanel {
         self.is_loading = false;
         self.loading_started_at = None;
         self._loading_timer_task = None;
-        self.selected_rows.clear();
         self.filter_panel_state = None;
         self.column_visibility_state = None;
         self.filter_expanded = false;
@@ -22,7 +21,22 @@ impl TableViewerPanel {
         self.search_visible = false;
         self.search_text.clear();
         self.pagination_state = None;
+        self.active_request_generation = 0;
         cx.notify();
+    }
+
+    pub fn begin_data_request(&mut self, cx: &mut Context<Self>) -> u64 {
+        self.active_request_generation = self.active_request_generation.saturating_add(1);
+        self.set_loading(true, cx);
+        self.active_request_generation
+    }
+
+    pub fn current_request_generation(&self) -> u64 {
+        self.active_request_generation
+    }
+
+    pub fn is_current_request(&self, request_generation: u64) -> bool {
+        self.active_request_generation == request_generation
     }
 
     pub fn cancel_cell_editing(&mut self, cx: &mut Context<Self>) {
@@ -56,9 +70,23 @@ impl TableViewerPanel {
             let delegate = table.delegate_mut();
             if let Some(row_data) = delegate.rows.get_mut(row) {
                 if let Some(cell) = row_data.get_mut(col) {
-                    let old_value = cell.clone();
-                    *cell = new_value.unwrap_or_default();
-                    tracing::info!("Cell updated: '{}' -> '{}'", old_value, cell);
+                    let old_value = cell.display_for_table();
+                    *cell = match new_value {
+                        Some(s) => {
+                            let data_type = delegate
+                                .column_meta
+                                .get(col)
+                                .map(|c| c.data_type.as_str())
+                                .unwrap_or("text");
+                            zqlz_core::Value::parse_from_string(&s, data_type)
+                        }
+                        None => zqlz_core::Value::Null,
+                    };
+                    tracing::info!(
+                        "Cell updated: '{}' -> '{}'",
+                        old_value,
+                        cell.display_for_table()
+                    );
                     cx.notify();
                 } else {
                     tracing::warn!("Column {} not found in row {}", col, row);
@@ -102,9 +130,9 @@ impl TableViewerPanel {
     }
 
     /// Begin loading a specific table — sets the table name for display while loading
-    pub fn begin_loading_table(&mut self, table_name: String, cx: &mut Context<Self>) {
+    pub fn begin_loading_table(&mut self, table_name: String, cx: &mut Context<Self>) -> u64 {
         self.table_name = Some(table_name);
-        self.set_loading(true, cx);
+        self.begin_data_request(cx)
     }
 
     pub fn set_foreign_keys(&mut self, foreign_keys: Vec<ForeignKeyInfo>, cx: &mut Context<Self>) {
@@ -194,6 +222,35 @@ impl TableViewerPanel {
         } else {
             tracing::debug!("Cannot refresh: no table loaded");
         }
+    }
+
+    /// Update the total row count from a background count task.
+    ///
+    /// Called when a `CountCompleted` event arrives after the initial data
+    /// load (for slow-count drivers where the count is decoupled from the
+    /// data query for faster display).
+    pub fn update_total_rows(
+        &mut self,
+        total_rows: u64,
+        is_estimated: bool,
+        table_name: &str,
+        request_generation: u64,
+        cx: &mut Context<Self>,
+    ) {
+        // Only apply if we're still showing the same table
+        if self.table_name.as_deref() != Some(table_name)
+            || !self.is_current_request(request_generation)
+        {
+            return;
+        }
+        if let Some(ref pagination_state) = self.pagination_state {
+            pagination_state.update(cx, |state, cx| {
+                state.total_records = Some(total_rows);
+                state.is_estimated = is_estimated;
+                cx.notify();
+            });
+        }
+        cx.notify();
     }
 
     pub fn set_auto_commit_mode(&mut self, enabled: bool, cx: &mut Context<Self>) {

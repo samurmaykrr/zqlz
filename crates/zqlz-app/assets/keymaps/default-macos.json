@@ -58,7 +58,11 @@
       "cmd-e": "table_viewer::OpenRowEditor",
       "escape": "table_viewer::CancelCellEditing",
       "backspace": "table_viewer::DeleteSelectedRows",
-      "delete": "table_viewer::DeleteSelectedRows"
+      "delete": "table_viewer::DeleteSelectedRows",
+      "cmd-z": "table_viewer::UndoEdit",
+      "cmd-shift-z": "table_viewer::RedoEdit",
+      "cmd-f": "table_viewer::ToggleSearch",
+      "cmd-h": "table_viewer::ToggleReplace"
     }
   },
   {

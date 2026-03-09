@@ -9,7 +9,9 @@ use thiserror::Error;
 
 use zqlz_core::Connection;
 
-use crate::widgets::{FieldMapping, ImportAdvancedSettings, ImportMode, ImportWizardState, LogLevel};
+use crate::widgets::{
+    FieldMapping, ImportAdvancedSettings, ImportMode, ImportWizardState, LogLevel,
+};
 
 /// Errors during CSV import
 #[derive(Debug, Error)]
@@ -146,10 +148,9 @@ impl CsvImporter {
 
     /// Returns true if a table with the given name exists on the target connection.
     async fn table_exists(&self, table_name: &str) -> Result<bool, CsvImportError> {
-        let schema = self
-            .connection
-            .as_schema_introspection()
-            .ok_or_else(|| CsvImportError::SchemaError("Schema introspection not supported".into()))?;
+        let schema = self.connection.as_schema_introspection().ok_or_else(|| {
+            CsvImportError::SchemaError("Schema introspection not supported".into())
+        })?;
         let tables = schema
             .list_tables(None)
             .await
@@ -185,10 +186,7 @@ impl CsvImporter {
     ///   to the user rather than silently doing the wrong thing.
     ///
     /// Returns `Ok(true)` if the source should be skipped, `Ok(false)` to proceed normally.
-    async fn prepare_target_table(
-        &self,
-        table_name: &str,
-    ) -> Result<bool, CsvImportError> {
+    async fn prepare_target_table(&self, table_name: &str) -> Result<bool, CsvImportError> {
         match self.state.import_mode {
             ImportMode::Append => Ok(false),
             ImportMode::Copy => {
@@ -208,9 +206,7 @@ impl CsvImporter {
                 }
                 Ok(false)
             }
-            ImportMode::Update
-            | ImportMode::AppendUpdate
-            | ImportMode::Delete => {
+            ImportMode::Update | ImportMode::AppendUpdate | ImportMode::Delete => {
                 Err(CsvImportError::UnsupportedMode(format!(
                     "Import mode '{}' is not yet supported for CSV imports. \
                      Please choose Append or Copy.",
@@ -317,27 +313,24 @@ impl CsvImporter {
                 CsvImportResult::default()
             } else {
                 match source.path() {
-                Some(path) => {
-                    self.import_file(
-                        path,
-                        &target_table,
-                        &field_mappings,
-                        source_index,
-                        total_sources,
-                    )
-                    .await?
+                    Some(path) => {
+                        self.import_file(
+                            path,
+                            &target_table,
+                            &field_mappings,
+                            source_index,
+                            total_sources,
+                        )
+                        .await?
+                    }
+                    None => {
+                        // URL sources require an HTTP download step that is not yet implemented.
+                        // Returning an error here ensures the failure is visible to the caller
+                        // rather than silently producing an empty result.
+                        let url = source.url().unwrap_or("<unknown>").to_string();
+                        return Err(CsvImportError::UrlSourceNotSupported(url));
+                    }
                 }
-                None => {
-                    // URL sources require an HTTP download step that is not yet implemented.
-                    // Returning an error here ensures the failure is visible to the caller
-                    // rather than silently producing an empty result.
-                    let url = source
-                        .url()
-                        .unwrap_or("<unknown>")
-                        .to_string();
-                    return Err(CsvImportError::UrlSourceNotSupported(url));
-                }
-            }
             };
 
             // Accumulate results
@@ -639,7 +632,9 @@ pub fn generate_create_table_sql(
         .iter()
         .filter_map(|header| {
             let mapping = field_mappings.iter().find(|m| &m.source_field == header);
-            let skip = mapping.map(|m| m.skip || m.is_auto_increment).unwrap_or(false);
+            let skip = mapping
+                .map(|m| m.skip || m.is_auto_increment)
+                .unwrap_or(false);
             if skip {
                 return None;
             }
@@ -785,7 +780,13 @@ mod tests {
     // generate_create_table_sql tests
     // -------------------------------------------------------------------------
 
-    fn make_mapping(source: &str, target: &str, is_pk: bool, skip: bool, auto_inc: bool) -> FieldMapping {
+    fn make_mapping(
+        source: &str,
+        target: &str,
+        is_pk: bool,
+        skip: bool,
+        auto_inc: bool,
+    ) -> FieldMapping {
         FieldMapping {
             source_field: source.to_string(),
             target_field: target.to_string(),
@@ -916,7 +917,11 @@ mod tests {
             self.driver
         }
 
-        async fn execute(&self, sql: &str, _params: &[zqlz_core::Value]) -> ZqlzResult<StatementResult> {
+        async fn execute(
+            &self,
+            sql: &str,
+            _params: &[zqlz_core::Value],
+        ) -> ZqlzResult<StatementResult> {
             self.executed.lock().unwrap().push(sql.to_string());
             Ok(StatementResult {
                 is_query: false,
@@ -990,43 +995,80 @@ mod tests {
             Ok(Vec::new())
         }
 
-        async fn get_table(&self, _schema: Option<&str>, _name: &str) -> ZqlzResult<zqlz_core::TableDetails> {
+        async fn get_table(
+            &self,
+            _schema: Option<&str>,
+            _name: &str,
+        ) -> ZqlzResult<zqlz_core::TableDetails> {
             Err(ZqlzError::NotSupported("mock".into()))
         }
 
-        async fn get_columns(&self, _schema: Option<&str>, _table: &str) -> ZqlzResult<Vec<zqlz_core::ColumnInfo>> {
+        async fn get_columns(
+            &self,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> ZqlzResult<Vec<zqlz_core::ColumnInfo>> {
             Ok(Vec::new())
         }
 
-        async fn get_indexes(&self, _schema: Option<&str>, _table: &str) -> ZqlzResult<Vec<zqlz_core::IndexInfo>> {
+        async fn get_indexes(
+            &self,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> ZqlzResult<Vec<zqlz_core::IndexInfo>> {
             Ok(Vec::new())
         }
 
-        async fn get_foreign_keys(&self, _schema: Option<&str>, _table: &str) -> ZqlzResult<Vec<zqlz_core::ForeignKeyInfo>> {
+        async fn get_foreign_keys(
+            &self,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> ZqlzResult<Vec<zqlz_core::ForeignKeyInfo>> {
             Ok(Vec::new())
         }
 
-        async fn get_primary_key(&self, _schema: Option<&str>, _table: &str) -> ZqlzResult<Option<zqlz_core::PrimaryKeyInfo>> {
+        async fn get_primary_key(
+            &self,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> ZqlzResult<Option<zqlz_core::PrimaryKeyInfo>> {
             Ok(None)
         }
 
-        async fn get_constraints(&self, _schema: Option<&str>, _table: &str) -> ZqlzResult<Vec<zqlz_core::ConstraintInfo>> {
+        async fn get_constraints(
+            &self,
+            _schema: Option<&str>,
+            _table: &str,
+        ) -> ZqlzResult<Vec<zqlz_core::ConstraintInfo>> {
             Ok(Vec::new())
         }
 
-        async fn list_functions(&self, _schema: Option<&str>) -> ZqlzResult<Vec<zqlz_core::FunctionInfo>> {
+        async fn list_functions(
+            &self,
+            _schema: Option<&str>,
+        ) -> ZqlzResult<Vec<zqlz_core::FunctionInfo>> {
             Ok(Vec::new())
         }
 
-        async fn list_procedures(&self, _schema: Option<&str>) -> ZqlzResult<Vec<zqlz_core::ProcedureInfo>> {
+        async fn list_procedures(
+            &self,
+            _schema: Option<&str>,
+        ) -> ZqlzResult<Vec<zqlz_core::ProcedureInfo>> {
             Ok(Vec::new())
         }
 
-        async fn list_triggers(&self, _schema: Option<&str>, _table: Option<&str>) -> ZqlzResult<Vec<zqlz_core::TriggerInfo>> {
+        async fn list_triggers(
+            &self,
+            _schema: Option<&str>,
+            _table: Option<&str>,
+        ) -> ZqlzResult<Vec<zqlz_core::TriggerInfo>> {
             Ok(Vec::new())
         }
 
-        async fn list_sequences(&self, _schema: Option<&str>) -> ZqlzResult<Vec<zqlz_core::SequenceInfo>> {
+        async fn list_sequences(
+            &self,
+            _schema: Option<&str>,
+        ) -> ZqlzResult<Vec<zqlz_core::SequenceInfo>> {
             Ok(Vec::new())
         }
 
@@ -1038,12 +1080,18 @@ mod tests {
             Err(ZqlzError::NotSupported("mock".into()))
         }
 
-        async fn get_dependencies(&self, _object: &zqlz_core::DatabaseObject) -> ZqlzResult<Vec<zqlz_core::Dependency>> {
+        async fn get_dependencies(
+            &self,
+            _object: &zqlz_core::DatabaseObject,
+        ) -> ZqlzResult<Vec<zqlz_core::Dependency>> {
             Ok(Vec::new())
         }
     }
 
-    fn make_importer_with_mode(connection: Arc<TrackingConnection>, mode: ImportMode) -> CsvImporter {
+    fn make_importer_with_mode(
+        connection: Arc<TrackingConnection>,
+        mode: ImportMode,
+    ) -> CsvImporter {
         let mut state = ImportWizardState::default();
         state.import_mode = mode;
         CsvImporter {
@@ -1069,7 +1117,8 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_target_table_append_is_noop() {
-        let conn = Arc::new(TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]));
+        let conn =
+            Arc::new(TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]));
         let importer = make_importer_with_mode(conn.clone(), ImportMode::Append);
         let skip = importer.prepare_target_table("users").await.unwrap();
         assert!(!skip, "Append should not skip the source");
@@ -1081,7 +1130,8 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_target_table_copy_issues_delete_when_table_exists() {
-        let conn = Arc::new(TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]));
+        let conn =
+            Arc::new(TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]));
         let importer = make_importer_with_mode(conn.clone(), ImportMode::Copy);
         let skip = importer.prepare_target_table("users").await.unwrap();
         assert!(!skip, "Copy should not skip the source");
@@ -1124,9 +1174,8 @@ mod tests {
     #[tokio::test]
     async fn prepare_target_table_append_without_update_proceeds_on_empty_table() {
         // Table exists but is empty → should not skip.
-        let conn = Arc::new(
-            TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]),
-        );
+        let conn =
+            Arc::new(TrackingConnection::new("postgresql").with_existing_tables(vec!["users"]));
         let importer = make_importer_with_mode(conn.clone(), ImportMode::AppendWithoutUpdate);
         let skip = importer.prepare_target_table("users").await.unwrap();
         assert!(!skip, "Empty table should be populated");
@@ -1134,7 +1183,11 @@ mod tests {
 
     #[tokio::test]
     async fn prepare_target_table_unsupported_mode_returns_error() {
-        for mode in [ImportMode::Update, ImportMode::AppendUpdate, ImportMode::Delete] {
+        for mode in [
+            ImportMode::Update,
+            ImportMode::AppendUpdate,
+            ImportMode::Delete,
+        ] {
             let conn = Arc::new(TrackingConnection::new("postgresql"));
             let importer = make_importer_with_mode(conn, mode);
             let result = importer.prepare_target_table("users").await;

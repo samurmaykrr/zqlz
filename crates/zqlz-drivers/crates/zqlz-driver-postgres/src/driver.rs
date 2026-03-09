@@ -81,9 +81,11 @@ impl DatabaseDriver for PostgresDriver {
             .get_string("user")
             .or_else(|| config.get_string("username"));
         let password = config.get_string("password");
-        
+
         // Extract SSL configuration
-        let ssl_mode = config.get_string("ssl_mode").unwrap_or_else(|| "prefer".to_string());
+        let ssl_mode = config
+            .get_string("ssl_mode")
+            .unwrap_or_else(|| "prefer".to_string());
         let ssl_ca_cert = config.get_string("ssl_ca_cert");
         let ssl_client_cert = config.get_string("ssl_client_cert");
         let ssl_client_key = config.get_string("ssl_client_key");
@@ -147,7 +149,7 @@ impl DatabaseDriver for PostgresDriver {
 
     fn connection_field_schema(&self) -> ConnectionFieldSchema {
         use zqlz_core::ConnectionFieldOption;
-        
+
         ConnectionFieldSchema {
             title: Cow::Borrowed("PostgreSQL Connection"),
             fields: vec![
@@ -174,7 +176,6 @@ impl DatabaseDriver for PostgresDriver {
                 ConnectionField::password("password", "Password")
                     .width(0.5)
                     .row_group(2),
-                
                 // SSL tab fields
                 ConnectionField::select(
                     "ssl_mode",
@@ -189,15 +190,15 @@ impl DatabaseDriver for PostgresDriver {
                     ],
                 )
                 .default_value("prefer")
-                .help_text("SSL connection mode - Prefer tries SSL first, falls back to unencrypted")
+                .help_text(
+                    "SSL connection mode - Prefer tries SSL first, falls back to unencrypted",
+                )
                 .tab("ssl"),
-                
                 ConnectionField::file_path("ssl_ca_cert", "CA Certificate")
                     .placeholder("/path/to/ca-cert.pem")
                     .with_extensions(vec!["pem", "crt", "cer"])
                     .help_text("Root certificate for verifying server certificate")
                     .tab("ssl"),
-                
                 ConnectionField::file_path("ssl_client_cert", "Client Certificate")
                     .placeholder("/path/to/client-cert.pem")
                     .with_extensions(vec!["pem", "crt", "cer"])
@@ -205,7 +206,6 @@ impl DatabaseDriver for PostgresDriver {
                     .width(0.5)
                     .row_group(10)
                     .tab("ssl"),
-                
                 ConnectionField::file_path("ssl_client_key", "Client Key")
                     .placeholder("/path/to/client-key.pem")
                     .with_extensions(vec!["pem", "key"])
@@ -213,25 +213,21 @@ impl DatabaseDriver for PostgresDriver {
                     .width(0.5)
                     .row_group(10)
                     .tab("ssl"),
-                
                 // Advanced tab fields
                 ConnectionField::text("connect_timeout", "Connect Timeout (seconds)")
                     .placeholder("10")
                     .default_value("10")
                     .help_text("Maximum time to wait for connection")
                     .tab("advanced"),
-                
                 ConnectionField::text("application_name", "Application Name")
                     .placeholder("ZQLZ")
                     .default_value("ZQLZ")
                     .help_text("Application name sent to PostgreSQL server")
                     .tab("advanced"),
-                
                 ConnectionField::text("search_path", "Search Path")
                     .placeholder("public")
                     .help_text("Default schema search path (comma-separated)")
                     .tab("advanced"),
-                
                 ConnectionField::boolean("keepalive", "Keep Alive")
                     .default_value("true")
                     .help_text("Send TCP keepalive packets to maintain connection")

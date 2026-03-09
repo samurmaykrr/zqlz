@@ -488,34 +488,34 @@ impl std::fmt::Debug for RedisConnection {
 
 /// Convert Redis value to query result rows
 fn redis_value_to_rows(value: &redis::Value) -> (Vec<ColumnMeta>, Vec<Row>) {
-        let columns = vec![
-            ColumnMeta {
-                name: "key".to_string(),
-                data_type: "TEXT".to_string(),
-                nullable: true,
-                ordinal: 0,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            },
-            ColumnMeta {
-                name: "value".to_string(),
-                data_type: "TEXT".to_string(),
-                nullable: true,
-                ordinal: 1,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            },
-        ];
+    let columns = vec![
+        ColumnMeta {
+            name: "key".to_string(),
+            data_type: "TEXT".to_string(),
+            nullable: true,
+            ordinal: 0,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        },
+        ColumnMeta {
+            name: "value".to_string(),
+            data_type: "TEXT".to_string(),
+            nullable: true,
+            ordinal: 1,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        },
+    ];
 
     let column_names = vec!["key".to_string(), "value".to_string()];
 

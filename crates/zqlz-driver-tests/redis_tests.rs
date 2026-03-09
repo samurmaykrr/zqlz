@@ -17,7 +17,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use zqlz_core::{Connection, Value};
 
@@ -169,7 +169,10 @@ mod tests {
             .context("SET key3 failed")?;
 
         let del_result = conn
-            .execute("DEL test:del_multi:key1 test:del_multi:key2 test:del_multi:key3", &[])
+            .execute(
+                "DEL test:del_multi:key1 test:del_multi:key2 test:del_multi:key3",
+                &[],
+            )
             .await
             .context("DEL multiple keys failed")?;
 
@@ -237,10 +240,7 @@ mod tests {
             .await
             .context("GET nonexistent key failed")?;
 
-        let value = result
-            .rows
-            .first()
-            .and_then(|row| row.get_by_name("value"));
+        let value = result.rows.first().and_then(|row| row.get_by_name("value"));
 
         assert_eq!(
             value,
@@ -302,9 +302,12 @@ mod tests {
     async fn test_mget_mset(#[case] driver: TestDriver) -> Result<()> {
         let conn = test_connection(driver).await?;
 
-        conn.execute("MSET test:mset:key1 value1 test:mset:key2 value2 test:mset:key3 value3", &[])
-            .await
-            .context("MSET failed")?;
+        conn.execute(
+            "MSET test:mset:key1 value1 test:mset:key2 value2 test:mset:key3 value3",
+            &[],
+        )
+        .await
+        .context("MSET failed")?;
 
         let mget_result = conn
             .query("MGET test:mset:key1 test:mset:key2 test:mset:key3", &[])
@@ -416,9 +419,12 @@ mod tests {
         assert!(keys.contains(&"test:pattern:user:1".to_string()));
         assert!(keys.contains(&"test:pattern:user:2".to_string()));
 
-        conn.execute("DEL test:pattern:user:1 test:pattern:user:2 test:pattern:admin:1", &[])
-            .await
-            .context("DEL cleanup failed")?;
+        conn.execute(
+            "DEL test:pattern:user:1 test:pattern:user:2 test:pattern:admin:1",
+            &[],
+        )
+        .await
+        .context("DEL cleanup failed")?;
 
         Ok(())
     }
@@ -510,9 +516,12 @@ mod tests {
 
         assert!(!keys.is_empty(), "SCAN should return at least one key");
 
-        conn.execute("DEL test:scan:key1 test:scan:key2 test:scan:key3 test:scan:key4 test:scan:key5", &[])
-            .await
-            .context("DEL cleanup failed")?;
+        conn.execute(
+            "DEL test:scan:key1 test:scan:key2 test:scan:key3 test:scan:key4 test:scan:key5",
+            &[],
+        )
+        .await
+        .context("DEL cleanup failed")?;
 
         Ok(())
     }
@@ -1363,9 +1372,12 @@ mod tests {
     async fn test_sorted_set_operations(#[case] driver: TestDriver) -> Result<()> {
         let conn = test_connection(driver).await?;
 
-        conn.execute("ZADD test:zset:scores 100 player1 85 player2 95 player3", &[])
-            .await
-            .context("ZADD failed")?;
+        conn.execute(
+            "ZADD test:zset:scores 100 player1 85 player2 95 player3",
+            &[],
+        )
+        .await
+        .context("ZADD failed")?;
 
         let zcard_result = conn
             .query("ZCARD test:zset:scores", &[])
@@ -1580,7 +1592,10 @@ mod tests {
             .and_then(|v| v.as_i64())
             .context("ZCARD not returned as int")?;
 
-        assert_eq!(cardinality, 2, "Sorted set should have 2 members after ZREM");
+        assert_eq!(
+            cardinality, 2,
+            "Sorted set should have 2 members after ZREM"
+        );
 
         conn.execute("DEL test:zset:rem", &[])
             .await

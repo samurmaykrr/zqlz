@@ -5,9 +5,9 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    body_small, caption,
+    ActiveTheme, body_small, caption,
     dock::{Panel, PanelEvent, TitleStyle},
-    h2, h_flex, label, muted_small, v_flex, ActiveTheme,
+    h_flex, h2, label, muted_small, v_flex,
 };
 
 /// Welcome panel shown on startup

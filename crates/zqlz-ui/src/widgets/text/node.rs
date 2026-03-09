@@ -5,28 +5,28 @@ use std::{
 };
 
 use gpui::{
-    div, img, prelude::FluentBuilder as _, px, relative, rems, AnyElement, App, DefiniteLength,
-    Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle, InteractiveElement as _,
-    IntoElement, Length, ObjectFit, ParentElement, SharedString, SharedUri,
-    StatefulInteractiveElement, Styled, StyledImage as _, Window,
+    AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
+    InteractiveElement as _, IntoElement, Length, ObjectFit, ParentElement, SharedString,
+    SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, Window, div, img,
+    prelude::FluentBuilder as _, px, relative, rems,
 };
 // NOTE: markdown::mdast removed - API changed in new Zed version
 // This import was only used for AlignKind conversion which is now commented out
 use ropey::Rope;
 
 use crate::widgets::{
-    h_flex,
+    ActiveTheme as _, Icon, IconName, StyledExt, h_flex,
     highlighter::{HighlightTheme, SyntaxHighlighter},
     text::{
+        CodeBlockActionsFn,
         document::NodeRenderOptions,
         inline::{Inline, InlineState},
-        CodeBlockActionsFn,
     },
     tooltip::Tooltip,
-    v_flex, ActiveTheme as _, Icon, IconName, StyledExt,
+    v_flex,
 };
 
-use super::{utils::list_item_prefix, TextViewStyle};
+use super::{TextViewStyle, utils::list_item_prefix};
 
 /// The block-level nodes.
 #[derive(Debug, Clone, PartialEq)]
@@ -835,11 +835,7 @@ impl BlockNode {
                 children, checked, ..
             } => {
                 let checkbox = if let Some(checked) = checked {
-                    if *checked {
-                        "[x] "
-                    } else {
-                        "[ ] "
-                    }
+                    if *checked { "[x] " } else { "[ ] " }
                 } else {
                     ""
                 };
@@ -970,10 +966,9 @@ impl BlockNode {
                                 // merge content into last item.
                                 if last_not_list {
                                     if let Some(item_item) = items.last_mut() {
-                                        item_item.extend(vec![div()
-                                            .overflow_hidden()
-                                            .child(text)
-                                            .into_any_element()]);
+                                        item_item.extend(vec![
+                                            div().overflow_hidden().child(text).into_any_element(),
+                                        ]);
                                         continue;
                                     }
                                 }

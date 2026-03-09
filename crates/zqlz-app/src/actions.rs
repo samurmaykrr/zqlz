@@ -3,7 +3,7 @@
 //! Defines all actions available in the ZQLZ application.
 //! Actions can be triggered via keyboard shortcuts or UI interactions.
 
-use gpui::{actions, Action};
+use gpui::{Action, actions};
 use serde::Deserialize;
 
 actions!(
@@ -42,10 +42,10 @@ actions!(
 // Re-export query editor actions from zqlz-query crate
 pub use zqlz_query::{
     AcceptCompletion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp, DeleteLine,
-    DuplicateLine, FindNext, FindPrevious, FindReferences, FormatQuery, GoToDefinition, MoveLineDown,
-    MoveLineUp, NextProblem, PreviousProblem, RenameSymbol, SaveQuery, SaveQueryAs, ShowCodeActions,
-    ShowHover, ToggleLineComment, ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints,
-    UncommentSelection,
+    DuplicateLine, FindNext, FindPrevious, FindReferences, FormatQuery, GoToDefinition,
+    MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, RenameSymbol, SaveQuery, SaveQueryAs,
+    ShowCodeActions, ShowHover, ToggleLineComment, ToggleProblemsPanel, TriggerCompletion,
+    TriggerParameterHints, UncommentSelection,
 };
 
 // Tab management actions
@@ -74,7 +74,21 @@ actions!(
 // Table viewer actions
 actions!(
     table_viewer,
-    [CancelCellEditing, CommitChanges, DeleteSelectedRows]
+    [
+        CancelCellEditing,
+        CommitChanges,
+        DeleteSelectedRows,
+        /// Undo the last cell edit (batch mode only)
+        UndoEdit,
+        /// Redo the last undone cell edit (batch mode only)
+        RedoEdit,
+        /// Export visible rows to a CSV file on disk
+        ExportCsvToFile,
+        /// Export visible rows to a JSON file on disk
+        ExportJsonToFile,
+        /// Export visible rows as SQL INSERT to a file on disk
+        ExportSqlToFile,
+    ]
 );
 
 // Versioning actions

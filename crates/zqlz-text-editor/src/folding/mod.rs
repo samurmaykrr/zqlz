@@ -9,4 +9,4 @@
 
 pub mod detector;
 
-pub use detector::{detect_folds, FoldKind, FoldRegion, FoldingDetector};
+pub use detector::{FoldKind, FoldRegion, FoldingDetector, detect_folds};

@@ -11,7 +11,7 @@
 
 #[cfg(test)]
 mod tests {
-    use crate::fixtures::{test_connection, TestDriver};
+    use crate::fixtures::{TestDriver, test_connection};
     use anyhow::{Context, Result};
     use rstest::rstest;
     use zqlz_core::{Connection, QueryResult, StatementResult, Value};
@@ -34,7 +34,9 @@ mod tests {
             }
             TestDriver::Redis => sql.to_string(),
         };
-        conn.execute(&sql, params).await.map_err(|e| anyhow::anyhow!("{}", e))
+        conn.execute(&sql, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     /// Helper to query SQL that works across drivers.
@@ -55,7 +57,9 @@ mod tests {
             }
             TestDriver::Redis => sql.to_string(),
         };
-        conn.query(&sql, params).await.map_err(|e| anyhow::anyhow!("{}", e))
+        conn.query(&sql, params)
+            .await
+            .map_err(|e| anyhow::anyhow!("{}", e))
     }
 
     #[rstest]
@@ -106,11 +110,7 @@ mod tests {
         .await
         .context("Failed to verify deletion")?;
 
-        assert_eq!(
-            query_result.rows.len(),
-            0,
-            "Actor should have been deleted"
-        );
+        assert_eq!(query_result.rows.len(), 0, "Actor should have been deleted");
 
         Ok(())
     }
@@ -160,10 +160,7 @@ mod tests {
         let query_result = query_sql(
             conn.as_ref(),
             "SELECT actor_id FROM actor WHERE actor_id >= $1 AND actor_id <= $2",
-            &[
-                Value::Int64(90000),
-                Value::Int64(90002),
-            ],
+            &[Value::Int64(90000), Value::Int64(90002)],
             driver,
         )
         .await
@@ -433,10 +430,7 @@ mod tests {
         let result = execute_sql(
             conn.as_ref(),
             "DELETE FROM actor WHERE actor_id >= $1 AND actor_id <= $2",
-            &[
-                Value::Int64(90010),
-                Value::Int64(90014),
-            ],
+            &[Value::Int64(90010), Value::Int64(90014)],
             driver,
         )
         .await
@@ -453,10 +447,7 @@ mod tests {
         let query_result = query_sql(
             conn.as_ref(),
             "SELECT COUNT(*) as count FROM actor WHERE actor_id >= $1 AND actor_id <= $2",
-            &[
-                Value::Int64(90010),
-                Value::Int64(90014),
-            ],
+            &[Value::Int64(90010), Value::Int64(90014)],
             driver,
         )
         .await

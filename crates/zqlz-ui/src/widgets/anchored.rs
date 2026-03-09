@@ -3,9 +3,9 @@
 #![allow(private_interfaces)]
 
 use gpui::{
-    point, px, AnyElement, App, Axis, Bounds, Display, Edges, Element, GlobalElementId, Half,
+    AnyElement, App, Axis, Bounds, Display, Edges, Element, GlobalElementId, Half,
     InspectorElementId, IntoElement, LayoutId, ParentElement, Pixels, Point, Position, Size, Style,
-    Window,
+    Window, point, px,
 };
 use smallvec::SmallVec;
 
