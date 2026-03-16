@@ -5,9 +5,9 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use uuid::Uuid;
 
-use crate::widgets::sidebar::{ConnectionSidebar, SavedQueryInfo, SidebarDatabaseInfo};
+use super::SqlSchemaTreeProps;
+use crate::widgets::sidebar::ConnectionSidebar;
 use zqlz_ui::widgets::{ActiveTheme, Icon, IconName, ZqlzIcon, caption, h_flex, v_flex};
 
 impl ConnectionSidebar {
@@ -49,37 +49,41 @@ impl ConnectionSidebar {
     /// An `AnyElement` containing the complete schema tree for this connection.
     pub(super) fn render_schema_tree(
         &self,
-        conn_id: Uuid,
-        tables: &[String],
-        views: &[String],
-        materialized_views: &[String],
-        triggers: &[String],
-        functions: &[String],
-        procedures: &[String],
-        queries: &[SavedQueryInfo],
-        tables_expanded: bool,
-        views_expanded: bool,
-        materialized_views_expanded: bool,
-        triggers_expanded: bool,
-        functions_expanded: bool,
-        procedures_expanded: bool,
-        queries_expanded: bool,
-        tables_loading: bool,
-        views_loading: bool,
-        materialized_views_loading: bool,
-        triggers_loading: bool,
-        functions_loading: bool,
-        procedures_loading: bool,
-        databases: &[SidebarDatabaseInfo],
-        schema_name: Option<&str>,
-        schema_expanded: bool,
-        _window: &mut Window,
+        props: SqlSchemaTreeProps<'_>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let SqlSchemaTreeProps {
+            conn_id,
+            object_capabilities,
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            queries,
+            tables_expanded,
+            views_expanded,
+            materialized_views_expanded,
+            triggers_expanded,
+            functions_expanded,
+            procedures_expanded,
+            queries_expanded,
+            tables_loading,
+            views_loading,
+            materialized_views_loading,
+            triggers_loading,
+            functions_loading,
+            procedures_loading,
+            databases,
+            schema_name,
+            schema_expanded,
+        } = props;
         // Simple case: no multi-database — render objects tree directly
         if databases.is_empty() {
             let objects_tree = self.render_objects_tree(
                 conn_id,
+                object_capabilities,
                 &conn_id.to_string(),
                 None,
                 tables,
@@ -131,13 +135,13 @@ impl ConnectionSidebar {
             .iter()
             .find(|d| d.is_active)
             .map(|d| d.name.as_str());
-        let fallback_shows_schema =
-            schema_name.is_some_and(|s| active_db_name.map_or(true, |db| s != db));
+        let fallback_shows_schema = schema_name.is_some_and(|s| active_db_name != Some(s));
         let fallback_depth: usize = if fallback_shows_schema { 3 } else { 2 };
 
         let mut fallback_tree: Option<AnyElement> = Some(
             self.render_objects_tree(
                 conn_id,
+                object_capabilities,
                 &conn_id.to_string(),
                 active_db_name.map(|s| s.to_string()),
                 tables,
@@ -240,7 +244,7 @@ impl ConnectionSidebar {
                     let sch_expanded = db_schema.map_or(schema_expanded, |s| s.schema_expanded);
                     let db_name_for_toggle = db.name.clone();
 
-                    let show_schema_node = sch_name.as_ref().map_or(false, |s| s != &db_name);
+                    let show_schema_node = sch_name.as_ref().is_some_and(|s| s != &db_name);
                     let objects_depth: usize = if show_schema_node { 3 } else { 2 };
 
                     let tree: Option<AnyElement> = if let Some(schema) = db_schema {
@@ -248,6 +252,7 @@ impl ConnectionSidebar {
                         Some(
                             self.render_objects_tree(
                                 conn_id,
+                                object_capabilities,
                                 &format!("{}-{}", conn_id, db.name),
                                 Some(db_name.clone()),
                                 &schema.tables,
@@ -271,12 +276,16 @@ impl ConnectionSidebar {
                                 schema.functions_loading,
                                 schema.procedures_loading,
                                 move |this: &mut ConnectionSidebar, section, cx| {
-                                    this.toggle_db_section(
-                                        conn_id,
-                                        &db_name_for_closure,
-                                        section,
-                                        cx,
-                                    );
+                                    if section == "queries" {
+                                        this.toggle_queries_expand(conn_id, cx);
+                                    } else {
+                                        this.toggle_db_section(
+                                            conn_id,
+                                            &db_name_for_closure,
+                                            section,
+                                            cx,
+                                        );
+                                    }
                                 },
                                 objects_depth,
                                 cx,

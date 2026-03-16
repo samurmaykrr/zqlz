@@ -218,8 +218,8 @@ impl SqlDiagnostics {
 
             diagnostics.push(Diagnostic {
                 range: Range::new(
-                    Position::new(start_pos.line as u32, start_pos.character as u32),
-                    Position::new(end_pos.line as u32, end_pos.character as u32),
+                    Position::new(start_pos.line, start_pos.character),
+                    Position::new(end_pos.line, end_pos.character),
                 ),
                 severity: Some(DiagnosticSeverity::ERROR),
                 message: format!("Syntax error near: '{}'", preview),
@@ -248,11 +248,11 @@ impl SqlDiagnostics {
         // Try to extract "line X"
         if let Some(line_pos) = error_msg.find("line ") {
             let rest = &error_msg[line_pos + 5..];
-            if let Some(line_end) = rest.find(&[',', ' ', '\n'][..]) {
-                if let Ok(line) = rest[..line_end].parse::<usize>() {
-                    // Found line number
-                    return (line.saturating_sub(1), 0); // Line numbers are 1-based
-                }
+            if let Some(line_end) = rest.find(&[',', ' ', '\n'][..])
+                && let Ok(line) = rest[..line_end].parse::<usize>()
+            {
+                // Found line number
+                return (line.saturating_sub(1), 0); // Line numbers are 1-based
             }
         }
 
@@ -267,13 +267,12 @@ impl SqlDiagnostics {
         if let Some(token_text) = token {
             // Search for the token near the error position
             let line_idx = position.line as usize;
-            if let Some(line_content) = self.get_line(text, line_idx) {
-                if let Some(token_pos) = line_content.find(&token_text) {
-                    let start_pos = Position::new(position.line, token_pos as u32);
-                    let end_pos =
-                        Position::new(position.line, (token_pos + token_text.len()) as u32);
-                    return Range::new(start_pos, end_pos);
-                }
+            if let Some(line_content) = self.get_line(text, line_idx)
+                && let Some(token_pos) = line_content.find(&token_text)
+            {
+                let start_pos = Position::new(position.line, token_pos as u32);
+                let end_pos = Position::new(position.line, (token_pos + token_text.len()) as u32);
+                return Range::new(start_pos, end_pos);
             }
         }
 
@@ -349,8 +348,8 @@ impl SqlDiagnostics {
             let pos = text.offset_to_position(select_star_pos);
             diagnostics.push(Diagnostic {
                 range: Range::new(
-                    Position::new(pos.line as u32, pos.character as u32),
-                    Position::new(pos.line as u32, (pos.character + 8) as u32),
+                    Position::new(pos.line, pos.character),
+                    Position::new(pos.line, pos.character + 8),
                 ),
                 severity: Some(DiagnosticSeverity::INFORMATION),
                 message: "Consider specifying explicit column names instead of SELECT *"
@@ -369,8 +368,8 @@ impl SqlDiagnostics {
                     let end_character = (pos.character as usize + keyword.len()) as u32;
                     diagnostics.push(Diagnostic {
                         range: Range::new(
-                            Position::new(pos.line as u32, pos.character as u32),
-                            Position::new(pos.line as u32, end_character),
+                            Position::new(pos.line, pos.character),
+                            Position::new(pos.line, end_character),
                         ),
                         severity: Some(DiagnosticSeverity::WARNING),
                         message: format!(
@@ -385,20 +384,20 @@ impl SqlDiagnostics {
         }
 
         // Check for potential SQL injection patterns
-        if sql.contains("'; DROP") || sql.contains("\"; DROP") {
-            if let Some(drop_pos) = sql.to_uppercase().find("DROP") {
-                let pos = text.offset_to_position(drop_pos);
-                diagnostics.push(Diagnostic {
-                    range: Range::new(
-                        Position::new(pos.line as u32, pos.character as u32),
-                        Position::new(pos.line as u32, (pos.character + 4) as u32),
-                    ),
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: "Potential SQL injection pattern detected".to_string(),
-                    source: Some("security".to_string()),
-                    ..Default::default()
-                });
-            }
+        if (sql.contains("'; DROP") || sql.contains("\"; DROP"))
+            && let Some(drop_pos) = sql.to_uppercase().find("DROP")
+        {
+            let pos = text.offset_to_position(drop_pos);
+            diagnostics.push(Diagnostic {
+                range: Range::new(
+                    Position::new(pos.line, pos.character),
+                    Position::new(pos.line, pos.character + 4),
+                ),
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "Potential SQL injection pattern detected".to_string(),
+                source: Some("security".to_string()),
+                ..Default::default()
+            });
         }
 
         diagnostics

@@ -54,6 +54,243 @@ impl From<String> for Value {
 }
 
 impl Value {
+    fn strip_type_modifiers(data_type: &str) -> &str {
+        match data_type.find('(') {
+            Some(index) => data_type[..index].trim(),
+            None => data_type.trim(),
+        }
+    }
+
+    fn strip_array_suffix(data_type: &str) -> Option<&str> {
+        data_type.strip_suffix("[]").map(str::trim)
+    }
+
+    fn parse_hex_bytes(input: &str) -> Option<Vec<u8>> {
+        let hex = input.trim().strip_prefix("0x")?;
+        if hex.len() % 2 != 0 {
+            return None;
+        }
+
+        let mut bytes = Vec::with_capacity(hex.len() / 2);
+        let mut index = 0;
+        while index < hex.len() {
+            let byte = u8::from_str_radix(&hex[index..index + 2], 16).ok()?;
+            bytes.push(byte);
+            index += 2;
+        }
+
+        Some(bytes)
+    }
+
+    fn parse_date(input: &str) -> Option<Value> {
+        ["%Y-%m-%d"]
+            .into_iter()
+            .find_map(|format| NaiveDate::parse_from_str(input, format).ok())
+            .map(Value::Date)
+    }
+
+    fn parse_time(input: &str) -> Option<Value> {
+        ["%H:%M:%S%.f", "%H:%M:%S", "%H:%M"]
+            .into_iter()
+            .find_map(|format| NaiveTime::parse_from_str(input, format).ok())
+            .map(Value::Time)
+    }
+
+    fn parse_datetime(input: &str) -> Option<Value> {
+        [
+            "%Y-%m-%d %H:%M:%S%.f",
+            "%Y-%m-%d %H:%M:%S",
+            "%Y-%m-%dT%H:%M:%S%.f",
+            "%Y-%m-%dT%H:%M:%S",
+        ]
+        .into_iter()
+        .find_map(|format| NaiveDateTime::parse_from_str(input, format).ok())
+        .map(Value::DateTime)
+    }
+
+    fn parse_datetime_utc(input: &str) -> Option<Value> {
+        DateTime::parse_from_rfc3339(input)
+            .map(|value| Value::DateTimeUtc(value.with_timezone(&Utc)))
+            .ok()
+            .or_else(|| {
+                DateTime::parse_from_str(input, "%Y-%m-%d %H:%M:%S%.f %Z")
+                    .map(|value| Value::DateTimeUtc(value.with_timezone(&Utc)))
+                    .ok()
+            })
+            .or_else(|| {
+                Self::parse_datetime(input).and_then(|value| match value {
+                    Value::DateTime(value) => Some(Value::DateTimeUtc(value.and_utc())),
+                    _ => None,
+                })
+            })
+    }
+
+    fn parse_json_with_type_hint(value: &serde_json::Value, data_type: &str) -> Value {
+        match value {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(value) => Value::Bool(*value),
+            serde_json::Value::Number(value) => {
+                Value::parse_from_string(&value.to_string(), data_type)
+            }
+            serde_json::Value::String(value) => Value::parse_from_string(value, data_type),
+            serde_json::Value::Array(values) => Value::Array(
+                values
+                    .iter()
+                    .map(|value| Self::parse_json_with_type_hint(value, data_type))
+                    .collect(),
+            ),
+            serde_json::Value::Object(_) => Value::Json(value.clone()),
+        }
+    }
+
+    fn split_array_items(input: &str) -> Option<Vec<String>> {
+        let trimmed = input.trim();
+        let inner = trimmed.strip_prefix('[')?.strip_suffix(']')?;
+
+        if inner.trim().is_empty() {
+            return Some(Vec::new());
+        }
+
+        let mut items = Vec::new();
+        let mut current = String::new();
+        let mut in_string = false;
+        let mut escape = false;
+        let mut depth = 0usize;
+
+        for character in inner.chars() {
+            if in_string {
+                current.push(character);
+                if escape {
+                    escape = false;
+                    continue;
+                }
+
+                match character {
+                    '\\' => escape = true,
+                    '"' => in_string = false,
+                    _ => {}
+                }
+
+                continue;
+            }
+
+            match character {
+                '"' => {
+                    in_string = true;
+                    current.push(character);
+                }
+                '[' | '{' => {
+                    depth += 1;
+                    current.push(character);
+                }
+                ']' | '}' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(character);
+                }
+                ',' if depth == 0 => {
+                    items.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(character),
+            }
+        }
+
+        items.push(current.trim().to_string());
+        Some(items)
+    }
+
+    fn parse_array(input: &str, element_type: &str) -> Option<Value> {
+        if let Ok(serde_json::Value::Array(values)) =
+            serde_json::from_str::<serde_json::Value>(input.trim())
+        {
+            return Some(Value::Array(
+                values
+                    .iter()
+                    .map(|value| Self::parse_json_with_type_hint(value, element_type))
+                    .collect(),
+            ));
+        }
+
+        let items = Self::split_array_items(input)?;
+        let values = items
+            .into_iter()
+            .map(|item| {
+                let trimmed = item.trim();
+                if trimmed.eq_ignore_ascii_case("null") {
+                    Value::Null
+                } else if trimmed.starts_with('"') && trimmed.ends_with('"') {
+                    serde_json::from_str::<String>(trimmed)
+                        .map(|value| Value::parse_from_string(&value, element_type))
+                        .unwrap_or_else(|_| Value::parse_from_string(trimmed, element_type))
+                } else {
+                    Value::parse_from_string(trimmed, element_type)
+                }
+            })
+            .collect();
+
+        Some(Value::Array(values))
+    }
+
+    fn format_table_preview_string(value: &str, max_chars: usize) -> String {
+        let mut chars = value.chars();
+        let preview: String = chars.by_ref().take(max_chars).collect();
+        if chars.next().is_some() {
+            format!("{}…", preview)
+        } else {
+            preview
+        }
+    }
+
+    fn format_nested_preview(&self) -> String {
+        match self {
+            Value::Null => "NULL".to_string(),
+            Value::String(value) => format!("\"{}\"", value.replace('"', "\\\"")),
+            Value::Bytes(bytes) => Self::format_bytes_preview(bytes),
+            Value::Json(value) => value.to_string(),
+            Value::Array(values) => Self::format_array_preview(values, 8),
+            Value::Date(value) => value.to_string(),
+            Value::Time(value) => value.format("%H:%M:%S%.f").to_string(),
+            Value::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            Value::DateTimeUtc(value) => value.format("%Y-%m-%d %H:%M:%S%.f UTC").to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn format_bytes_preview(bytes: &[u8]) -> String {
+        const PREVIEW_BYTE_COUNT: usize = 16;
+
+        let preview_hex: String = bytes
+            .iter()
+            .take(PREVIEW_BYTE_COUNT)
+            .map(|byte| format!("{:02x}", byte))
+            .collect();
+
+        if bytes.len() > PREVIEW_BYTE_COUNT {
+            format!("0x{}… ({} bytes)", preview_hex, bytes.len())
+        } else {
+            format!("0x{} ({} bytes)", preview_hex, bytes.len())
+        }
+    }
+
+    fn format_array_preview(values: &[Value], max_items: usize) -> String {
+        let mut rendered_items: Vec<String> = values
+            .iter()
+            .take(max_items)
+            .map(Value::format_nested_preview)
+            .collect();
+
+        if values.len() > max_items {
+            rendered_items.push("…".to_string());
+        }
+
+        format!("[{}]", rendered_items.join(", "))
+    }
+
+    fn format_array_full(values: &[Value]) -> String {
+        let rendered_items: Vec<String> = values.iter().map(Value::format_nested_preview).collect();
+        format!("[{}]", rendered_items.join(", "))
+    }
+
     fn is_string_data_type(base_type: &str) -> bool {
         matches!(
             base_type,
@@ -70,6 +307,8 @@ impl Value {
                 | "longtext"
                 | "mediumtext"
                 | "tinytext"
+                | "enum"
+                | "set"
         )
     }
 
@@ -136,7 +375,33 @@ impl Value {
     pub fn display_for_table(&self) -> String {
         match self {
             Value::Null => "NULL".to_string(),
-            Value::Bytes(b) => format!("<{} bytes>", b.len()),
+            Value::Bytes(bytes) => Self::format_bytes_preview(bytes),
+            Value::Array(values) => Self::format_array_preview(values, 8),
+            Value::Json(value) => value.to_string(),
+            Value::Time(value) => value.format("%H:%M:%S%.f").to_string(),
+            Value::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            Value::DateTimeUtc(value) => value.format("%Y-%m-%d %H:%M:%S%.f UTC").to_string(),
+            Value::String(value) => Self::format_table_preview_string(value, 240),
+            other => other.to_string(),
+        }
+    }
+
+    /// Return a readable string that preserves the full logical value.
+    ///
+    /// This is used by editor flows and tooltips where losing detail would make
+    /// round-tripping or inspection harder than necessary.
+    pub fn display_for_editor(&self) -> String {
+        match self {
+            Value::Null => "NULL".to_string(),
+            Value::Bytes(bytes) => {
+                let hex: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+                format!("0x{}", hex)
+            }
+            Value::Array(values) => Self::format_array_full(values),
+            Value::Json(value) => value.to_string(),
+            Value::Time(value) => value.format("%H:%M:%S%.f").to_string(),
+            Value::DateTime(value) => value.format("%Y-%m-%d %H:%M:%S%.f").to_string(),
+            Value::DateTimeUtc(value) => value.format("%Y-%m-%d %H:%M:%S%.f UTC").to_string(),
             other => other.to_string(),
         }
     }
@@ -148,11 +413,14 @@ impl Value {
     /// Empty strings and the literal "NULL" (case-insensitive) produce `Value::Null`
     /// for non-string columns. String-like columns preserve the literal input.
     pub fn parse_from_string(input: &str, data_type: &str) -> Value {
-        let lower = data_type.to_lowercase();
-        let base_type = match lower.find('(') {
-            Some(idx) => &lower[..idx],
-            None => &lower,
-        };
+        let lower = data_type.trim().to_lowercase();
+        if let Some(element_type) = Self::strip_array_suffix(&lower)
+            && let Some(value) = Self::parse_array(input, element_type)
+        {
+            return value;
+        }
+
+        let base_type = Self::strip_type_modifiers(&lower);
 
         if input.is_empty() || input.eq_ignore_ascii_case("null") {
             if Self::is_string_data_type(base_type) {
@@ -200,6 +468,27 @@ impl Value {
                 .map(Value::Float64)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
             "numeric" | "decimal" | "money" => Value::Decimal(input.to_string()),
+            "json" | "jsonb" => serde_json::from_str::<serde_json::Value>(input)
+                .map(Value::Json)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "uuid" => uuid::Uuid::parse_str(input)
+                .map(Value::Uuid)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
+            "date" => Self::parse_date(input).unwrap_or_else(|| Value::String(input.to_string())),
+            "time" | "timetz" | "time without time zone" | "time with time zone" => {
+                Self::parse_time(input).unwrap_or_else(|| Value::String(input.to_string()))
+            }
+            "timestamp" | "datetime" | "timestamp without time zone" | "smalldatetime" => {
+                Self::parse_datetime(input).unwrap_or_else(|| Value::String(input.to_string()))
+            }
+            "timestamptz" | "timestamp with time zone" => {
+                Self::parse_datetime_utc(input).unwrap_or_else(|| Value::String(input.to_string()))
+            }
+            "bytea" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
+                Self::parse_hex_bytes(input)
+                    .map(Value::Bytes)
+                    .unwrap_or_else(|| Value::String(input.to_string()))
+            }
             _ => Value::String(input.to_string()),
         }
     }
@@ -233,6 +522,7 @@ impl std::fmt::Display for Value {
 #[cfg(test)]
 mod tests {
     use super::Value;
+    use chrono::NaiveDate;
 
     #[test]
     fn parse_from_string_preserves_literal_empty_and_null_for_text_columns() {
@@ -250,6 +540,54 @@ mod tests {
     fn parse_from_string_still_maps_empty_and_null_to_null_for_non_string_columns() {
         assert_eq!(Value::parse_from_string("", "integer"), Value::Null);
         assert_eq!(Value::parse_from_string("NULL", "boolean"), Value::Null);
+    }
+
+    #[test]
+    fn display_for_table_formats_arrays_with_content_preview() {
+        let value = Value::Array(vec![
+            Value::Int32(1),
+            Value::String("two".to_string()),
+            Value::Null,
+        ]);
+
+        assert_eq!(value.display_for_table(), "[1, \"two\", NULL]");
+    }
+
+    #[test]
+    fn display_for_table_formats_bytes_with_hex_preview() {
+        let value = Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef]);
+
+        assert_eq!(value.display_for_table(), "0xdeadbeef (4 bytes)");
+        assert_eq!(value.display_for_editor(), "0xdeadbeef");
+    }
+
+    #[test]
+    fn parse_from_string_parses_json_timestamp_and_bytes() {
+        assert_eq!(
+            Value::parse_from_string("{\"enabled\":true}", "jsonb"),
+            Value::Json(serde_json::json!({ "enabled": true }))
+        );
+        assert_eq!(
+            Value::parse_from_string("2024-03-15 10:11:12", "timestamp"),
+            Value::DateTime(
+                NaiveDate::from_ymd_opt(2024, 3, 15)
+                    .expect("valid test date")
+                    .and_hms_opt(10, 11, 12)
+                    .expect("valid test time")
+            )
+        );
+        assert_eq!(
+            Value::parse_from_string("0xdeadbeef", "bytea"),
+            Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef])
+        );
+    }
+
+    #[test]
+    fn parse_from_string_parses_array_editor_output() {
+        assert_eq!(
+            Value::parse_from_string("[1, 2, NULL]", "int4[]"),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Null])
+        );
     }
 }
 

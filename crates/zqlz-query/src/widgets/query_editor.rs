@@ -11,6 +11,7 @@
 //! - Triggers: CREATE/ALTER TRIGGER definitions
 
 use crate::ai_completion::{AiProviderFactory, CompletionRequest};
+use crate::batch::split_statements;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use lsp_types::DiagnosticSeverity;
@@ -21,14 +22,18 @@ use uuid::Uuid;
 use zqlz_core::Connection;
 use zqlz_lsp::SqlLsp;
 use zqlz_services::SchemaService;
-use zqlz_settings::{InlineSuggestionProvider, ZqlzSettings};
+use zqlz_settings::{
+    CursorBlink, CursorShape, EditorSettings, InlineSuggestionProvider, ScrollBeyondLastLine,
+    SearchWrap, ZqlzSettings,
+};
 use zqlz_templates::TemplateEngine;
-use zqlz_text_editor::TextEditor;
+use zqlz_text_editor::{DocumentIdentity, TextDocument, TextEditor, TextEditorEvent};
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, RopeExt, Sizable, StyledExt, Theme, ZqlzIcon,
-    button::{Button, ButtonCustomVariant, ButtonVariants},
+    ActiveTheme, Disableable, RopeExt, Selectable, Sizable, StyledExt, Theme, ZqlzIcon,
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
+    kbd::Kbd,
     menu::DropdownMenu,
     scroll::ScrollableElement,
     v_flex,
@@ -36,9 +41,9 @@ use zqlz_ui::widgets::{
 
 use super::actions::{
     AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CancelCompletionMenu,
-    ConfirmCompletion, DismissInlineSuggestion, FindReferences, FormatQuery, GoToDefinition,
-    NextCompletion, NextProblem, PreviousCompletion, PreviousProblem, RenameSymbol, SaveQuery,
-    ShowCodeActions, ShowHover, TriggerCompletion, TriggerParameterHints,
+    ConfirmCompletion, DismissInlineSuggestion, FormatQuery, NextCompletion, NextProblem,
+    PreviousCompletion, PreviousProblem, SaveQuery, ShowCodeActions, ShowHover, TriggerCompletion,
+    TriggerParameterHints,
 };
 use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
 
@@ -76,11 +81,16 @@ fn json_to_minijinja_value(value: serde_json::Value) -> minijinja::Value {
 fn driver_type_to_highlight_language(driver_type: Option<&str>) -> &'static str {
     // Use DialectProfile to determine the correct language for syntax highlighting
     driver_type
-        .map(|driver| zqlz_core::dialects::get_highlight_language(driver))
+        .map(zqlz_core::dialects::get_highlight_language)
         .unwrap_or("sql")
 }
 
-/// Adapter that implements CompletionProvider for SqlLsp
+fn driver_type_to_sqlformat_dialect(driver_type: Option<&str>) -> sqlformat::Dialect {
+    match driver_type.map(str::to_ascii_lowercase).as_deref() {
+        Some("postgres") | Some("postgresql") => sqlformat::Dialect::PostgreSql,
+        _ => sqlformat::Dialect::Generic,
+    }
+}
 
 /// Adapter that implements HoverProvider for SqlLsp
 ///
@@ -158,18 +168,20 @@ impl SqlLspDefinitionAdapter {
 }
 
 impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
-    fn definition(&self, text: &ropey::Rope, offset: usize) -> Option<usize> {
+    fn definition(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _document: &zqlz_text_editor::DocumentContext,
+    ) -> Option<usize> {
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
 
-        if let Some(definition) = self.sql_lsp.read().get_definition(&ui_rope, offset) {
-            if let Some(location) = first_location_from_definition_response(&definition) {
-                if let Some(target_offset) =
-                    byte_offset_for_lsp_position(text, location.range.start)
-                {
-                    return Some(target_offset);
-                }
-            }
+        if let Some(definition) = self.sql_lsp.read().get_definition(&ui_rope, offset)
+            && let Some(location) = first_location_from_definition_response(&definition)
+            && let Some(target_offset) = byte_offset_for_lsp_position(text, location.range.start)
+        {
+            return Some(target_offset);
         }
 
         self.sql_lsp
@@ -192,7 +204,12 @@ impl SqlLspReferencesAdapter {
 }
 
 impl zqlz_text_editor::ReferencesProvider for SqlLspReferencesAdapter {
-    fn references(&self, text: &ropey::Rope, offset: usize) -> Vec<std::ops::Range<usize>> {
+    fn references(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _document: &zqlz_text_editor::DocumentContext,
+    ) -> Vec<std::ops::Range<usize>> {
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
 
@@ -205,6 +222,59 @@ impl zqlz_text_editor::ReferencesProvider for SqlLspReferencesAdapter {
                 let end = byte_offset_for_lsp_position(text, location.range.end)?;
                 if end > start { Some(start..end) } else { None }
             })
+            .collect()
+    }
+}
+
+/// Adapter that implements RenameProvider for SqlLsp.
+struct SqlLspRenameAdapter {
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+}
+
+impl SqlLspRenameAdapter {
+    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
+        Self { sql_lsp }
+    }
+}
+
+impl zqlz_text_editor::RenameProvider for SqlLspRenameAdapter {
+    fn rename(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        new_name: &str,
+        _document: &zqlz_text_editor::DocumentContext,
+    ) -> Option<lsp_types::WorkspaceEdit> {
+        let text_string = text.to_string();
+        let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
+        self.sql_lsp.read().rename(&ui_rope, offset, new_name)
+    }
+}
+
+struct SqlLspCodeActionAdapter {
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+}
+
+impl SqlLspCodeActionAdapter {
+    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
+        Self { sql_lsp }
+    }
+}
+
+impl zqlz_text_editor::CodeActionProvider for SqlLspCodeActionAdapter {
+    fn code_actions(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _document: &zqlz_text_editor::DocumentContext,
+    ) -> Vec<lsp_types::CodeActionOrCommand> {
+        let text_string = text.to_string();
+        let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
+        let mut lsp = self.sql_lsp.write();
+        let diagnostics = lsp.validate_sql(&ui_rope);
+        lsp.get_code_actions(&ui_rope, offset, &diagnostics)
+            .into_iter()
+            .map(lsp_types::CodeActionOrCommand::CodeAction)
             .collect()
     }
 }
@@ -227,7 +297,7 @@ impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
         &self,
         text: &ropey::Rope,
         offset: usize,
-        _trigger: lsp_types::CompletionContext,
+        trigger: lsp_types::CompletionContext,
         _window: &mut Window,
         _cx: &mut Context<zqlz_text_editor::TextEditor>,
     ) -> Task<Result<lsp_types::CompletionResponse, anyhow::Error>> {
@@ -235,18 +305,46 @@ impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         let mut lsp = self.sql_lsp.write();
-        let items = lsp.get_completions(&ui_rope, offset);
+        let items = lsp.get_completions_with_trigger(
+            &ui_rope,
+            offset,
+            trigger.trigger_kind == lsp_types::CompletionTriggerKind::INVOKED,
+        );
         Task::ready(Ok(lsp_types::CompletionResponse::Array(items)))
     }
 
-    fn is_completion_trigger(
+    fn completion_trigger_context(
         &self,
         _offset: usize,
         new_text: &str,
         _cx: &mut Context<zqlz_text_editor::TextEditor>,
-    ) -> bool {
-        // Trigger on dot (table.column), space (after keywords), or alphanumeric characters
-        new_text == "." || new_text == " " || new_text.chars().all(|c| c.is_alphanumeric())
+    ) -> Option<lsp_types::CompletionContext> {
+        if new_text.len() == 1 {
+            let character = new_text.chars().next()?;
+            if matches!(character, '.' | ' ' | '(' | ',') {
+                return Some(lsp_types::CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
+                    trigger_character: Some(character.to_string()),
+                });
+            }
+
+            if character.is_alphanumeric() || character == '_' {
+                return Some(lsp_types::CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                });
+            }
+
+            return None;
+        }
+
+        new_text
+            .chars()
+            .any(|c| c.is_alphanumeric())
+            .then_some(lsp_types::CompletionContext {
+                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            })
     }
 }
 
@@ -379,47 +477,8 @@ impl EditorObjectType {
     }
 }
 
-/// A reference location found by FindReferences
-#[derive(Clone, Debug)]
-pub struct ReferenceItem {
-    /// The URI/location of the reference
-    pub uri: String,
-    /// Line number (0-indexed, displayed as 1-indexed)
-    pub line: u32,
-    /// Column number (0-indexed, displayed as 1-indexed)
-    pub column: u32,
-    /// The text of the reference (for display)
-    #[allow(dead_code)]
-    pub text: Option<String>,
-}
-
-/// A code action available at the current cursor position
-#[derive(Clone, Debug)]
-pub struct CodeActionItem {
-    /// The title/description of the action
-    pub title: String,
-    /// The kind of code action (e.g., QUICKFIX, REFACTOR)
-    pub kind: Option<String>,
-    /// Index into the code actions list for applying the action
-    #[allow(dead_code)]
-    pub index: usize,
-}
-
-/// State for the rename UI
-#[derive(Clone, Debug)]
-pub struct RenameState {
-    /// The original identifier being renamed
-    pub original_name: String,
-    /// The current input value for the new name
-    pub input_value: String,
-    /// The cursor offset where rename was triggered
-    pub trigger_offset: usize,
-    /// Error message if rename validation failed
-    pub error_message: Option<String>,
-}
-
 /// Information about a diagnostic for external display (e.g., Problems panel)
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DiagnosticInfo {
     /// Start line (0-indexed)
     pub line: usize,
@@ -508,6 +567,8 @@ pub enum QueryEditorEvent {
         /// List of current diagnostics
         diagnostics: Vec<DiagnosticInfo>,
     },
+    /// Canonical document metadata changed and workspace state should refresh.
+    DocumentStateChanged,
     /// User requested to switch to a different connection
     SwitchConnection {
         /// The new connection ID to switch to
@@ -540,8 +601,8 @@ pub struct QueryEditor {
     /// SQL LSP instance for IntelliSense
     sql_lsp: Arc<RwLock<SqlLsp>>,
 
-    /// Whether the content has unsaved changes
-    is_dirty: bool,
+    /// Last known driver type from the active connection.
+    driver_type: Option<String>,
 
     /// Whether a query is currently executing
     is_executing: bool,
@@ -583,23 +644,6 @@ pub struct QueryEditor {
     /// Current hover popover content (shown when ShowHover action is triggered)
     hover_content: Option<String>,
 
-    /// Current signature help content (shown when TriggerParameterHints action is triggered)
-    signature_help_content: Option<String>,
-
-    /// Current definition content (shown when GoToDefinition action is triggered)
-    definition_content: Option<String>,
-
-    /// Current references list (shown when FindReferences action is triggered)
-    references_content: Option<Vec<ReferenceItem>>,
-
-    /// Current rename state (shown when RenameSymbol action is triggered)
-    rename_content: Option<RenameState>,
-
-    /// Current code actions list (shown when ShowCodeActions action is triggered)
-    code_actions_content: Option<Vec<CodeActionItem>>,
-    /// Cached code actions from the last ShowCodeActions invocation.
-    code_actions: Vec<lsp_types::CodeActionOrCommand>,
-
     /// Current inline suggestion (ghost text shown while typing)
     inline_suggestion: Option<InlineSuggestionState>,
 
@@ -611,6 +655,12 @@ pub struct QueryEditor {
 
     /// Last text content (used to detect changes for diagnostics)
     _last_diagnostics_text: Option<String>,
+
+    /// Cached diagnostics from the last explicit validation pass.
+    cached_diagnostics: Vec<lsp_types::Diagnostic>,
+
+    /// Monotonic generation used to ignore stale async inline suggestions.
+    inline_suggestion_generation: u64,
 
     /// Schema metadata provider for hover overlay (created on demand)
     schema_metadata: Option<SchemaMetadata>,
@@ -645,6 +695,218 @@ pub enum InlineSuggestionSource {
 }
 
 impl QueryEditor {
+    fn diagnostic_infos_from_lsp_diagnostics(
+        diagnostics: &[lsp_types::Diagnostic],
+    ) -> Vec<DiagnosticInfo> {
+        diagnostics
+            .iter()
+            .map(|diagnostic| DiagnosticInfo {
+                line: diagnostic.range.start.line as usize,
+                column: diagnostic.range.start.character as usize,
+                end_line: diagnostic.range.end.line as usize,
+                end_column: diagnostic.range.end.character as usize,
+                severity: match diagnostic.severity {
+                    Some(DiagnosticSeverity::ERROR) => DiagnosticInfoSeverity::Error,
+                    Some(DiagnosticSeverity::WARNING) => DiagnosticInfoSeverity::Warning,
+                    Some(DiagnosticSeverity::INFORMATION) => DiagnosticInfoSeverity::Info,
+                    Some(DiagnosticSeverity::HINT) => DiagnosticInfoSeverity::Hint,
+                    _ => DiagnosticInfoSeverity::Error,
+                },
+                message: diagnostic.message.clone(),
+                source: diagnostic.source.clone(),
+            })
+            .collect()
+    }
+
+    fn ui_diagnostics_from_lsp_diagnostics(
+        diagnostics: &[lsp_types::Diagnostic],
+    ) -> Vec<zqlz_ui::widgets::highlighter::Diagnostic> {
+        diagnostics.iter().cloned().map(Into::into).collect()
+    }
+
+    fn diagnostic_counts_from_lsp_diagnostics(
+        diagnostics: &[lsp_types::Diagnostic],
+    ) -> (usize, usize, usize) {
+        let mut errors = 0;
+        let mut warnings = 0;
+        let mut hints_infos = 0;
+
+        for diagnostic in diagnostics {
+            match diagnostic.severity {
+                Some(DiagnosticSeverity::ERROR) => errors += 1,
+                Some(DiagnosticSeverity::WARNING) => warnings += 1,
+                Some(DiagnosticSeverity::INFORMATION) | Some(DiagnosticSeverity::HINT) => {
+                    hints_infos += 1
+                }
+                _ => errors += 1,
+            }
+        }
+
+        (errors, warnings, hints_infos)
+    }
+
+    fn internal_text_document(text: impl AsRef<str>) -> TextDocument {
+        TextDocument::with_text(
+            DocumentIdentity::internal_with_label("query-editor").expect("internal document uri"),
+            text.as_ref(),
+        )
+    }
+
+    fn build_primary_editor(
+        document: TextDocument,
+        editor_settings: &EditorSettings,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<TextEditor> {
+        let editor = cx.new(|cx| TextEditor::with_document(document, window, cx));
+
+        editor.update(cx, |text_editor, cx| {
+            Self::apply_editor_settings(text_editor, editor_settings, cx);
+            text_editor.set_autofocus_on_open(true);
+        });
+
+        editor
+    }
+
+    fn apply_editor_settings(
+        text_editor: &mut TextEditor,
+        settings: &EditorSettings,
+        cx: &mut Context<TextEditor>,
+    ) {
+        text_editor.set_indent_settings(settings.tab_size as usize, settings.insert_spaces, cx);
+        text_editor.set_show_line_numbers(settings.show_line_numbers, cx);
+        text_editor.set_soft_wrap_enabled(settings.word_wrap, cx);
+        text_editor.set_highlight_current_line(settings.highlight_current_line, cx);
+        text_editor.set_show_inline_diagnostics(settings.show_inline_diagnostics, cx);
+        text_editor.set_show_folding(settings.show_folding, cx);
+        text_editor.set_highlight_enabled(settings.highlight_enabled, cx);
+        text_editor.set_bracket_matching_enabled(settings.bracket_matching, cx);
+        text_editor.set_relative_line_numbers(settings.relative_line_numbers, cx);
+        text_editor.set_show_gutter_diagnostics(settings.show_gutter_diagnostics, cx);
+        text_editor.set_cursor_shape(
+            match settings.cursor_shape {
+                CursorShape::Block => zqlz_text_editor::CursorShapeStyle::Block,
+                CursorShape::Line => zqlz_text_editor::CursorShapeStyle::Line,
+                CursorShape::Underline => zqlz_text_editor::CursorShapeStyle::Underline,
+            },
+            cx,
+        );
+        text_editor
+            .set_cursor_blink_enabled(!matches!(settings.cursor_blink, CursorBlink::Off), cx);
+        text_editor.set_selection_highlight_enabled(settings.selection_highlight, cx);
+        text_editor.set_rounded_selection(settings.rounded_selection, cx);
+        text_editor.set_search_wrap_enabled(!matches!(
+            settings.search_wrap,
+            SearchWrap::Disabled | SearchWrap::NoWrap
+        ));
+        text_editor.set_smartcase_search_enabled(settings.use_smartcase_search);
+        text_editor.set_autoscroll_on_clicks(settings.autoscroll_on_clicks);
+        text_editor.set_vertical_scroll_margin(settings.vertical_scroll_margin as usize);
+        text_editor.set_horizontal_scroll_margin(settings.horizontal_scroll_margin as usize);
+        text_editor.set_scroll_sensitivity(settings.scroll_sensitivity);
+        text_editor.set_scroll_beyond_last_line(!matches!(
+            settings.scroll_beyond_last_line,
+            ScrollBeyondLastLine::Disabled
+        ));
+        text_editor.set_auto_indent_enabled(settings.auto_indent, cx);
+        text_editor.set_large_file_thresholds(
+            settings.large_file_line_threshold as usize,
+            settings.large_file_byte_threshold as usize,
+        );
+    }
+
+    fn sync_lsp_settings(&mut self, cx: &mut Context<Self>) {
+        let settings = ZqlzSettings::global(cx).editor.clone();
+
+        self.editor.update(cx, |text_editor, cx| {
+            Self::apply_editor_settings(text_editor, &settings, cx);
+
+            if settings.lsp_enabled && settings.lsp_completions_enabled {
+                text_editor.set_completion_provider(std::rc::Rc::new(
+                    SqlLspCompletionAdapter::new(self.sql_lsp.clone()),
+                ));
+            } else {
+                text_editor.clear_completion_provider();
+            }
+
+            if settings.lsp_enabled && settings.lsp_hover_enabled {
+                text_editor.set_hover_provider(std::rc::Rc::new(SqlLspHoverAdapter::new(
+                    self.sql_lsp.clone(),
+                )));
+            } else {
+                text_editor.clear_hover_provider();
+            }
+
+            text_editor.set_definition_provider(std::rc::Rc::new(SqlLspDefinitionAdapter::new(
+                self.sql_lsp.clone(),
+            )));
+            text_editor.set_references_provider(std::rc::Rc::new(SqlLspReferencesAdapter::new(
+                self.sql_lsp.clone(),
+            )));
+
+            if settings.lsp_enabled && settings.lsp_rename_enabled {
+                text_editor.set_rename_provider(std::rc::Rc::new(SqlLspRenameAdapter::new(
+                    self.sql_lsp.clone(),
+                )));
+            } else {
+                text_editor.clear_rename_provider();
+            }
+
+            if settings.lsp_enabled && settings.lsp_code_actions_enabled {
+                text_editor.set_code_action_provider(std::rc::Rc::new(
+                    SqlLspCodeActionAdapter::new(self.sql_lsp.clone()),
+                ));
+            } else {
+                text_editor.clear_code_action_provider();
+            }
+        });
+
+        self.template_params.update(cx, |text_editor, cx| {
+            Self::apply_editor_settings(text_editor, &settings, cx);
+        });
+
+        if !settings.lsp_enabled || !settings.lsp_diagnostics_enabled {
+            self.editor.update(cx, |editor, cx| {
+                editor.set_diagnostics(Vec::new(), cx);
+            });
+        }
+    }
+
+    fn build_settings_subscription(
+        editor: &Entity<TextEditor>,
+        template_params: &Entity<TextEditor>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        let _editor = editor;
+        let _template_params = template_params;
+
+        cx.observe_global::<ZqlzSettings>(move |this, cx| {
+            this.sync_lsp_settings(cx);
+            cx.notify();
+        })
+    }
+
+    fn build_editor_subscriptions(
+        editor: &Entity<TextEditor>,
+        template_params: &Entity<TextEditor>,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        vec![
+            cx.subscribe(editor, |this, _, event: &TextEditorEvent, cx| {
+                if matches!(event, TextEditorEvent::ContentChanged) {
+                    this.handle_primary_editor_changed(cx);
+                }
+            }),
+            cx.subscribe(template_params, |this, _, event: &TextEditorEvent, cx| {
+                if matches!(event, TextEditorEvent::ContentChanged)
+                    && this.editor_mode == EditorMode::Template
+                {
+                    this.update_template_preview(cx);
+                }
+            }),
+        ]
+    }
+
     pub fn new(
         name: String,
         connection_id: Option<Uuid>,
@@ -657,80 +919,40 @@ impl QueryEditor {
         // Initialize SQL LSP with SchemaService
         let sql_lsp = Arc::new(RwLock::new(SqlLsp::new(schema_service)));
 
-        // Get editor settings from global settings
-        let editor_settings = &ZqlzSettings::global(cx).editor;
-        let _show_line_numbers = editor_settings.show_line_numbers;
-        let _word_wrap = editor_settings.word_wrap;
-        let _show_inline_diagnostics = editor_settings.show_inline_diagnostics;
-        let large_file_line_threshold = editor_settings.large_file_line_threshold;
-        let large_file_byte_threshold = editor_settings.large_file_byte_threshold;
-
+        let editor_settings = ZqlzSettings::global(cx).editor.clone();
         tracing::debug!("Creating TextEditor for SQL code editing");
-        let editor = cx.new(|cx| TextEditor::new(window, cx));
+        let editor = Self::build_primary_editor(
+            Self::internal_text_document(""),
+            &editor_settings,
+            window,
+            cx,
+        );
 
-        // Wire up the SqlLsp completion provider for schema-aware completions
-        {
-            let adapter = std::rc::Rc::new(SqlLspCompletionAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_completion_provider(adapter);
-                tracing::info!("QueryEditor: SqlLspCompletionAdapter wired up");
-            });
-        }
-
-        // Wire up the SqlLsp hover provider for schema-aware hover documentation
-        {
-            let hover_adapter = std::rc::Rc::new(SqlLspHoverAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_hover_provider(hover_adapter);
-                tracing::info!("QueryEditor: SqlLspHoverAdapter wired up");
-            });
-        }
-
-        // Wire up go-to-definition / references providers for TextEditor context actions.
-        {
-            let definition_adapter =
-                std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_definition_provider(definition_adapter);
-            });
-        }
-        {
-            let references_adapter =
-                std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_references_provider(references_adapter);
-            });
-        }
-
-        editor.update(cx, |text_editor, _cx| {
-            text_editor.set_large_file_thresholds(
-                large_file_line_threshold as usize,
-                large_file_byte_threshold as usize,
-            );
-            text_editor.set_autofocus_on_open(true);
-        });
-
-        // Get initial text and run diagnostics
         let initial_text = editor.read(cx).get_text(cx);
 
         // Create template parameters JSON editor (multi-line, plain TextEditor)
         let template_params = cx.new(|cx| {
             let mut editor = TextEditor::new(window, cx);
+            Self::apply_editor_settings(&mut editor, &editor_settings, cx);
             editor.set_text("{\n  \n}".to_string(), window, cx);
             editor
         });
 
-        // Subscriptions are stored here to keep them alive for the lifetime of the editor
-        let _subscriptions: Vec<Subscription> = vec![];
+        let mut _subscriptions = Self::build_editor_subscriptions(&editor, &template_params, cx);
+        _subscriptions.push(Self::build_settings_subscription(
+            &editor,
+            &template_params,
+            cx,
+        ));
 
-        Self {
+        let mut query_editor = Self {
             name,
             connection_id,
             connection_name: None,
             saved_query_id: None,
             editor,
             sql_lsp,
-            is_dirty: false,
+            driver_type: None,
             is_executing: false,
             editor_mode: EditorMode::Sql,
             object_type: EditorObjectType::Query,
@@ -743,21 +965,20 @@ impl QueryEditor {
             available_connections: Vec::new(),
             available_databases: Vec::new(),
             hover_content: None,
-            signature_help_content: None,
-            definition_content: None,
-            references_content: None,
-            rename_content: None,
-            code_actions_content: None,
-            code_actions: Vec::new(),
             inline_suggestion: None,
             _inline_suggestion_debounce: None,
             _completion_debounce: None,
             _diagnostics_debounce: None,
             _last_diagnostics_text: Some(initial_text.to_string()),
+            cached_diagnostics: Vec::new(),
+            inline_suggestion_generation: 0,
             schema_metadata: None,
             schema_symbol_info: None,
             _subscriptions,
-        }
+        };
+
+        query_editor.sync_lsp_settings(cx);
+        query_editor
     }
 
     /// Create a new editor for a database object (view, procedure, function, trigger)
@@ -767,6 +988,92 @@ impl QueryEditor {
         connection_id: Uuid,
         object_type: EditorObjectType,
         initial_content: Option<String>,
+        schema_service: Arc<SchemaService>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let document = Self::internal_text_document(initial_content.as_deref().unwrap_or(""));
+        Self::new_for_object_with_document(
+            name,
+            connection_id,
+            object_type,
+            document,
+            schema_service,
+            window,
+            cx,
+        )
+    }
+
+    pub fn new_with_document(
+        name: String,
+        connection_id: Option<Uuid>,
+        document: TextDocument,
+        schema_service: Arc<SchemaService>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        tracing::debug!(name = %name, connection_id = ?connection_id, "QueryEditor initialization");
+
+        let sql_lsp = Arc::new(RwLock::new(SqlLsp::new(schema_service)));
+        let editor_settings = ZqlzSettings::global(cx).editor.clone();
+        let editor = Self::build_primary_editor(document, &editor_settings, window, cx);
+        let initial_text = editor.read(cx).get_text(cx);
+
+        let template_params = cx.new(|cx| {
+            let mut editor = TextEditor::new(window, cx);
+            Self::apply_editor_settings(&mut editor, &editor_settings, cx);
+            editor.set_text("{\n  \n}".to_string(), window, cx);
+            editor
+        });
+
+        let mut _subscriptions = Self::build_editor_subscriptions(&editor, &template_params, cx);
+        _subscriptions.push(Self::build_settings_subscription(
+            &editor,
+            &template_params,
+            cx,
+        ));
+
+        let mut query_editor = Self {
+            name,
+            connection_id,
+            connection_name: None,
+            saved_query_id: None,
+            editor,
+            sql_lsp,
+            driver_type: None,
+            is_executing: false,
+            editor_mode: EditorMode::Sql,
+            object_type: EditorObjectType::Query,
+            template_engine: TemplateEngine::new(),
+            template_params,
+            focus_handle: cx.focus_handle(),
+            rendered_sql: None,
+            template_error: None,
+            current_database: None,
+            available_connections: Vec::new(),
+            available_databases: Vec::new(),
+            hover_content: None,
+            inline_suggestion: None,
+            _inline_suggestion_debounce: None,
+            _completion_debounce: None,
+            _diagnostics_debounce: None,
+            _last_diagnostics_text: Some(initial_text.to_string()),
+            cached_diagnostics: Vec::new(),
+            inline_suggestion_generation: 0,
+            schema_metadata: None,
+            schema_symbol_info: None,
+            _subscriptions,
+        };
+
+        query_editor.sync_lsp_settings(cx);
+        query_editor
+    }
+
+    pub fn new_for_object_with_document(
+        name: String,
+        connection_id: Uuid,
+        object_type: EditorObjectType,
+        document: TextDocument,
         schema_service: Arc<SchemaService>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -784,81 +1091,32 @@ impl QueryEditor {
         tracing::debug!(name = %name, connection_id = ?connection_id, object_type = ?object_type, "QueryEditor initialization for object");
 
         let sql_lsp = Arc::new(RwLock::new(SqlLsp::new(schema_service)));
-        let editor_settings = &ZqlzSettings::global(cx).editor;
-        let _show_line_numbers = editor_settings.show_line_numbers;
-        let _word_wrap = editor_settings.word_wrap;
-        let _show_inline_diagnostics = editor_settings.show_inline_diagnostics;
-        let large_file_line_threshold = editor_settings.large_file_line_threshold;
-        let large_file_byte_threshold = editor_settings.large_file_byte_threshold;
-
-        let editor = cx.new(|cx| TextEditor::new(window, cx));
-
-        // Wire up the SqlLsp completion provider for schema-aware completions
-        {
-            let adapter = std::rc::Rc::new(SqlLspCompletionAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_completion_provider(adapter);
-            });
-        }
-
-        // Wire up the SqlLsp hover provider for schema-aware hover documentation
-        {
-            let hover_adapter = std::rc::Rc::new(SqlLspHoverAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_hover_provider(hover_adapter);
-            });
-        }
-
-        // Wire up go-to-definition / references providers for TextEditor context actions.
-        {
-            let definition_adapter =
-                std::rc::Rc::new(SqlLspDefinitionAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_definition_provider(definition_adapter);
-            });
-        }
-        {
-            let references_adapter =
-                std::rc::Rc::new(SqlLspReferencesAdapter::new(sql_lsp.clone()));
-            editor.update(cx, |text_editor, _cx| {
-                text_editor.set_references_provider(references_adapter);
-            });
-        }
-
-        editor.update(cx, |text_editor, _cx| {
-            text_editor.set_large_file_thresholds(
-                large_file_line_threshold as usize,
-                large_file_byte_threshold as usize,
-            );
-            text_editor.set_autofocus_on_open(true);
-        });
-
-        if let Some(content) = initial_content {
-            editor.update(cx, |editor, cx| {
-                editor.set_text(content, window, cx);
-            });
-        }
-
-        // Get initial text and run diagnostics
+        let editor_settings = ZqlzSettings::global(cx).editor.clone();
+        let editor = Self::build_primary_editor(document, &editor_settings, window, cx);
         let initial_text = editor.read(cx).get_text(cx);
 
         let template_params = cx.new(|cx| {
             let mut editor = TextEditor::new(window, cx);
+            Self::apply_editor_settings(&mut editor, &editor_settings, cx);
             editor.set_text("{\n  \n}".to_string(), window, cx);
             editor
         });
 
-        // Subscriptions are stored here to keep them alive for the lifetime of the editor
-        let _subscriptions: Vec<Subscription> = vec![];
+        let mut _subscriptions = Self::build_editor_subscriptions(&editor, &template_params, cx);
+        _subscriptions.push(Self::build_settings_subscription(
+            &editor,
+            &template_params,
+            cx,
+        ));
 
-        Self {
+        let mut query_editor = Self {
             name,
             connection_id: Some(connection_id),
             connection_name: None,
             saved_query_id: None,
             editor,
             sql_lsp,
-            is_dirty: false,
+            driver_type: None,
             is_executing: false,
             editor_mode: EditorMode::Sql,
             object_type,
@@ -871,21 +1129,20 @@ impl QueryEditor {
             available_connections: Vec::new(),
             available_databases: Vec::new(),
             hover_content: None,
-            signature_help_content: None,
-            definition_content: None,
-            references_content: None,
-            rename_content: None,
-            code_actions_content: None,
-            code_actions: Vec::new(),
             inline_suggestion: None,
             _inline_suggestion_debounce: None,
             _completion_debounce: None,
             _diagnostics_debounce: None,
             _last_diagnostics_text: Some(initial_text.to_string()),
+            cached_diagnostics: Vec::new(),
+            inline_suggestion_generation: 0,
             schema_metadata: None,
             schema_symbol_info: None,
             _subscriptions,
-        }
+        };
+
+        query_editor.sync_lsp_settings(cx);
+        query_editor
     }
 
     /// Set the connection for this editor and refresh schema
@@ -900,6 +1157,13 @@ impl QueryEditor {
         tracing::debug!(connection_id = ?connection_id, connection_name = ?connection_name, driver_type = ?driver_type, "Setting connection for editor");
         self.connection_id = connection_id;
         self.connection_name = connection_name;
+        self.driver_type = driver_type.clone();
+        self.schema_metadata = None;
+        self.schema_symbol_info = None;
+        self.hover_content = None;
+        self.editor.update(cx, |editor, cx| {
+            editor.clear_code_actions(cx);
+        });
 
         // Dialect determines syntax highlighting language; currently unused since
         // the TextEditor's tree-sitter highlighter handles generic SQL.
@@ -913,10 +1177,10 @@ impl QueryEditor {
             // If a cache was persisted from the last session, apply it immediately so
             // completions work from the first keystroke.  The background refresh below
             // always runs regardless (stale-while-revalidate).
-            if let Some(conn_id) = connection_id {
-                if let Some(cached) = load_schema_cache_from_disk(conn_id) {
-                    lsp.apply_schema_cache(cached);
-                }
+            if let Some(conn_id) = connection_id
+                && let Some(cached) = load_schema_cache_from_disk(conn_id)
+            {
+                lsp.apply_schema_cache(cached);
             }
         }
 
@@ -993,9 +1257,9 @@ impl QueryEditor {
                             save_schema_cache_to_disk(connection_id_for_refresh, &cache);
                             lsp.write().apply_schema_cache_if_current(cache, epoch);
                             tracing::debug!("SQL schema refreshed successfully");
-                            _ = this.update(cx, |editor, cx| {
-                                editor.update_diagnostics(cx);
-                            });
+                _ = this.update(cx, |editor, cx| {
+                    editor.update_diagnostics(cx);
+                });
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to refresh SQL schema after retries");
@@ -1034,10 +1298,12 @@ impl QueryEditor {
         if !crate::QueryEngine::new().is_schema_modifying(sql) {
             return;
         }
-        if let Some(conn_id) = self.connection_id {
-            if let Some(path) = schema_cache_path(conn_id) {
-                std::fs::remove_file(path).ok();
-            }
+        self.schema_metadata = None;
+        self.schema_symbol_info = None;
+        if let Some(conn_id) = self.connection_id
+            && let Some(path) = schema_cache_path(conn_id)
+        {
+            std::fs::remove_file(path).ok();
         }
         // Mark schema as loading so completions don't surface stale objects
         // (e.g. a just-dropped table) during the background re-fetch window.
@@ -1082,6 +1348,9 @@ impl QueryEditor {
                     save_schema_cache_to_disk(connection_id, &cache);
                     lsp.write().apply_schema_cache_if_current(cache, epoch);
                     tracing::debug!("Schema cache refreshed after prefetch completion");
+                    _ = _this.update(cx, |this, cx| {
+                        this.update_diagnostics(cx);
+                    });
                 }
                 Err(e) => {
                     tracing::warn!(error = %e, "Schema refresh after prefetch failed");
@@ -1115,14 +1384,24 @@ impl QueryEditor {
 
     /// Set the SQL content
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_inline_suggestion(cx);
         self.editor.update(cx, |editor, cx| {
             editor.set_text(content.clone(), window, cx);
         });
-        self.is_dirty = true;
-        // Update diagnostics immediately for set_content
-        self.update_diagnostics(cx);
-        // Also update the tracked text for future change detection
         self._last_diagnostics_text = Some(content);
+        cx.notify();
+    }
+
+    fn handle_primary_editor_changed(&mut self, cx: &mut Context<Self>) {
+        let current_text = self.content(cx).to_string();
+        self._last_diagnostics_text = Some(current_text);
+        cx.emit(QueryEditorEvent::DocumentStateChanged);
+
+        if self.editor_mode == EditorMode::Template {
+            self.update_template_preview(cx);
+        }
+
+        self.update_diagnostics(cx);
         cx.notify();
     }
 
@@ -1134,14 +1413,25 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Skip if text hasn't changed
-        if self._last_diagnostics_text.as_ref() == Some(&new_text) {
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
+            self._diagnostics_debounce = None;
+            self._last_diagnostics_text = Some(new_text);
+            self.cached_diagnostics.clear();
+            self.editor.update(cx, |editor, cx| {
+                editor.set_diagnostics(Vec::new(), cx);
+            });
+            cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                diagnostics: Vec::new(),
+            });
+            cx.notify();
             return;
         }
 
-        if self.editor.read(cx).is_large_file() {
+        if !self.editor.read(cx).diagnostics_enabled() {
             self._diagnostics_debounce = None;
             self._last_diagnostics_text = Some(new_text);
+            self.cached_diagnostics.clear();
             self.editor.update(cx, |editor, cx| {
                 editor.set_diagnostics(Vec::new(), cx);
             });
@@ -1180,7 +1470,7 @@ impl QueryEditor {
                 // Convert to TextEditor format
                 let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
                     .iter()
-                    .filter_map(|lsp_diag| {
+                    .map(|lsp_diag| {
                         use lsp_types::DiagnosticSeverity;
                         use zqlz_text_editor::DiagnosticLevel;
 
@@ -1201,7 +1491,7 @@ impl QueryEditor {
                         let end_line = rope.offset_to_position(end_offset).line as usize;
                         let end_column = rope.offset_to_position(end_offset).character as usize;
 
-                        Some(zqlz_text_editor::Diagnostic {
+                        zqlz_text_editor::Diagnostic {
                             line: start_line,
                             column: start_column,
                             end_line: Some(end_line),
@@ -1209,7 +1499,7 @@ impl QueryEditor {
                             severity,
                             message: lsp_diag.message.clone(),
                             source: lsp_diag.source.clone(),
-                        })
+                        }
                     })
                     .collect();
 
@@ -1218,12 +1508,14 @@ impl QueryEditor {
                 editor.update(cx, |editor, cx| {
                     editor.set_diagnostics(text_editor_diagnostics_clone, cx);
                 });
+                this.cached_diagnostics = lsp_diagnostics.clone();
 
                 // Update tracked text
                 this._last_diagnostics_text = Some(text_content.to_string());
 
                 // Emit diagnostics changed event for Problems panel
-                let diagnostic_infos = this.collect_diagnostic_infos(cx);
+                let diagnostic_infos =
+                    Self::diagnostic_infos_from_lsp_diagnostics(&lsp_diagnostics);
                 cx.emit(QueryEditorEvent::DiagnosticsChanged {
                     diagnostics: diagnostic_infos,
                 });
@@ -1243,7 +1535,21 @@ impl QueryEditor {
     }
 
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
-        if self.editor.read(cx).is_large_file() {
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
+            self.cached_diagnostics.clear();
+            self.editor.update(cx, |editor, cx| {
+                editor.set_diagnostics(Vec::new(), cx);
+            });
+            cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                diagnostics: Vec::new(),
+            });
+            cx.notify();
+            return;
+        }
+
+        if !self.editor.read(cx).diagnostics_enabled() {
+            self.cached_diagnostics.clear();
             self.editor.update(cx, |editor, cx| {
                 editor.set_diagnostics(Vec::new(), cx);
             });
@@ -1267,7 +1573,7 @@ impl QueryEditor {
         // Convert LSP diagnostics (lsp_types::Diagnostic) to TextEditor format
         let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
             .iter()
-            .filter_map(|lsp_diag| {
+            .map(|lsp_diag| {
                 // Convert LSP Range (line/col) to byte offsets using rope
                 let start_offset = rope.position_to_offset(&lsp_diag.range.start);
                 let end_offset = rope.position_to_offset(&lsp_diag.range.end);
@@ -1289,7 +1595,7 @@ impl QueryEditor {
                 let end_line = rope.offset_to_position(end_offset).line as usize;
                 let end_column = rope.offset_to_position(end_offset).character as usize;
 
-                Some(zqlz_text_editor::Diagnostic {
+                zqlz_text_editor::Diagnostic {
                     line: start_line,
                     column: start_column,
                     end_line: Some(end_line),
@@ -1297,7 +1603,7 @@ impl QueryEditor {
                     severity,
                     message: lsp_diag.message.clone(),
                     source: lsp_diag.source.clone(),
-                })
+                }
             })
             .collect();
 
@@ -1306,29 +1612,8 @@ impl QueryEditor {
             editor.set_diagnostics(text_editor_diagnostics, cx);
         });
 
-        // Convert the already-computed LSP diagnostics to DiagnosticInfo directly,
-        // avoiding a second validate_sql call that collect_diagnostic_infos would make.
-        let diagnostic_infos: Vec<DiagnosticInfo> = lsp_diagnostics
-            .into_iter()
-            .map(|lsp_diag| {
-                let severity = match lsp_diag.severity {
-                    Some(DiagnosticSeverity::ERROR) => DiagnosticInfoSeverity::Error,
-                    Some(DiagnosticSeverity::WARNING) => DiagnosticInfoSeverity::Warning,
-                    Some(DiagnosticSeverity::INFORMATION) => DiagnosticInfoSeverity::Info,
-                    Some(DiagnosticSeverity::HINT) => DiagnosticInfoSeverity::Hint,
-                    _ => DiagnosticInfoSeverity::Error,
-                };
-                DiagnosticInfo {
-                    line: lsp_diag.range.start.line as usize,
-                    column: lsp_diag.range.start.character as usize,
-                    end_line: lsp_diag.range.end.line as usize,
-                    end_column: lsp_diag.range.end.character as usize,
-                    severity,
-                    message: lsp_diag.message.clone(),
-                    source: lsp_diag.source.clone(),
-                }
-            })
-            .collect();
+        self.cached_diagnostics = lsp_diagnostics.clone();
+        let diagnostic_infos = Self::diagnostic_infos_from_lsp_diagnostics(&lsp_diagnostics);
         cx.emit(QueryEditorEvent::DiagnosticsChanged {
             diagnostics: diagnostic_infos,
         });
@@ -1336,106 +1621,39 @@ impl QueryEditor {
         cx.notify();
     }
 
-    /// Collect diagnostics as DiagnosticInfo for external consumers
-    fn collect_diagnostic_infos(&self, cx: &App) -> Vec<DiagnosticInfo> {
-        if self.editor.read(cx).is_large_file() {
-            return Vec::new();
-        }
-
-        let text_content = self.editor.read(cx).get_text(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
-
-        // Get diagnostics from LSP
-        let lsp_diagnostics = {
-            let mut lsp = self.sql_lsp.write();
-            lsp.validate_sql(&rope)
-        };
-
-        // Convert to DiagnosticInfo
-        lsp_diagnostics
-            .into_iter()
-            .map(|lsp_diag| {
-                let severity = match lsp_diag.severity {
-                    Some(DiagnosticSeverity::ERROR) => DiagnosticInfoSeverity::Error,
-                    Some(DiagnosticSeverity::WARNING) => DiagnosticInfoSeverity::Warning,
-                    Some(DiagnosticSeverity::INFORMATION) => DiagnosticInfoSeverity::Info,
-                    Some(DiagnosticSeverity::HINT) => DiagnosticInfoSeverity::Hint,
-                    _ => DiagnosticInfoSeverity::Error,
-                };
-
-                DiagnosticInfo {
-                    line: lsp_diag.range.start.line as usize,
-                    column: lsp_diag.range.start.character as usize,
-                    end_line: lsp_diag.range.end.line as usize,
-                    end_column: lsp_diag.range.end.character as usize,
-                    severity,
-                    message: lsp_diag.message.clone(),
-                    source: lsp_diag.source.clone(),
-                }
-            })
-            .collect()
-    }
-
     /// Get the current SQL content
     pub fn content(&self, cx: &App) -> SharedString {
-        self.editor.read(cx).get_text(cx).into()
+        self.editor.read(cx).get_text(cx)
     }
 
     /// Get diagnostic counts from the current editor state
     ///
     /// Returns (errors, warnings, hints/infos)
     pub fn diagnostic_counts(&self, cx: &App) -> (usize, usize, usize) {
-        if self.editor.read(cx).is_large_file() {
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
             return (0, 0, 0);
         }
 
-        let text_content = self.editor.read(cx).get_text(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
-
-        let lsp_diagnostics = {
-            let mut lsp = self.sql_lsp.write();
-            lsp.validate_sql(&rope)
-        };
-
-        let mut errors = 0;
-        let mut warnings = 0;
-        let mut hints_infos = 0;
-
-        for diag in lsp_diagnostics {
-            match diag.severity {
-                Some(DiagnosticSeverity::ERROR) => errors += 1,
-                Some(DiagnosticSeverity::WARNING) => warnings += 1,
-                Some(DiagnosticSeverity::INFORMATION) | Some(DiagnosticSeverity::HINT) => {
-                    hints_infos += 1
-                }
-                _ => errors += 1,
-            }
+        if !self.editor.read(cx).diagnostics_enabled() {
+            return (0, 0, 0);
         }
 
-        (errors, warnings, hints_infos)
+        Self::diagnostic_counts_from_lsp_diagnostics(&self.cached_diagnostics)
     }
 
     /// Get all diagnostics as a list for external display (e.g., Problems panel)
     pub fn get_diagnostics(&self, cx: &App) -> Vec<zqlz_ui::widgets::highlighter::Diagnostic> {
-        if self.editor.read(cx).is_large_file() {
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
             return Vec::new();
         }
 
-        let text_content = self.editor.read(cx).get_text(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
+        if !self.editor.read(cx).diagnostics_enabled() {
+            return Vec::new();
+        }
 
-        let lsp_diagnostics = {
-            let mut lsp = self.sql_lsp.write();
-            lsp.validate_sql(&rope)
-        };
-
-        lsp_diagnostics
-            .into_iter()
-            .map(|lsp_diag| {
-                // Use the From trait to convert lsp_types::Diagnostic
-                zqlz_ui::widgets::highlighter::Diagnostic::from(lsp_diag)
-            })
-            .collect()
+        Self::ui_diagnostics_from_lsp_diagnostics(&self.cached_diagnostics)
     }
 
     fn problem_index_for_cursor(
@@ -1521,9 +1739,11 @@ impl QueryEditor {
 
     /// Set the SQL content
     pub fn set_text(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.dismiss_inline_suggestion(cx);
         self.editor.update(cx, |editor, cx| {
             editor.set_text(sql.to_string(), window, cx)
         });
+        self._last_diagnostics_text = Some(sql.to_string());
     }
 
     /// Get the SQL to execute - either raw SQL or rendered template
@@ -1599,6 +1819,10 @@ impl QueryEditor {
         self.editor_mode
     }
 
+    pub fn editor(&self) -> &Entity<TextEditor> {
+        &self.editor
+    }
+
     /// Get selected text, or entire content if nothing is selected
     pub fn selected_or_all_content(&self, cx: &App) -> String {
         // Get selected text from TextEditor, or fall back to all content if no selection
@@ -1607,6 +1831,45 @@ impl QueryEditor {
             .get_selected_text(cx)
             .unwrap_or_else(|| self.content(cx))
             .to_string()
+    }
+
+    /// Get the selected SQL, or the statement containing the cursor when there
+    /// is no selection.
+    pub fn selected_or_current_statement(&self, cx: &App) -> String {
+        if let Some(selected_text) = self.editor.read(cx).get_selected_text(cx) {
+            let selected_text = selected_text.to_string();
+            if !selected_text.trim().is_empty() {
+                return selected_text;
+            }
+        }
+
+        if self.editor_mode == EditorMode::Template {
+            return self.get_executable_sql(cx);
+        }
+
+        let full_sql = self.get_executable_sql(cx);
+        let statements = split_statements(&full_sql);
+        if statements.len() <= 1 {
+            return full_sql;
+        }
+
+        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
+        let mut search_start = 0;
+
+        for statement in statements {
+            if let Some(relative_start) = full_sql[search_start..].find(&statement) {
+                let statement_start = search_start + relative_start;
+                let statement_end = statement_start + statement.len();
+
+                if cursor_offset >= statement_start && cursor_offset <= statement_end {
+                    return statement;
+                }
+
+                search_start = statement_end;
+            }
+        }
+
+        full_sql
     }
 
     /// Navigate to a specific position in the editor
@@ -1673,7 +1936,12 @@ impl QueryEditor {
 
     /// Emit execute selection event (selected text or entire content)
     pub fn emit_execute_selection(&mut self, cx: &mut Context<Self>) {
-        let sql = self.selected_or_all_content(cx);
+        if self.editor_mode == EditorMode::Template && self.template_error.is_some() {
+            tracing::warn!("Cannot execute selection: template has errors");
+            return;
+        }
+
+        let sql = self.selected_or_current_statement(cx);
         if sql.trim().is_empty() {
             return;
         }
@@ -1721,7 +1989,12 @@ impl QueryEditor {
 
     /// Emit explain selection event (selected text or entire content)
     pub fn emit_explain_selection(&mut self, cx: &mut Context<Self>) {
-        let sql = self.selected_or_all_content(cx);
+        if self.editor_mode == EditorMode::Template && self.template_error.is_some() {
+            tracing::warn!("Cannot explain selection: template has errors");
+            return;
+        }
+
+        let sql = self.selected_or_current_statement(cx);
         if sql.trim().is_empty() {
             return;
         }
@@ -1770,13 +2043,33 @@ impl QueryEditor {
 
     /// Mark the editor as clean (no unsaved changes)
     pub fn mark_clean(&mut self, cx: &mut Context<Self>) {
-        self.is_dirty = false;
+        self.editor.update(cx, |editor, cx| {
+            editor.mark_saved(cx);
+        });
+        cx.emit(QueryEditorEvent::DocumentStateChanged);
         cx.notify();
+    }
+
+    pub fn is_dirty(&self, cx: &App) -> bool {
+        self.editor.read(cx).is_dirty()
+    }
+
+    pub fn document_context(&self, cx: &App) -> zqlz_text_editor::DocumentContext {
+        self.editor.read(cx).document_context()
+    }
+
+    pub fn document_identity(&self, cx: &App) -> zqlz_text_editor::DocumentIdentity {
+        self.editor.read(cx).document_identity().clone()
     }
 
     /// Get the saved query ID if this editor is editing a saved query
     pub fn saved_query_id(&self) -> Option<Uuid> {
         self.saved_query_id
+    }
+
+    /// Get the connection associated with this editor, if any.
+    pub fn connection_id(&self) -> Option<Uuid> {
+        self.connection_id
     }
 
     /// Set the saved query ID (used when a query is saved)
@@ -1788,37 +2081,9 @@ impl QueryEditor {
     /// Set the editor name/title
     pub fn set_name(&mut self, name: &str, cx: &mut Context<Self>) {
         self.name = name.to_string();
+        cx.emit(QueryEditorEvent::DocumentStateChanged);
+        cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
-    }
-
-    /// Trigger auto-completion with debouncing
-    ///
-    /// This is called when the user types alphanumeric characters.
-    /// After a short delay, completions are automatically shown.
-    fn trigger_auto_completion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let settings = ZqlzSettings::global(cx);
-        if !settings.editor.lsp_enabled || !settings.editor.lsp_completions_enabled {
-            return;
-        }
-
-        let editor = self.editor.clone();
-        self._completion_debounce = Some(cx.spawn_in(window, async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(150))
-                .await;
-
-            _ = this.update_in(cx, |this, window, cx| {
-                if this.editor.read(cx).is_completion_menu_open(cx) {
-                    editor.update(cx, |editor, cx| {
-                        editor.refresh_completions(window, cx);
-                    });
-                } else {
-                    editor.update(cx, |editor, cx| {
-                        editor.show_completions_auto(window, cx);
-                    });
-                }
-            });
-        }));
     }
 
     /// Handle TriggerCompletion action - manually trigger completion popup
@@ -1828,10 +2093,8 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("TriggerCompletion action triggered");
-
         self.editor.update(cx, |editor, cx| {
-            editor.show_completions(window, cx);
+            editor.handle_completion_action(&TriggerCompletion, window, cx);
         });
     }
 
@@ -1844,33 +2107,33 @@ impl QueryEditor {
     ) {
         // If there's an inline suggestion, accept it
         if let Some(_inline_suggestion) = &self.inline_suggestion {
-            self.accept_inline_suggestion(window, cx);
+            self.editor.update(cx, |editor, cx| {
+                editor.accept_inline_suggestion(window, cx);
+            });
+            self.inline_suggestion = None;
             return;
         }
 
-        let mut handled = false;
         self.editor.update(cx, |editor, cx| {
-            if editor.is_completion_menu_open(cx) {
-                editor.accept_completion(window, cx);
-                handled = true;
-            }
+            editor.handle_completion_action(&AcceptCompletion, window, cx);
         });
-
-        if !handled {
-            cx.propagate();
-        }
     }
 
     /// Handle CancelCompletion action - hides completion menu
     fn handle_cancel_completion(
         &mut self,
         _action: &CancelCompletion,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self.editor.update(cx, |editor, cx| {
-            editor.hide_completions(cx);
+            editor.handle_completion_action(
+                &zqlz_text_editor::actions::DismissCompletion,
+                window,
+                cx,
+            );
         });
+        self.inline_suggestion = None;
     }
 
     /// Navigates to the next completion item when the menu is open.
@@ -1878,7 +2141,7 @@ impl QueryEditor {
     fn handle_next_completion(
         &mut self,
         _action: &NextCompletion,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.editor.read(cx).is_completion_menu_open(cx) {
@@ -1886,8 +2149,11 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.completion_menu_select_next();
-            cx.notify();
+            editor.handle_completion_action(
+                &zqlz_text_editor::actions::SelectNextCompletion,
+                window,
+                cx,
+            );
         });
     }
 
@@ -1896,7 +2162,7 @@ impl QueryEditor {
     fn handle_previous_completion(
         &mut self,
         _action: &PreviousCompletion,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.editor.read(cx).is_completion_menu_open(cx) {
@@ -1904,8 +2170,11 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.completion_menu_select_previous();
-            cx.notify();
+            editor.handle_completion_action(
+                &zqlz_text_editor::actions::SelectPreviousCompletion,
+                window,
+                cx,
+            );
         });
     }
 
@@ -1940,7 +2209,7 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.accept_completion(window, cx);
+            editor.handle_completion_action(&AcceptCompletion, window, cx);
         });
     }
 
@@ -1948,7 +2217,7 @@ impl QueryEditor {
     fn handle_cancel_completion_menu(
         &mut self,
         _action: &CancelCompletionMenu,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         if !self.editor.read(cx).is_completion_menu_open(cx) {
@@ -1956,7 +2225,11 @@ impl QueryEditor {
             return;
         }
         self.editor.update(cx, |editor, cx| {
-            editor.hide_completions(cx);
+            editor.handle_completion_action(
+                &zqlz_text_editor::actions::DismissCompletion,
+                window,
+                cx,
+            );
         });
     }
 
@@ -1995,6 +2268,8 @@ impl QueryEditor {
         if !settings.editor.inline_suggestions_enabled {
             return;
         }
+
+        let inline_suggestions_delay = settings.editor.inline_suggestions_delay_ms;
 
         let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
         let text = self.editor.read(cx).get_text(cx);
@@ -2057,9 +2332,12 @@ impl QueryEditor {
             return;
         }
 
+        self.inline_suggestion_generation = self.inline_suggestion_generation.wrapping_add(1);
+        let inline_suggestion_generation = self.inline_suggestion_generation;
+
         let request = CompletionRequest {
-            prefix: prefix.into(),
-            suffix: suffix.into(),
+            prefix: prefix.clone().into(),
+            suffix: suffix.clone().into(),
             cursor_offset,
             schema_context: None,
             dialect: None,
@@ -2068,6 +2346,12 @@ impl QueryEditor {
         // Spawn on the background executor so the network call doesn't block the
         // GPUI foreground thread, then update state on the foreground via WeakEntity.
         self._inline_suggestion_debounce = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(
+                    inline_suggestions_delay as u64,
+                ))
+                .await;
+
             let result = cx
                 .background_spawn(async move { ai_provider.suggest(request).await })
                 .await;
@@ -2081,6 +2365,25 @@ impl QueryEditor {
             }
 
             this.update(&mut cx.clone(), |this, cx| {
+                if this.inline_suggestion_generation != inline_suggestion_generation {
+                    return;
+                }
+
+                let editor = this.editor.read(cx);
+                let current_cursor_offset = editor.get_cursor_offset(cx);
+                let current_text = editor.get_text(cx);
+                if current_cursor_offset != cursor_offset {
+                    return;
+                }
+                if current_cursor_offset > current_text.len() {
+                    return;
+                }
+                if current_text[..current_cursor_offset] != prefix
+                    || current_text[current_cursor_offset..] != suffix
+                {
+                    return;
+                }
+
                 this.inline_suggestion = Some(InlineSuggestionState {
                     suggestion: suggestion.to_string(),
                     start_offset: cursor_offset,
@@ -2111,20 +2414,23 @@ impl QueryEditor {
             return None;
         }
 
-        // Get completions from editor wrapper
+        if self.editor.read(cx).is_completion_menu_open(cx) {
+            return None;
+        }
+
         let completions = self.editor.read(cx).get_completions(cx);
 
         // Find the best completion for inline suggestion
         for completion in completions.iter() {
-            if let Some(insert_text) = &completion.insert_text {
-                if !insert_text.is_empty() {
-                    return Some((
-                        insert_text.clone(),
-                        cursor_offset,
-                        cursor_offset + insert_text.len(),
-                        "LSP",
-                    ));
-                }
+            if let Some(insert_text) = &completion.insert_text
+                && !insert_text.is_empty()
+            {
+                return Some((
+                    insert_text.clone(),
+                    cursor_offset,
+                    cursor_offset + insert_text.len(),
+                    "LSP",
+                ));
             }
         }
 
@@ -2134,20 +2440,8 @@ impl QueryEditor {
     /// Accept the current inline suggestion
     pub fn accept_inline_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(inline_suggestion) = self.inline_suggestion.take() {
-            // Insert the suggestion text at the current position
-            let current_text = self.editor.read(cx).get_text(cx);
-            let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-
-            // Build new text with suggestion inserted
-            let mut new_text = String::new();
-            new_text.push_str(&current_text[..cursor_offset]);
-            new_text.push_str(&inline_suggestion.suggestion);
-            new_text.push_str(&current_text[cursor_offset..]);
-
-            // Set the new text and clear the ghost-text preview from the editor
             self.editor.update(cx, |editor, cx| {
-                editor.clear_inline_suggestion(cx);
-                editor.set_text(new_text, window, cx);
+                editor.accept_inline_suggestion(window, cx);
             });
 
             tracing::debug!(
@@ -2160,6 +2454,7 @@ impl QueryEditor {
 
     /// Dismiss the current inline suggestion
     pub fn dismiss_inline_suggestion(&mut self, cx: &mut Context<Self>) {
+        self.inline_suggestion_generation = self.inline_suggestion_generation.wrapping_add(1);
         if self.inline_suggestion.is_some() {
             self.inline_suggestion = None;
             self.editor.update(cx, |editor, cx| {
@@ -2188,6 +2483,17 @@ impl QueryEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_hover_enabled {
+            self.hover_content = None;
+            self.schema_symbol_info = None;
+            self.editor.update(cx, |editor, _editor_cx| {
+                editor.clear_hover();
+            });
+            cx.notify();
+            return;
+        }
+
         tracing::debug!("ShowHover action triggered");
 
         // First, try to find a schema symbol at the cursor position
@@ -2209,7 +2515,9 @@ impl QueryEditor {
         } else {
             // No schema symbol found - fall back to LSP hover
             self.schema_symbol_info = None;
-            let hover = self.editor.read(cx).get_hover(cx);
+            let text = self.editor.read(cx).get_text(cx).to_string();
+            let rope = zqlz_ui::widgets::Rope::from(text.as_str());
+            let hover = self.sql_lsp.read().get_hover(&rope, cursor_offset);
 
             if let Some(hover) = hover {
                 let content = match &hover.contents {
@@ -2308,10 +2616,10 @@ impl QueryEditor {
                     if nullable { "Yes" } else { "No" }
                 ));
             }
-            if let Some(is_pk) = details.is_primary_key {
-                if is_pk {
-                    content.push_str("**Primary Key**: Yes\n");
-                }
+            if let Some(is_pk) = details.is_primary_key
+                && is_pk
+            {
+                content.push_str("**Primary Key**: Yes\n");
             }
             if let Some(row_count) = details.row_count {
                 content.push_str(&format!("**Rows**: ~{}\n", row_count));
@@ -2325,6 +2633,10 @@ impl QueryEditor {
     pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
         self.hover_content = None;
         self.schema_symbol_info = None;
+        self.editor.update(cx, |editor, editor_cx| {
+            editor.clear_hover();
+            editor.clear_signature_help(editor_cx);
+        });
         cx.notify();
     }
 
@@ -2338,280 +2650,20 @@ impl QueryEditor {
         tracing::debug!("TriggerParameterHints action triggered");
 
         let signature_help = self.editor.read(cx).get_signature_help(cx);
+        let anchor_offset = self.editor.read(cx).get_cursor_offset(cx);
 
         if let Some(sig_help) = signature_help {
             let content = Self::format_signature_help(&sig_help);
             tracing::info!("Signature help content: {}", content);
-            self.signature_help_content = Some(content);
+            self.editor.update(cx, |editor, cx| {
+                editor.set_signature_help(content, anchor_offset, cx);
+            });
         } else {
-            self.signature_help_content = None;
+            self.editor.update(cx, |editor, cx| {
+                editor.clear_signature_help(cx);
+            });
         }
 
-        cx.notify();
-    }
-
-    /// Handle GoToDefinition action - navigate to definition of symbol under cursor
-    fn handle_go_to_definition(
-        &mut self,
-        _action: &GoToDefinition,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::debug!("GoToDefinition action triggered");
-        let text = self.editor.read(cx).get_text(cx).to_string();
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text.as_str());
-        let definition = self.sql_lsp.read().get_definition(&rope, cursor_offset);
-
-        if let Some(def_response) = definition {
-            let content = Self::format_definition_response(&def_response);
-            tracing::info!("Definition found: {}", content);
-            self.definition_content = Some(content);
-        } else {
-            self.definition_content = None;
-            tracing::debug!("No definition found at cursor position");
-        }
-
-        cx.notify();
-    }
-
-    /// Format definition response for display
-    fn format_definition_response(def_response: &lsp_types::GotoDefinitionResponse) -> String {
-        match def_response {
-            lsp_types::GotoDefinitionResponse::Scalar(location) => {
-                format!(
-                    "**Definition**\n\nFile: {}\nLine: {}, Column: {}",
-                    location.uri.as_str(),
-                    location.range.start.line + 1,
-                    location.range.start.character + 1
-                )
-            }
-            lsp_types::GotoDefinitionResponse::Array(locations) => {
-                let locations_str: Vec<String> = locations
-                    .iter()
-                    .map(|loc| {
-                        format!(
-                            "- {} (Line {}, Column {})",
-                            loc.uri.as_str(),
-                            loc.range.start.line + 1,
-                            loc.range.start.character + 1
-                        )
-                    })
-                    .collect();
-                format!(
-                    "**Definitions ({} found)**\n\n{}",
-                    locations.len(),
-                    locations_str.join("\n")
-                )
-            }
-            lsp_types::GotoDefinitionResponse::Link(links) => {
-                let links_str: Vec<String> = links
-                    .iter()
-                    .map(|link| {
-                        let target = link.target_uri.as_str();
-                        let start = link
-                            .origin_selection_range
-                            .map(|r| {
-                                format!(
-                                    "Line {}, Column {}",
-                                    r.start.line + 1,
-                                    r.start.character + 1
-                                )
-                            })
-                            .unwrap_or_else(|| "cursor position".to_string());
-                        format!("- {} ({})", target, start)
-                    })
-                    .collect();
-                format!(
-                    "**Definition Links ({} found)**\n\n{}",
-                    links.len(),
-                    links_str.join("\n")
-                )
-            }
-        }
-    }
-
-    /// Clear the definition popover
-    pub fn clear_definition(&mut self, cx: &mut Context<Self>) {
-        self.definition_content = None;
-        cx.notify();
-    }
-
-    /// Handle FindReferences action - find all references to symbol under cursor
-    fn handle_find_references(
-        &mut self,
-        _action: &FindReferences,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::debug!("FindReferences action triggered");
-        let text = self.editor.read(cx).get_text(cx).to_string();
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text.as_str());
-        let references = self.sql_lsp.read().get_references(&rope, cursor_offset);
-
-        if references.is_empty() {
-            tracing::debug!("No references found at cursor position");
-            self.references_content = None;
-        } else {
-            let ref_items: Vec<ReferenceItem> = references
-                .iter()
-                .map(|loc| ReferenceItem {
-                    uri: loc.uri.to_string(),
-                    line: loc.range.start.line,
-                    column: loc.range.start.character,
-                    text: None,
-                })
-                .collect();
-            tracing::info!("Found {} references", ref_items.len());
-            self.references_content = Some(ref_items);
-        }
-
-        cx.notify();
-    }
-
-    /// Clear the references list
-    pub fn clear_references(&mut self, cx: &mut Context<Self>) {
-        self.references_content = None;
-        cx.notify();
-    }
-
-    /// Handle RenameSymbol action - rename symbol under cursor
-    fn handle_rename_symbol(
-        &mut self,
-        _action: &RenameSymbol,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        tracing::debug!("RenameSymbol action triggered");
-
-        // Get the current word under cursor
-        let offset = self.editor.read(cx).get_cursor_offset(cx);
-        let text = self.editor.read(cx).get_text(cx);
-
-        // Extract the word at the cursor position
-        let word = Self::extract_word_at_offset(&text, offset);
-
-        if let Some(word) = word {
-            if word.is_empty() {
-                tracing::debug!("No word at cursor position for rename");
-                self.rename_content = None;
-            } else {
-                tracing::info!("Rename initiated for: {}", word);
-                self.rename_content = Some(RenameState {
-                    original_name: word.clone(),
-                    input_value: word,
-                    trigger_offset: offset,
-                    error_message: None,
-                });
-            }
-        } else {
-            self.rename_content = None;
-        }
-
-        cx.notify();
-    }
-
-    /// Extract a word at a given byte offset in the text
-    fn extract_word_at_offset(text: &str, offset: usize) -> Option<String> {
-        if offset > text.len() {
-            return None;
-        }
-
-        let chars: Vec<char> = text.chars().collect();
-        if chars.is_empty() {
-            return None;
-        }
-
-        // Find start of word
-        let mut start = offset;
-        while start > 0 {
-            let prev_idx = start - 1;
-            if chars[prev_idx].is_alphanumeric() || chars[prev_idx] == '_' {
-                start -= 1;
-            } else {
-                break;
-            }
-        }
-
-        // Find end of word
-        let mut end = offset;
-        while end < chars.len() {
-            if chars[end].is_alphanumeric() || chars[end] == '_' {
-                end += 1;
-            } else {
-                break;
-            }
-        }
-
-        if start < end {
-            Some(chars[start..end].iter().collect())
-        } else {
-            None
-        }
-    }
-
-    /// Apply the rename with the new name
-    pub fn apply_rename(&mut self, new_name: String, window: &mut Window, cx: &mut Context<Self>) {
-        let rename_state = match &self.rename_content {
-            Some(state) => state.clone(),
-            None => return,
-        };
-
-        // Check if new name is the same as original
-        if new_name.to_lowercase() == rename_state.original_name.to_lowercase() {
-            self.rename_content = None;
-            cx.notify();
-            return;
-        }
-
-        // Call the LSP rename
-        let text = self.editor.read(cx).get_text(cx).to_string();
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text.as_str());
-        let workspace_edit = self.sql_lsp.read().rename(&rope, cursor_offset, &new_name);
-
-        match workspace_edit {
-            Some(edit) => {
-                tracing::info!(
-                    "Rename workspace edit received, applying {} text edits",
-                    edit.changes.as_ref().map(|c| c.len()).unwrap_or(0)
-                );
-
-                // Apply the edits to the editor (need mutable access)
-                let result = self.editor.update(cx, |editor, cx| {
-                    editor.apply_workspace_edit(&edit, window, cx)
-                });
-
-                match result {
-                    Ok(_) => {
-                        self.is_dirty = true;
-                        self.update_diagnostics(cx);
-                        tracing::info!("Rename applied successfully");
-                    }
-                    Err(err) => tracing::warn!("Failed to apply rename edits: {}", err),
-                }
-
-                // Clear the rename UI
-                self.rename_content = None;
-            }
-            None => {
-                tracing::debug!("Rename returned no edits (may be invalid identifier or keyword)");
-                self.rename_content = Some(RenameState {
-                    original_name: rename_state.original_name,
-                    input_value: new_name,
-                    trigger_offset: rename_state.trigger_offset,
-                    error_message: Some("Cannot rename: invalid identifier or keyword".to_string()),
-                });
-            }
-        }
-
-        cx.notify();
-    }
-
-    /// Cancel the rename operation
-    pub fn cancel_rename(&mut self, cx: &mut Context<Self>) {
-        self.rename_content = None;
         cx.notify();
     }
 
@@ -2622,137 +2674,27 @@ impl QueryEditor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::debug!("ShowCodeActions action triggered");
-        let text = self.editor.read(cx).get_text(cx).to_string();
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text.as_str());
-        let code_actions = {
-            let mut lsp = self.sql_lsp.write();
-            let diagnostics = lsp.validate_sql(&rope);
-            lsp.get_code_actions(&rope, cursor_offset, &diagnostics)
-        };
-        self.code_actions = code_actions
-            .into_iter()
-            .map(lsp_types::CodeActionOrCommand::CodeAction)
-            .collect();
-
-        if self.code_actions.is_empty() {
-            tracing::debug!("No code actions available at cursor position");
-            self.code_actions_content = None;
-        } else {
-            let action_items: Vec<CodeActionItem> = self
-                .code_actions
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, action)| match action {
-                    lsp_types::CodeActionOrCommand::CodeAction(ca) => Some(CodeActionItem {
-                        title: ca.title.clone(),
-                        kind: ca.kind.as_ref().map(|k| format!("{:?}", k)),
-                        index: idx,
-                    }),
-                    lsp_types::CodeActionOrCommand::Command(cmd) => Some(CodeActionItem {
-                        title: cmd.title.clone(),
-                        kind: None,
-                        index: idx,
-                    }),
-                })
-                .collect();
-            tracing::info!("Found {} code actions", action_items.len());
-            self.code_actions_content = Some(action_items);
+        let settings = ZqlzSettings::global(cx);
+        if !settings.editor.lsp_enabled || !settings.editor.lsp_code_actions_enabled {
+            self.clear_code_actions(cx);
+            return;
         }
 
+        tracing::debug!("ShowCodeActions action triggered");
+        self.editor.update(cx, |editor, cx| {
+            editor.clear_signature_help(cx);
+            editor.update_code_actions(cx);
+        });
         cx.notify();
     }
 
     /// Apply a code action by index
-    pub fn apply_code_action(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
-        // Find the action at the given index
-        if let Some(action) = self.code_actions.get(index).cloned() {
-            match action {
-                lsp_types::CodeActionOrCommand::CodeAction(ca) => {
-                    if let Some(edit) = ca.edit {
-                        tracing::info!("Applying code action: {}", ca.title);
-
-                        // Apply the edits to the editor
-                        let result = self.editor.update(cx, |editor, cx| {
-                            editor.apply_workspace_edit(&edit, window, cx)
-                        });
-
-                        match result {
-                            Ok(_) => {
-                                self.is_dirty = true;
-                                self.update_diagnostics(cx);
-                                tracing::info!("Code action applied successfully");
-                            }
-                            Err(err) => {
-                                tracing::warn!("Failed to apply code action edits: {}", err)
-                            }
-                        }
-                    } else {
-                        tracing::debug!("Code action has no edits to apply: {}", ca.title);
-                    }
-                }
-                lsp_types::CodeActionOrCommand::Command(cmd) => {
-                    let command_title = cmd.title.clone();
-                    let mut applied = false;
-
-                    if let Some(arguments) = cmd.arguments {
-                        for argument in arguments {
-                            let workspace_edit = match serde_json::from_value::<
-                                lsp_types::WorkspaceEdit,
-                            >(argument)
-                            {
-                                Ok(edit) => edit,
-                                Err(_) => continue,
-                            };
-
-                            tracing::info!("Applying command-based code action: {}", command_title);
-                            let result = self.editor.update(cx, |editor, cx| {
-                                editor.apply_workspace_edit(&workspace_edit, window, cx)
-                            });
-
-                            match result {
-                                Ok(_) => {
-                                    self.is_dirty = true;
-                                    self.update_diagnostics(cx);
-                                    applied = true;
-                                    tracing::info!(
-                                        "Command-based code action applied successfully"
-                                    );
-                                    break;
-                                }
-                                Err(err) => {
-                                    tracing::warn!(
-                                        "Failed to apply command-based code action edits: {}",
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    }
-
-                    if !applied {
-                        tracing::debug!(
-                            "Command-based code action is unsupported without WorkspaceEdit arguments: {}",
-                            command_title
-                        );
-                    }
-                }
-            }
-        } else {
-            tracing::warn!("Code action index out of bounds: {}", index);
-        }
-
-        // Clear the code actions UI
-        self.code_actions_content = None;
-        self.code_actions.clear();
-        cx.notify();
-    }
-
     /// Clear the code actions list
     pub fn clear_code_actions(&mut self, cx: &mut Context<Self>) {
-        self.code_actions_content = None;
-        self.code_actions.clear();
+        self.editor.update(cx, |editor, cx| {
+            editor.clear_code_actions(cx);
+            editor.clear_signature_help(cx);
+        });
         cx.notify();
     }
 
@@ -2781,7 +2723,9 @@ impl QueryEditor {
 
     /// Clear the signature help popover
     pub fn clear_signature_help(&mut self, cx: &mut Context<Self>) {
-        self.signature_help_content = None;
+        self.editor.update(cx, |editor, cx| {
+            editor.clear_signature_help(cx);
+        });
         cx.notify();
     }
 
@@ -2801,22 +2745,20 @@ impl QueryEditor {
     }
 
     /// Format the SQL query using production-level formatter
-    fn format_query(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn format_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!("🔍 format_query called!");
-        let content = self.content(cx).to_string();
-        tracing::info!("🔍 Content length: {} bytes", content.len());
-
-        let formatted = if self.object_type.is_procedural() {
-            Self::format_sql_with_dollar_quoting(&content)
-        } else {
-            Self::format_sql(&content)
-        };
-        tracing::info!("🔍 Formatted content length: {} bytes", formatted.len());
-
+        let driver_type = self.driver_type.as_deref();
         self.editor.update(cx, |editor, cx| {
-            editor.set_text(formatted, window, cx);
+            if self.object_type.is_procedural() {
+                let content = editor.get_text(cx).to_string();
+                let formatted = Self::format_sql_with_dollar_quoting(&content, driver_type);
+                if formatted != content {
+                    editor.replace_all_text(&formatted, cx);
+                }
+            } else {
+                editor.format_sql(cx);
+            }
         });
-        self.is_dirty = true;
         self.update_diagnostics(cx);
         self._last_diagnostics_text = Some(self.content(cx).to_string());
         cx.notify();
@@ -2849,8 +2791,8 @@ impl QueryEditor {
         });
     }
 
-    fn format_sql(sql: &str) -> String {
-        use sqlformat::{Dialect, FormatOptions, Indent, QueryParams, format};
+    fn format_sql(sql: &str, driver_type: Option<&str>) -> String {
+        use sqlformat::{FormatOptions, Indent, QueryParams, format};
 
         let options = FormatOptions {
             indent: Indent::Spaces(4),
@@ -2862,7 +2804,7 @@ impl QueryEditor {
             max_inline_arguments: None,
             max_inline_top_level: None,
             joins_as_top_level: false,
-            dialect: Dialect::Generic,
+            dialect: driver_type_to_sqlformat_dialect(driver_type),
         };
 
         format(sql, &QueryParams::None, &options)
@@ -2873,12 +2815,12 @@ impl QueryEditor {
     /// Splits on dollar-quote delimiters (`$tag$`), formats only the outer DDL
     /// parts with the standard SQL formatter, and preserves the procedural body
     /// verbatim so that PL/pgSQL `DECLARE`/`BEGIN`/`END` blocks are not mangled.
-    fn format_sql_with_dollar_quoting(sql: &str) -> String {
+    fn format_sql_with_dollar_quoting(sql: &str, driver_type: Option<&str>) -> String {
         // Match dollar-quote delimiters like $$, $function$, $body$, $BODY$, etc.
         let delimiter_pattern =
             regex::Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)?\$").unwrap_or_else(|_| {
                 // Fallback: return unformatted if regex fails
-                return regex::Regex::new(r"^\b$").expect("infallible regex");
+                regex::Regex::new(r"^\b$").expect("infallible regex")
             });
 
         let delimiters: Vec<_> = delimiter_pattern.find_iter(sql).collect();
@@ -2894,11 +2836,11 @@ impl QueryEditor {
                 let body = &sql[open.start()..close.end()];
                 let after_body = &sql[close.end()..];
 
-                let formatted_before = Self::format_sql(before_body);
+                let formatted_before = Self::format_sql(before_body, driver_type);
                 let formatted_after = if after_body.trim().is_empty() {
                     after_body.to_string()
                 } else {
-                    Self::format_sql(after_body)
+                    Self::format_sql(after_body, driver_type)
                 };
 
                 return format!(
@@ -2919,38 +2861,16 @@ impl QueryEditor {
         }
 
         // No procedural content detected, format normally
-        Self::format_sql(sql)
+        Self::format_sql(sql, driver_type)
     }
 
     /// Render the toolbar with execution controls
-    fn render_toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
+    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme().clone();
         let is_empty = self.is_content_empty(cx);
         let has_template_error = self.template_error.is_some();
         let supports_save = self.object_type.supports_save();
         let has_connection = self.connection_id.is_some();
-
-        // Icon-only toolbar buttons use muted_foreground at rest and foreground on hover,
-        // matching standard IDE toolbar conventions (icons are "discoverable" but not dominant).
-        let toolbar_icon_style = ButtonCustomVariant::new(cx)
-            .foreground(theme.muted_foreground)
-            .hover(theme.list_hover)
-            .active(theme.list_active);
-
-        // The execute button gets a primary-colored icon (foreground only) rather than a filled
-        // background, so it stays visually prominent without clashing with the muted icon buttons.
-        let execute_icon_style = ButtonCustomVariant::new(cx)
-            .foreground(theme.primary)
-            .hover(theme.list_hover)
-            .active(theme.list_active);
-
-        // Active mode-toggle buttons show a primary-colored icon on a faint tinted background,
-        // conveying the selected state without the dominance of a fully-filled primary button.
-        let mode_active_style = ButtonCustomVariant::new(cx)
-            .foreground(theme.primary)
-            .color(theme.primary.opacity(0.1))
-            .hover(theme.primary.opacity(0.15))
-            .active(theme.primary.opacity(0.25));
 
         h_flex()
             .id("query-editor-toolbar")
@@ -2960,9 +2880,6 @@ impl QueryEditor {
             .on_action(cx.listener(Self::handle_save_query))
             .on_action(cx.listener(Self::handle_show_hover))
             .on_action(cx.listener(Self::handle_trigger_parameter_hints))
-            .on_action(cx.listener(Self::handle_go_to_definition))
-            .on_action(cx.listener(Self::handle_find_references))
-            .on_action(cx.listener(Self::handle_rename_symbol))
             .on_action(cx.listener(Self::handle_show_code_actions))
             .w_full()
             .h(px(36.0))
@@ -2979,7 +2896,8 @@ impl QueryEditor {
                         .small()
                         .icon(ZqlzIcon::FloppyDisk)
                         .label("Save")
-                        .disabled(!has_connection || is_empty || !self.is_dirty)
+                        .tooltip_with_action("Save", &SaveQuery, None)
+                        .disabled(!has_connection || is_empty || !self.editor.read(cx).is_dirty())
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.emit_save_object(cx);
                         })),
@@ -2989,9 +2907,10 @@ impl QueryEditor {
             .when(!supports_save && has_connection, |this| {
                 this.child(
                     Button::new("save-query")
-                        .custom(toolbar_icon_style)
+                        .ghost()
                         .small()
                         .icon(ZqlzIcon::FloppyDisk)
+                        .tooltip_with_action("Save Query", &SaveQuery, None)
                         .disabled(is_empty)
                         .on_click(cx.listener(|this, _, window, cx| {
                             this.handle_save_query(&SaveQuery, window, cx);
@@ -3002,10 +2921,19 @@ impl QueryEditor {
             .child(
                 Button::new("execute")
                     .when(supports_save, |b| b.ghost())
-                    .when(!supports_save, |b| b.custom(execute_icon_style))
+                    .when(!supports_save, |b| b.primary())
                     .small()
                     .icon(ZqlzIcon::Play)
-                    .tooltip("Run Query")
+                    .tooltip({
+                        #[cfg(target_os = "macos")]
+                        {
+                            "Run Query (⌘↩)"
+                        }
+                        #[cfg(not(target_os = "macos"))]
+                        {
+                            "Run Query (Ctrl+Enter / F5)"
+                        }
+                    })
                     .disabled(self.is_executing || is_empty || has_template_error)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.emit_execute_query(cx);
@@ -3013,13 +2941,13 @@ impl QueryEditor {
             )
             .child(
                 Button::new("explain")
-                    .custom(toolbar_icon_style)
+                    .ghost()
                     .small()
                     .icon(ZqlzIcon::Lightbulb)
                     .tooltip("Explain Query")
                     .disabled(self.is_executing || is_empty || has_template_error)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.emit_explain_selection(cx);
+                        this.emit_explain_query(cx);
                     })),
             )
             // Stop button with icon (only shown when executing)
@@ -3029,7 +2957,16 @@ impl QueryEditor {
                         .danger()
                         .small()
                         .icon(ZqlzIcon::Stop)
-                        .tooltip("Stop Query")
+                        .tooltip({
+                            #[cfg(target_os = "macos")]
+                            {
+                                "Stop Query (⌘Esc)"
+                            }
+                            #[cfg(not(target_os = "macos"))]
+                            {
+                                "Stop Query (Esc)"
+                            }
+                        })
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.emit_cancel_query(cx);
                         })),
@@ -3037,7 +2974,7 @@ impl QueryEditor {
             })
             .child(
                 Button::new("format")
-                    .custom(toolbar_icon_style)
+                    .ghost()
                     .small()
                     .icon(ZqlzIcon::TextIndent)
                     .tooltip_with_action("Format SQL", &FormatQuery, None)
@@ -3050,7 +2987,7 @@ impl QueryEditor {
             .when(!supports_save, |this| {
                 this.child({
                     let is_active = self.editor_mode == EditorMode::Sql;
-                    let mut btn = Button::new("mode-sql")
+                    let btn = Button::new("mode-sql")
                         .small()
                         .icon(ZqlzIcon::Code)
                         .tooltip("SQL Mode")
@@ -3059,16 +2996,15 @@ impl QueryEditor {
                                 this.toggle_editor_mode(window, cx);
                             }
                         }));
-                    btn = if is_active {
-                        btn.custom(mode_active_style)
+                    if is_active {
+                        btn.secondary_primary().selected(true)
                     } else {
-                        btn.custom(toolbar_icon_style)
-                    };
-                    btn
+                        btn.ghost()
+                    }
                 })
                 .child({
                     let is_active = self.editor_mode == EditorMode::Template;
-                    let mut btn = Button::new("mode-template")
+                    let btn = Button::new("mode-template")
                         .small()
                         .icon(ZqlzIcon::BracketsCurly)
                         .tooltip("Template Mode")
@@ -3077,12 +3013,11 @@ impl QueryEditor {
                                 this.toggle_editor_mode(window, cx);
                             }
                         }));
-                    btn = if is_active {
-                        btn.custom(mode_active_style)
+                    if is_active {
+                        btn.secondary_primary().selected(true)
                     } else {
-                        btn.custom(toolbar_icon_style)
-                    };
-                    btn
+                        btn.ghost()
+                    }
                 })
             })
             // Show object type indicator for database objects
@@ -3201,6 +3136,7 @@ impl QueryEditor {
                     .items_center()
                     .text_sm()
                     .text_color(theme.muted_foreground)
+                    .child(self.render_toolbar_shortcut_hints(window, cx))
                     // Error/warning count badge
                     .map(|this| {
                         let (errors, warnings, _) = self.diagnostic_counts(cx);
@@ -3210,13 +3146,12 @@ impl QueryEditor {
                                     .gap_1()
                                     .items_center()
                                     .child(div().size_2().rounded_full().bg(theme.danger))
-                                    .child(div().text_xs().text_color(theme.danger).child(
-                                        format!(
-                                            "{} error{}",
-                                            errors,
-                                            if errors == 1 { "" } else { "s" }
-                                        ),
-                                    )),
+                                    .child(div().text_xs().text_color(theme.danger).child(format!(
+                                        "{} error{}",
+                                        errors,
+                                        if errors == 1 { "" } else { "s" }
+                                    )))
+                                    .child(self.render_problem_shortcut_hints(window, cx)),
                             )
                         } else if warnings > 0 {
                             this.child(
@@ -3230,7 +3165,8 @@ impl QueryEditor {
                                             warnings,
                                             if warnings == 1 { "" } else { "s" }
                                         ),
-                                    )),
+                                    ))
+                                    .child(self.render_problem_shortcut_hints(window, cx)),
                             )
                         } else {
                             this
@@ -3246,6 +3182,96 @@ impl QueryEditor {
             )
     }
 
+    fn render_toolbar_shortcut_hints(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut hints: Vec<AnyElement> = Vec::new();
+
+        #[cfg(target_os = "macos")]
+        let run_shortcut = Self::kbd_for_keystroke("cmd-enter");
+        #[cfg(not(target_os = "macos"))]
+        let run_shortcut = Self::kbd_for_keystroke("ctrl-enter");
+
+        if let Some(kbd) = run_shortcut {
+            hints.push(self.render_toolbar_shortcut_hint("Run", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(
+            &zqlz_text_editor::actions::TriggerCompletion,
+            &self.focus_handle,
+            window,
+        ) {
+            hints.push(self.render_toolbar_shortcut_hint("Complete", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&FormatQuery, &self.focus_handle, window) {
+            hints.push(self.render_toolbar_shortcut_hint("Format", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&ShowHover, &self.focus_handle, window) {
+            hints.push(self.render_toolbar_shortcut_hint("Hover", kbd, cx));
+        }
+        if let Some(kbd) =
+            Kbd::binding_for_action_in(&TriggerParameterHints, &self.focus_handle, window)
+        {
+            hints.push(self.render_toolbar_shortcut_hint("Params", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&ShowCodeActions, &self.focus_handle, window)
+        {
+            hints.push(self.render_toolbar_shortcut_hint("Actions", kbd, cx));
+        }
+
+        h_flex().gap_3().items_center().children(hints)
+    }
+
+    fn render_toolbar_shortcut_hint(
+        &self,
+        label: impl Into<SharedString>,
+        kbd: Kbd,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let label = label.into();
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(kbd)
+            .into_any_element()
+    }
+
+    fn render_problem_shortcut_hints(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut hints: Vec<AnyElement> = Vec::new();
+
+        if let Some(kbd) = Kbd::binding_for_action_in(&NextProblem, &self.focus_handle, window) {
+            hints.push(self.render_toolbar_shortcut_hint("Next", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&PreviousProblem, &self.focus_handle, window)
+        {
+            hints.push(self.render_toolbar_shortcut_hint("Prev", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(
+            &super::actions::ToggleProblemsPanel,
+            &self.focus_handle,
+            window,
+        ) {
+            hints.push(self.render_toolbar_shortcut_hint("Panel", kbd, cx));
+        }
+
+        h_flex()
+            .gap_2()
+            .items_center()
+            .children(hints)
+            .into_any_element()
+    }
+
+    fn kbd_for_keystroke(stroke: &str) -> Option<Kbd> {
+        Keystroke::parse(stroke).ok().map(Kbd::new)
+    }
+
     /// Render the SQL editor area using the custom TextEditor
     fn render_editor(&self, _cx: &mut Context<Self>) -> impl IntoElement {
         self.editor.clone().into_any_element()
@@ -3256,19 +3282,13 @@ impl QueryEditor {
     fn format_hover_content(&self, content: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
         let theme = cx.theme().clone();
 
-        // Check if content has code blocks (```)
-        let has_code_blocks = content.contains("```");
-
-        if has_code_blocks {
-            // Render with code block support
+        if content.contains("```") {
             self.render_markdown_with_code_blocks(content, &theme)
         } else {
-            // Simple rendering for plain text
             self.render_simple_markdown(content, &theme)
         }
     }
 
-    /// Render content with code block support
     fn render_markdown_with_code_blocks(&self, content: &str, theme: &Theme) -> gpui::AnyElement {
         let mut elements: Vec<gpui::AnyElement> = Vec::new();
         let mut in_code_block = false;
@@ -3277,11 +3297,9 @@ impl QueryEditor {
         for line in content.lines() {
             if line.starts_with("```") {
                 if !in_code_block {
-                    // Start of code block
                     in_code_block = true;
                     code_block_lines.clear();
                 } else {
-                    // End of code block - render it
                     let code_text = code_block_lines.join("\n");
                     elements.push(
                         div()
@@ -3303,13 +3321,11 @@ impl QueryEditor {
             } else if in_code_block {
                 code_block_lines.push(line);
             } else {
-                // Regular content - render with markdown styling
                 let styled = self.render_markdown_line(line, theme);
                 elements.push(div().w_full().mb_1().child(styled).into_any_element());
             }
         }
 
-        // Handle remaining code block if not closed
         if in_code_block && !code_block_lines.is_empty() {
             let code_text = code_block_lines.join("\n");
             elements.push(
@@ -3328,7 +3344,6 @@ impl QueryEditor {
             );
         }
 
-        // If no elements were created (empty content), show the raw content
         if elements.is_empty() {
             div().child(content.to_string()).into_any_element()
         } else {
@@ -3342,9 +3357,7 @@ impl QueryEditor {
         }
     }
 
-    /// Render a single line with markdown-like styling
     fn render_markdown_line(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
-        // Check for headings
         if line.starts_with("### ") {
             return div()
                 .text_sm()
@@ -3373,17 +3386,14 @@ impl QueryEditor {
                 .into_any_element();
         }
 
-        // Check for inline code
         if line.contains('`') {
             return self.render_inline_code(line, theme);
         }
 
-        // Check for bold text
         if line.contains("**") {
             return self.render_bold_text(line, theme);
         }
 
-        // Regular text - wrap in div
         div()
             .text_xs()
             .text_color(theme.popover_foreground)
@@ -3391,13 +3401,11 @@ impl QueryEditor {
             .into_any_element()
     }
 
-    /// Render inline code (text wrapped in backticks)
     fn render_inline_code(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
         let mut parts: Vec<gpui::AnyElement> = Vec::new();
         let mut remaining = line;
 
         while let Some(start) = remaining.find('`') {
-            // Add text before the backtick
             if start > 0 {
                 parts.push(
                     div()
@@ -3409,7 +3417,6 @@ impl QueryEditor {
             }
 
             if let Some(end) = remaining[start + 1..].find('`') {
-                // Found inline code
                 let code = &remaining[start + 1..start + 1 + end];
                 parts.push(
                     div()
@@ -3424,7 +3431,6 @@ impl QueryEditor {
                 );
                 remaining = &remaining[start + 1 + end + 1..];
             } else {
-                // No closing backtick, treat rest as text
                 parts.push(
                     div()
                         .text_xs()
@@ -3436,7 +3442,6 @@ impl QueryEditor {
             }
         }
 
-        // Add any remaining text
         if !remaining.is_empty() {
             parts.push(
                 div()
@@ -3452,13 +3457,11 @@ impl QueryEditor {
             .into_any_element()
     }
 
-    /// Render text with bold markers (**text**)
     fn render_bold_text(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
         let mut parts: Vec<gpui::AnyElement> = Vec::new();
         let mut remaining = line;
 
         while let Some(start) = remaining.find("**") {
-            // Add text before the bold marker
             if start > 0 {
                 parts.push(
                     div()
@@ -3470,7 +3473,6 @@ impl QueryEditor {
             }
 
             if let Some(end) = remaining[start + 2..].find("**") {
-                // Found bold text
                 let bold = &remaining[start + 2..start + 2 + end];
                 parts.push(
                     div()
@@ -3482,7 +3484,6 @@ impl QueryEditor {
                 );
                 remaining = &remaining[start + 2 + end + 2..];
             } else {
-                // No closing marker, treat rest as text
                 parts.push(
                     div()
                         .text_xs()
@@ -3494,7 +3495,6 @@ impl QueryEditor {
             }
         }
 
-        // Add any remaining text
         if !remaining.is_empty() {
             parts.push(
                 div()
@@ -3510,7 +3510,6 @@ impl QueryEditor {
             .into_any_element()
     }
 
-    /// Render simple markdown (headings and basic styling without code blocks)
     fn render_simple_markdown(&self, content: &str, theme: &Theme) -> gpui::AnyElement {
         let mut elements: Vec<gpui::AnyElement> = Vec::new();
 
@@ -3556,391 +3555,6 @@ impl QueryEditor {
                 .on_mouse_down_out(cx.listener(|this, _, _, cx| {
                     this.clear_hover(cx);
                 })),
-        )
-    }
-
-    /// Render the signature help popover if there's content to show
-    fn render_signature_help_popover(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let content = self.signature_help_content.as_ref()?;
-        let theme = cx.theme();
-
-        // Parse and render signature help with styled elements
-        let lines: Vec<&str> = content.lines().collect();
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-
-        let mut in_parameters = false;
-        let mut _active_param_index = 0;
-
-        for (_line_idx, line) in lines.iter().enumerate() {
-            if line.starts_with("**") && line.ends_with("**") && !line.contains("Parameters") {
-                // Function name header
-                let func_name = line.trim_start_matches("**").trim_end_matches("**");
-                elements.push(
-                    div()
-                        .text_sm()
-                        .font_weight(gpui::FontWeight::from(700.0))
-                        .text_color(theme.foreground)
-                        .mb_2()
-                        .child(func_name.to_string())
-                        .into_any_element(),
-                );
-            } else if line.contains("**Parameters:**") {
-                // Parameters header
-                in_parameters = true;
-                elements.push(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::from(600.0))
-                        .text_color(theme.muted_foreground)
-                        .mb_1()
-                        .mt_2()
-                        .child("Parameters")
-                        .into_any_element(),
-                );
-            } else if in_parameters && !line.is_empty() {
-                // Parameter line - check for active marker
-                let is_active = line.starts_with("◀");
-                let param_text = line.trim_start_matches("◀").trim_start_matches(' ');
-
-                if is_active {
-                    _active_param_index += 1;
-                    // Active parameter - highlight with background
-                    elements.push(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .bg(theme.muted)
-                            .rounded_sm()
-                            .px_2()
-                            .py_1()
-                            .mb_1()
-                            .children([
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.accent)
-                                    .child("◀")
-                                    .into_any_element(),
-                                div()
-                                    .text_xs()
-                                    .font_weight(gpui::FontWeight::from(600.0))
-                                    .text_color(theme.foreground)
-                                    .font_family(theme.mono_font_family.clone())
-                                    .child(param_text.to_string())
-                                    .into_any_element(),
-                            ])
-                            .into_any_element(),
-                    );
-                } else {
-                    // Inactive parameter - regular styling
-                    elements.push(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .text_xs()
-                            .text_color(theme.popover_foreground)
-                            .mb_1()
-                            .children([
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.muted_foreground)
-                                    .w_3()
-                                    .child(" ")
-                                    .into_any_element(),
-                                div()
-                                    .text_xs()
-                                    .text_color(theme.popover_foreground)
-                                    .font_family(theme.mono_font_family.clone())
-                                    .child(param_text.to_string())
-                                    .into_any_element(),
-                            ])
-                            .into_any_element(),
-                    );
-                }
-            }
-        }
-
-        Some(
-            div()
-                .absolute()
-                .bottom_8()
-                .left_4()
-                .max_w(px(500.0))
-                .max_h(px(300.0))
-                .overflow_y_scrollbar()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.info)
-                .rounded_md()
-                .shadow_lg()
-                .p_3()
-                .text_xs()
-                .child(
-                    div().children(
-                        elements
-                            .into_iter()
-                            .map(gpui::IntoElement::into_any_element),
-                    ),
-                )
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.clear_signature_help(cx);
-                })),
-        )
-    }
-
-    /// Render the definition popover if there's content to show
-    fn render_definition_popover(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let content = self.definition_content.as_ref()?;
-        let theme = cx.theme();
-
-        Some(
-            div()
-                .absolute()
-                .top_8()
-                .right_4()
-                .max_w(px(400.0))
-                .max_h(px(300.0))
-                .overflow_y_scrollbar()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.info)
-                .rounded_md()
-                .shadow_lg()
-                .p_3()
-                .text_xs()
-                .text_color(theme.popover_foreground)
-                .child(content.clone())
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.clear_definition(cx);
-                })),
-        )
-    }
-
-    /// Render the references list popover if there's content to show
-    fn render_references_popover(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let references = self.references_content.as_ref()?;
-        let theme = cx.theme();
-        let refs_count = references.len();
-
-        Some(
-            div()
-                .absolute()
-                .top_8()
-                .right_4()
-                .max_w(px(400.0))
-                .max_h(px(400.0))
-                .overflow_y_scrollbar()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.info)
-                .rounded_md()
-                .shadow_lg()
-                .p_3()
-                .text_xs()
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.popover_foreground)
-                        .mb_2()
-                        .child(if refs_count == 0 {
-                            "No references found".to_string()
-                        } else {
-                            format!("References ({} found)", refs_count)
-                        }),
-                )
-                .when(refs_count > 0, |this| {
-                    this.child(v_flex().gap_1().children(references.iter().enumerate().map(
-                        |(_idx, r)| {
-                            let line = r.line as usize;
-                            let column = r.column as usize;
-                            div()
-                                .p_1()
-                                .rounded_sm()
-                                .hover(|s| s.bg(theme.muted))
-                                .cursor_pointer()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, window, cx| {
-                                        let focus_handle = this.editor.read(cx).focus_handle(cx);
-                                        focus_handle.focus(window, cx);
-                                        this.editor.update(cx, |editor, cx| {
-                                            editor
-                                                .navigate_to(line, column, None, None, window, cx);
-                                        });
-                                        this.clear_references(cx);
-                                    }),
-                                )
-                                .child(div().text_color(theme.popover_foreground).child(format!(
-                                    "Line {}, Column {}",
-                                    r.line + 1,
-                                    r.column + 1
-                                )))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(r.uri.clone()),
-                                )
-                        },
-                    )))
-                })
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.clear_references(cx);
-                })),
-        )
-    }
-
-    /// Render the rename popover if rename is active
-    fn render_rename_popover(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let rename_state = self.rename_content.as_ref()?;
-        let theme = cx.theme();
-
-        Some(
-            div()
-                .absolute()
-                .top_8()
-                .right_4()
-                .w(px(300.0))
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.info)
-                .rounded_md()
-                .shadow_lg()
-                .p_3()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.cancel_rename(cx);
-                }))
-                .child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.popover_foreground)
-                        .mb_2()
-                        .child(format!("Rename '{}' to:", rename_state.original_name)),
-                )
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.popover_foreground)
-                        .mb_2()
-                        .child(rename_state.input_value.clone()),
-                )
-                .when_some(rename_state.error_message.as_ref(), |this, error| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.danger)
-                            .mb_2()
-                            .child(error.clone()),
-                    )
-                })
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .justify_end()
-                        .child(
-                            Button::new("rename-cancel")
-                                .ghost()
-                                .small()
-                                .label("Cancel")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.cancel_rename(cx);
-                                })),
-                        )
-                        .child(
-                            Button::new("rename-confirm")
-                                .primary()
-                                .small()
-                                .label("Rename")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let value = this
-                                        .rename_content
-                                        .as_ref()
-                                        .map(|s| s.input_value.clone())
-                                        .unwrap_or_default();
-                                    this.apply_rename(value, window, cx);
-                                })),
-                        ),
-                ),
-        )
-    }
-
-    /// Render the code actions popover if there are actions available
-    fn render_code_actions_popover(
-        &self,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Option<impl IntoElement> {
-        let actions = self.code_actions_content.as_ref()?;
-        let theme = cx.theme();
-        let actions_count = actions.len();
-
-        Some(
-            div()
-                .absolute()
-                .top_8()
-                .right_4()
-                .max_w(px(400.0))
-                .max_h(px(300.0))
-                .overflow_y_scrollbar()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.info)
-                .rounded_md()
-                .shadow_lg()
-                .p_3()
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.clear_code_actions(cx);
-                }))
-                .child(
-                    div()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.popover_foreground)
-                        .mb_2()
-                        .child(if actions_count == 0 {
-                            "No code actions available".to_string()
-                        } else {
-                            format!(
-                                "Code Actions ({} available) - Cmd+Shift+. to apply",
-                                actions_count
-                            )
-                        }),
-                )
-                .when(actions_count > 0, |this| {
-                    this.child(v_flex().gap_1().children(actions.iter().map(|action| {
-                        let action_index = action.index;
-                        div()
-                            .p_2()
-                            .rounded_sm()
-                            .hover(|s| s.bg(theme.muted))
-                            .cursor_pointer()
-                            .on_mouse_down(
-                                MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
-                                    this.apply_code_action(action_index, window, cx);
-                                }),
-                            )
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(theme.popover_foreground)
-                                    .child(action.title.clone()),
-                            )
-                            .when_some(action.kind.as_ref(), |this, kind| {
-                                this.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(kind.clone()),
-                                )
-                            })
-                    })))
-                }),
         )
     }
 
@@ -4018,21 +3632,18 @@ impl QueryEditor {
 }
 
 impl Render for QueryEditor {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg_color = cx.theme().background;
         let indicator_bg = cx.theme().primary.opacity(0.1);
 
         let is_template_mode = self.editor_mode == EditorMode::Template;
         let hover_content = self.hover_content.clone();
-        let signature_help_content = self.signature_help_content.clone();
-        let definition_content = self.definition_content.clone();
-        let references_content = self.references_content.clone();
-        let code_actions_content = self.code_actions_content.clone();
 
         let inline_suggestion_text = self
             .inline_suggestion
             .as_ref()
             .map(|s| s.suggestion.clone());
+        let muted_foreground = cx.theme().muted_foreground;
 
         v_flex()
             .id("query-editor")
@@ -4055,17 +3666,36 @@ impl Render for QueryEditor {
                 let key = event.keystroke.key.as_str();
                 let modifiers = event.keystroke.modifiers;
 
-                // Query execution shortcuts:
-                // - Cmd+Enter (platform Enter), Ctrl+R, and F5 execute the current query
-                // - Cmd/Ctrl+Shift+Enter executes selection/current statement
-                // - Shift+F5 cancels the running query
-                if key == "f5" && modifiers.shift {
-                    this.emit_cancel_query(cx);
+                let is_manual_completion_shortcut = key == "."
+                    && !modifiers.shift
+                    && !modifiers.alt
+                    && (modifiers.platform || modifiers.control);
+
+                if is_manual_completion_shortcut && !this.is_executing {
+                    this.dismiss_inline_suggestion(cx);
+                    this.handle_trigger_completion(&TriggerCompletion, window, cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
                     return;
                 }
-                if (modifiers.platform && modifiers.shift && key == "enter")
-                    || (modifiers.control && modifiers.shift && key == "enter")
+
+                // Query execution shortcuts:
+                // - Cmd+Enter and F5 execute the current query
+                // - Cmd/Ctrl+Shift+Enter executes selection/current statement
+                // - Escape / Cmd+Escape cancels the running query via app keymap
+                if (this.is_executing && key == "escape" && !modifiers.shift && !modifiers.alt)
+                    || (this.is_executing
+                        && key == "escape"
+                        && modifiers.platform
+                        && !modifiers.shift
+                        && !modifiers.alt)
                 {
+                    this.emit_cancel_query(cx);
+                    window.prevent_default();
+                    cx.stop_propagation();
+                    return;
+                }
+                if modifiers.shift && key == "enter" && (modifiers.platform || modifiers.control) {
                     this.emit_execute_selection(cx);
                     return;
                 }
@@ -4077,29 +3707,19 @@ impl Render for QueryEditor {
                     return;
                 }
 
-                // Trigger auto-completion when typing identifier-like characters.
-                // Navigation keys (up/down/enter/tab/escape) are handled by
-                // action handlers registered above.
-                if key.len() == 1 {
-                    if let Some(ch) = key.chars().next() {
-                        if ch.is_ascii_alphanumeric() || ch == '_' || ch == '.' {
-                            // Any new character invalidates the current ghost-text suggestion.
-                            this.dismiss_inline_suggestion(cx);
-                            this.trigger_auto_completion(window, cx);
-                        }
-                    }
+                // Any typed character invalidates the current ghost-text suggestion.
+                if key.len() == 1
+                    && let Some(ch) = key.chars().next()
+                    && !ch.is_control()
+                {
+                    this.dismiss_inline_suggestion(cx);
                 }
-
-                // Trigger diagnostics debounced when any key is pressed
-                // This updates diagnostics as the user types
-                let current_text = this.editor.read(cx).get_text(cx);
-                this.trigger_diagnostics_debounced(current_text.to_string(), window, cx);
 
                 // Allow the event to continue propagating so the inner TextEditor
                 // also receives it and can insert the typed character.
                 cx.propagate();
             }))
-            .child(self.render_toolbar(cx))
+            .child(self.render_toolbar(_window, cx))
             .child(
                 h_flex()
                     .flex_1()
@@ -4115,21 +3735,6 @@ impl Render for QueryEditor {
                             .when_some(hover_content, |this, _content| {
                                 this.children(self.render_hover_popover(cx))
                             })
-                            .when_some(signature_help_content, |this, _content| {
-                                this.children(self.render_signature_help_popover(cx))
-                            })
-                            .when_some(definition_content, |this, _content| {
-                                this.children(self.render_definition_popover(cx))
-                            })
-                            .when_some(references_content, |this, _content| {
-                                this.children(self.render_references_popover(cx))
-                            })
-                            .when_some(self.rename_content.as_ref(), |this, _content| {
-                                this.children(self.render_rename_popover(window, cx))
-                            })
-                            .when_some(code_actions_content, |this, _content| {
-                                this.children(self.render_code_actions_popover(window, cx))
-                            })
                             .when_some(inline_suggestion_text, |this, suggestion_text| {
                                 this.child(
                                     div()
@@ -4142,10 +3747,33 @@ impl Render for QueryEditor {
                                         .bg(indicator_bg)
                                         .text_sm()
                                         .font_medium()
-                                        .child(format!(
-                                            "⟪ {} (Tab to accept, Esc to dismiss)",
-                                            suggestion_text
-                                        )),
+                                        .child(
+                                            h_flex()
+                                                .gap_1()
+                                                .items_center()
+                                                .child("⟪")
+                                                .child(suggestion_text)
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted_foreground)
+                                                        .child("accept"),
+                                                )
+                                                .when_some(
+                                                    Self::kbd_for_keystroke("tab"),
+                                                    |this, kbd| this.child(kbd),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_xs()
+                                                        .text_color(muted_foreground)
+                                                        .child("dismiss"),
+                                                )
+                                                .when_some(
+                                                    Self::kbd_for_keystroke("escape"),
+                                                    |this, kbd| this.child(kbd),
+                                                ),
+                                        ),
                                 )
                             }),
                     )
@@ -4171,7 +3799,7 @@ impl Panel for QueryEditor {
     }
 
     fn title(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        if self.is_dirty {
+        if self.editor.read(_cx).is_dirty() {
             format!("{}*", self.name)
         } else {
             self.name.clone()
@@ -4187,7 +3815,7 @@ impl Panel for QueryEditor {
     }
 
     fn has_unsaved_changes(&self, _cx: &App) -> bool {
-        self.is_dirty
+        self.editor.read(_cx).is_dirty()
     }
 }
 
@@ -4218,11 +3846,11 @@ fn save_schema_cache_to_disk(connection_id: Uuid, cache: &zqlz_lsp::SchemaCache)
     let Some(path) = schema_cache_path(connection_id) else {
         return;
     };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(error = %e, "Failed to create schema cache directory");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(e) = std::fs::create_dir_all(parent)
+    {
+        tracing::warn!(error = %e, "Failed to create schema cache directory");
+        return;
     }
     match serde_json::to_string(cache) {
         Ok(json) => {
@@ -4238,7 +3866,10 @@ fn save_schema_cache_to_disk(connection_id: Uuid, cache: &zqlz_lsp::SchemaCache)
 
 #[cfg(test)]
 mod tests {
-    use super::QueryEditor;
+    use super::{DiagnosticInfo, DiagnosticInfoSeverity, QueryEditor};
+    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use std::path::Path;
+    use zqlz_text_editor::DocumentIdentity;
 
     #[test]
     fn problem_index_forward_wraps_to_start() {
@@ -4273,6 +3904,81 @@ mod tests {
         assert_eq!(
             QueryEditor::problem_index_for_cursor(&problems, 8, 0, false),
             Some(1)
+        );
+    }
+
+    #[test]
+    fn internal_text_document_starts_with_internal_identity() {
+        let document = QueryEditor::internal_text_document("select 1");
+
+        assert_eq!(document.buffer.text(), "select 1");
+        match document.identity() {
+            DocumentIdentity::Internal { uri } => {
+                assert!(uri.as_str().starts_with("sql://internal/"));
+            }
+            identity => panic!("expected internal identity, got {identity:?}"),
+        }
+    }
+
+    #[test]
+    fn document_identity_from_path_can_be_used_for_document_first_construction() {
+        let identity = DocumentIdentity::from_path("/tmp/query.sql").expect("external identity");
+
+        assert_eq!(identity.path(), Some(Path::new("/tmp/query.sql")));
+    }
+
+    #[test]
+    fn cached_diagnostic_counts_match_lsp_severities() {
+        let diagnostics = vec![
+            Diagnostic {
+                range: Range::new(Position::new(0, 0), Position::new(0, 6)),
+                severity: Some(DiagnosticSeverity::ERROR),
+                ..Diagnostic::default()
+            },
+            Diagnostic {
+                range: Range::new(Position::new(1, 0), Position::new(1, 4)),
+                severity: Some(DiagnosticSeverity::WARNING),
+                ..Diagnostic::default()
+            },
+            Diagnostic {
+                range: Range::new(Position::new(2, 0), Position::new(2, 3)),
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                ..Diagnostic::default()
+            },
+            Diagnostic {
+                range: Range::new(Position::new(3, 0), Position::new(3, 2)),
+                severity: Some(DiagnosticSeverity::HINT),
+                ..Diagnostic::default()
+            },
+        ];
+
+        assert_eq!(
+            QueryEditor::diagnostic_counts_from_lsp_diagnostics(&diagnostics),
+            (1, 1, 2)
+        );
+    }
+
+    #[test]
+    fn cached_diagnostic_infos_preserve_ranges_and_messages() {
+        let diagnostics = vec![Diagnostic {
+            range: Range::new(Position::new(4, 2), Position::new(4, 8)),
+            severity: Some(DiagnosticSeverity::WARNING),
+            message: "check predicate".to_string(),
+            source: Some("sqlparser".to_string()),
+            ..Diagnostic::default()
+        }];
+
+        assert_eq!(
+            QueryEditor::diagnostic_infos_from_lsp_diagnostics(&diagnostics),
+            vec![DiagnosticInfo {
+                line: 4,
+                column: 2,
+                end_line: 4,
+                end_column: 8,
+                severity: DiagnosticInfoSeverity::Warning,
+                message: "check predicate".to_string(),
+                source: Some("sqlparser".to_string()),
+            }]
         );
     }
 }

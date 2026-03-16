@@ -102,6 +102,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // Redis key deletion is destructive, and dialog button configuration is
+                        // variant-based because render happens inside the shared dialog widget.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {

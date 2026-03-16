@@ -53,11 +53,10 @@ impl Kbd {
             None => window.highest_precedence_binding_for_action(action),
         }?;
 
-        if let Some(key) = binding.keystrokes().first() {
-            Some(Self::new(key.as_keystroke().clone()))
-        } else {
-            None
-        }
+        binding
+            .keystrokes()
+            .first()
+            .map(|key| Self::new(key.as_keystroke().clone()))
     }
 
     /// Return the first keybinding for the given action and focus handle.
@@ -67,11 +66,10 @@ impl Kbd {
         window: &Window,
     ) -> Option<Self> {
         let binding = window.highest_precedence_binding_for_action_in(action, focus_handle)?;
-        if let Some(key) = binding.keystrokes().first() {
-            Some(Self::new(key.as_keystroke().clone()))
-        } else {
-            None
-        }
+        binding
+            .keystrokes()
+            .first()
+            .map(|key| Self::new(key.as_keystroke().clone()))
     }
 
     /// Return the Platform specific keybinding string by KeyStroke
@@ -188,7 +186,7 @@ impl Kbd {
                             chars.collect::<String>()
                         ));
                     } else {
-                        keys.push_str(&key_str);
+                        keys.push_str(key_str);
                     }
                 }
             }

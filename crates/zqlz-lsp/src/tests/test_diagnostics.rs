@@ -1004,6 +1004,22 @@ fn test_correlated_subquery_wrong_alias() {
     println!("Wrong alias in correlated subquery: {:?}", diagnostics);
 }
 
+#[test]
+fn test_valid_alias_reference_has_no_schema_diagnostic() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT u.user_id FROM users u WHERE u.username IS NOT NULL");
+    let diagnostics = lsp.validate_sql(&text);
+
+    assert!(
+        !diagnostics.iter().any(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("Unknown table or alias")
+        }),
+        "Valid aliases should not produce schema alias diagnostics: {:?}",
+        diagnostics
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Malformed INSERT Statements
 // -----------------------------------------------------------------------------

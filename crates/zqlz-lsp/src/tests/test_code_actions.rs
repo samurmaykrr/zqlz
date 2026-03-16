@@ -6,7 +6,7 @@ use zqlz_ui::widgets::Rope;
 
 #[test]
 fn test_code_actions_add_semicolon() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
     let text = Rope::from("SELECT * FROM users");
 
     // No diagnostics, just context
@@ -24,7 +24,7 @@ fn test_code_actions_add_semicolon() {
 
 #[test]
 fn test_code_actions_for_valid_query() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
     let text = Rope::from("SELECT * FROM users;");
 
     let diagnostics: Vec<Diagnostic> = Vec::new();
@@ -40,7 +40,7 @@ fn test_code_actions_for_valid_query() {
 
 #[test]
 fn test_code_actions_with_error_diagnostics() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
     let text = Rope::from("SELECT * FR0M users");
 
     // Create a diagnostic for the typo "FR0M"
@@ -71,7 +71,7 @@ fn test_code_actions_with_error_diagnostics() {
 
 #[test]
 fn test_code_actions_empty_query() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
     let text = Rope::from("");
 
     let diagnostics: Vec<Diagnostic> = Vec::new();
@@ -84,7 +84,7 @@ fn test_code_actions_empty_query() {
 
 #[test]
 fn test_code_actions_at_query_end() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
     let text = Rope::from("SELECT * FROM users");
 
     let diagnostics: Vec<Diagnostic> = Vec::new();

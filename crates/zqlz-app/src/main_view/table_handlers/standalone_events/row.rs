@@ -11,11 +11,15 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use zqlz_core::ColumnMeta;
+use zqlz_core::{ColumnMeta, Value};
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
-    notification::Notification, v_flex,
+    ActiveTheme as _, Sizable, WindowExt,
+    button::ButtonVariants,
+    button::{Button, ButtonVariant},
+    dialog::DialogButtonProps,
+    notification::Notification,
+    v_flex,
 };
 
 use crate::app::AppState;
@@ -23,12 +27,11 @@ use crate::components::{PendingCellChange, TableViewerEvent, TableViewerPanel};
 
 use super::super::super::table_handlers_utils::{
     conversion::resolve_schema_qualifier, formatting::escape_redis_value,
-    validation::parse_inline_value,
 };
 
 #[derive(Clone, Debug)]
 struct FailedModifiedCell {
-    original_row_values: Vec<String>,
+    original_row_values: Vec<Value>,
     column_index: usize,
     column_name: String,
     change: PendingCellChange,
@@ -37,8 +40,16 @@ struct FailedModifiedCell {
 #[derive(Clone, Debug)]
 struct FailedNewRow {
     row_number: usize,
-    row_values: Vec<String>,
+    row_values: Vec<Value>,
     error_message: String,
+}
+
+pub(in crate::main_view) struct SaveNewRowRequest {
+    pub connection_id: Uuid,
+    pub table_name: String,
+    pub new_row_index: usize,
+    pub row_data: Vec<String>,
+    pub column_names: Vec<String>,
 }
 
 pub(in crate::main_view) fn handle_add_row_event(
@@ -54,9 +65,11 @@ pub(in crate::main_view) fn handle_add_row_event(
         table_name
     );
 
+    let viewer_weak = viewer_entity.downgrade();
+
     // Add row locally to pending changes instead of immediately inserting to database
     // The row will be committed when user clicks "Commit Changes"
-    _ = viewer_entity.update(cx, |viewer, cx| {
+    viewer_entity.update(cx, |viewer, cx| {
         if let Some(table_state) = &viewer.table_state {
             table_state.update(cx, |table, cx| {
                 // Add the new row
@@ -101,22 +114,39 @@ pub(in crate::main_view) fn handle_add_row_event(
         }
         cx.notify();
     });
+
+    window.push_notification(
+        Notification::info("New row added. Tip: open the form editor for a safer full-row insert.")
+            .title("New row created")
+            .autohide(false)
+            .action(move |_notification, _window, _cx| {
+                let viewer_weak = viewer_weak.clone();
+                Button::new("open-new-row-form")
+                    .label("Open Form")
+                    .small()
+                    .primary()
+                    .on_click(move |_, _window, cx| {
+                        if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
+                            viewer.emit_open_new_row_in_form(cx);
+                        }) {
+                            tracing::debug!(error = %error, "Skipped opening new-row form after viewer dropped");
+                        }
+                    })
+            }),
+        cx,
+    );
 }
 
 pub(in crate::main_view) fn handle_save_new_row_event(
-    connection_id: Uuid,
-    table_name: &str,
-    new_row_index: usize,
-    row_data: &[String],
-    column_names: &[String],
+    request: SaveNewRowRequest,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
 ) {
     tracing::info!(
         "SaveNewRow event: table={}, new_row_index={}, auto-committing after all required fields filled",
-        table_name,
-        new_row_index
+        request.table_name,
+        request.new_row_index
     );
 
     let Some(app_state) = cx.try_global::<AppState>() else {
@@ -125,20 +155,26 @@ pub(in crate::main_view) fn handle_save_new_row_event(
     };
 
     let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
+        request.connection_id,
         viewer_entity.read(cx).database_name().as_deref(),
     ) else {
-        tracing::error!("Connection not found: {}", connection_id);
+        tracing::error!("Connection not found: {}", request.connection_id);
         return;
     };
 
     let table_service = app_state.table_service.clone();
-    let table_name = table_name.to_string();
+    let table_name = request.table_name;
     let connection = connection.clone();
-    // Convert row_data from Vec<String> to Vec<Option<String>> for the insert API
-    let row_data: Vec<Option<String>> = row_data.iter().map(|v| Some(v.clone())).collect();
-    let column_names = column_names.to_vec();
+    // Convert row_data from editable strings into typed values before insert.
+    let row_data: Vec<Option<Value>> = request
+        .row_data
+        .into_iter()
+        .map(|value| Some(Value::String(value)))
+        .collect();
+    let column_names = request.column_names;
     let window_handle = window.window_handle();
+    let connection_id = request.connection_id;
+    let new_row_index = request.new_row_index;
 
     let database_name = viewer_entity.read(cx).database_name();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
@@ -165,7 +201,7 @@ pub(in crate::main_view) fn handle_save_new_row_event(
         let is_success = result.is_ok();
 
         // Update UI on foreground thread - all updates in a single closure to avoid nested update panic
-        _ = viewer_entity.update(cx, |viewer, cx| {
+        if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
             if is_success {
                 tracing::info!("Successfully inserted new row: table={}", table_name);
 
@@ -199,25 +235,30 @@ pub(in crate::main_view) fn handle_save_new_row_event(
                     err
                 );
             }
-
-            Ok::<_, anyhow::Error>(())
-        });
+            Ok::<(), anyhow::Error>(())
+        }) {
+            tracing::debug!(error = %error, "Skipped save-new-row UI update after viewer dropped");
+        }
 
         // Show notifications via window_handle (separate from viewer_entity update)
         if is_success {
-            _ = window_handle.update(cx, |_, window, cx| {
+            if let Err(error) = window_handle.update(cx, |_, window, cx| {
                 window.push_notification(
-                    Notification::success(&format!("New row inserted into {}", table_name)),
+                    Notification::success(format!("New row inserted into {}", table_name)),
                     cx,
                 );
-            });
-        } else if let Some(err) = error_message {
-            _ = window_handle.update(cx, |_, window, cx| {
+            }) {
+                tracing::debug!(error = %error, "Skipped save-new-row success notification after window closed");
+            }
+        } else if let Some(err) = error_message
+            && let Err(error) = window_handle.update(cx, |_, window, cx| {
                 window.push_notification(
-                    Notification::error(&format!("Failed to insert new row: {}", err)),
+                    Notification::error(format!("Failed to insert new row: {}", err)),
                     cx,
                 );
-            });
+            })
+        {
+            tracing::debug!(error = %error, "Skipped save-new-row error notification after window closed");
         }
 
         Ok::<_, anyhow::Error>(())
@@ -229,7 +270,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
     connection_id: Uuid,
     table_name: &str,
     all_column_names: &[String],
-    rows_to_delete: &[Vec<String>],
+    rows_to_delete: &[Vec<Value>],
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -287,28 +328,26 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                 order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
             }
 
-            if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> =
-                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
+            let all_column_names: Vec<String> =
+                viewer.column_meta.iter().map(|c| c.name.clone()).collect();
 
-                if !all_column_names.is_empty() {
-                    let escaped_search = viewer
-                        .search_text
-                        .replace("'", "''")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_");
-                    let column_conditions: Vec<String> = all_column_names
-                        .iter()
-                        .map(|col_name| {
-                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                            format!(
-                                "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                                escaped_col, escaped_search
-                            )
-                        })
-                        .collect();
-                    where_clauses.push(format!("({})", column_conditions.join(" OR ")));
-                }
+            if !viewer.search_text.is_empty() && !all_column_names.is_empty() {
+                let escaped_search = viewer
+                    .search_text
+                    .replace("'", "''")
+                    .replace('%', "\\%")
+                    .replace('_', "\\_");
+                let column_conditions: Vec<String> = all_column_names
+                    .iter()
+                    .map(|col_name| {
+                        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
+                        format!(
+                            "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
+                            escaped_col, escaped_search
+                        )
+                    })
+                    .collect();
+                where_clauses.push(format!("({})", column_conditions.join(" OR ")));
             }
 
             let visible_columns: Vec<String> = viewer
@@ -343,19 +382,21 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                     match table_service
                         .browse_table_with_filters(
                             connection,
-                            &table_name,
-                            schema_qualifier.as_deref(),
-                            where_clauses,
-                            order_by_clauses,
-                            visible_columns,
-                            None,
-                            None,
-                            None,
+                            zqlz_services::BrowseTableWithFiltersRequest {
+                                table_name: &table_name,
+                                schema: schema_qualifier.as_deref(),
+                                where_clauses,
+                                order_by_clauses,
+                                visible_columns,
+                                limit: None,
+                                offset: None,
+                                cached_total: None,
+                            },
                         )
                         .await
                     {
                         Ok(result) => {
-                            _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                            if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                                 viewer.load_table(
                                     connection_id,
                                     connection_name.clone(),
@@ -368,13 +409,15 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                                     cx,
                                 );
                                 window.push_notification(
-                                    Notification::success(&format!(
+                                    Notification::success(format!(
                                         "{} row(s) deleted",
                                         deleted_count
                                     )),
                                     cx,
                                 );
-                            });
+                            }) {
+                                tracing::debug!(error = %error, "Skipped delete-rows success UI update after viewer dropped");
+                            }
                         }
                         Err(refresh_err) => {
                             tracing::error!(
@@ -386,12 +429,14 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                 }
                 Err(e) => {
                     tracing::error!("Failed to delete rows: {}", e);
-                    _ = viewer_entity.update_in(cx, |_viewer, window, cx| {
+                    if let Err(error) = viewer_entity.update_in(cx, |_viewer, window, cx| {
                         window.push_notification(
-                            Notification::error(&format!("Failed to delete rows: {}", e)),
+                            Notification::error(format!("Failed to delete rows: {}", e)),
                             cx,
                         );
-                    });
+                    }) {
+                        tracing::debug!(error = %error, "Skipped delete-rows error notification after viewer dropped");
+                    }
                 }
             }
 
@@ -403,7 +448,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
 pub(in crate::main_view) fn handle_delete_redis_keys_event(
     connection_id: Uuid,
     all_column_names: &[String],
-    rows_to_delete: &[Vec<String>],
+    rows_to_delete: &[Vec<Value>],
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -425,7 +470,8 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
 
     let key_names: Vec<String> = rows_to_delete
         .iter()
-        .filter_map(|row| row.get(key_column_index).cloned())
+        .filter_map(|row| row.get(key_column_index).and_then(|value| value.as_str()))
+        .map(ToOwned::to_owned)
         .collect();
 
     if key_names.is_empty() {
@@ -451,30 +497,31 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
 
             for key_name in &key_names {
                 let escaped_key = escape_redis_value(key_name);
-                match connection
-                    .execute(&format!("DEL {}", escaped_key), &[])
-                    .await
-                {
+                let delete_command = format!("DEL {}", escaped_key);
+                match connection.execute(&delete_command, &[]).await {
                     Ok(_) => {
                         deleted_count += 1;
                     }
                     Err(e) => {
                         tracing::error!("Failed to delete Redis key '{}': {}", key_name, e);
-                        last_error = Some(format!("{}", e));
+                        last_error = Some(e.to_string());
                     }
                 }
             }
 
-            if deleted_count > 0 {
-                _ = viewer_entity.update(cx, |viewer, cx| {
+            if deleted_count > 0
+                && let Err(error) = viewer_entity.update(cx, |viewer, cx| {
                     viewer.refresh(cx);
-                });
+                    Ok::<(), anyhow::Error>(())
+                })
+            {
+                tracing::debug!(error = %error, "Skipped Redis refresh after viewer dropped");
             }
 
-            _ = viewer_entity.update_in(cx, |_viewer, window, cx| {
+            if let Err(error) = viewer_entity.update_in(cx, |_viewer, window, cx| {
                 if let Some(err) = last_error {
                     window.push_notification(
-                        Notification::error(&format!(
+                        Notification::error(format!(
                             "Deleted {} of {} key(s), error: {}",
                             deleted_count,
                             key_names.len(),
@@ -484,11 +531,13 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
                     );
                 } else {
                     window.push_notification(
-                        Notification::success(&format!("{} key(s) deleted", deleted_count)),
+                        Notification::success(format!("{} key(s) deleted", deleted_count)),
                         cx,
                     );
                 }
-            });
+            }) {
+                tracing::debug!(error = %error, "Skipped Redis delete notification after viewer dropped");
+            }
 
             anyhow::Ok(())
         })
@@ -502,9 +551,9 @@ pub(in crate::main_view) fn handle_commit_changes_event(
     table_name: String,
     modified_cells: HashMap<(usize, usize), PendingCellChange>,
     deleted_rows: HashSet<usize>,
-    new_rows: Vec<Vec<String>>,
+    new_rows: Vec<Vec<Value>>,
     column_meta: Vec<ColumnMeta>,
-    all_rows: Vec<Vec<String>>,
+    all_rows: Vec<Vec<Value>>,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -544,7 +593,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
         .spawn(cx, async move |cx| {
             let mut successful_operations = 0usize;
             let mut failed_modified_cells: Vec<FailedModifiedCell> = Vec::new();
-            let mut failed_deleted_rows: Vec<Vec<String>> = Vec::new();
+            let mut failed_deleted_rows: Vec<Vec<Value>> = Vec::new();
             let mut failed_new_rows: Vec<FailedNewRow> = Vec::new();
 
             // Execute UPDATE statements for modified cells
@@ -560,9 +609,11 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                 let error_message =
                     "The table state is inconsistent. Please refresh the table and try again."
                         .to_string();
-                _ = cx.update(|window, cx| {
-                    window.push_notification(Notification::error(&error_message), cx);
-                });
+                if let Err(error) = cx.update(|window, cx| {
+                    window.push_notification(Notification::error(error_message), cx);
+                }) {
+                    tracing::debug!(error = %error, "Skipped commit error notification after window closed");
+                }
                 return anyhow::Ok(());
             };
 
@@ -575,49 +626,55 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     );
                     continue;
                 }
-                if let Some(row_values) = all_rows.get(*row_idx) {
-                    if let Some(col_name) = column_names.get(*col_idx) {
-                        // Reconstruct the original row values for WHERE clause
-                        // The UI has already been updated with the new value, so we need
-                        // to restore original values for any modified cells in this row
-                        let mut original_row_values = row_values.clone();
-                        for ((mod_row, mod_col), mod_change) in &modified_cells {
-                            if *mod_row == *row_idx {
-                                if let Some(cell) = original_row_values.get_mut(*mod_col) {
-                                    *cell = mod_change.original_value.clone();
-                                }
-                            }
-                        }
-
-                        let cell_update = zqlz_services::CellUpdateData {
-                            column_name: col_name.clone(),
-                            new_value: parse_inline_value(&change.new_value),
-                            all_column_names: column_names.clone(),
-                            all_row_values: original_row_values.clone(),
-                            all_column_types: column_types.clone(),
-                        };
-
-                        match table_service
-                            .update_cell(connection.clone(), &table_name, schema_qualifier.as_deref(), cell_update)
-                            .await
+                if let Some(row_values) = all_rows.get(*row_idx)
+                    && let Some(col_name) = column_names.get(*col_idx)
+                {
+                    // Reconstruct the original row values for WHERE clause
+                    // The UI has already been updated with the new value, so we need
+                    // to restore original values for any modified cells in this row
+                    let mut original_row_values = row_values.clone();
+                    for ((mod_row, mod_col), mod_change) in &modified_cells {
+                        if *mod_row == *row_idx
+                            && let Some(cell) = original_row_values.get_mut(*mod_col)
                         {
-                            Ok(()) => {
-                                successful_operations += 1;
-                            }
-                            Err(e) => {
-                                failed_modified_cells.push(FailedModifiedCell {
-                                    original_row_values: original_row_values.clone(),
-                                    column_index: *col_idx,
-                                    column_name: col_name.clone(),
-                                    change: change.clone(),
-                                });
-                                tracing::error!(
-                                    row = row_idx + 1,
-                                    column = %col_name,
-                                    error = %e,
-                                    "Failed to commit modified cell"
-                                );
-                            }
+                            *cell = mod_change.original_value.as_value();
+                        }
+                    }
+
+                    let cell_update = zqlz_services::CellUpdateData {
+                        column_name: col_name.clone(),
+                        new_value: Some(change.new_value.as_value())
+                            .filter(|value| !value.is_null()),
+                        all_column_names: column_names.clone(),
+                        all_row_values: original_row_values.clone(),
+                        all_column_types: column_types.clone(),
+                    };
+
+                    match table_service
+                        .update_cell(
+                            connection.clone(),
+                            &table_name,
+                            schema_qualifier.as_deref(),
+                            cell_update,
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            successful_operations += 1;
+                        }
+                        Err(e) => {
+                            failed_modified_cells.push(FailedModifiedCell {
+                                original_row_values: original_row_values.clone(),
+                                column_index: *col_idx,
+                                column_name: col_name.clone(),
+                                change: change.clone(),
+                            });
+                            tracing::error!(
+                                row = row_idx + 1,
+                                column = %col_name,
+                                error = %e,
+                                "Failed to commit modified cell"
+                            );
                         }
                     }
                 }
@@ -625,7 +682,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
 
             // Execute DELETE statements for deleted rows
             if !deleted_rows.is_empty() {
-                let rows_to_delete: Vec<Vec<String>> = deleted_rows
+                let rows_to_delete: Vec<Vec<Value>> = deleted_rows
                     .iter()
                     .filter_map(|&idx| all_rows.get(idx).cloned())
                     .collect();
@@ -637,7 +694,12 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     };
 
                     match table_service
-                        .delete_rows(connection.clone(), &table_name, schema_qualifier.as_deref(), row_delete_data)
+                        .delete_rows(
+                            connection.clone(),
+                            &table_name,
+                            schema_qualifier.as_deref(),
+                            row_delete_data,
+                        )
                         .await
                     {
                         Ok(deleted_count) => {
@@ -653,14 +715,15 @@ pub(in crate::main_view) fn handle_commit_changes_event(
 
             // Execute INSERT statements for new rows
             for (row_idx, row_values) in new_rows.iter().enumerate() {
-                // Convert Vec<String> to Vec<Option<String>> - empty strings become None (NULL)
-                let values: Vec<Option<String>> = row_values
+                let values: Vec<Option<Value>> = row_values
                     .iter()
                     .map(|v| {
-                        if v.is_empty()
-                            || v == "NULL"
-                            || v == crate::components::table_viewer::delegate::inline_edit::AUTO_INCREMENT_PLACEHOLDER
-                        {
+                        if matches!(
+                            v,
+                            Value::String(text)
+                                if text
+                                    == crate::components::table_viewer::delegate::inline_edit::AUTO_INCREMENT_PLACEHOLDER
+                        ) {
                             None
                         } else {
                             Some(v.clone())
@@ -675,7 +738,12 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                 };
 
                 match table_service
-                    .insert_row(connection.clone(), &table_name, schema_qualifier.as_deref(), row_insert_data)
+                    .insert_row(
+                        connection.clone(),
+                        &table_name,
+                        schema_qualifier.as_deref(),
+                        row_insert_data,
+                    )
                     .await
                 {
                     Ok(()) => {
@@ -696,21 +764,23 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                 || !failed_new_rows.is_empty();
 
             if !has_failures {
-                _ = viewer_entity.update(cx, |viewer, cx| {
+                if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
                     if let Some(table_state) = &viewer.table_state {
                         table_state.update(cx, |table, cx| {
                             table.delegate_mut().clear_pending_changes();
                             cx.notify();
                         });
                     }
-                });
+                    Ok::<(), anyhow::Error>(())
+                }) {
+                    tracing::debug!(error = %error, "Skipped pending-change clear after viewer dropped");
+                }
 
                 // Refresh table data
                 if let Ok(result) = table_service
                     .browse_table(connection, &table_name, schema_qualifier.as_deref(), None, None)
                     .await
-                {
-                    _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                    && let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                         viewer.load_table(
                             connection_id,
                             connection_name.clone(),
@@ -722,7 +792,9 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                             window,
                             cx,
                         );
-                    });
+                    })
+                {
+                    tracing::debug!(error = %error, "Skipped post-commit table reload after viewer dropped");
                 }
 
                 tracing::info!("{} changes committed successfully", successful_operations);
@@ -735,7 +807,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     failed_new_rows.len()
                 );
 
-                _ = viewer_entity.update(cx, |viewer, cx| {
+                if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
                     if let Some(table_state) = &viewer.table_state {
                         table_state.update(cx, |table, cx| {
                             table.delegate_mut().restore_failed_commit_state(
@@ -758,7 +830,10 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                             cx.notify();
                         });
                     }
-                });
+                    Ok::<(), anyhow::Error>(())
+                }) {
+                    tracing::debug!(error = %error, "Skipped failed-commit state restore after viewer dropped");
+                }
 
                 let mut error_messages: Vec<String> = failed_modified_cells
                     .iter()
@@ -784,7 +859,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                     )
                 }));
 
-                _ = cx.update(|window, cx| {
+                if let Err(error) = cx.update(|window, cx| {
                     window.open_dialog(cx, move |dialog, _window, cx| {
                         dialog
                             .title("Commit Changes Failed")
@@ -817,11 +892,15 @@ pub(in crate::main_view) fn handle_commit_changes_event(
                             .button_props(
                                 DialogButtonProps::default()
                                     .ok_text("OK")
+                                    // Alerts configure their future OK button through dialog props,
+                                    // so the shared dialog keeps a Primary ButtonVariant here.
                                     .ok_variant(ButtonVariant::Primary),
                             )
                             .alert()
                     });
-                });
+                }) {
+                    tracing::debug!(error = %error, "Skipped commit failure dialog after window closed");
+                }
             }
 
             anyhow::Ok(())

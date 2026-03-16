@@ -10,6 +10,7 @@ use uuid::Uuid;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
+use crate::components::table_viewer::delegate::SaveCellRequest;
 use crate::components::{InspectorView, RowData, TableViewerEvent, TableViewerPanel};
 
 use crate::main_view::MainView;
@@ -18,14 +19,63 @@ use crate::main_view::table_handlers_utils::conversion::{
 };
 
 use super::super::standalone_events::{
-    handle_add_row_event, handle_apply_filters_event, handle_became_active_event,
-    handle_became_inactive_event, handle_commit_changes_event, handle_delete_rows_event,
-    handle_edit_cell_event, handle_generate_sql_event, handle_last_page_requested_event,
-    handle_limit_changed_event, handle_limit_enabled_changed_event,
-    handle_load_distinct_values_event, handle_load_fk_values_event, handle_load_more_event,
-    handle_page_changed_event, handle_refresh_table_event, handle_save_cell_event,
-    handle_save_new_row_event, handle_sort_column_event,
+    ApplyFiltersRequest, BecameActiveRequest, SaveNewRowRequest, handle_add_row_event,
+    handle_apply_filters_event, handle_became_active_event, handle_became_inactive_event,
+    handle_commit_changes_event, handle_delete_rows_event, handle_edit_cell_event,
+    handle_generate_sql_event, handle_last_page_requested_event, handle_limit_changed_event,
+    handle_limit_enabled_changed_event, handle_load_distinct_values_event,
+    handle_load_fk_values_event, handle_load_more_event, handle_page_changed_event,
+    handle_refresh_table_event, handle_save_cell_event, handle_save_new_row_event,
+    handle_sort_column_event,
 };
+
+fn should_use_sqlite_virtual_table_schema_fallback(
+    driver_name: &str,
+    error: &zqlz_services::ServiceError,
+    details: &zqlz_services::TableDetails,
+) -> bool {
+    driver_name == "sqlite"
+        && details.table_type == zqlz_core::TableType::VirtualTable
+        && error
+            .to_string()
+            .to_ascii_lowercase()
+            .contains("vtable constructor failed")
+}
+
+fn build_schema_only_query_result(details: &zqlz_services::TableDetails) -> zqlz_core::QueryResult {
+    let columns = details
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(ordinal, column)| zqlz_core::ColumnMeta {
+            name: column.name.clone(),
+            data_type: column.data_type.clone(),
+            nullable: column.nullable,
+            ordinal,
+            max_length: column.max_length,
+            precision: column.precision,
+            scale: column.scale,
+            auto_increment: column.is_auto_increment,
+            default_value: column.default_value.clone(),
+            comment: column.comment.clone(),
+            enum_values: column.enum_values.clone(),
+        })
+        .collect();
+
+    zqlz_core::QueryResult {
+        id: uuid::Uuid::new_v4(),
+        columns,
+        rows: Vec::new(),
+        total_rows: Some(0),
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms: 0,
+        warnings: vec![
+            "Schema-only fallback: SQLite could not initialize the virtual table runtime for data browsing"
+                .to_string(),
+        ],
+    }
+}
 
 impl MainView {
     /// Opens a table viewer as a new tab in the center dock.
@@ -38,7 +88,7 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let viewer_entity = cx.new(|cx| TableViewerPanel::new(cx));
+        let viewer_entity = cx.new(TableViewerPanel::new);
         let table_viewer: Arc<dyn zqlz_ui::widgets::dock::PanelView> =
             Arc::new(viewer_entity.clone());
 
@@ -75,41 +125,43 @@ impl MainView {
                         all_column_types,
                     } => {
                         handle_save_cell_event(
-                            table_name,
-                            *connection_id,
-                            *row,
-                            *col,
-                            column_name,
-                            new_value,
-                            original_value,
-                            all_row_values,
-                            all_column_names,
-                            all_column_types,
+                            SaveCellRequest {
+                                table_name: table_name.clone(),
+                                connection_id: *connection_id,
+                                row: *row,
+                                data_col: *col,
+                                column_name: column_name.clone(),
+                                new_value: new_value.clone(),
+                                original_value: original_value.clone(),
+                                all_row_values: all_row_values.clone(),
+                                all_column_names: all_column_names.clone(),
+                                all_column_types: all_column_types.clone(),
+                            },
                             viewer_weak_for_save.clone(),
                             viewer_entity_for_events.read(cx).database_name(),
                             window,
                             cx,
                         );
 
-                        // Sync inline cell edit to the row editor if it's showing this row.
-                        // col includes the row-number column at index 0, so data_col = col - 1.
-                        if *col > 0 {
-                            let data_col = *col - 1;
-                            let is_null = new_value == "NULL";
-                            key_value_editor_panel.update(cx, |editor, cx| {
-                                if editor.is_editing_row(table_name, *row) {
-                                    editor.update_field_value(
-                                        data_col, new_value, is_null, window, cx,
-                                    );
-                                }
-                            });
-                        }
+                        let data_col = *col;
+                        let rendered_value = new_value.as_option_string();
+                        let (value_text, is_null) = match rendered_value.as_deref() {
+                            None => ("", true),
+                            Some(value) => (value, false),
+                        };
+                        key_value_editor_panel.update(cx, |editor, cx| {
+                            if editor.is_editing_row(table_name, *row) {
+                                editor
+                                    .update_field_value(data_col, value_text, is_null, window, cx);
+                            }
+                        });
                     }
                     TableViewerEvent::EditCell {
                         table_name,
                         connection_id,
                         row,
                         col,
+                        column_meta,
                         column_name,
                         column_type,
                         current_value,
@@ -118,18 +170,24 @@ impl MainView {
                         all_column_types,
                         raw_bytes,
                     } => {
+                        let cell_data = crate::components::CellData {
+                            table_name: table_name.clone(),
+                            column_name: column_name.clone(),
+                            column_type: column_type.clone(),
+                            column_meta: column_meta.clone(),
+                            row_id: None,
+                            current_value: current_value.clone(),
+                            row_index: *row,
+                            col_index: *col,
+                            connection_id: *connection_id,
+                            all_row_values: all_row_values.clone(),
+                            all_column_names: all_column_names.clone(),
+                            all_column_types: all_column_types.clone(),
+                            raw_bytes: raw_bytes.clone(),
+                        };
+
                         handle_edit_cell_event(
-                            table_name,
-                            *connection_id,
-                            *row,
-                            *col,
-                            column_name,
-                            column_type,
-                            current_value,
-                            all_row_values,
-                            all_column_names,
-                            all_column_types,
-                            raw_bytes.clone(),
+                            cell_data,
                             viewer_weak_for_edit.clone(),
                             &cell_editor_panel,
                             &dock_area,
@@ -144,9 +202,11 @@ impl MainView {
                         database_name,
                     } => {
                         handle_became_active_event(
-                            *connection_id,
-                            table_name,
-                            database_name.as_deref(),
+                            BecameActiveRequest {
+                                connection_id: *connection_id,
+                                table_name: table_name.clone(),
+                                database_name: database_name.clone(),
+                            },
                             schema_details_panel.clone(),
                             results_panel.clone(),
                             &dock_area,
@@ -173,7 +233,7 @@ impl MainView {
                         database_name: _,
                     } => {
                         // Clear cell editor — row indices become stale after refresh
-                        _ = cell_editor_panel.update(cx, |editor, cx| {
+                        cell_editor_panel.update(cx, |editor, cx| {
                             editor.clear(cx);
                         });
                         handle_refresh_table_event(
@@ -207,11 +267,13 @@ impl MainView {
                         column_names,
                     } => {
                         handle_save_new_row_event(
-                            *connection_id,
-                            table_name,
-                            *new_row_index,
-                            row_data,
-                            column_names,
+                            SaveNewRowRequest {
+                                connection_id: *connection_id,
+                                table_name: table_name.clone(),
+                                new_row_index: *new_row_index,
+                                row_data: row_data.clone(),
+                                column_names: column_names.clone(),
+                            },
                             viewer_entity_for_events.clone(),
                             window,
                             cx,
@@ -253,7 +315,7 @@ impl MainView {
                         // Clear cell editor if it's editing a cell in the table being modified
                         // Since DeleteRows doesn't have row indices, we clear if editing any cell
                         // in this table to prevent showing stale data from deleted rows
-                        _ = cell_editor_panel.update(cx, |editor, cx| {
+                        cell_editor_panel.update(cx, |editor, cx| {
                             if editor.is_editing_table(table_name) {
                                 tracing::debug!(
                                     "Clearing cell editor - rows being deleted from table {}",
@@ -275,7 +337,7 @@ impl MainView {
                     }
                     TableViewerEvent::InlineEditStarted => {
                         tracing::debug!("Inline editing started - closing cell editor panel");
-                        _ = cell_editor_panel.update(cx, |editor, cx| {
+                        cell_editor_panel.update(cx, |editor, cx| {
                             editor.clear(cx);
                         });
                     }
@@ -308,16 +370,18 @@ impl MainView {
                         search_text,
                     } => {
                         // Clear cell editor — row indices become stale after filter change
-                        _ = cell_editor_panel.update(cx, |editor, cx| {
+                        cell_editor_panel.update(cx, |editor, cx| {
                             editor.clear(cx);
                         });
                         handle_apply_filters_event(
-                            *connection_id,
-                            table_name,
-                            filters,
-                            sorts,
-                            visible_columns,
-                            search_text,
+                            ApplyFiltersRequest {
+                                connection_id: *connection_id,
+                                table_name: table_name.clone(),
+                                filters: filters.clone(),
+                                sorts: sorts.clone(),
+                                visible_columns: visible_columns.clone(),
+                                search_text: search_text.clone(),
+                            },
                             viewer_entity_for_events.clone(),
                             window,
                             cx,
@@ -344,31 +408,31 @@ impl MainView {
                     }
                     TableViewerEvent::HideColumn { column_name } => {
                         // Hide column is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.hide_column(column_name, cx);
                         });
                     }
                     TableViewerEvent::FreezeColumn { col_ix } => {
                         // Freeze column is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.freeze_column(*col_ix, cx);
                         });
                     }
                     TableViewerEvent::UnfreezeColumn { col_ix } => {
                         // Unfreeze column is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.unfreeze_column(*col_ix, cx);
                         });
                     }
                     TableViewerEvent::SizeColumnToFit { col_ix } => {
                         // Size column to fit is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.size_column_to_fit(*col_ix, cx);
                         });
                     }
                     TableViewerEvent::SizeAllColumnsToFit => {
                         // Size all columns to fit is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.size_all_columns_to_fit(cx);
                         });
                     }
@@ -385,7 +449,7 @@ impl MainView {
                         if !deleted_rows.is_empty() {
                             let deleted_indices: Vec<usize> =
                                 deleted_rows.iter().copied().collect();
-                            _ = cell_editor_panel.update(cx, |editor, cx| {
+                            cell_editor_panel.update(cx, |editor, cx| {
                                 editor.clear_if_editing_rows(table_name, &deleted_indices, cx);
                             });
                         }
@@ -426,16 +490,13 @@ impl MainView {
                             cx,
                         );
                     }
-                    TableViewerEvent::SetToNull { .. } | TableViewerEvent::SetToEmpty { .. } => {
-                        // These are handled via SaveCell events
-                    }
                     TableViewerEvent::AddQuickFilter {
                         column_name,
                         operator,
                         value,
                     } => {
                         // Add quick filter is handled directly by the panel
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.add_quick_filter(
                                 column_name.clone(),
                                 *operator,
@@ -588,16 +649,38 @@ impl MainView {
                         connection_id,
                         table_name,
                         column_meta,
+                        row_values,
+                        row_index,
                     } => {
                         key_value_editor_panel.update(cx, |editor, cx| {
-                            editor.new_row(
-                                table_name.clone(),
-                                *connection_id,
-                                column_meta.clone(),
-                                Some(viewer_weak_for_edit.clone()),
-                                window,
-                                cx,
-                            );
+                            if let Some(row_values) = row_values.clone() {
+                                editor.edit_row(
+                                    RowData {
+                                        table_name: table_name.clone(),
+                                        connection_id: *connection_id,
+                                        column_meta: column_meta.clone(),
+                                        row_values,
+                                        row_index: *row_index,
+                                        is_new: true,
+                                        source_viewer: Some(viewer_weak_for_edit.clone()),
+                                        all_column_names: column_meta
+                                            .iter()
+                                            .map(|column| column.name.clone())
+                                            .collect(),
+                                    },
+                                    window,
+                                    cx,
+                                );
+                            } else {
+                                editor.new_row(
+                                    table_name.clone(),
+                                    *connection_id,
+                                    column_meta.clone(),
+                                    Some(viewer_weak_for_edit.clone()),
+                                    window,
+                                    cx,
+                                );
+                            }
                         });
 
                         inspector_panel.update(cx, |panel, cx| {
@@ -683,7 +766,7 @@ impl MainView {
                         request_generation,
                         ..
                     } => {
-                        _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                        viewer_entity_for_events.update(cx, |panel, cx| {
                             panel.update_total_rows(
                                 *total_rows,
                                 *is_estimated,
@@ -774,7 +857,7 @@ impl MainView {
             let driver_category = driver_name_to_category(conn.driver_name());
 
             // Browse and schema+DDL are independent — run them in parallel.
-            let (browse_result, schema_result) = futures::join!(
+            let (mut browse_result, schema_result) = futures::join!(
                 async {
                     if is_redis {
                         table_service
@@ -791,11 +874,33 @@ impl MainView {
                         .get_table_details(conn.clone(), connection_id, &table_name_for_spawn, schema_qualifier.as_deref())
                         .await;
                     let ddl = schema_service
-                        .get_or_generate_ddl(&conn, connection_id, &table_name_for_spawn)
+                        .get_or_generate_ddl(
+                            &conn,
+                            connection_id,
+                            &table_name_for_spawn,
+                            schema_qualifier.as_deref(),
+                            if is_view {
+                                Some(zqlz_core::ObjectType::View)
+                            } else {
+                                None
+                            },
+                        )
                         .await;
                     details.map(|d| (d, ddl))
                 },
             );
+
+            let mut used_schema_only_fallback = false;
+            if let (Err(browse_error), Ok((table_details, _))) = (&browse_result, &schema_result) {
+                if should_use_sqlite_virtual_table_schema_fallback(
+                    conn.driver_name(),
+                    browse_error,
+                    table_details,
+                ) {
+                    browse_result = Ok(build_schema_only_query_result(table_details));
+                    used_schema_only_fallback = true;
+                }
+            }
 
             // Deliver browse result first so rows appear immediately.
             let needs_background_count = match browse_result {
@@ -804,7 +909,7 @@ impl MainView {
                         && !is_redis
                         && !zqlz_services::TableService::supports_fast_count(conn.driver_name());
                     let conn_name = connection_name.clone();
-                    _ = viewer_weak.update_in(cx, |viewer, window, cx| {
+                    if let Err(error) = viewer_weak.update_in(cx, |viewer, window, cx| {
                         if !viewer.is_current_request(initial_request_generation) {
                             tracing::debug!(
                                 "Discarding stale initial table load for '{}' (generation={}, current={})",
@@ -826,16 +931,26 @@ impl MainView {
                             window,
                             cx,
                         );
-                    });
+                    }) {
+                        tracing::debug!(error = %error, "Skipped initial table load after viewer dropped");
+                    }
+                    if used_schema_only_fallback {
+                        tracing::warn!(
+                            table_name = %table_name_for_spawn,
+                            "Opened SQLite virtual table in schema-only mode after browse failure"
+                        );
+                    }
                     needs_count
                 }
                 Err(e) => {
                     tracing::error!("Failed to load table data: {}", e);
-                    _ = viewer_weak.update(cx, |viewer, cx| {
+                    if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
                         if viewer.is_current_request(initial_request_generation) {
                             viewer.set_loading(false, cx);
                         }
-                    });
+                    }) {
+                        tracing::debug!(error = %error, "Skipped loading-state reset after viewer dropped");
+                    }
                     false
                 }
             };
@@ -865,21 +980,25 @@ impl MainView {
                             fk_info_for_viewer.len(),
                             table_name_for_spawn
                         );
-                        _ = viewer_weak.update(cx, |viewer, cx| {
+                        if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
                             if viewer.is_current_request(initial_request_generation) {
                                 viewer.set_foreign_keys(fk_info_for_viewer, cx);
                             }
-                        });
+                        }) {
+                            tracing::debug!(error = %error, "Skipped foreign-key update after viewer dropped");
+                        }
                     }
 
                     let schema_columns = table_details.columns.clone();
                     let pk_columns = table_details.primary_key_columns.clone();
-                    _ = viewer_weak.update(cx, |viewer, cx| {
+                    if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
                         if viewer.is_current_request(initial_request_generation) {
                             viewer.update_column_types_from_schema(&schema_columns, cx);
                             viewer.set_primary_key_columns(pk_columns);
                         }
-                    });
+                    }) {
+                        tracing::debug!(error = %error, "Skipped schema metadata update after viewer dropped");
+                    }
 
                     let details = convert_to_schema_details(
                         connection_id,
@@ -888,27 +1007,33 @@ impl MainView {
                         create_statement,
                     );
 
-                    _ = viewer_weak.read_with(cx, |viewer, _cx| viewer.is_current_request(initial_request_generation))
+                    if viewer_weak
+                        .read_with(cx, |viewer, _cx| {
+                            viewer.is_current_request(initial_request_generation)
+                        })
                         .ok()
-                        .filter(|is_current| *is_current)
-                        .map(|_| {
-                            schema_details_panel.update(cx, |panel, cx| {
-                                panel.set_details(details, cx);
-                            })
+                        .is_some_and(|is_current| is_current)
+                    {
+                        schema_details_panel.update(cx, |panel, cx| {
+                            panel.set_details(details, cx);
                         });
+                    }
 
                     tracing::info!("Schema details loaded for table: {}", table_name_for_spawn);
                 }
                 Err(e) => {
                     tracing::error!("Failed to load schema details: {}", e);
-                    _ = viewer_weak.read_with(cx, |viewer, _cx| viewer.is_current_request(initial_request_generation))
+                    if viewer_weak
+                        .read_with(cx, |viewer, _cx| {
+                            viewer.is_current_request(initial_request_generation)
+                        })
                         .ok()
-                        .filter(|is_current| *is_current)
-                        .map(|_| {
-                            schema_details_panel.update(cx, |panel, cx| {
-                                panel.set_loading(false, cx);
-                            })
+                        .is_some_and(|is_current| is_current)
+                    {
+                        schema_details_panel.update(cx, |panel, cx| {
+                            panel.set_loading(false, cx);
                         });
+                    }
                 }
             }
 
@@ -933,7 +1058,7 @@ impl MainView {
                     .await;
                 match count_result {
                     Ok((total, is_estimated)) => {
-                        _ = count_viewer.update(cx, |_viewer, cx| {
+                        if let Err(error) = count_viewer.update(cx, |_viewer, cx| {
                             cx.emit(TableViewerEvent::CountCompleted {
                                 connection_id,
                                 table_name: table_name_for_spawn.clone(),
@@ -941,7 +1066,9 @@ impl MainView {
                                 total_rows: total,
                                 is_estimated,
                             });
-                        });
+                        }) {
+                            tracing::debug!(error = %error, "Skipped background count update after viewer dropped");
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -955,9 +1082,11 @@ impl MainView {
 
             // Clear the stored task reference now that work is done so the
             // Task is dropped and its memory is freed.
-            _ = this.update(cx, |main_view, _cx| {
+            if let Err(error) = this.update(cx, |main_view, _cx| {
                 main_view.active_table_load_task = None;
-            });
+            }) {
+                tracing::debug!(error = %error, "Table load task finished after main view dropped");
+            }
 
             anyhow::Ok(())
         });

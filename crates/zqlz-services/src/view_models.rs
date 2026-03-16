@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use zqlz_core::{ColumnMeta, ForeignKeyInfo, IndexInfo, ObjectsPanelData, TableInfo};
+use zqlz_core::{ColumnMeta, ForeignKeyInfo, IndexInfo, ObjectsPanelData, TableInfo, TableType};
 
 /// Database schema overview for UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -26,6 +26,7 @@ pub struct DatabaseSchema {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TableDetails {
     pub name: String,
+    pub table_type: TableType,
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<ForeignKeyInfo>,
@@ -41,6 +42,12 @@ pub struct ColumnInfo {
     pub nullable: bool,
     pub is_primary_key: bool,
     pub default_value: Option<String>,
+    pub max_length: Option<i64>,
+    pub precision: Option<i32>,
+    pub scale: Option<i32>,
+    pub is_auto_increment: bool,
+    pub comment: Option<String>,
+    pub enum_values: Option<Vec<String>>,
 }
 
 impl From<ColumnMeta> for ColumnInfo {
@@ -51,6 +58,12 @@ impl From<ColumnMeta> for ColumnInfo {
             nullable: meta.nullable,
             is_primary_key: false, // Will be set by TableDetails builder
             default_value: meta.default_value,
+            max_length: meta.max_length,
+            precision: meta.precision,
+            scale: meta.scale,
+            is_auto_increment: meta.auto_increment,
+            comment: meta.comment,
+            enum_values: meta.enum_values,
         }
     }
 }

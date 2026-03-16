@@ -920,7 +920,7 @@ impl Theme {
             self.shadow = default_theme.shadow;
         }
 
-        self.colors.apply_config(&config, &default_theme.colors);
+        self.colors.apply_config(config, &default_theme.colors);
         self.mode = config.mode;
     }
 }

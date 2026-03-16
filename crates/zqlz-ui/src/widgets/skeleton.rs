@@ -28,6 +28,12 @@ impl Skeleton {
     }
 }
 
+impl Default for Skeleton {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Styled for Skeleton {
     fn style(&mut self) -> &mut gpui::StyleRefinement {
         &mut self.style

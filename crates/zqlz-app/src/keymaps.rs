@@ -147,29 +147,11 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "tabs::ActivateLastTab" => bind!(ActivateLastTab),
 
         // === query_editor namespace (editor-specific actions) ===
-        "query_editor::FormatQuery" => bind!(FormatQuery),
         "query_editor::SaveQuery" => bind!(SaveQuery),
         "query_editor::SaveQueryAs" => bind!(SaveQueryAs),
-        "query_editor::ToggleLineComment" => bind!(ToggleLineComment),
-        "query_editor::CommentSelection" => bind!(CommentSelection),
-        "query_editor::UncommentSelection" => bind!(UncommentSelection),
-        "query_editor::DuplicateLine" => bind!(DuplicateLine),
-        "query_editor::DeleteLine" => bind!(DeleteLine),
-        "query_editor::MoveLineUp" => bind!(MoveLineUp),
-        "query_editor::MoveLineDown" => bind!(MoveLineDown),
-        "query_editor::CopyLineUp" => bind!(CopyLineUp),
-        "query_editor::CopyLineDown" => bind!(CopyLineDown),
-        "query_editor::AcceptCompletion" => bind!(AcceptCompletion),
-        "query_editor::CancelCompletion" => bind!(CancelCompletion),
-        "query_editor::TriggerCompletion" => bind!(TriggerCompletion),
         "query_editor::TriggerParameterHints" => bind!(TriggerParameterHints),
         "query_editor::ShowHover" => bind!(ShowHover),
-        "query_editor::GoToDefinition" => bind!(GoToDefinition),
-        "query_editor::FindReferences" => bind!(FindReferences),
-        "query_editor::RenameSymbol" => bind!(RenameSymbol),
         "query_editor::ShowCodeActions" => bind!(ShowCodeActions),
-        "query_editor::FindNext" => bind!(FindNext),
-        "query_editor::FindPrevious" => bind!(FindPrevious),
         "query_editor::NextProblem" => bind!(NextProblem),
         "query_editor::PreviousProblem" => bind!(PreviousProblem),
         "query_editor::ToggleProblemsPanel" => bind!(ToggleProblemsPanel),
@@ -214,6 +196,14 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "editor::TriggerCompletion" => bind!(editor::TriggerCompletion),
         "editor::AcceptCompletion" => bind!(editor::AcceptCompletion),
         "editor::DismissCompletion" => bind!(editor::DismissCompletion),
+        "editor::ToggleLineComment" => bind!(editor::ToggleLineComment),
+        "editor::MoveLineUp" => bind!(editor::MoveLineUp),
+        "editor::MoveLineDown" => bind!(editor::MoveLineDown),
+        "editor::DeleteLine" => bind!(editor::DeleteLine),
+        "editor::FormatSQL" => bind!(editor::FormatSQL),
+        "editor::GoToDefinition" => bind!(editor::GoToDefinition),
+        "editor::FindReferences" => bind!(editor::FindReferences),
+        "editor::RenameSymbol" => bind!(editor::RenameSymbol),
         "editor::Escape" => bind!(editor::Escape),
         // Actions that exist in the JSON but have no equivalent yet — silently ignored.
         "editor::SelectNext"
@@ -229,10 +219,7 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         | "editor::DeleteToEndOfLine"
         | "editor::DeleteToPreviousWordStart"
         | "editor::DeleteToNextWordEnd"
-        | "editor::DeleteLine"
         | "editor::DuplicateLineDown"
-        | "editor::MoveLineUp"
-        | "editor::MoveLineDown"
         | "editor::JoinLines"
         | "editor::Transpose"
         | "editor::Indent"
@@ -263,14 +250,40 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "table_viewer::CancelCellEditing" => bind!(CancelCellEditing),
         "table_viewer::CommitChanges" => bind!(CommitChanges),
         "table_viewer::DeleteSelectedRows" => bind!(DeleteSelectedRows),
+        "table_viewer::UndoEdit" => bind!(UndoEdit),
+        "table_viewer::RedoEdit" => bind!(RedoEdit),
         "table_viewer::ToggleSearch" => {
             bind!(crate::components::table_viewer::ToggleSearch)
+        }
+        "table_viewer::ToggleReplace" => {
+            bind!(crate::components::table_viewer::ToggleReplace)
+        }
+        "table_viewer::CutSelection" => {
+            bind!(crate::components::table_viewer::CutSelection)
+        }
+        "table_viewer::OpenRowEditor" => {
+            bind!(crate::components::table_viewer::OpenRowEditor)
         }
         "table_viewer::CopySelection" => {
             bind!(crate::components::table_viewer::CopySelection)
         }
         "table_viewer::PasteClipboard" => {
             bind!(crate::components::table_viewer::PasteClipboard)
+        }
+        "table_viewer::SelectAllSelection" => {
+            bind!(crate::components::table_viewer::SelectAllSelection)
+        }
+        "table_viewer::SelectColumnVisibilityPrevious" => {
+            bind!(crate::components::table_viewer::SelectColumnVisibilityPrevious)
+        }
+        "table_viewer::SelectColumnVisibilityNext" => {
+            bind!(crate::components::table_viewer::SelectColumnVisibilityNext)
+        }
+        "table_viewer::ToggleSelectedColumnVisibility" => {
+            bind!(crate::components::table_viewer::ToggleSelectedColumnVisibility)
+        }
+        "table_viewer::CloseColumnVisibility" => {
+            bind!(crate::components::table_viewer::CloseColumnVisibility)
         }
 
         // === versioning namespace ===

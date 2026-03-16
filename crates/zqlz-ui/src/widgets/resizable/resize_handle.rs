@@ -8,6 +8,8 @@ use gpui::{
 
 use crate::widgets::{ActiveTheme as _, AxisExt as _, dock::DockPlacement};
 
+type ResizeHandleDragFn<E> = Rc<dyn Fn(&Point<Pixels>, &mut Window, &mut App) -> Entity<E>>;
+
 pub(crate) const HANDLE_PADDING: Pixels = px(4.);
 pub(crate) const HANDLE_SIZE: Pixels = px(1.);
 
@@ -24,7 +26,7 @@ pub(crate) struct ResizeHandle<T: 'static, E: 'static + Render> {
     axis: Axis,
     drag_value: Option<Rc<T>>,
     placement: Option<DockPlacement>,
-    on_drag: Option<Rc<dyn Fn(&Point<Pixels>, &mut Window, &mut App) -> Entity<E>>>,
+    on_drag: Option<ResizeHandleDragFn<E>>,
 }
 
 impl<T: 'static, E: 'static + Render> ResizeHandle<T, E> {
@@ -103,7 +105,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
         let axis = self.axis;
 
         window.with_element_state(id.unwrap(), |state, window| {
-            let state = state.unwrap_or(ResizeHandleState::default());
+            let state: ResizeHandleState = state.unwrap_or_default();
 
             let bg_color = if state.is_active() {
                 cx.theme().drag_border
@@ -192,7 +194,7 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
         request_layout.paint(window, cx);
 
         window.with_element_state(id.unwrap(), |state: Option<ResizeHandleState>, window| {
-            let state = state.unwrap_or(ResizeHandleState::default());
+            let state = state.unwrap_or_default();
 
             window.on_mouse_event({
                 let state = state.clone();

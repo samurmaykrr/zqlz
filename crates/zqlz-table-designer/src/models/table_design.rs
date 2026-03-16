@@ -1,7 +1,7 @@
 //! Table design model
 
 use std::collections::HashSet;
-use zqlz_core::TableDetails;
+use zqlz_core::{ConstraintType, TableDetails};
 
 use super::{
     CheckConstraintDesign, ColumnDesign, DatabaseDialect, ForeignKeyDesign, IndexDesign,
@@ -60,19 +60,26 @@ impl TableDesign {
         let columns = details
             .columns
             .iter()
-            .map(|c| ColumnDesign::from_column_info(c))
+            .map(ColumnDesign::from_column_info)
             .collect();
 
         let indexes = details
             .indexes
             .iter()
-            .map(|i| IndexDesign::from_index_info(i))
+            .map(IndexDesign::from_index_info)
             .collect();
 
         let foreign_keys = details
             .foreign_keys
             .iter()
-            .map(|fk| ForeignKeyDesign::from_foreign_key_info(fk))
+            .map(ForeignKeyDesign::from_foreign_key_info)
+            .collect();
+
+        let check_constraints = details
+            .constraints
+            .iter()
+            .filter(|c| c.constraint_type == ConstraintType::Check)
+            .map(CheckConstraintDesign::from_constraint_info)
             .collect();
 
         Self {
@@ -85,7 +92,7 @@ impl TableDesign {
             options: TableOptions::default(),
             comment: details.info.comment,
             is_new: false,
-            check_constraints: Vec::new(),
+            check_constraints,
         }
     }
 

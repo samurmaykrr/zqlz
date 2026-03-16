@@ -1,4 +1,4 @@
-;From nvim-treesitter/nvim-treesitter
+;From tree-sitter markdown highlight definitions
 (atx_heading (inline) @title)
 (setext_heading (paragraph) @title)
 

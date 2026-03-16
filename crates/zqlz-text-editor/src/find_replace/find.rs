@@ -6,6 +6,7 @@
 //! - Regular expression patterns
 
 use regex::{Regex, RegexBuilder};
+use ropey::Rope;
 use std::ops::Range;
 
 /// Options for find operations.
@@ -94,13 +95,7 @@ pub fn find_all(text: &str, pattern: &str, options: &FindOptions) -> Result<Vec<
         return Ok(Vec::new());
     }
 
-    let regex = build_regex(pattern, options)?;
-    let matches = regex
-        .find_iter(text)
-        .map(|m| Match::new(m.start(), m.end(), m.as_str().to_string()))
-        .collect();
-
-    Ok(matches)
+    Ok(SearchEngine::new(pattern, options)?.find_all(text))
 }
 
 /// Find the first match of a pattern in text.
@@ -113,10 +108,7 @@ pub fn find_first(
         return Ok(None);
     }
 
-    let regex = build_regex(pattern, options)?;
-    Ok(regex
-        .find(text)
-        .map(|m| Match::new(m.start(), m.end(), m.as_str().to_string())))
+    Ok(SearchEngine::new(pattern, options)?.find_first(text))
 }
 
 /// Find the next match after a given position.
@@ -130,16 +122,7 @@ pub fn find_next(
         return Ok(None);
     }
 
-    let regex = build_regex(pattern, options)?;
-    let search_text = &text[start_pos..];
-
-    Ok(regex.find(search_text).map(|m| {
-        Match::new(
-            start_pos + m.start(),
-            start_pos + m.end(),
-            m.as_str().to_string(),
-        )
-    }))
+    Ok(SearchEngine::new(pattern, options)?.find_next(text, start_pos))
 }
 
 /// Count the number of matches in text.
@@ -148,8 +131,7 @@ pub fn count_matches(text: &str, pattern: &str, options: &FindOptions) -> Result
         return Ok(0);
     }
 
-    let regex = build_regex(pattern, options)?;
-    Ok(regex.find_iter(text).count())
+    Ok(SearchEngine::new(pattern, options)?.count_matches(text))
 }
 
 /// Build a regex from a pattern and options.
@@ -181,6 +163,184 @@ pub enum FindError {
     /// Invalid regular expression pattern.
     #[error("Invalid regex pattern: {0}")]
     InvalidRegex(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReplaceResult {
+    pub text: String,
+    pub count: usize,
+}
+
+impl ReplaceResult {
+    pub fn new(text: String, count: usize) -> Self {
+        Self { text, count }
+    }
+}
+
+/// Shared compiled search plan used by both find and replace helpers.
+pub struct SearchEngine {
+    regex: Regex,
+}
+
+impl SearchEngine {
+    pub fn new(pattern: &str, options: &FindOptions) -> Result<Self, FindError> {
+        Ok(Self {
+            regex: build_regex(pattern, options)?,
+        })
+    }
+
+    pub fn find_all(&self, text: &str) -> Vec<Match> {
+        self.regex
+            .find_iter(text)
+            .map(|matched| Match::new(matched.start(), matched.end(), matched.as_str().to_string()))
+            .collect()
+    }
+
+    pub fn find_all_in_rope(&self, text: &Rope) -> Vec<Match> {
+        let mut matches = Vec::new();
+        let mut cursor = 0usize;
+
+        while cursor < text.len_bytes() {
+            let (chunk, chunk_byte_index, _, _) = text.chunk_at_byte(cursor);
+            let chunk_start = cursor.max(chunk_byte_index);
+            let local_start = chunk_start - chunk_byte_index;
+            let search_chunk = &chunk[local_start..];
+
+            for matched in self.regex.find_iter(search_chunk) {
+                let start = chunk_start + matched.start();
+                let end = chunk_start + matched.end();
+                matches.push(Match::new(start, end, matched.as_str().to_string()));
+            }
+
+            cursor = chunk_byte_index + chunk.len();
+        }
+
+        matches.sort_by_key(|matched| matched.start);
+        matches.dedup_by(|left, right| left.start == right.start && left.end == right.end);
+        matches
+    }
+
+    pub fn find_first(&self, text: &str) -> Option<Match> {
+        self.regex
+            .find(text)
+            .map(|matched| Match::new(matched.start(), matched.end(), matched.as_str().to_string()))
+    }
+
+    pub fn find_next(&self, text: &str, start_pos: usize) -> Option<Match> {
+        if start_pos >= text.len() {
+            return None;
+        }
+
+        let safe_start = text.floor_char_boundary(start_pos);
+        self.regex.find(&text[safe_start..]).map(|matched| {
+            Match::new(
+                safe_start + matched.start(),
+                safe_start + matched.end(),
+                matched.as_str().to_string(),
+            )
+        })
+    }
+
+    pub fn count_matches(&self, text: &str) -> usize {
+        self.regex.find_iter(text).count()
+    }
+
+    pub fn replace_all(&self, text: &str, replacement: &str) -> ReplaceResult {
+        let mut count = 0;
+        let text = self
+            .regex
+            .replace_all(text, |captures: &regex::Captures| {
+                count += 1;
+                expand_replacement(replacement, captures)
+            })
+            .into_owned();
+        ReplaceResult::new(text, count)
+    }
+
+    pub fn replace_first(&self, text: &str, replacement: &str) -> ReplaceResult {
+        if let Some(matched) = self.regex.find(text)
+            && let Some(captures) = self.regex.captures(text)
+        {
+            let expanded = expand_replacement(replacement, &captures);
+            let result = format!(
+                "{}{}{}",
+                &text[..matched.start()],
+                expanded,
+                &text[matched.end()..]
+            );
+            return ReplaceResult::new(result, 1);
+        }
+
+        ReplaceResult::new(text.to_string(), 0)
+    }
+
+    pub fn replace_next(&self, text: &str, replacement: &str, start_pos: usize) -> ReplaceResult {
+        if start_pos >= text.len() {
+            return ReplaceResult::new(text.to_string(), 0);
+        }
+
+        let safe_start = text.floor_char_boundary(start_pos);
+        let search_text = &text[safe_start..];
+        if let Some(matched) = self.regex.find(search_text)
+            && let Some(captures) = self.regex.captures(search_text)
+        {
+            let expanded = expand_replacement(replacement, &captures);
+            let absolute_start = safe_start + matched.start();
+            let absolute_end = safe_start + matched.end();
+            let result = format!(
+                "{}{}{}",
+                &text[..absolute_start],
+                expanded,
+                &text[absolute_end..]
+            );
+            return ReplaceResult::new(result, 1);
+        }
+
+        ReplaceResult::new(text.to_string(), 0)
+    }
+}
+
+pub(crate) fn expand_replacement(replacement: &str, caps: &regex::Captures) -> String {
+    let mut result = String::with_capacity(replacement.len() * 2);
+    let mut chars = replacement.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        if character != '$' {
+            result.push(character);
+            continue;
+        }
+
+        match chars.peek().copied() {
+            Some('$') => {
+                result.push('$');
+                chars.next();
+            }
+            Some('&') => {
+                if let Some(matched) = caps.get(0) {
+                    result.push_str(matched.as_str());
+                }
+                chars.next();
+            }
+            Some(next) if next.is_ascii_digit() => {
+                let mut digits = String::new();
+                while let Some(digit) = chars.peek().copied() {
+                    if !digit.is_ascii_digit() {
+                        break;
+                    }
+                    digits.push(digit);
+                    chars.next();
+                }
+                if let Ok(index) = digits.parse::<usize>()
+                    && let Some(matched) = caps.get(index)
+                {
+                    result.push_str(matched.as_str());
+                }
+            }
+            _ => result.push(character),
+        }
+    }
+
+    result
 }
 
 #[cfg(test)]
@@ -333,5 +493,34 @@ mod tests {
         assert_eq!(matches.len(), 1);
         assert_eq!(matches[0].text, "col");
         assert_eq!(matches[0].start, 0);
+    }
+
+    #[test]
+    fn search_engine_reuses_match_semantics_for_find_and_replace() {
+        let text = "id userid id";
+        let options = FindOptions::new().whole_word(true);
+        let engine = SearchEngine::new("id", &options).expect("search engine");
+
+        let matches = engine.find_all(text);
+        let replaced = engine.replace_all(text, "ID");
+
+        assert_eq!(
+            matches
+                .iter()
+                .map(|matched| matched.range())
+                .collect::<Vec<_>>(),
+            vec![0..2, 10..12]
+        );
+        assert_eq!(replaced.text, "ID userid ID");
+        assert_eq!(replaced.count, matches.len());
+    }
+
+    #[test]
+    fn search_engine_find_all_in_rope_matches_find_all_for_chunked_text() {
+        let engine = SearchEngine::new("needle", &FindOptions::default()).unwrap();
+        let text = format!("{}needle{}needle", "a".repeat(2048), "b".repeat(1024));
+        let rope = Rope::from_str(&text);
+
+        assert_eq!(engine.find_all_in_rope(&rope), engine.find_all(&text));
     }
 }

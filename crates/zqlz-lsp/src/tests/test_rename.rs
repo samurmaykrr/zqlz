@@ -1,14 +1,26 @@
 //! Tests for rename symbol functionality
 
 use crate::SqlLsp;
-use lsp_types::{Position, Range, TextEdit, Uri, WorkspaceEdit};
+use crate::keywords::SQL_KEYWORDS;
+use lsp_types::{Position, Range, Uri};
 use std::sync::Arc;
 use zqlz_services::SchemaService;
 use zqlz_ui::widgets::Rope;
 
+const RENAME_PROBE_IDENTIFIER: &str = "__zqlz_rename_probe";
+
 /// Helper to create an SqlLsp instance for testing
 fn create_test_lsp() -> SqlLsp {
     SqlLsp::new(Arc::new(SchemaService::new()))
+}
+
+fn edits_for_internal_uri(edit: lsp_types::WorkspaceEdit) -> Vec<lsp_types::TextEdit> {
+    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
+    edit.changes
+        .expect("should have changes")
+        .into_iter()
+        .find_map(|(change_uri, edits)| (change_uri == uri).then_some(edits))
+        .expect("should have changes for sql://internal")
 }
 
 /// Test renaming a simple identifier
@@ -25,11 +37,7 @@ fn test_rename_simple_identifier() {
     let edit = result.unwrap();
     assert!(edit.changes.is_some());
 
-    let changes = edit.changes.unwrap();
-    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
-    let edits = changes
-        .get(&uri)
-        .expect("should have changes for sql://internal");
+    let edits = edits_for_internal_uri(edit);
 
     // Should have 2 occurrences (both user_name occurrences)
     assert_eq!(edits.len(), 2, "should rename all occurrences");
@@ -133,9 +141,7 @@ fn test_rename_qualified_column() {
     let edit = result.unwrap();
     assert!(edit.changes.is_some());
 
-    let changes = edit.changes.unwrap();
-    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
-    let edits = changes.get(&uri).expect("should have changes");
+    let edits = edits_for_internal_uri(edit);
 
     // Should find all occurrences of user_name
     assert!(!edits.is_empty());
@@ -158,9 +164,7 @@ fn test_rename_table_name() {
     let edit = result.unwrap();
     assert!(edit.changes.is_some());
 
-    let changes = edit.changes.unwrap();
-    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
-    let edits = changes.get(&uri).expect("should have changes");
+    let edits = edits_for_internal_uri(edit);
 
     // Should have at least one occurrence
     assert!(!edits.is_empty());
@@ -182,13 +186,11 @@ fn test_rename_excludes_partial_matches() {
 
     assert!(result.is_some());
     let edit = result.unwrap();
-    let changes = edit.changes.unwrap();
-    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
-    let edits = changes.get(&uri).expect("should have changes");
+    let edits = edits_for_internal_uri(edit);
 
     // Should only replace standalone 'user', not 'user_name'
     // Looking for exact word boundary matches
-    assert!(edits.len() >= 1);
+    assert!(!edits.is_empty());
 }
 
 /// Test renaming handles underscores correctly
@@ -203,9 +205,7 @@ fn test_rename_with_underscores() {
 
     assert!(result.is_some());
     let edit = result.unwrap();
-    let changes = edit.changes.unwrap();
-    let uri = "sql://internal".parse::<Uri>().expect("valid uri");
-    let edits = changes.get(&uri).expect("should have changes");
+    let edits = edits_for_internal_uri(edit);
 
     assert_eq!(edits[0].new_text, "customer_id");
 }
@@ -233,4 +233,10 @@ fn test_rename_empty_text_returns_none() {
     let result = lsp.rename(&text, offset, "new_name");
 
     assert!(result.is_none());
+}
+
+#[test]
+fn test_rename_probe_identifier_stays_valid() {
+    let probe_upper = RENAME_PROBE_IDENTIFIER.to_uppercase();
+    assert!(!SQL_KEYWORDS.iter().any(|keyword| *keyword == probe_upper));
 }

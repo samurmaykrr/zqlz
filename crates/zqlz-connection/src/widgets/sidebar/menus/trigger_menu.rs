@@ -39,18 +39,31 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
+        let supports_triggers = self.supports_sidebar_section(conn_id, "triggers");
+        if !supports_triggers {
+            return;
+        }
+
         if self.trigger_context_menu.is_none() {
             self.trigger_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
         let trigger_for_menu = trigger_name.clone();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.trigger_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
-                    menu.max_h(px(400.0))
+                    let menu = menu
+                        .action_context(action_context.clone())
+                        .max_h(px(400.0))
                         .item(PopupMenuItem::new("Edit Raw SQL").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = trigger_for_menu.clone();
@@ -75,8 +88,10 @@ impl ConnectionSidebar {
                                 });
                             }
                         }))
-                        .separator()
-                        .item(PopupMenuItem::new("New Trigger").on_click({
+                        .separator();
+
+                    let menu = if supports_triggers {
+                        menu.item(PopupMenuItem::new("New Trigger").on_click({
                             let sidebar = sidebar_weak.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
@@ -87,43 +102,47 @@ impl ConnectionSidebar {
                             }
                         }))
                         .separator()
-                        .item(PopupMenuItem::new("Delete Trigger").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            let name = trigger_for_menu.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::DeleteTrigger {
-                                        connection_id: conn_id,
-                                        trigger_name: name.clone(),
-                                    });
+                    } else {
+                        menu
+                    };
+
+                    menu.item(PopupMenuItem::new("Delete Trigger").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        let name = trigger_for_menu.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::DeleteTrigger {
+                                    connection_id: conn_id,
+                                    trigger_name: name.clone(),
                                 });
-                            }
-                        }))
-                        .separator()
-                        .item(PopupMenuItem::new("View History").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            let name = trigger_for_menu.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
-                                        connection_id: conn_id,
-                                        object_name: name.clone(),
-                                        object_type: "trigger".to_string(),
-                                    });
+                            });
+                        }
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("View History").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        let name = trigger_for_menu.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                    connection_id: conn_id,
+                                    object_name: name.clone(),
+                                    object_type: "trigger".to_string(),
                                 });
-                            }
-                        }))
-                        .separator()
-                        .item(PopupMenuItem::new("Refresh").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
-                                        connection_id: conn_id,
-                                    });
+                            });
+                        }
+                    }))
+                    .separator()
+                    .item(PopupMenuItem::new("Refresh").on_click({
+                        let sidebar = sidebar_weak.clone();
+                        move |_event, _window, cx| {
+                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                    connection_id: conn_id,
                                 });
-                            }
-                        }))
+                            });
+                        }
+                    }))
                 });
 
                 let menu_entity = new_menu.clone();
@@ -133,7 +152,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

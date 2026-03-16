@@ -10,10 +10,14 @@ use crate::main_view::table_handlers_utils::conversion::{
     convert_to_schema_details, resolve_schema_qualifier,
 };
 
+pub(in crate::main_view) struct BecameActiveRequest {
+    pub connection_id: Uuid,
+    pub table_name: String,
+    pub database_name: Option<String>,
+}
+
 pub(in crate::main_view) fn handle_became_active_event(
-    connection_id: Uuid,
-    table_name: &str,
-    database_name: Option<&str>,
+    request: BecameActiveRequest,
     schema_details_panel: Entity<SchemaDetailsPanel>,
     results_panel: Entity<ResultsPanel>,
     dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
@@ -23,8 +27,8 @@ pub(in crate::main_view) fn handle_became_active_event(
 ) {
     tracing::info!(
         "Table viewer became active: table={}, connection={}",
-        table_name,
-        connection_id
+        request.table_name,
+        request.connection_id
     );
 
     // Clear problems when switching to a table viewer (no active query editor)
@@ -33,7 +37,7 @@ pub(in crate::main_view) fn handle_became_active_event(
     });
 
     // Ensure Inspector panel is visible when a table becomes active
-    _ = dock_area.update(cx, |area, cx| {
+    dock_area.update(cx, |area, cx| {
         area.activate_panel(
             "InspectorPanel",
             zqlz_ui::widgets::dock::DockPlacement::Right,
@@ -46,21 +50,22 @@ pub(in crate::main_view) fn handle_became_active_event(
     // the Cell Editor (which the user explicitly opened via a cell click)
     let current_view = inspector_panel.read(cx).active_view();
     if current_view != InspectorView::CellEditor {
-        _ = inspector_panel.update(cx, |panel, cx| {
+        inspector_panel.update(cx, |panel, cx| {
             panel.set_active_view(InspectorView::Schema, cx);
         });
     }
 
     let needs_update = schema_details_panel.read_with(cx, |panel, _cx| {
-        !panel.is_showing_table(connection_id, table_name)
+        !panel.is_showing_table(request.connection_id, &request.table_name)
     });
 
     if !needs_update {
         return;
     }
 
-    let table_name = table_name.to_string();
-    let database_name = database_name.map(|s| s.to_string());
+    let connection_id = request.connection_id;
+    let table_name = request.table_name;
+    let database_name = request.database_name;
     let schema_panel = schema_details_panel.clone();
 
     window
@@ -80,7 +85,7 @@ pub(in crate::main_view) fn handle_became_active_event(
                 }
             };
 
-            _ = schema_panel.update(cx, |panel, cx| {
+            schema_panel.update(cx, |panel, cx| {
                 panel.set_loading_for_table(connection_id, &table_name, cx);
             });
 
@@ -97,7 +102,13 @@ pub(in crate::main_view) fn handle_became_active_event(
             {
                 Ok(table_details) => {
                     let create_statement = schema_service
-                        .get_or_generate_ddl(&conn, connection_id, &table_name)
+                        .get_or_generate_ddl(
+                            &conn,
+                            connection_id,
+                            &table_name,
+                            schema_qualifier.as_deref(),
+                            None,
+                        )
                         .await;
                     let details = convert_to_schema_details(
                         connection_id,
@@ -106,13 +117,13 @@ pub(in crate::main_view) fn handle_became_active_event(
                         create_statement,
                     );
 
-                    _ = schema_panel.update(cx, |panel, cx| {
+                    schema_panel.update(cx, |panel, cx| {
                         panel.set_details(details, cx);
                     });
                 }
                 Err(e) => {
                     tracing::error!("Failed to load schema details: {}", e);
-                    _ = schema_panel.update(cx, |panel, cx| {
+                    schema_panel.update(cx, |panel, cx| {
                         panel.set_loading(false, cx);
                     });
                 }
@@ -140,7 +151,7 @@ pub(in crate::main_view) fn handle_became_inactive_event(
     });
 
     if should_clear {
-        _ = schema_details_panel.update(cx, |panel, cx| {
+        schema_details_panel.update(cx, |panel, cx| {
             panel.clear(cx);
         });
     }

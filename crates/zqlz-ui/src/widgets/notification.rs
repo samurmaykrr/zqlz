@@ -20,6 +20,12 @@ use crate::widgets::{
     h_flex, v_flex,
 };
 
+type NotificationActionBuilder =
+    Rc<dyn Fn(&mut Notification, &mut Window, &mut Context<Notification>) -> Button>;
+type NotificationContentBuilder =
+    Rc<dyn Fn(&mut Notification, &mut Window, &mut Context<Notification>) -> AnyElement>;
+type NotificationClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub enum NotificationType {
     #[default]
@@ -71,9 +77,9 @@ pub struct Notification {
     message: Option<SharedString>,
     icon: Option<Icon>,
     autohide: bool,
-    action_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> Button>>,
-    content_builder: Option<Rc<dyn Fn(&mut Self, &mut Window, &mut Context<Self>) -> AnyElement>>,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+    action_builder: Option<NotificationActionBuilder>,
+    content_builder: Option<NotificationContentBuilder>,
+    on_click: Option<NotificationClickHandler>,
     closing: bool,
 }
 
@@ -108,6 +114,12 @@ impl From<(NotificationType, SharedString)> for Notification {
 }
 
 struct DefaultIdType;
+
+impl Default for Notification {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Notification {
     /// Create a new notification.

@@ -451,7 +451,7 @@ impl VersionStorage {
                     id: Uuid::parse_str(&id_str).unwrap_or_default(),
                     connection_id: Uuid::parse_str(&conn_id_str).unwrap_or_default(),
                     object_id: row.get(2)?,
-                    object_type: DatabaseObjectType::from_str(&object_type_str),
+                    object_type: DatabaseObjectType::parse(&object_type_str),
                     object_schema: row.get(4)?,
                     object_name: row.get(5)?,
                     tracked_at: parse_datetime(row.get::<_, String>(6)?),
@@ -495,7 +495,7 @@ impl VersionStorage {
 
                 Ok(VersionedObjectInfo {
                     object_id: row.get(0)?,
-                    object_type: DatabaseObjectType::from_str(&object_type_str),
+                    object_type: DatabaseObjectType::parse(&object_type_str),
                     object_schema: row.get(2)?,
                     object_name: row.get(3)?,
                     version_count: row.get(4)?,
@@ -523,7 +523,7 @@ impl VersionStorage {
                     id: Uuid::parse_str(&id_str).unwrap_or_default(),
                     connection_id: Uuid::parse_str(&conn_id_str).unwrap_or_default(),
                     object_id: row.get(2)?,
-                    object_type: DatabaseObjectType::from_str(&object_type_str),
+                    object_type: DatabaseObjectType::parse(&object_type_str),
                     object_schema: row.get(4)?,
                     object_name: row.get(5)?,
                     content: row.get(6)?,

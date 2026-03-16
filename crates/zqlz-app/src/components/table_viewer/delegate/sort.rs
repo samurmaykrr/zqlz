@@ -197,19 +197,19 @@ fn try_parse_numeric(s: &str) -> Option<f64> {
     // Strip common suffixes (e.g., "1.2 KB", "3 MB") and convert to bytes
     let s_trimmed = s.trim();
     let parts: Vec<&str> = s_trimmed.splitn(2, ' ').collect();
-    if parts.len() == 2 {
-        if let Ok(n) = parts[0].parse::<f64>() {
-            let multiplier = match parts[1].to_uppercase().as_str() {
-                "B" => Some(1.0),
-                "KB" => Some(1024.0),
-                "MB" => Some(1024.0 * 1024.0),
-                "GB" => Some(1024.0 * 1024.0 * 1024.0),
-                "TB" => Some(1024.0 * 1024.0 * 1024.0 * 1024.0),
-                _ => None,
-            };
-            if let Some(m) = multiplier {
-                return Some(n * m);
-            }
+    if parts.len() == 2
+        && let Ok(n) = parts[0].parse::<f64>()
+    {
+        let multiplier = match parts[1].to_uppercase().as_str() {
+            "B" => Some(1.0),
+            "KB" => Some(1024.0),
+            "MB" => Some(1024.0 * 1024.0),
+            "GB" => Some(1024.0 * 1024.0 * 1024.0),
+            "TB" => Some(1024.0 * 1024.0 * 1024.0 * 1024.0),
+            _ => None,
+        };
+        if let Some(m) = multiplier {
+            return Some(n * m);
         }
     }
 

@@ -473,7 +473,7 @@ mod tests {
             Value::Bool(true),
             Value::Int32(42),
             Value::Int64(1234567890123),
-            Value::Float64(3.14159),
+            Value::Float64(std::f64::consts::PI),
             Value::String("hello world".into()),
         ];
 
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn test_normal_finite_float_unchanged() {
-        let value = Value::Float64(3.14);
+        let value = Value::Float64(2.5);
         let encoded = encode_value(&value);
         let decoded = decode_value(&encoded).expect("decode");
         assert_eq!(value, decoded);

@@ -7,8 +7,8 @@ use std::ops::Range;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use serde_json;
 use uuid::Uuid;
+use zqlz_core::{ColumnMeta, Value};
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
@@ -21,6 +21,16 @@ use zqlz_ui::widgets::{
 
 use super::TableViewerPanel;
 
+fn parse_editor_value(input: Option<&str>, cell_data: &CellData) -> Value {
+    match input {
+        None => Value::Null,
+        Some(value) if value == cell_data.current_value.display_for_editor() => {
+            cell_data.current_value.clone()
+        }
+        Some(value) => Value::parse_from_string(value, &cell_data.column_type),
+    }
+}
+
 /// Cell data being edited
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -28,15 +38,16 @@ pub struct CellData {
     pub table_name: String,
     pub column_name: String,
     pub column_type: String,
-    pub row_id: Option<String>,        // Primary key value for updating
-    pub current_value: Option<String>, // None means NULL
+    pub column_meta: ColumnMeta,
+    pub row_id: Option<String>, // Primary key value for updating
+    pub current_value: Value,
     pub row_index: usize,
     pub col_index: usize,
     pub connection_id: Uuid,
-    pub all_row_values: Vec<String>, // All column values for this row (for identifying the row)
+    pub all_row_values: Vec<Value>, // All column values for this row (for identifying the row)
     pub all_column_names: Vec<String>, // Column names corresponding to all_row_values
     pub all_column_types: Vec<String>, // Database column types for type-aware value parsing
-    pub raw_bytes: Option<Vec<u8>>,  // Raw binary data for blob/binary columns
+    pub raw_bytes: Option<Vec<u8>>, // Raw binary data for blob/binary columns
 }
 
 /// Events from the cell editor
@@ -44,8 +55,9 @@ pub struct CellData {
 pub enum CellEditorEvent {
     /// Cell value was saved - application should handle the actual update
     ValueSaved {
-        cell_data: CellData,
+        cell_data: Box<CellData>,
         new_value: Option<String>,
+        typed_value: Value,
         /// The source table viewer that should be updated after save
         source_viewer: Option<WeakEntity<TableViewerPanel>>,
     },
@@ -222,11 +234,11 @@ impl CellEditorPanel {
             cell_data.table_name,
             cell_data.column_name,
             cell_data.column_type,
-            cell_data.current_value,
+            Some(cell_data.current_value.display_for_editor()),
             cell_data.raw_bytes.is_some()
         );
 
-        self.is_null = cell_data.current_value.is_none();
+        self.is_null = cell_data.current_value.is_null();
 
         // Handle binary data: build hex dump and attempt UTF-8 decode
         if let Some(ref bytes) = cell_data.raw_bytes {
@@ -266,7 +278,7 @@ impl CellEditorPanel {
         self.decoded_text = None;
         self.text_view_input = None;
 
-        let value = cell_data.current_value.clone().unwrap_or_default();
+        let value = cell_data.current_value.display_for_editor();
         let language = self.detect_language(&cell_data.column_type);
         let is_json = self.is_json_column(&cell_data.column_type);
 
@@ -316,7 +328,7 @@ impl CellEditorPanel {
             return false;
         }
 
-        let original_is_null = cell_data.current_value.is_none();
+        let original_is_null = cell_data.current_value.is_null();
         if self.is_null != original_is_null {
             return true;
         }
@@ -326,15 +338,15 @@ impl CellEditorPanel {
         }
 
         let current_value = self.editor_input.read(cx).text().to_string();
-        let original_value = cell_data.current_value.clone().unwrap_or_default();
+        let original_value = cell_data.current_value.display_for_editor();
 
-        if self.is_json_column(&cell_data.column_type) {
-            if let (Ok(current_json), Ok(original_json)) = (
+        if self.is_json_column(&cell_data.column_type)
+            && let (Ok(current_json), Ok(original_json)) = (
                 serde_json::from_str::<serde_json::Value>(&current_value),
                 serde_json::from_str::<serde_json::Value>(&original_value),
-            ) {
-                return current_json != original_json;
-            }
+            )
+        {
+            return current_json != original_json;
         }
 
         current_value != original_value
@@ -343,6 +355,112 @@ impl CellEditorPanel {
     fn is_json_column(&self, column_type: &str) -> bool {
         let lower = column_type.to_lowercase();
         lower.contains("json") || lower.contains("jsonb")
+    }
+
+    fn normalized_column_type(column_type: &str) -> String {
+        column_type.trim().to_lowercase()
+    }
+
+    fn base_column_type(column_type: &str) -> String {
+        let lower = column_type.trim().to_lowercase();
+        let without_array = lower.strip_suffix("[]").unwrap_or(&lower);
+        without_array
+            .split_once('(')
+            .map(|(base, _)| base)
+            .unwrap_or(without_array)
+            .trim()
+            .to_string()
+    }
+
+    fn is_string_like_column(column_type: &str) -> bool {
+        matches!(
+            Self::base_column_type(column_type).as_str(),
+            "text"
+                | "varchar"
+                | "char"
+                | "bpchar"
+                | "name"
+                | "citext"
+                | "character varying"
+                | "character"
+                | "nvarchar"
+                | "nchar"
+                | "longtext"
+                | "mediumtext"
+                | "tinytext"
+                | "enum"
+                | "set"
+        )
+    }
+
+    fn validation_hint(column_type: &str) -> Option<&'static str> {
+        let normalized = Self::normalized_column_type(column_type);
+        if normalized.ends_with("[]") {
+            return Some("a JSON-style array like [1, 2, 3]");
+        }
+
+        match Self::base_column_type(column_type).as_str() {
+            "boolean" | "bool" | "bit" => Some("a boolean like true or false"),
+            "tinyint" if normalized == "tinyint(1)" => Some("a boolean like true or false"),
+            "int2" | "smallint" | "smallserial" | "int4" | "integer" | "int" | "mediumint"
+            | "serial" | "int8" | "bigint" | "bigserial" | "tinyint" => Some("a whole number"),
+            "float4" | "real" | "float" | "float8" | "double precision" | "double" => {
+                Some("a number")
+            }
+            "numeric" | "decimal" | "money" => Some("a numeric value"),
+            "json" | "jsonb" => Some("valid JSON"),
+            "uuid" => Some("a UUID like 550e8400-e29b-41d4-a716-446655440000"),
+            "date" => Some("a date like 2024-03-15"),
+            "time" | "timetz" | "time without time zone" | "time with time zone" => {
+                Some("a time like 14:30:00")
+            }
+            "timestamp" | "datetime" | "timestamp without time zone" | "smalldatetime" => {
+                Some("a timestamp like 2024-03-15 14:30:00")
+            }
+            "timestamptz" | "timestamp with time zone" => {
+                Some("a timestamp with timezone like 2024-03-15T14:30:00Z")
+            }
+            "bytea" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
+                Some("hex bytes like 0xdeadbeef")
+            }
+            _ => None,
+        }
+    }
+
+    fn validate_typed_value(&self, cell_data: &CellData, value: &str) -> Result<Value, String> {
+        let typed_value = parse_editor_value(Some(value), cell_data);
+
+        if typed_value.is_null() && !Self::is_string_like_column(&cell_data.column_type) {
+            if value.trim().is_empty() {
+                return Err(format!(
+                    "Enter a value for '{}' or enable NULL.",
+                    cell_data.column_name
+                ));
+            }
+
+            if value.trim().eq_ignore_ascii_case("null") {
+                return Err(format!(
+                    "Use the NULL checkbox to clear '{}'.",
+                    cell_data.column_name
+                ));
+            }
+        }
+
+        let should_reject_string_fallback = !Self::is_string_like_column(&cell_data.column_type)
+            && matches!(typed_value, Value::String(_));
+
+        if should_reject_string_fallback {
+            let detail = Self::validation_hint(&cell_data.column_type)
+                .map(|hint| format!("Expected {}.", hint))
+                .unwrap_or_else(|| format!("Expected a valid {} value.", cell_data.column_type));
+
+            return Err(format!(
+                "Invalid value for '{}'. {}",
+                cell_data.column_name, detail
+            ));
+        }
+
+        Ok(typed_value)
     }
 
     /// Detect the appropriate syntax highlighting language based on column type
@@ -381,13 +499,12 @@ impl CellEditorPanel {
         }
 
         let col_name_lower = column_type.to_lowercase();
-        if lower.contains("text") || lower.contains("varchar") || lower.contains("char") {
-            if col_name_lower.contains("code")
+        if (lower.contains("text") || lower.contains("varchar") || lower.contains("char"))
+            && (col_name_lower.contains("code")
                 || col_name_lower.contains("script")
-                || col_name_lower.contains("source")
-            {
-                return Some("text");
-            }
+                || col_name_lower.contains("source"))
+        {
+            return Some("text");
         }
 
         None
@@ -431,18 +548,17 @@ impl CellEditorPanel {
         let current_value = self.editor_input.read(cx).text().to_string();
         let trimmed = current_value.trim();
 
-        if (trimmed.starts_with('{') && trimmed.ends_with('}'))
-            || (trimmed.starts_with('[') && trimmed.ends_with(']'))
+        if ((trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+            && let Some(formatted) = self.format_json(&current_value)
         {
-            if let Some(formatted) = self.format_json(&current_value) {
-                tracing::info!("Auto-detected JSON and formatted");
-                self.editor_input.update(cx, |input, cx| {
-                    input.set_value(formatted, window, cx);
-                });
-                self.validation_error = None;
-                cx.notify();
-                return;
-            }
+            tracing::info!("Auto-detected JSON and formatted");
+            self.editor_input.update(cx, |input, cx| {
+                input.set_value(formatted, window, cx);
+            });
+            self.validation_error = None;
+            cx.notify();
+            return;
         }
 
         let upper = trimmed.to_uppercase();
@@ -476,21 +592,38 @@ impl CellEditorPanel {
     fn validate(&mut self, cx: &mut Context<Self>) -> bool {
         self.validation_error = None;
 
-        if self.is_null {
-            return true;
-        }
-
         let Some(cell_data) = &self.cell_data else {
             return true;
         };
 
-        let value = self.editor_input.read(cx).text().to_string();
-
-        if self.is_json_column(&cell_data.column_type) && !value.trim().is_empty() {
-            if let Err(e) = serde_json::from_str::<serde_json::Value>(&value) {
-                self.validation_error = Some(format!("Invalid JSON: {}", e));
+        if self.is_null {
+            if !cell_data.column_meta.nullable {
+                self.validation_error = Some(format!(
+                    "Column '{}' cannot be set to NULL.",
+                    cell_data.column_name
+                ));
                 return false;
             }
+
+            return true;
+        }
+
+        let value = self.editor_input.read(cx).text().to_string();
+
+        if self.is_json_column(&cell_data.column_type)
+            && !value.trim().is_empty()
+            && let Err(e) = serde_json::from_str::<serde_json::Value>(&value)
+        {
+            self.validation_error = Some(format!(
+                "Invalid JSON for '{}': {}",
+                cell_data.column_name, e
+            ));
+            return false;
+        }
+
+        if let Err(message) = self.validate_typed_value(cell_data, &value) {
+            self.validation_error = Some(message);
+            return false;
         }
 
         true
@@ -535,8 +668,11 @@ impl CellEditorPanel {
 
         tracing::info!("Emitting ValueSaved event to MainView...");
 
+        let typed_value = parse_editor_value(new_value.as_deref(), &cell_data);
+
         cx.emit(CellEditorEvent::ValueSaved {
-            cell_data,
+            cell_data: Box::new(cell_data),
+            typed_value,
             new_value,
             source_viewer: self.source_viewer.clone(),
         });
@@ -586,10 +722,11 @@ impl CellEditorPanel {
         row_indices: &[usize],
         cx: &mut Context<Self>,
     ) {
-        if let Some(ref cell_data) = self.cell_data {
-            if cell_data.table_name == table_name && row_indices.contains(&cell_data.row_index) {
-                self.clear(cx);
-            }
+        if let Some(ref cell_data) = self.cell_data
+            && cell_data.table_name == table_name
+            && row_indices.contains(&cell_data.row_index)
+        {
+            self.clear(cx);
         }
     }
 
@@ -677,24 +814,39 @@ impl CellEditorPanel {
 
     fn render_null_checkbox(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let is_nullable = self
+            .cell_data
+            .as_ref()
+            .map(|cell_data| cell_data.column_meta.nullable)
+            .unwrap_or(true);
         h_flex()
             .gap_2()
             .items_center()
             .child(
                 Checkbox::new("is-null")
                     .checked(self.is_null)
+                    .disabled(!is_nullable)
                     .on_click(cx.listener(|this, _checked, _window, cx| {
                         this.is_null = !this.is_null;
+                        this.validation_error = None;
                         cx.notify();
                     })),
             )
             .child(div().text_sm().text_color(theme.foreground).child("NULL"))
+            .when(!is_nullable, |this| {
+                this.child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Not nullable"),
+                )
+            })
     }
 
     fn render_format_json_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Button::new("format-json")
             .icon(Icon::new(ZqlzIcon::BracketsCurly).size_4())
-            .with_variant(ButtonVariant::Ghost)
+            .ghost()
             .tooltip("Format JSON")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.format_json_in_editor(window, cx);
@@ -704,7 +856,7 @@ impl CellEditorPanel {
     fn render_auto_format_button(&self, cx: &mut Context<Self>) -> impl IntoElement {
         Button::new("auto-format")
             .icon(Icon::new(ZqlzIcon::MagicWand).size_4())
-            .with_variant(ButtonVariant::Ghost)
+            .ghost()
             .tooltip("Auto Format (JSON/SQL)")
             .on_click(cx.listener(|this, _, window, cx| {
                 this.auto_format(window, cx);
@@ -715,8 +867,10 @@ impl CellEditorPanel {
         let is_wrapped = self.word_wrap;
         Button::new("word-wrap")
             .icon(Icon::new(ZqlzIcon::TextWrap).size_4())
+            // This toggle switches between active/inactive semantic styles at runtime, so it
+            // stays variant-driven rather than using a single fixed helper like `.ghost()`.
             .with_variant(if is_wrapped {
-                ButtonVariant::Secondary
+                ButtonVariant::SecondaryPrimary
             } else {
                 ButtonVariant::Ghost
             })
@@ -788,6 +942,7 @@ impl CellEditorPanel {
             .justify_end()
             .child(
                 Button::new("cancel-edit")
+                    .secondary()
                     .label("Cancel")
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.cancel(cx);
@@ -796,7 +951,7 @@ impl CellEditorPanel {
             .child(
                 Button::new("save-edit")
                     .label("Save")
-                    .with_variant(ButtonVariant::Primary)
+                    .primary()
                     .disabled(!has_modifications)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.save(window, cx);
@@ -855,8 +1010,10 @@ impl CellEditorPanel {
         let is_active = mode == current;
         Button::new(SharedString::from(format!("tab-{}", label.to_lowercase())))
             .label(label)
+            // The binary-mode tabs need to flip between selected and idle variants from one
+            // shared code path, which is why this remains a dynamic ButtonVariant choice.
             .with_variant(if is_active {
-                ButtonVariant::Secondary
+                ButtonVariant::SecondaryPrimary
             } else {
                 ButtonVariant::Ghost
             })
@@ -1052,13 +1209,14 @@ impl CellEditorPanel {
                             .child(format!("Type: Binary; Size: {} byte(s)", byte_count)),
                     )
                     .child(
-                        div()
-                            .ml_auto()
-                            .child(Button::new("close-binary").label("Close").on_click(
-                                cx.listener(|this, _, _window, cx| {
+                        div().ml_auto().child(
+                            Button::new("close-binary")
+                                .secondary()
+                                .label("Close")
+                                .on_click(cx.listener(|this, _, _window, cx| {
                                     this.cancel(cx);
-                                }),
-                            )),
+                                })),
+                        ),
                     ),
             )
     }

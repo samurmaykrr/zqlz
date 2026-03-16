@@ -493,10 +493,10 @@ impl GenericImporter {
     }
 
     fn should_include_table(&self, table_name: &str, options: &ImportOptions) -> bool {
-        if !options.include_tables.is_empty() {
-            if !options.include_tables.iter().any(|t| t == table_name) {
-                return false;
-            }
+        if !options.include_tables.is_empty()
+            && !options.include_tables.iter().any(|t| t == table_name)
+        {
+            return false;
         }
         if options.exclude_tables.iter().any(|t| t == table_name) {
             return false;
@@ -543,11 +543,11 @@ impl GenericImporter {
 
         sql.push_str(&column_defs.join(",\n"));
 
-        if let Some(ref pk) = table.primary_key {
-            if !pk.columns.is_empty() {
-                sql.push_str(",\n");
-                sql.push_str(&self.generate_primary_key_sql(pk));
-            }
+        if let Some(ref pk) = table.primary_key
+            && !pk.columns.is_empty()
+        {
+            sql.push_str(",\n");
+            sql.push_str(&self.generate_primary_key_sql(pk));
         }
 
         for unique in &table.unique_constraints {
@@ -595,7 +595,7 @@ impl GenericImporter {
     }
 
     fn generate_column_sql(&self, col: &ColumnDefinition) -> String {
-        let native_type = self.type_mapper.from_canonical(&col.canonical_type);
+        let native_type = self.type_mapper.native_type_for(&col.canonical_type);
         let mut sql = format!("  {} {}", self.quote_identifier(&col.name), native_type);
 
         // SQLite has no native ENUM type, so we represent it as TEXT and add an
@@ -814,19 +814,19 @@ impl GenericImporter {
         // When the source and target drivers differ the expression may use
         // driver-specific functions that do not translate.  Always warn so the
         // user can audit the expression rather than discovering a silent failure.
-        if let Some(src) = source_driver {
-            if src != target_driver {
-                warnings.push(ImportWarning {
-                    table: Some(table_name.to_owned()),
-                    column: Some(col.name.clone()),
-                    message: format!(
-                        "Generated column '{}' in table '{}': expression was written for {} and \
-                         may use driver-specific functions — verify the expression is valid on {}",
-                        col.name, table_name, src, target_driver
-                    ),
-                    kind: ImportWarningKind::GeneratedColumnDegraded,
-                });
-            }
+        if let Some(src) = source_driver
+            && src != target_driver
+        {
+            warnings.push(ImportWarning {
+                table: Some(table_name.to_owned()),
+                column: Some(col.name.clone()),
+                message: format!(
+                    "Generated column '{}' in table '{}': expression was written for {} and \
+                     may use driver-specific functions — verify the expression is valid on {}",
+                    col.name, table_name, src, target_driver
+                ),
+                kind: ImportWarningKind::GeneratedColumnDegraded,
+            });
         }
 
         // PostgreSQL only supports STORED generated columns.  A VIRTUAL column
@@ -967,15 +967,15 @@ impl GenericImporter {
     ) -> String {
         // Build a temporary column definition with the overridden enum name so that
         // the standard `generate_column_sql` path emits the right type string.
-        if let Some(type_name) = synthesized_type_name {
-            if let CanonicalType::Enum { ref values, .. } = col.canonical_type {
-                let mut patched = col.clone();
-                patched.canonical_type = CanonicalType::Enum {
-                    name: Some(type_name.to_owned()),
-                    values: values.clone(),
-                };
-                return self.generate_column_sql(&patched);
-            }
+        if let Some(type_name) = synthesized_type_name
+            && let CanonicalType::Enum { ref values, .. } = col.canonical_type
+        {
+            let mut patched = col.clone();
+            patched.canonical_type = CanonicalType::Enum {
+                name: Some(type_name.to_owned()),
+                values: values.clone(),
+            };
+            return self.generate_column_sql(&patched);
         }
         self.generate_column_sql(col)
     }
@@ -1709,7 +1709,7 @@ impl Importer for GenericImporter {
             blocking_issues: Vec::new(),
         };
 
-        for (table_name, _) in &doc.schema.tables {
+        for table_name in doc.schema.tables.keys() {
             if !self.should_include_table(table_name, options) {
                 preview.tables_to_skip.push(table_name.clone());
                 continue;
@@ -1754,7 +1754,7 @@ impl Importer for GenericImporter {
         for (table_name, table_def) in &doc.schema.tables {
             for col in &table_def.columns {
                 if !self.type_mapper.supports_type(&col.canonical_type) {
-                    let target_type = self.type_mapper.from_canonical(&col.canonical_type);
+                    let target_type = self.type_mapper.native_type_for(&col.canonical_type);
                     let fallback = col.canonical_type.fallback_type();
 
                     warnings.push(TypeWarning {

@@ -69,6 +69,31 @@ fn test_qualified_completion_with_filter() {
 }
 
 #[test]
+fn test_qualified_completion_with_alias_and_partial_column() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users us WHERE u.us");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions.iter().map(|c| c.label.clone()).collect();
+
+    assert!(
+        labels.contains(&"user_id".to_string()),
+        "Should suggest aliased columns while typing qualified reference. Got: {:?}",
+        labels
+    );
+    assert!(
+        labels.contains(&"username".to_string()),
+        "Should suggest username for aliased partial qualified reference. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"FROM".to_string()),
+        "Should not fall back to keyword completions for qualified alias references"
+    );
+}
+
+#[test]
 fn test_qualified_completion_with_alias() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("SELECT * FROM users u WHERE u.");
@@ -181,6 +206,26 @@ fn test_qualified_completion_case_insensitive() {
         labels.contains(&"user_id".to_string()),
         "Should handle uppercase table name. Got: {:?}",
         labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_alias_case_insensitive() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users U WHERE U.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions.iter().map(|c| c.label.clone()).collect();
+
+    assert!(
+        labels.contains(&"user_id".to_string()),
+        "Should resolve uppercase alias case-insensitively. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"SELECT".to_string()),
+        "Qualified alias completion should not fall back to SQL keywords"
     );
 }
 

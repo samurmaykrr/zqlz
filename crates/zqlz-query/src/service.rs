@@ -249,7 +249,7 @@ impl QueryService {
                             current_statement.push(next_char);
                         }
                         // Consume until newline
-                        while let Some(sc) = chars.next() {
+                        for sc in chars.by_ref() {
                             current_statement.push(sc);
                             if sc == '\n' {
                                 break;
@@ -268,7 +268,7 @@ impl QueryService {
                         }
                         // Consume until */
                         let mut prev = '\0';
-                        while let Some(sc) = chars.next() {
+                        for sc in chars.by_ref() {
                             current_statement.push(sc);
                             if prev == '*' && sc == '/' {
                                 break;

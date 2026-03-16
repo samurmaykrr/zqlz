@@ -149,12 +149,12 @@ impl TemplateLibraryPanel {
         let search_input_weak = search_input.downgrade();
         subscriptions.push(
             cx.subscribe(&search_input, move |this, _, event: &InputEvent, cx| {
-                if let InputEvent::Change = event {
-                    if let Some(input) = search_input_weak.upgrade() {
-                        this.search_query = input.read(cx).value().to_string();
-                        this.apply_filters();
-                        cx.notify();
-                    }
+                if let InputEvent::Change = event
+                    && let Some(input) = search_input_weak.upgrade()
+                {
+                    this.search_query = input.read(cx).value().to_string();
+                    this.apply_filters();
+                    cx.notify();
                 }
             }),
         );
@@ -216,14 +216,14 @@ impl TemplateLibraryPanel {
             .collect();
 
         // Reset selection if out of bounds
-        if let Some(idx) = self.selected_index {
-            if idx >= self.filtered_templates.len() {
-                self.selected_index = if self.filtered_templates.is_empty() {
-                    None
-                } else {
-                    Some(0)
-                };
-            }
+        if let Some(idx) = self.selected_index
+            && idx >= self.filtered_templates.len()
+        {
+            self.selected_index = if self.filtered_templates.is_empty() {
+                None
+            } else {
+                Some(0)
+            };
         }
     }
 

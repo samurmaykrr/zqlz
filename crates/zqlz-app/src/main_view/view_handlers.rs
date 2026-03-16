@@ -24,6 +24,7 @@ use crate::app::AppState;
 use crate::components::QueryEditor;
 use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 use zqlz_services::SchemaService;
+use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
 use super::MainView;
 use super::rename_window::RenameWindow;
@@ -154,23 +155,23 @@ pub(in crate::main_view) async fn fetch_view_definition(
 
     match connection.query(&sql, &[]).await {
         Ok(result) => {
-            if let Some(row) = result.rows.first() {
-                if let Some(value) = row.values.first() {
-                    let definition = value.to_string();
+            if let Some(row) = result.rows.first()
+                && let Some(value) = row.values.first()
+            {
+                let definition = value.to_string();
 
-                    // For PostgreSQL, the definition is just the SELECT part
-                    // For SQLite, it's the full CREATE VIEW statement, so extract the SELECT
-                    if driver_type.contains("sqlite") {
-                        // SQLite returns: CREATE VIEW name AS SELECT ...
-                        // We need to extract just the SELECT part
-                        if let Some(as_pos) = definition.to_uppercase().find(" AS ") {
-                            let select_part = definition[as_pos + 4..].trim();
-                            return Ok(select_part.to_string());
-                        }
+                // For PostgreSQL, the definition is just the SELECT part
+                // For SQLite, it's the full CREATE VIEW statement, so extract the SELECT
+                if driver_type.contains("sqlite") {
+                    // SQLite returns: CREATE VIEW name AS SELECT ...
+                    // We need to extract just the SELECT part
+                    if let Some(as_pos) = definition.to_uppercase().find(" AS ") {
+                        let select_part = definition[as_pos + 4..].trim();
+                        return Ok(select_part.to_string());
                     }
-
-                    return Ok(definition);
                 }
+
+                return Ok(definition);
             }
             Err(format!("View '{}' not found", view_name))
         }
@@ -208,10 +209,10 @@ async fn fetch_function_definition(
 
     match connection.query(&sql, &[]).await {
         Ok(result) => {
-            if let Some(row) = result.rows.first() {
-                if let Some(value) = row.values.first() {
-                    return Ok(value.to_string());
-                }
+            if let Some(row) = result.rows.first()
+                && let Some(value) = row.values.first()
+            {
+                return Ok(value.to_string());
             }
             Err(format!("Function '{}' not found", function_name))
         }
@@ -250,10 +251,10 @@ async fn fetch_procedure_definition(
 
     match connection.query(&sql, &[]).await {
         Ok(result) => {
-            if let Some(row) = result.rows.first() {
-                if let Some(value) = row.values.first() {
-                    return Ok(value.to_string());
-                }
+            if let Some(row) = result.rows.first()
+                && let Some(value) = row.values.first()
+            {
+                return Ok(value.to_string());
             }
             Err(format!("Procedure '{}' not found", procedure_name))
         }
@@ -261,7 +262,138 @@ async fn fetch_procedure_definition(
     }
 }
 
+struct ObjectEditorConnection {
+    connection_id: Uuid,
+    connection_name: String,
+    connection: Arc<dyn zqlz_core::Connection>,
+    driver_name: String,
+}
+
+struct ObjectEditorDefinition {
+    display_name: String,
+    object_type: EditorObjectType,
+    initial_content: Option<String>,
+    schema_service: Arc<SchemaService>,
+}
+
+struct ViewSavePromptRequest {
+    connection_id: Uuid,
+    definition: String,
+    connection: Arc<dyn zqlz_core::Connection>,
+    schema_service: Arc<SchemaService>,
+    editor_weak: WeakEntity<QueryEditor>,
+}
+
+struct TriggerDesignerSaveRequest {
+    connection_id: Uuid,
+    design: TriggerDesign,
+    ddl: String,
+    is_new: bool,
+    original_name: Option<String>,
+    panel: Entity<TriggerDesignerPanel>,
+}
+
 impl MainView {
+    fn document_first_object_editor(
+        definition: ObjectEditorDefinition,
+        connection: ObjectEditorConnection,
+        window: &mut Window,
+        cx: &mut Context<QueryEditor>,
+    ) -> QueryEditor {
+        let document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            definition.initial_content.as_deref().unwrap_or(""),
+        );
+        let mut editor = QueryEditor::new_for_object_with_document(
+            definition.display_name,
+            connection.connection_id,
+            definition.object_type,
+            document,
+            definition.schema_service,
+            window,
+            cx,
+        );
+
+        editor.set_connection(
+            Some(connection.connection_id),
+            Some(connection.connection_name),
+            Some(connection.connection),
+            Some(connection.driver_name),
+            cx,
+        );
+
+        editor
+    }
+
+    fn open_workspace_object_editor(
+        &mut self,
+        definition: ObjectEditorDefinition,
+        connection: ObjectEditorConnection,
+        event_handler: fn(
+            &mut MainView,
+            &crate::components::QueryEditorEvent,
+            WeakEntity<QueryEditor>,
+            &mut Window,
+            &mut Context<Self>,
+        ),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let editor_id = self.create_workspace_editor(
+            Some(connection.connection_id),
+            definition.display_name.clone(),
+            cx,
+        );
+        let query_editor =
+            cx.new(|cx| Self::document_first_object_editor(definition, connection, window, cx));
+
+        let subscription = cx.subscribe_in(&query_editor, window, {
+            let query_editor_weak = query_editor.downgrade();
+            move |this, _editor, event: &crate::components::QueryEditorEvent, window, cx| {
+                event_handler(this, event, query_editor_weak.clone(), window, cx);
+
+                if matches!(
+                    event,
+                    crate::components::QueryEditorEvent::DocumentStateChanged
+                ) {
+                    let Some(editor) = query_editor_weak.upgrade() else {
+                        return;
+                    };
+
+                    let document_context = editor.read(cx).document_context(cx);
+                    let is_dirty = editor.read(cx).is_dirty(cx);
+                    let display_name = editor.read(cx).name();
+                    this.refresh_workspace_document_state(
+                        editor_id,
+                        document_context,
+                        is_dirty,
+                        display_name,
+                        cx,
+                    );
+                }
+            }
+        });
+
+        self._subscriptions.push(subscription);
+        self.query_editors.push(query_editor.downgrade());
+
+        let document_context = query_editor.read(cx).document_context(cx);
+        let is_dirty = query_editor.read(cx).is_dirty(cx);
+        let current_display_name = query_editor.read(cx).name();
+        self.refresh_workspace_document_state(
+            editor_id,
+            document_context,
+            is_dirty,
+            current_display_name,
+            cx,
+        );
+
+        let query_editor_panel: Arc<dyn PanelView> = Arc::new(query_editor);
+        self.dock_area.update(cx, |area, cx| {
+            area.add_panel(query_editor_panel, DockPlacement::Center, None, window, cx);
+        });
+    }
+
     /// Opens a QueryEditor to design/edit an existing view
     pub(super) fn design_view(
         &mut self,
@@ -303,69 +435,31 @@ impl MainView {
             match fetch_view_definition(&connection, &view_name_for_spawn, &driver_name).await {
                 Ok(definition) => {
                     cx.update(|window, cx| {
-                        // Create a QueryEditor with EditorObjectType::View
                         let object_type = EditorObjectType::edit_view(
                             view_name_for_spawn.clone(),
                             None, // schema
                         );
 
-                        let query_editor = cx.new(|cx| {
-                            let mut editor = QueryEditor::new_for_object(
-                                editor_title.clone(),
-                                connection_id,
-                                object_type,
-                                Some(definition),
-                                schema_service.clone(),
+                        let _ = dock_area;
+                        _ = this.update(cx, |main_view, cx| {
+                            main_view.open_workspace_object_editor(
+                                ObjectEditorDefinition {
+                                    display_name: editor_title.clone(),
+                                    object_type,
+                                    initial_content: Some(definition),
+                                    schema_service: schema_service.clone(),
+                                },
+                                ObjectEditorConnection {
+                                    connection_id,
+                                    connection_name: connection_name.clone(),
+                                    connection: connection.clone(),
+                                    driver_name: driver_name.clone(),
+                                },
+                                MainView::handle_view_editor_event,
                                 window,
                                 cx,
                             );
-
-                            // Set the connection so LSP and autocomplete work
-                            editor.set_connection(
-                                Some(connection_id),
-                                Some(connection_name.clone()),
-                                Some(connection.clone()),
-                                Some(driver_name.clone()),
-                                cx,
-                            );
-
-                            editor
                         });
-
-                        // Subscribe to editor events to handle Save
-                        _ = this.update(cx, |main_view, cx| {
-                            let subscription = cx.subscribe_in(&query_editor, window, {
-                                let query_editor_weak = query_editor.downgrade();
-                                move |this,
-                                      _editor,
-                                      event: &crate::components::QueryEditorEvent,
-                                      window,
-                                      cx| {
-                                    this.handle_view_editor_event(
-                                        event,
-                                        query_editor_weak.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            });
-                            main_view._subscriptions.push(subscription);
-                            main_view.query_editors.push(query_editor.downgrade());
-                        });
-
-                        // Add to center dock
-                        if let Some(dock_area) = dock_area.upgrade() {
-                            dock_area.update(cx, |area, cx| {
-                                area.add_panel(
-                                    Arc::new(query_editor)
-                                        as Arc<dyn zqlz_ui::widgets::dock::PanelView>,
-                                    zqlz_ui::widgets::dock::DockPlacement::Center,
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
 
                         tracing::info!("Opened view designer for '{}'", view_name_for_spawn);
                     })?;
@@ -417,49 +511,23 @@ impl MainView {
         // Create a new view with a placeholder name
         let object_type = EditorObjectType::new_view();
 
-        let query_editor = cx.new(|cx| {
-            let mut editor = QueryEditor::new_for_object(
-                "New View".to_string(),
-                connection_id,
+        self.open_workspace_object_editor(
+            ObjectEditorDefinition {
+                display_name: "New View".to_string(),
                 object_type,
-                Some("SELECT * FROM table_name".to_string()), // Starter template
-                schema_service.clone(),
-                window,
-                cx,
-            );
-
-            editor.set_connection(
-                Some(connection_id),
-                Some(connection_name),
-                Some(connection.clone()),
-                Some(driver_name),
-                cx,
-            );
-
-            editor
-        });
-
-        // Subscribe to editor events
-        let subscription = cx.subscribe_in(&query_editor, window, {
-            let query_editor_weak = query_editor.downgrade();
-            move |this, _editor, event: &crate::components::QueryEditorEvent, window, cx| {
-                this.handle_view_editor_event(event, query_editor_weak.clone(), window, cx);
-            }
-        });
-        self._subscriptions.push(subscription);
-        self.query_editors.push(query_editor.downgrade());
-
-        // Add to center dock
-        let query_editor_panel: Arc<dyn zqlz_ui::widgets::dock::PanelView> = Arc::new(query_editor);
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(
-                query_editor_panel,
-                zqlz_ui::widgets::dock::DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
-        });
+                initial_content: Some("SELECT * FROM table_name".to_string()),
+                schema_service,
+            },
+            ObjectEditorConnection {
+                connection_id,
+                connection_name,
+                connection: connection.clone(),
+                driver_name,
+            },
+            MainView::handle_view_editor_event,
+            window,
+            cx,
+        );
 
         tracing::info!("New view editor opened");
     }
@@ -514,6 +582,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // This styles the shared dialog's OK action, not a concrete Button, so it
+                        // must stay as a ButtonVariant to mark the action as destructive.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
@@ -976,14 +1046,15 @@ impl MainView {
         let schema_service = app_state.schema_service.clone();
 
         // For new views, we need to prompt for a name
-        if is_new || name.is_none() {
+        if is_new {
             self.prompt_for_view_name(
-                connection_id,
-                definition,
-                driver_name,
-                connection.clone(),
-                schema_service,
-                editor_weak,
+                ViewSavePromptRequest {
+                    connection_id,
+                    definition,
+                    connection: connection.clone(),
+                    schema_service,
+                    editor_weak,
+                },
                 window,
                 cx,
             );
@@ -991,7 +1062,7 @@ impl MainView {
         }
 
         let Some(view_name) = name else {
-            // Guarded by is_new || name.is_none() check above; this branch is unreachable
+            tracing::error!("save_view called for existing view without a name");
             return;
         };
         let connection = connection.clone();
@@ -1119,15 +1190,17 @@ impl MainView {
     /// Prompt user for a view name when creating a new view
     fn prompt_for_view_name(
         &mut self,
-        connection_id: Uuid,
-        definition: String,
-        driver_name: String,
-        connection: Arc<dyn zqlz_core::Connection>,
-        schema_service: Arc<SchemaService>,
-        editor_weak: WeakEntity<QueryEditor>,
+        request: ViewSavePromptRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let ViewSavePromptRequest {
+            connection_id,
+            definition,
+            connection,
+            schema_service,
+            editor_weak,
+        } = request;
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("View name"));
         let error_message: Entity<Option<String>> = cx.new(|_| None);
         let connection_sidebar = self.connection_sidebar.downgrade();
@@ -1154,7 +1227,6 @@ impl MainView {
             move |dialog, _window, cx| {
                 let connection = connection.clone();
                 let definition = definition.clone();
-                let _driver_name = driver_name.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
@@ -1267,7 +1339,6 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let function_name_for_spawn = function_name.clone();
-        let dock_area = self.dock_area.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the function definition
@@ -1282,53 +1353,24 @@ impl MainView {
                             is_new: false,
                         };
 
-                        let query_editor = cx.new(|cx| {
-                            let mut editor = QueryEditor::new_for_object(
-                                function_name_for_spawn.clone(),
-                                connection_id,
-                                object_type,
-                                Some(definition),
-                                schema_service.clone(),
+                        _ = this.update(cx, |main_view, cx| {
+                            main_view.open_workspace_object_editor(
+                                ObjectEditorDefinition {
+                                    display_name: function_name_for_spawn.clone(),
+                                    object_type,
+                                    initial_content: Some(definition),
+                                    schema_service: schema_service.clone(),
+                                },
+                                ObjectEditorConnection {
+                                    connection_id,
+                                    connection_name: connection_name.clone(),
+                                    connection: connection.clone(),
+                                    driver_name: driver_name.clone(),
+                                },
+                                MainView::handle_view_editor_event,
                                 window,
                                 cx,
                             );
-
-                            editor.set_connection(
-                                Some(connection_id),
-                                Some(connection_name.clone()),
-                                Some(connection.clone()),
-                                Some(driver_name.clone()),
-                                cx,
-                            );
-
-                            editor
-                        });
-
-                        // Subscribe to editor events
-                        _ = this.update(cx, |main_view, cx| {
-                            let subscription = cx.subscribe_in(&query_editor, window, {
-                                let query_editor_weak = query_editor.downgrade();
-                                move |this,
-                                      _editor,
-                                      event: &crate::components::QueryEditorEvent,
-                                      window,
-                                      cx| {
-                                    this.handle_view_editor_event(
-                                        event,
-                                        query_editor_weak.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            });
-                            main_view._subscriptions.push(subscription);
-                            main_view.query_editors.push(query_editor.downgrade());
-                        });
-
-                        // Add to center dock
-                        let panel_view: Arc<dyn PanelView> = Arc::new(query_editor);
-                        _ = dock_area.update(cx, |area, cx| {
-                            area.add_panel(panel_view, DockPlacement::Center, None, window, cx);
                         });
                     })?;
                 }
@@ -1385,7 +1427,6 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let procedure_name_for_spawn = procedure_name.clone();
-        let dock_area = self.dock_area.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the procedure definition
@@ -1400,53 +1441,24 @@ impl MainView {
                             is_new: false,
                         };
 
-                        let query_editor = cx.new(|cx| {
-                            let mut editor = QueryEditor::new_for_object(
-                                procedure_name_for_spawn.clone(),
-                                connection_id,
-                                object_type,
-                                Some(definition),
-                                schema_service.clone(),
+                        _ = this.update(cx, |main_view, cx| {
+                            main_view.open_workspace_object_editor(
+                                ObjectEditorDefinition {
+                                    display_name: procedure_name_for_spawn.clone(),
+                                    object_type,
+                                    initial_content: Some(definition),
+                                    schema_service: schema_service.clone(),
+                                },
+                                ObjectEditorConnection {
+                                    connection_id,
+                                    connection_name: connection_name.clone(),
+                                    connection: connection.clone(),
+                                    driver_name: driver_name.clone(),
+                                },
+                                MainView::handle_view_editor_event,
                                 window,
                                 cx,
                             );
-
-                            editor.set_connection(
-                                Some(connection_id),
-                                Some(connection_name.clone()),
-                                Some(connection.clone()),
-                                Some(driver_name.clone()),
-                                cx,
-                            );
-
-                            editor
-                        });
-
-                        // Subscribe to editor events
-                        _ = this.update(cx, |main_view, cx| {
-                            let subscription = cx.subscribe_in(&query_editor, window, {
-                                let query_editor_weak = query_editor.downgrade();
-                                move |this,
-                                      _editor,
-                                      event: &crate::components::QueryEditorEvent,
-                                      window,
-                                      cx| {
-                                    this.handle_view_editor_event(
-                                        event,
-                                        query_editor_weak.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            });
-                            main_view._subscriptions.push(subscription);
-                            main_view.query_editors.push(query_editor.downgrade());
-                        });
-
-                        // Add to center dock
-                        let panel_view: Arc<dyn PanelView> = Arc::new(query_editor);
-                        _ = dock_area.update(cx, |area, cx| {
-                            area.add_panel(panel_view, DockPlacement::Center, None, window, cx);
                         });
                     })?;
                 }
@@ -1507,7 +1519,6 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let trigger_name_for_spawn = trigger_name.clone();
-        let dock_area = self.dock_area.downgrade();
 
         let editor_title = format!("[Trigger] {} ({})", trigger_name, connection_name);
 
@@ -1519,59 +1530,25 @@ impl MainView {
                         let object_type =
                             EditorObjectType::edit_trigger(trigger_name_for_spawn.clone(), None);
 
-                        let query_editor = cx.new(|cx| {
-                            let mut editor = QueryEditor::new_for_object(
-                                editor_title.clone(),
-                                connection_id,
-                                object_type,
-                                Some(definition),
-                                schema_service.clone(),
+                        _ = this.update(cx, |main_view, cx| {
+                            main_view.open_workspace_object_editor(
+                                ObjectEditorDefinition {
+                                    display_name: editor_title.clone(),
+                                    object_type,
+                                    initial_content: Some(definition),
+                                    schema_service: schema_service.clone(),
+                                },
+                                ObjectEditorConnection {
+                                    connection_id,
+                                    connection_name: connection_name.clone(),
+                                    connection: connection.clone(),
+                                    driver_name: driver_name.clone(),
+                                },
+                                MainView::handle_trigger_editor_event,
                                 window,
                                 cx,
                             );
-
-                            editor.set_connection(
-                                Some(connection_id),
-                                Some(connection_name.clone()),
-                                Some(connection.clone()),
-                                Some(driver_name.clone()),
-                                cx,
-                            );
-
-                            editor
                         });
-
-                        _ = this.update(cx, |main_view, cx| {
-                            let subscription = cx.subscribe_in(&query_editor, window, {
-                                let query_editor_weak = query_editor.downgrade();
-                                move |this,
-                                      _editor,
-                                      event: &crate::components::QueryEditorEvent,
-                                      window,
-                                      cx| {
-                                    this.handle_trigger_editor_event(
-                                        event,
-                                        query_editor_weak.clone(),
-                                        window,
-                                        cx,
-                                    );
-                                }
-                            });
-                            main_view._subscriptions.push(subscription);
-                            main_view.query_editors.push(query_editor.downgrade());
-                        });
-
-                        if let Some(dock_area) = dock_area.upgrade() {
-                            dock_area.update(cx, |area, cx| {
-                                area.add_panel(
-                                    Arc::new(query_editor) as Arc<dyn PanelView>,
-                                    DockPlacement::Center,
-                                    None,
-                                    window,
-                                    cx,
-                                );
-                            });
-                        }
 
                         tracing::info!("Opened trigger designer for '{}'", trigger_name_for_spawn);
                     })?;
@@ -1647,41 +1624,23 @@ END;"#
                 .to_string()
         };
 
-        let query_editor = cx.new(|cx| {
-            let mut editor = QueryEditor::new_for_object(
-                "New Trigger".to_string(),
-                connection_id,
+        self.open_workspace_object_editor(
+            ObjectEditorDefinition {
+                display_name: "New Trigger".to_string(),
                 object_type,
-                Some(template),
-                schema_service.clone(),
-                window,
-                cx,
-            );
-
-            editor.set_connection(
-                Some(connection_id),
-                Some(connection_name),
-                Some(connection.clone()),
-                Some(driver_name),
-                cx,
-            );
-
-            editor
-        });
-
-        let subscription = cx.subscribe_in(&query_editor, window, {
-            let query_editor_weak = query_editor.downgrade();
-            move |this, _editor, event: &crate::components::QueryEditorEvent, window, cx| {
-                this.handle_trigger_editor_event(event, query_editor_weak.clone(), window, cx);
-            }
-        });
-        self._subscriptions.push(subscription);
-        self.query_editors.push(query_editor.downgrade());
-
-        let query_editor_panel: Arc<dyn PanelView> = Arc::new(query_editor);
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(query_editor_panel, DockPlacement::Center, None, window, cx);
-        });
+                initial_content: Some(template),
+                schema_service,
+            },
+            ObjectEditorConnection {
+                connection_id,
+                connection_name,
+                connection: connection.clone(),
+                driver_name,
+            },
+            MainView::handle_trigger_editor_event,
+            window,
+            cx,
+        );
 
         tracing::info!("New trigger editor opened");
     }
@@ -1746,6 +1705,8 @@ END;"#
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // This goes through dialog configuration rather than direct button helpers,
+                        // and the destructive variant keeps the trigger delete affordance explicit.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
@@ -1993,12 +1954,14 @@ END;"#
                 // Generate the DDL from the design
                 let ddl = design.to_ddl();
                 self.save_trigger_from_designer(
-                    connection_id,
-                    design,
-                    ddl,
-                    is_new,
-                    original_name,
-                    panel,
+                    TriggerDesignerSaveRequest {
+                        connection_id,
+                        design,
+                        ddl,
+                        is_new,
+                        original_name,
+                        panel,
+                    },
                     window,
                     cx,
                 );
@@ -2019,15 +1982,18 @@ END;"#
     /// Save a trigger from the designer (execute CREATE TRIGGER DDL)
     fn save_trigger_from_designer(
         &mut self,
-        connection_id: Uuid,
-        design: TriggerDesign,
-        ddl: String,
-        is_new: bool,
-        original_name: Option<String>,
-        panel: Entity<TriggerDesignerPanel>,
+        request: TriggerDesignerSaveRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let TriggerDesignerSaveRequest {
+            connection_id,
+            design,
+            ddl,
+            is_new,
+            original_name,
+            panel,
+        } = request;
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
             return;
@@ -2056,13 +2022,14 @@ END;"#
         cx.spawn_in(window, async move |_this, cx| {
             // If editing an existing trigger, drop it first (for SQLite/MySQL)
             // Postgres uses CREATE OR REPLACE
-            if !is_new && !driver_name.contains("postgres") {
-                if let Some(orig_name) = &original_name {
-                    let drop_sql = format!("DROP TRIGGER IF EXISTS \"{}\"", orig_name);
-                    if let Err(e) = connection.execute(&drop_sql, &[]).await {
-                        tracing::warn!("Failed to drop old trigger: {}", e);
-                        // Continue anyway - the create might still work
-                    }
+            if !is_new
+                && !driver_name.contains("postgres")
+                && let Some(orig_name) = &original_name
+            {
+                let drop_sql = format!("DROP TRIGGER IF EXISTS \"{}\"", orig_name);
+                if let Err(e) = connection.execute(&drop_sql, &[]).await {
+                    tracing::warn!("Failed to drop old trigger: {}", e);
+                    // Continue anyway - the create might still work
                 }
             }
 
@@ -2078,11 +2045,11 @@ END;"#
                         _ = connection_sidebar.update(cx, |sidebar, cx| {
                             if is_new {
                                 sidebar.add_trigger(connection_id, trigger_name.clone(), cx);
-                            } else if let Some(orig_name) = &original_name {
-                                if orig_name != &trigger_name {
-                                    sidebar.remove_trigger(connection_id, orig_name, cx);
-                                    sidebar.add_trigger(connection_id, trigger_name.clone(), cx);
-                                }
+                            } else if let Some(orig_name) = &original_name
+                                && orig_name != &trigger_name
+                            {
+                                sidebar.remove_trigger(connection_id, orig_name, cx);
+                                sidebar.add_trigger(connection_id, trigger_name.clone(), cx);
                             }
                         });
 
@@ -2199,7 +2166,7 @@ END;"#
         let connection_sidebar = self.connection_sidebar.downgrade();
         let schema_service = app_state.schema_service.clone();
 
-        if is_new || name.is_none() {
+        if is_new {
             // For new triggers, the definition should be the full CREATE TRIGGER statement
             // Just execute it directly
             cx.spawn_in(window, async move |_this, cx| {
@@ -2248,7 +2215,10 @@ END;"#
             })
             .detach();
         } else {
-            let trigger_name = name.unwrap();
+            let Some(trigger_name) = name else {
+                tracing::error!("save_trigger called for existing trigger without a name");
+                return;
+            };
 
             // For existing triggers, we need to drop and recreate
             // SQLite doesn't support CREATE OR REPLACE TRIGGER
@@ -2407,6 +2377,8 @@ END;"#
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // Multi-delete is a destructive dialog action, so the shared dialog button
+                        // is configured with Danger via ButtonVariant instead of a concrete helper.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
@@ -2796,24 +2768,25 @@ fn extract_trigger_name(definition: &str) -> Option<String> {
     let trimmed = after_create.trim_start();
 
     // Handle "OR REPLACE" for PostgreSQL
-    let trimmed = if trimmed.to_uppercase().starts_with("OR REPLACE") {
-        trimmed[10..].trim_start()
-    } else if trimmed.to_uppercase().starts_with("IF NOT EXISTS") {
-        trimmed[13..].trim_start()
+    let trimmed_upper = trimmed.to_uppercase();
+    let trimmed = if let Some(stripped) = trimmed_upper.strip_prefix("OR REPLACE") {
+        trimmed[trimmed.len() - stripped.len()..].trim_start()
+    } else if let Some(stripped) = trimmed_upper.strip_prefix("IF NOT EXISTS") {
+        trimmed[trimmed.len() - stripped.len()..].trim_start()
     } else {
         trimmed
     };
 
     // Extract the name (handle quoted identifiers)
-    if trimmed.starts_with('"') {
-        let end = trimmed[1..].find('"')?;
-        Some(trimmed[1..end + 1].to_string())
-    } else if trimmed.starts_with('`') {
-        let end = trimmed[1..].find('`')?;
-        Some(trimmed[1..end + 1].to_string())
-    } else if trimmed.starts_with('[') {
-        let end = trimmed[1..].find(']')?;
-        Some(trimmed[1..end + 1].to_string())
+    if let Some(stripped) = trimmed.strip_prefix('"') {
+        let end = stripped.find('"')?;
+        Some(stripped[..end].to_string())
+    } else if let Some(stripped) = trimmed.strip_prefix('`') {
+        let end = stripped.find('`')?;
+        Some(stripped[..end].to_string())
+    } else if let Some(stripped) = trimmed.strip_prefix('[') {
+        let end = stripped.find(']')?;
+        Some(stripped[..end].to_string())
     } else {
         // Unquoted identifier - ends at whitespace
         let end = trimmed.find(char::is_whitespace)?;

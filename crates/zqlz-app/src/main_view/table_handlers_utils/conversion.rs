@@ -62,7 +62,7 @@ pub(in crate::main_view) fn convert_to_schema_details(
 
     SchemaDetails {
         connection_id,
-        object_type: "Table".to_string(),
+        object_type: table_details.table_type.display_name().to_string(),
         object_name: table_name.to_string(),
         columns,
         indexes,

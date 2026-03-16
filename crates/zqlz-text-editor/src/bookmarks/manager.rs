@@ -132,17 +132,17 @@ impl BookmarkManager {
             .into_iter()
             .filter(|b| {
                 // Filter by name
-                if let Some(name) = &filter.name {
-                    if !b.name.to_lowercase().contains(&name.to_lowercase()) {
-                        return false;
-                    }
+                if let Some(name) = &filter.name
+                    && !b.name.to_lowercase().contains(&name.to_lowercase())
+                {
+                    return false;
                 }
 
                 // Filter by connection
-                if let Some(conn_id) = filter.connection_id {
-                    if b.connection_id != Some(conn_id) {
-                        return false;
-                    }
+                if let Some(conn_id) = filter.connection_id
+                    && b.connection_id != Some(conn_id)
+                {
+                    return false;
                 }
 
                 // Filter by tags (any match)
@@ -154,10 +154,10 @@ impl BookmarkManager {
                 }
 
                 // Filter by query text
-                if let Some(text) = &filter.query_text {
-                    if !b.query.to_lowercase().contains(&text.to_lowercase()) {
-                        return false;
-                    }
+                if let Some(text) = &filter.query_text
+                    && !b.query.to_lowercase().contains(&text.to_lowercase())
+                {
+                    return false;
                 }
 
                 true

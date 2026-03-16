@@ -30,6 +30,7 @@ pub mod date_picker;
 pub mod dialog;
 pub mod divider;
 pub mod dock;
+pub mod documentation_popover;
 pub mod highlighter;
 pub mod history;
 pub mod hover_card;
@@ -62,6 +63,7 @@ pub mod window_border;
 
 pub use crate::widgets::styled::Disableable;
 pub use anchored::anchored;
+pub use documentation_popover::DocumentationPopover;
 pub use element_ext::ElementExt;
 pub use event::InteractiveElementExt;
 pub use geometry::*;

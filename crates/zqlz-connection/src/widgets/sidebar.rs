@@ -12,6 +12,7 @@ pub use types::*;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use menus::state::ContextMenuState;
+use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
@@ -94,6 +95,8 @@ pub enum ConnectionSidebarEvent {
     DuplicateConnection(Uuid),
     /// User wants to open settings for a connection
     OpenConnectionSettings(Uuid),
+    /// User dropped one or more external paths onto the sidebar
+    OpenDroppedPaths(Vec<PathBuf>),
 
     // Table-specific events
     /// User wants to design/edit a table structure
@@ -372,18 +375,17 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) {
         let mut should_load = false;
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(db) = conn
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(db) = conn
                 .redis_databases
                 .iter_mut()
                 .find(|d| d.index == db_index)
-            {
-                db.is_expanded = !db.is_expanded;
-                // If expanding and keys haven't been loaded yet, trigger load
-                if db.is_expanded && db.keys.is_empty() && !db.is_loading {
-                    db.is_loading = true;
-                    should_load = true;
-                }
+        {
+            db.is_expanded = !db.is_expanded;
+            // If expanding and keys haven't been loaded yet, trigger load
+            if db.is_expanded && db.keys.is_empty() && !db.is_loading {
+                db.is_loading = true;
+                should_load = true;
             }
         }
         cx.notify();
@@ -466,6 +468,9 @@ impl ConnectionSidebar {
     fn toggle_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_views {
+                return;
+            }
             conn.views_expanded = !conn.views_expanded;
             if conn.views_expanded && conn.views.is_empty() && !conn.views_loading {
                 conn.views_loading = true;
@@ -485,6 +490,9 @@ impl ConnectionSidebar {
     fn toggle_materialized_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_materialized_views {
+                return;
+            }
             conn.materialized_views_expanded = !conn.materialized_views_expanded;
             if conn.materialized_views_expanded
                 && conn.materialized_views.is_empty()
@@ -507,6 +515,9 @@ impl ConnectionSidebar {
     fn toggle_triggers_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_triggers {
+                return;
+            }
             conn.triggers_expanded = !conn.triggers_expanded;
             if conn.triggers_expanded && conn.triggers.is_empty() && !conn.triggers_loading {
                 conn.triggers_loading = true;
@@ -526,6 +537,9 @@ impl ConnectionSidebar {
     fn toggle_functions_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_functions {
+                return;
+            }
             conn.functions_expanded = !conn.functions_expanded;
             if conn.functions_expanded && conn.functions.is_empty() && !conn.functions_loading {
                 conn.functions_loading = true;
@@ -545,6 +559,9 @@ impl ConnectionSidebar {
     fn toggle_procedures_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_procedures {
+                return;
+            }
             conn.procedures_expanded = !conn.procedures_expanded;
             if conn.procedures_expanded && conn.procedures.is_empty() && !conn.procedures_loading {
                 conn.procedures_loading = true;
@@ -569,22 +586,21 @@ impl ConnectionSidebar {
         section: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) {
-                if let Some(schema) = &mut db.schema {
-                    match section {
-                        "schema" => schema.schema_expanded = !schema.schema_expanded,
-                        "tables" => schema.tables_expanded = !schema.tables_expanded,
-                        "views" => schema.views_expanded = !schema.views_expanded,
-                        "materialized_views" => {
-                            schema.materialized_views_expanded = !schema.materialized_views_expanded
-                        }
-                        "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
-                        "functions" => schema.functions_expanded = !schema.functions_expanded,
-                        "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
-                        _ => {}
-                    }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name)
+            && let Some(schema) = &mut db.schema
+        {
+            match section {
+                "schema" => schema.schema_expanded = !schema.schema_expanded,
+                "tables" => schema.tables_expanded = !schema.tables_expanded,
+                "views" => schema.views_expanded = !schema.views_expanded,
+                "materialized_views" => {
+                    schema.materialized_views_expanded = !schema.materialized_views_expanded
                 }
+                "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
+                "functions" => schema.functions_expanded = !schema.functions_expanded,
+                "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
+                _ => {}
             }
         }
         cx.notify();
@@ -603,12 +619,12 @@ impl ConnectionSidebar {
     /// triggers schema loading so the user doesn't need a second click.
     fn toggle_database_expand(&mut self, id: Uuid, db_name: &str, cx: &mut Context<Self>) {
         let mut should_load_schema = false;
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) {
-                db.is_expanded = !db.is_expanded;
-                if db.is_expanded && db.schema.is_none() && !db.is_active && !db.is_loading {
-                    should_load_schema = true;
-                }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id)
+            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name)
+        {
+            db.is_expanded = !db.is_expanded;
+            if db.is_expanded && db.schema.is_none() && !db.is_active && !db.is_loading {
+                should_load_schema = true;
             }
         }
         if should_load_schema {
@@ -645,6 +661,27 @@ impl ConnectionSidebar {
         }
     }
 
+    fn object_capabilities_for_connection(&self, conn_id: Uuid) -> SidebarObjectCapabilities {
+        self.connections
+            .iter()
+            .find(|connection| connection.id == conn_id)
+            .map(|connection| connection.object_capabilities)
+            .unwrap_or_default()
+    }
+
+    fn supports_sidebar_section(&self, conn_id: Uuid, section: &str) -> bool {
+        let capabilities = self.object_capabilities_for_connection(conn_id);
+        match section {
+            "tables" | "queries" | "redis_databases" => true,
+            "views" => capabilities.supports_views,
+            "materialized_views" => capabilities.supports_materialized_views,
+            "triggers" => capabilities.supports_triggers,
+            "functions" => capabilities.supports_functions,
+            "procedures" => capabilities.supports_procedures,
+            _ => true,
+        }
+    }
+
     /// Check if an object name matches the search query (case-insensitive)
     fn matches_search(&self, name: &str) -> bool {
         if self.search_query.is_empty() {
@@ -660,6 +697,12 @@ impl ConnectionSidebar {
             .iter()
             .filter(|name| self.matches_search(name))
             .collect()
+    }
+
+    fn import_dropped_paths(&mut self, paths: &[PathBuf], cx: &mut Context<Self>) {
+        if !paths.is_empty() {
+            cx.emit(ConnectionSidebarEvent::OpenDroppedPaths(paths.to_vec()));
+        }
     }
 }
 
@@ -693,13 +736,18 @@ impl Render for ConnectionSidebar {
         // Pre-calculate if any matches exist (for "no results" message)
         let any_matches = if has_search_query && has_connections {
             connections.iter().any(|conn| {
+                let capabilities = conn.object_capabilities;
                 conn.is_expanded
                     && conn.is_connected
                     && (conn.tables.iter().any(|t| self.matches_search(t))
-                        || conn.views.iter().any(|v| self.matches_search(v))
-                        || conn.triggers.iter().any(|t| self.matches_search(t))
-                        || conn.functions.iter().any(|f| self.matches_search(f))
-                        || conn.procedures.iter().any(|p| self.matches_search(p))
+                        || (capabilities.supports_views
+                            && conn.views.iter().any(|v| self.matches_search(v)))
+                        || (capabilities.supports_triggers
+                            && conn.triggers.iter().any(|t| self.matches_search(t)))
+                        || (capabilities.supports_functions
+                            && conn.functions.iter().any(|f| self.matches_search(f)))
+                        || (capabilities.supports_procedures
+                            && conn.procedures.iter().any(|p| self.matches_search(p)))
                         || conn.queries.iter().any(|q| self.matches_search(&q.name)))
             })
         } else {
@@ -755,6 +803,11 @@ impl Render for ConnectionSidebar {
                     .w_full()
                     .overflow_y_scroll()
                     .py_1()
+                    .drag_over::<ExternalPaths>(|this, _, _, cx| this.bg(cx.theme().drop_target))
+                    .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                        this.import_dropped_paths(paths.paths(), cx);
+                        cx.stop_propagation();
+                    }))
                     .on_mouse_down(
                         gpui::MouseButton::Right,
                         cx.listener(|this, event: &MouseDownEvent, window, cx| {

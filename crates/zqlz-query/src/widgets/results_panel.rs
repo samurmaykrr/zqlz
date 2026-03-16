@@ -8,7 +8,7 @@ use zqlz_analyzer::QueryAnalysis;
 use zqlz_core::QueryResult;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Selectable, Sizable,
-    button::{Button, ButtonCustomVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     table::{Column, ColumnSort, Table, TableDelegate, TableState},
@@ -647,14 +647,12 @@ impl ResultsPanel {
 
     /// Get the current result being displayed (if any)
     fn get_current_result(&self) -> Option<(usize, &StatementResult)> {
-        if let ResultTab::Result(idx) = self.active_tab {
-            if let Some(exec) = &self.execution {
-                if let Some(statement) = exec.statements.get(idx) {
-                    if statement.result.is_some() {
-                        return Some((idx, statement));
-                    }
-                }
-            }
+        if let ResultTab::Result(idx) = self.active_tab
+            && let Some(exec) = &self.execution
+            && let Some(statement) = exec.statements.get(idx)
+            && statement.result.is_some()
+        {
+            return Some((idx, statement));
         }
         None
     }
@@ -927,26 +925,23 @@ impl ResultsPanel {
         let problem_count = self.problems.len();
         let error_count = self.error_count();
         let warning_count = self.warning_count();
-        let theme = cx.theme();
-
         tab_bar = tab_bar.child(
             Button::new("tab-problems")
-                .ghost()
+                .map(|btn| {
+                    if error_count > 0 {
+                        btn.danger()
+                    } else if warning_count > 0 {
+                        btn.warning()
+                    } else {
+                        btn.ghost()
+                    }
+                })
                 .xsmall()
                 .map(|btn| {
                     if problem_count > 0 {
                         btn.label(format!("Problems ({})", problem_count))
                     } else {
                         btn.label("Problems")
-                    }
-                })
-                .map(|btn| {
-                    if error_count > 0 {
-                        btn.custom(ButtonCustomVariant::new(cx).foreground(theme.danger))
-                    } else if warning_count > 0 {
-                        btn.custom(ButtonCustomVariant::new(cx).foreground(theme.warning))
-                    } else {
-                        btn
                     }
                 })
                 .selected(self.active_tab == ResultTab::Problems)
@@ -2305,94 +2300,87 @@ impl ResultsPanel {
                                         )),
                                 )
                             })
-                            .children(analysis.sorted_suggestions().iter().enumerate().map(
-                                |(_idx, suggestion)| {
-                                    let severity_color = match suggestion.severity {
-                                        zqlz_analyzer::SeverityLevel::Critical => theme.danger,
-                                        zqlz_analyzer::SeverityLevel::Warning => theme.warning,
-                                        zqlz_analyzer::SeverityLevel::Info => theme.info,
-                                    };
+                            .children(analysis.sorted_suggestions().iter().map(|suggestion| {
+                                let severity_color = match suggestion.severity {
+                                    zqlz_analyzer::SeverityLevel::Critical => theme.danger,
+                                    zqlz_analyzer::SeverityLevel::Warning => theme.warning,
+                                    zqlz_analyzer::SeverityLevel::Info => theme.info,
+                                };
 
-                                    v_flex()
-                                        .gap_2()
-                                        .p_3()
-                                        .bg(severity_color.opacity(0.05))
-                                        .rounded(px(6.0))
-                                        .border_1()
-                                        .border_color(severity_color.opacity(0.3))
-                                        .child(
-                                            h_flex()
-                                                .gap_2()
-                                                .items_center()
-                                                .child(
+                                v_flex()
+                                    .gap_2()
+                                    .p_3()
+                                    .bg(severity_color.opacity(0.05))
+                                    .rounded(px(6.0))
+                                    .border_1()
+                                    .border_color(severity_color.opacity(0.3))
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .items_center()
+                                            .child(
+                                                div()
+                                                    .px_2()
+                                                    .py(px(2.0))
+                                                    .rounded(px(3.0))
+                                                    .bg(severity_color.opacity(0.2))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_weight(FontWeight::BOLD)
+                                                            .text_color(severity_color)
+                                                            .child(
+                                                                suggestion
+                                                                    .severity
+                                                                    .as_str()
+                                                                    .to_uppercase(),
+                                                            ),
+                                                    ),
+                                            )
+                                            .when_some(suggestion.table.as_ref(), |this, table| {
+                                                this.child(
                                                     div()
-                                                        .px_2()
-                                                        .py(px(2.0))
-                                                        .rounded(px(3.0))
-                                                        .bg(severity_color.opacity(0.2))
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .font_weight(FontWeight::BOLD)
-                                                                .text_color(severity_color)
-                                                                .child(
-                                                                    suggestion
-                                                                        .severity
-                                                                        .as_str()
-                                                                        .to_uppercase(),
-                                                                ),
-                                                        ),
+                                                        .text_xs()
+                                                        .font_family(theme.mono_font_family.clone())
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(table.clone()),
                                                 )
-                                                .when_some(
-                                                    suggestion.table.as_ref(),
-                                                    |this, table| {
-                                                        this.child(
-                                                            div()
-                                                                .text_xs()
-                                                                .font_family(
-                                                                    theme.mono_font_family.clone(),
-                                                                )
-                                                                .text_color(theme.muted_foreground)
-                                                                .child(table.clone()),
-                                                        )
-                                                    },
-                                                ),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .font_weight(FontWeight::MEDIUM)
-                                                .text_color(theme.foreground)
-                                                .child(suggestion.message.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(theme.muted_foreground)
-                                                .child(suggestion.recommendation.clone()),
-                                        )
-                                        .when(!suggestion.columns.is_empty(), |this| {
-                                            this.child(h_flex().gap_1().flex_wrap().children(
-                                                suggestion.columns.iter().map(|col| {
-                                                    div()
-                                                        .px_2()
-                                                        .py(px(2.0))
-                                                        .rounded(px(3.0))
-                                                        .bg(theme.muted.opacity(0.3))
-                                                        .child(
-                                                            div()
-                                                                .text_xs()
-                                                                .font_family(
-                                                                    theme.mono_font_family.clone(),
-                                                                )
-                                                                .text_color(theme.foreground)
-                                                                .child(col.clone()),
-                                                        )
-                                                }),
-                                            ))
-                                        })
-                                },
-                            )),
+                                            }),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .text_color(theme.foreground)
+                                            .child(suggestion.message.clone()),
+                                    )
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(theme.muted_foreground)
+                                            .child(suggestion.recommendation.clone()),
+                                    )
+                                    .when(!suggestion.columns.is_empty(), |this| {
+                                        this.child(h_flex().gap_1().flex_wrap().children(
+                                            suggestion.columns.iter().map(|col| {
+                                                div()
+                                                    .px_2()
+                                                    .py(px(2.0))
+                                                    .rounded(px(3.0))
+                                                    .bg(theme.muted.opacity(0.3))
+                                                    .child(
+                                                        div()
+                                                            .text_xs()
+                                                            .font_family(
+                                                                theme.mono_font_family.clone(),
+                                                            )
+                                                            .text_color(theme.foreground)
+                                                            .child(col.clone()),
+                                                    )
+                                            }),
+                                        ))
+                                    })
+                            })),
                     ),
             )
     }

@@ -85,10 +85,10 @@ impl StackPanel {
             return false;
         }
 
-        if let Some(parent) = &self.parent {
-            if let Some(parent) = parent.upgrade() {
-                return parent.read(cx).is_last_panel(cx);
-            }
+        if let Some(parent) = &self.parent
+            && let Some(parent) = parent.upgrade()
+        {
+            return parent.read(cx).is_last_panel(cx);
         }
 
         true
@@ -216,7 +216,7 @@ impl StackPanel {
         self.assert_panel_is_valid(&panel);
 
         // If the panel is already in the stack, return.
-        if let Some(_) = self.index_of_panel(panel.clone()) {
+        if self.index_of_panel(panel.clone()).is_some() {
             return;
         }
 
@@ -336,12 +336,11 @@ impl StackPanel {
         check_parent: bool,
         cx: &App,
     ) -> Option<Entity<TabPanel>> {
-        if check_parent {
-            if let Some(parent) = self.parent.as_ref().and_then(|parent| parent.upgrade()) {
-                if let Some(panel) = parent.read(cx).left_top_tab_panel(true, cx) {
-                    return Some(panel);
-                }
-            }
+        if check_parent
+            && let Some(parent) = self.parent.as_ref().and_then(|parent| parent.upgrade())
+            && let Some(panel) = parent.read(cx).left_top_tab_panel(true, cx)
+        {
+            return Some(panel);
         }
 
         let first_panel = self.panels.first();
@@ -364,12 +363,11 @@ impl StackPanel {
         check_parent: bool,
         cx: &App,
     ) -> Option<Entity<TabPanel>> {
-        if check_parent {
-            if let Some(parent) = self.parent.as_ref().and_then(|parent| parent.upgrade()) {
-                if let Some(panel) = parent.read(cx).right_top_tab_panel(true, cx) {
-                    return Some(panel);
-                }
-            }
+        if check_parent
+            && let Some(parent) = self.parent.as_ref().and_then(|parent| parent.upgrade())
+            && let Some(panel) = parent.read(cx).right_top_tab_panel(true, cx)
+        {
+            return Some(panel);
         }
 
         let panel = if self.axis.is_vertical() {

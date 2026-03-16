@@ -9,6 +9,7 @@ path = "src/zqlz_command_palette.rs"
 
 [dependencies]
 gpui.workspace = true
+zqlz-connection.workspace = true
 zqlz-ui.workspace = true
 zqlz-fuzzy.workspace = true
 uuid.workspace = true

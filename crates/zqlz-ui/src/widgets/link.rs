@@ -5,6 +5,8 @@ use gpui::{
 
 use crate::widgets::{ActiveTheme as _, StyledExt};
 
+type LinkClickHandler = Box<dyn Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>;
+
 /// A Link element like a `<a>` tag in HTML.
 #[derive(IntoElement)]
 pub struct Link {
@@ -12,7 +14,7 @@ pub struct Link {
     style: StyleRefinement,
     href: Option<SharedString>,
     disabled: bool,
-    on_click: Option<Box<dyn Fn(&ClickEvent, &mut gpui::Window, &mut gpui::App) + 'static>>,
+    on_click: Option<LinkClickHandler>,
     children: Vec<AnyElement>,
 }
 

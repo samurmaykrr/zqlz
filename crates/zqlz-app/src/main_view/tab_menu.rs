@@ -11,7 +11,6 @@ pub struct TabContextMenuState {
     pub open: bool,
     pub position: Point<Pixels>,
     pub tab_index: usize,
-    pub _subscriptions: Vec<Subscription>,
     pub menu_subscription: Option<Subscription>,
 }
 
@@ -24,7 +23,6 @@ impl TabContextMenuState {
                 open: false,
                 position: Point::default(),
                 tab_index: 0,
-                _subscriptions: vec![],
                 menu_subscription: None,
             }
         })

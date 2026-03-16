@@ -191,10 +191,8 @@ impl ScrollbarStateInner {
     fn with_hovered_on_thumb(&self, axis: Option<Axis>) -> Self {
         let mut state = *self;
         state.hovered_on_thumb = axis;
-        if self.is_scrollbar_visible() {
-            if axis.is_some() {
-                state.last_scroll_time = Some(std::time::Instant::now());
-            }
+        if self.is_scrollbar_visible() && axis.is_some() {
+            state.last_scroll_time = Some(std::time::Instant::now());
         }
         state
     }
@@ -512,12 +510,16 @@ impl Element for Scrollbar {
         window: &mut Window,
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
-        let mut style = Style::default();
-        style.position = Position::Absolute;
-        style.flex_grow = 1.0;
-        style.flex_shrink = 1.0;
-        style.size.width = relative(1.).into();
-        style.size.height = relative(1.).into();
+        let style = Style {
+            position: Position::Absolute,
+            flex_grow: 1.0,
+            flex_shrink: 1.0,
+            size: gpui::Size {
+                width: relative(1.).into(),
+                height: relative(1.).into(),
+            },
+            ..Default::default()
+        };
 
         (window.request_layout(style, None, cx), ())
     }
@@ -781,20 +783,11 @@ impl Element for Scrollbar {
                             bounds,
                             corner_radii: (0.).into(),
                             background: gpui::transparent_black().into(),
-                            border_widths: if is_vertical {
-                                Edges {
-                                    top: px(0.),
-                                    right: px(0.),
-                                    bottom: px(0.),
-                                    left: px(0.),
-                                }
-                            } else {
-                                Edges {
-                                    top: px(0.),
-                                    right: px(0.),
-                                    bottom: px(0.),
-                                    left: px(0.),
-                                }
+                            border_widths: Edges {
+                                top: px(0.),
+                                right: px(0.),
+                                bottom: px(0.),
+                                left: px(0.),
                             },
                             border_color: state.border,
                             border_style: BorderStyle::default(),
@@ -810,14 +803,15 @@ impl Element for Scrollbar {
                         let scroll_handle = self.scroll_handle.clone();
 
                         move |event: &ScrollWheelEvent, phase, _, cx| {
-                            if phase.bubble() && hitbox_bounds.contains(&event.position) {
-                                if scroll_handle.offset() != state.get().last_scroll_offset {
-                                    state.set(state.get().with_last_scroll(
-                                        scroll_handle.offset(),
-                                        Some(Instant::now()),
-                                    ));
-                                    cx.notify(view_id);
-                                }
+                            if phase.bubble()
+                                && hitbox_bounds.contains(&event.position)
+                                && scroll_handle.offset() != state.get().last_scroll_offset
+                            {
+                                state.set(state.get().with_last_scroll(
+                                    scroll_handle.offset(),
+                                    Some(Instant::now()),
+                                ));
+                                cx.notify(view_id);
                             }
                         }
                     });
@@ -890,13 +884,11 @@ impl Element for Scrollbar {
                                 if state.get().hovered_axis != Some(axis) {
                                     notify = true;
                                 }
-                            } else {
-                                if state.get().hovered_axis == Some(axis) {
-                                    if state.get().hovered_axis.is_some() {
-                                        state.set(state.get().with_hovered(None));
-                                        notify = true;
-                                    }
-                                }
+                            } else if state.get().hovered_axis == Some(axis)
+                                && state.get().hovered_axis.is_some()
+                            {
+                                state.set(state.get().with_hovered(None));
+                                notify = true;
                             }
 
                             // Update hovered state for scrollbar thumb
@@ -905,11 +897,9 @@ impl Element for Scrollbar {
                                     state.set(state.get().with_hovered_on_thumb(Some(axis)));
                                     notify = true;
                                 }
-                            } else {
-                                if state.get().hovered_on_thumb == Some(axis) {
-                                    state.set(state.get().with_hovered_on_thumb(None));
-                                    notify = true;
-                                }
+                            } else if state.get().hovered_on_thumb == Some(axis) {
+                                state.set(state.get().with_hovered_on_thumb(None));
+                                notify = true;
                             }
 
                             // Move thumb position on dragging

@@ -302,24 +302,23 @@ impl PartialEq for dyn PanelView {
     }
 }
 
+type PanelFactory = Arc<
+    dyn Fn(
+        WeakEntity<DockArea>,
+        &PanelState,
+        &PanelInfo,
+        &mut Window,
+        &mut App,
+    ) -> Box<dyn PanelView>,
+>;
+
 pub struct PanelRegistry {
-    pub(super) items: HashMap<
-        String,
-        Arc<
-            dyn Fn(
-                WeakEntity<DockArea>,
-                &PanelState,
-                &PanelInfo,
-                &mut Window,
-                &mut App,
-            ) -> Box<dyn PanelView>,
-        >,
-    >,
+    pub(super) items: HashMap<String, PanelFactory>,
 }
 impl PanelRegistry {
     /// Initialize the panel registry.
     pub(crate) fn init(cx: &mut App) {
-        if let None = cx.try_global::<PanelRegistry>() {
+        if cx.try_global::<PanelRegistry>().is_none() {
             cx.set_global(PanelRegistry::new());
         }
     }
@@ -355,11 +354,17 @@ impl PanelRegistry {
             .cloned()
             .map(|f| f(dock_area, panel_state, panel_info, window, cx))
         {
-            return view;
+            view
         } else {
             // Show an invalid panel if the panel is not registered.
-            Box::new(cx.new(|cx| InvalidPanel::new(&panel_name, panel_state.clone(), window, cx)))
+            Box::new(cx.new(|cx| InvalidPanel::new(panel_name, panel_state.clone(), window, cx)))
         }
+    }
+}
+
+impl Default for PanelRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 impl Global for PanelRegistry {}

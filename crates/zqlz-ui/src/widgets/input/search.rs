@@ -104,7 +104,7 @@ impl SearchMatcher {
         self.whole_word = whole_word;
         self.use_regex = use_regex;
 
-        if query.len() > 0 {
+        if !query.is_empty() {
             // For regex or whole word, we need to use a more complex pattern
             let pattern = if use_regex {
                 if whole_word {
@@ -263,11 +263,8 @@ impl SearchPanel {
                 vec![
                     cx.subscribe(&search_input, |this: &mut Self, _, ev: &InputEvent, cx| {
                         // Handle search input changes
-                        match ev {
-                            InputEvent::Change => {
-                                this.update_search_query(cx);
-                            }
-                            _ => {}
+                        if let InputEvent::Change = ev {
+                            this.update_search_query(cx);
                         }
                     }),
                 ];
@@ -618,6 +615,7 @@ impl Render for SearchPanel {
                         )
                         .child(
                             Button::new("replace-one")
+                                .secondary()
                                 .small()
                                 .label(t!("Input.Replace"))
                                 .disabled(!has_matches)
@@ -627,6 +625,7 @@ impl Render for SearchPanel {
                         )
                         .child(
                             Button::new("replace-all")
+                                .secondary()
                                 .small()
                                 .label(t!("Input.Replace All"))
                                 .disabled(!has_matches)

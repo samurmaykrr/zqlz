@@ -102,7 +102,7 @@ impl MainView {
             );
 
             // Update sidebar with keys
-            _ = connection_sidebar.update(cx, |sidebar, cx| {
+            connection_sidebar.update(cx, |sidebar, cx| {
                 sidebar.set_redis_keys(connection_id, database_index, keys, cx);
             });
 

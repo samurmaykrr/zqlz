@@ -135,7 +135,7 @@ impl TextViewState {
             _receive_task,
         };
         tracing::trace!("Triggering initial update");
-        this.increment_update(&text, false, cx);
+        this.increment_update(text, false, cx);
         tracing::debug!("TextViewState initialization complete");
         this
     }

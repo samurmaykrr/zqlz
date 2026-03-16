@@ -268,10 +268,10 @@ impl VersionHistoryPanel {
             .border_color(theme.border)
             .child(
                 Button::new("view-diff")
+                    .secondary()
                     .label("View Diff")
                     .small()
                     .disabled(!has_selection)
-                    .with_variant(ButtonVariant::Secondary)
                     .when_some(selected_version, |this, vid| {
                         this.on_click(cx.listener(move |this, _, _window, cx| {
                             this.view_diff(vid, cx);
@@ -287,8 +287,10 @@ impl VersionHistoryPanel {
                     })
                     .small()
                     .disabled(!has_selection && !is_comparing)
+                    // Compare uses two semantic states from the same builder: neutral before the
+                    // flow starts, emphasized once the user is choosing the second version.
                     .with_variant(if is_comparing {
-                        ButtonVariant::Primary
+                        ButtonVariant::SecondaryPrimary
                     } else {
                         ButtonVariant::Secondary
                     })
@@ -300,10 +302,10 @@ impl VersionHistoryPanel {
             )
             .child(
                 Button::new("restore")
+                    .warning()
                     .label("Restore")
                     .small()
                     .disabled(!has_selection)
-                    .with_variant(ButtonVariant::Secondary)
                     .when_some(selected_version, |this, vid| {
                         this.on_click(cx.listener(move |this, _, _window, cx| {
                             this.restore_version(vid, cx);

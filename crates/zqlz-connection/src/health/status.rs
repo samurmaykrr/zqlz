@@ -6,10 +6,11 @@ use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// Health status of a connection
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
     /// Connection is healthy with good latency
+    #[default]
     Healthy,
     /// Connection is working but latency is elevated
     Degraded,
@@ -65,12 +66,6 @@ impl HealthStatus {
     /// Check if status is healthy.
     pub fn is_healthy(&self) -> bool {
         matches!(self, HealthStatus::Healthy)
-    }
-}
-
-impl Default for HealthStatus {
-    fn default() -> Self {
-        HealthStatus::Healthy
     }
 }
 

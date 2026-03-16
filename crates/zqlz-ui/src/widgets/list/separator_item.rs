@@ -17,6 +17,12 @@ impl ListSeparatorItem {
     }
 }
 
+impl Default for ListSeparatorItem {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ParentElement for ListSeparatorItem {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children.extend(elements);

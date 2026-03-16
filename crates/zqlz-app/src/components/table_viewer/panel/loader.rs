@@ -1,7 +1,52 @@
 use super::*;
 
 impl TableViewerPanel {
+    fn apply_column_visibility_to_result(&self, result: &mut QueryResult, cx: &App) {
+        let Some(column_visibility_state) = &self.column_visibility_state else {
+            return;
+        };
+
+        let visible_columns = column_visibility_state.read(cx).visible_columns();
+
+        if visible_columns.len() == result.columns.len()
+            && result
+                .columns
+                .iter()
+                .zip(visible_columns.iter())
+                .all(|(column, visible_name)| column.name == *visible_name)
+        {
+            return;
+        }
+
+        let visible_columns_set: std::collections::HashSet<&str> =
+            visible_columns.iter().map(String::as_str).collect();
+
+        let visible_indexes: Vec<usize> = result
+            .columns
+            .iter()
+            .enumerate()
+            .filter_map(|(index, column)| {
+                visible_columns_set
+                    .contains(column.name.as_str())
+                    .then_some(index)
+            })
+            .collect();
+
+        result.columns = visible_indexes
+            .iter()
+            .filter_map(|index| result.columns.get(*index).cloned())
+            .collect();
+
+        for row in &mut result.rows {
+            row.values = visible_indexes
+                .iter()
+                .filter_map(|index| row.values.get(*index).cloned())
+                .collect();
+        }
+    }
+
     /// Load table data into the viewer (extracted from original file)
+    #[allow(clippy::too_many_arguments)]
     pub fn load_table(
         &mut self,
         connection_id: Uuid,
@@ -9,7 +54,7 @@ impl TableViewerPanel {
         table_name: String,
         database_name: Option<String>,
         is_view: bool,
-        result: QueryResult,
+        mut result: QueryResult,
         driver_category: DriverCategory,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -56,6 +101,10 @@ impl TableViewerPanel {
                 visible_count,
                 col_names
             );
+        }
+
+        if is_same_table && self.column_visibility_state.is_some() {
+            self.apply_column_visibility_to_result(&mut result, cx);
         }
 
         self.connection_id = Some(connection_id);
@@ -115,7 +164,7 @@ impl TableViewerPanel {
                                         connection_id: delegate.connection_id,
                                         table_name: delegate.table_name.clone(),
                                         row_index: actual_row,
-                                        row_values: row_values.iter().map(|v| v.display_for_table()).collect(),
+                                        row_values: row_values.clone(),
                                         column_meta: delegate.column_meta.clone(),
                                         all_column_names: delegate
                                             .column_meta
@@ -320,7 +369,7 @@ impl TableViewerPanel {
                 })
                 .collect();
 
-            let filter_panel_state = cx.new(|cx| FilterPanelState::new(cx));
+            let filter_panel_state = cx.new(FilterPanelState::new);
             filter_panel_state.update(cx, |state, cx| {
                 state.set_columns(column_items, window, cx);
             });

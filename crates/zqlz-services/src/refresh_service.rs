@@ -35,7 +35,7 @@ pub struct ConnectionRefresh {
 #[derive(Clone, Debug)]
 pub enum ConnectionRefreshPayload {
     /// Refresh payload for SQL-like drivers.
-    Relational(RelationalConnectionRefresh),
+    Relational(Box<RelationalConnectionRefresh>),
     /// Refresh payload for Redis-like drivers.
     Redis(RedisConnectionRefresh),
 }
@@ -134,11 +134,11 @@ impl RefreshService {
 
         Ok(ConnectionRefresh {
             connection_id,
-            payload: ConnectionRefreshPayload::Relational(RelationalConnectionRefresh {
+            payload: ConnectionRefreshPayload::Relational(Box::new(RelationalConnectionRefresh {
                 schema,
                 databases,
                 driver_category,
-            }),
+            })),
         })
     }
 

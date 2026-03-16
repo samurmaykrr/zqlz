@@ -10,13 +10,15 @@ use crate::widgets::{
 
 use super::{Button, ButtonRounded, ButtonVariant, ButtonVariants};
 
+type DropdownButtonMenuBuilder =
+    Box<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static>;
+
 #[derive(IntoElement)]
 pub struct DropdownButton {
     id: ElementId,
     style: StyleRefinement,
     button: Option<Button>,
-    menu:
-        Option<Box<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static>>,
+    menu: Option<DropdownButtonMenuBuilder>,
     selected: bool,
     disabled: bool,
     // The button props

@@ -12,6 +12,46 @@ use zqlz_core::{
 
 use crate::MySqlConnection;
 
+fn parse_mysql_enum_values(column_type: &str) -> Option<Vec<String>> {
+    let open_paren = column_type.find('(')?;
+    let close_paren = column_type.rfind(')')?;
+    if close_paren <= open_paren {
+        return None;
+    }
+
+    let inner = &column_type[open_paren + 1..close_paren];
+    let mut values = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut chars = inner.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_string => {
+                in_string = true;
+                current.clear();
+            }
+            '\'' if in_string => {
+                if chars.peek() == Some(&'\'') {
+                    current.push('\'');
+                    let _ = chars.next();
+                } else {
+                    in_string = false;
+                    values.push(current.clone());
+                }
+            }
+            _ if in_string => current.push(ch),
+            _ => {}
+        }
+    }
+
+    if values.is_empty() {
+        None
+    } else {
+        Some(values)
+    }
+}
+
 #[async_trait]
 impl SchemaIntrospection for MySqlConnection {
     #[tracing::instrument(skip(self))]
@@ -51,14 +91,14 @@ impl SchemaIntrospection for MySqlConnection {
             format!(
                 "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH as SIZE_BYTES, TABLE_COMMENT
                  FROM information_schema.TABLES 
-                 WHERE TABLE_SCHEMA = '{}' AND TABLE_TYPE = 'BASE TABLE'
+                 WHERE TABLE_SCHEMA = '{}' AND TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VIEW')
                  ORDER BY TABLE_NAME",
                 db.replace("'", "''")
             )
         } else {
             "SELECT TABLE_NAME, TABLE_TYPE, TABLE_ROWS, DATA_LENGTH + INDEX_LENGTH as SIZE_BYTES, TABLE_COMMENT
-             FROM information_schema.TABLES 
-             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'
+              FROM information_schema.TABLES 
+             WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE IN ('BASE TABLE', 'SYSTEM VIEW')
              ORDER BY TABLE_NAME".to_string()
         };
 
@@ -192,6 +232,7 @@ impl SchemaIntrospection for MySqlConnection {
                     CHARACTER_MAXIMUM_LENGTH,
                     NUMERIC_PRECISION,
                     NUMERIC_SCALE,
+                    COLUMN_TYPE,
                     COLUMN_KEY,
                     EXTRA,
                     COLUMN_COMMENT
@@ -212,6 +253,7 @@ impl SchemaIntrospection for MySqlConnection {
                     CHARACTER_MAXIMUM_LENGTH,
                     NUMERIC_PRECISION,
                     NUMERIC_SCALE,
+                    COLUMN_TYPE,
                     COLUMN_KEY,
                     EXTRA,
                     COLUMN_COMMENT
@@ -244,10 +286,11 @@ impl SchemaIntrospection for MySqlConnection {
                 let max_length = row.get(5).and_then(|v| v.as_i64());
                 let precision = row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32);
                 let scale = row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32);
-                let column_key = row.get(8).and_then(|v| v.as_str()).unwrap_or("");
-                let extra = row.get(9).and_then(|v| v.as_str()).unwrap_or("");
+                let column_type = row.get(8).and_then(|v| v.as_str()).unwrap_or("");
+                let column_key = row.get(9).and_then(|v| v.as_str()).unwrap_or("");
+                let extra = row.get(10).and_then(|v| v.as_str()).unwrap_or("");
                 let comment = row
-                    .get(10)
+                    .get(11)
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string())
                     .filter(|s| !s.is_empty());
@@ -255,11 +298,22 @@ impl SchemaIntrospection for MySqlConnection {
                 let is_primary_key = column_key == "PRI";
                 let is_auto_increment = extra.contains("auto_increment");
                 let is_unique = column_key == "UNI";
+                let normalized_type = if column_type.is_empty() {
+                    data_type.clone()
+                } else {
+                    column_type.to_string()
+                };
+                let lower_data_type = data_type.to_lowercase();
+                let enum_values = if lower_data_type == "enum" || lower_data_type == "set" {
+                    parse_mysql_enum_values(column_type)
+                } else {
+                    None
+                };
 
                 ColumnInfo {
                     name,
                     ordinal,
-                    data_type,
+                    data_type: normalized_type,
                     nullable: is_nullable,
                     default_value,
                     max_length,
@@ -270,6 +324,7 @@ impl SchemaIntrospection for MySqlConnection {
                     is_unique,
                     foreign_key: None,
                     comment,
+                    enum_values,
                     ..Default::default()
                 }
             })
@@ -866,7 +921,7 @@ impl SchemaIntrospection for MySqlConnection {
                     TABLE_COMMENT
                  FROM information_schema.TABLES
                  WHERE TABLE_SCHEMA = '{}'
-                   AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+                    AND TABLE_TYPE IN ('BASE TABLE', 'VIEW', 'SYSTEM VIEW')
                  ORDER BY TABLE_NAME",
                 db.replace("'", "''")
             )
@@ -883,7 +938,7 @@ impl SchemaIntrospection for MySqlConnection {
                 TABLE_COMMENT
              FROM information_schema.TABLES
              WHERE TABLE_SCHEMA = DATABASE()
-               AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+                AND TABLE_TYPE IN ('BASE TABLE', 'VIEW', 'SYSTEM VIEW')
              ORDER BY TABLE_NAME"
                 .to_string()
         };
@@ -949,7 +1004,7 @@ impl SchemaIntrospection for MySqlConnection {
 
                 let table_type_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("BASE TABLE");
 
-                let object_type = if table_type_str == "VIEW" {
+                let object_type = if table_type_str.contains("VIEW") {
                     "view"
                 } else {
                     "table"

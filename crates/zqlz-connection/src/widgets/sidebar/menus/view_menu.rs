@@ -40,18 +40,28 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
+        let supports_new_view = self.supports_sidebar_section(conn_id, "views");
+
         if self.view_context_menu.is_none() {
             self.view_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
         let view_for_menu = view_name.clone();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.view_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
-                    menu.max_h(px(400.0))
+                    let menu = menu
+                        .action_context(action_context.clone())
+                        .max_h(px(400.0))
                         .item(PopupMenuItem::new("Open View").on_click({
                             let sidebar = sidebar_weak.clone();
                             let view = view_for_menu.clone();
@@ -77,8 +87,10 @@ impl ConnectionSidebar {
                                     });
                                 });
                             }
-                        }))
-                        .item(PopupMenuItem::new("New View").on_click({
+                        }));
+
+                    let menu = if supports_new_view {
+                        menu.item(PopupMenuItem::new("New View").on_click({
                             let sidebar = sidebar_weak.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
@@ -88,7 +100,11 @@ impl ConnectionSidebar {
                                 });
                             }
                         }))
-                        .separator()
+                    } else {
+                        menu
+                    };
+
+                    menu.separator()
                         .item(PopupMenuItem::new("Delete View").on_click({
                             let sidebar = sidebar_weak.clone();
                             let view = view_for_menu.clone();
@@ -184,7 +200,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

@@ -29,16 +29,33 @@ impl DdlGenerator {
         format!("{}{}{}", quote, name, quote)
     }
 
+    /// Build a schema-qualified, quoted table reference (e.g. `"myschema"."users"`).
+    fn qualified_table_name(design: &TableDesign, quote: char) -> String {
+        match design.schema.as_deref() {
+            Some(schema) if !schema.is_empty() => {
+                format!(
+                    "{}.{}",
+                    Self::quote_ident(schema, quote),
+                    Self::quote_ident(&design.table_name, quote)
+                )
+            }
+            _ => Self::quote_ident(&design.table_name, quote),
+        }
+    }
+
     /// Generate CREATE TABLE statement
     pub fn generate_create_table(design: &TableDesign) -> anyhow::Result<String> {
         let info = Self::dialect_info(&design.dialect);
         let q = info.identifier_quote;
         let mut ddl = String::new();
+        let table_ref = Self::qualified_table_name(design, q);
 
-        ddl.push_str(&format!(
-            "CREATE TABLE {} (\n",
-            Self::quote_ident(&design.table_name, q)
-        ));
+        // PostgreSQL UNLOGGED must appear before the table name
+        if design.options.unlogged && matches!(design.dialect, DatabaseDialect::Postgres) {
+            ddl.push_str(&format!("CREATE UNLOGGED TABLE {} (\n", table_ref));
+        } else {
+            ddl.push_str(&format!("CREATE TABLE {} (\n", table_ref));
+        }
 
         let column_defs: Vec<String> = design
             .columns
@@ -80,7 +97,16 @@ impl DdlGenerator {
                 .as_ref()
                 .map(|n| format!("CONSTRAINT {} ", Self::quote_ident(n, q)))
                 .unwrap_or_default();
-            ddl.push_str(&format!(",\n    {}CHECK ({})", name_part, cc.expression));
+            let no_inherit_suffix =
+                if cc.no_inherit && matches!(design.dialect, DatabaseDialect::Postgres) {
+                    " NO INHERIT"
+                } else {
+                    ""
+                };
+            ddl.push_str(&format!(
+                ",\n    {}CHECK ({}){no_inherit_suffix}",
+                name_part, cc.expression
+            ));
         }
 
         ddl.push_str("\n)");
@@ -94,10 +120,65 @@ impl DdlGenerator {
 
         ddl.push(';');
 
+        // Emit CREATE INDEX for non-primary indexes
         for index in &design.indexes {
             if !index.is_primary {
                 ddl.push_str("\n\n");
                 ddl.push_str(&Self::generate_create_index(&design.table_name, index, q));
+            }
+        }
+
+        // Table-level COMMENT (PostgreSQL / MySQL)
+        if let Some(ref comment) = design.comment
+            && !comment.is_empty()
+        {
+            match design.dialect {
+                DatabaseDialect::Postgres => {
+                    ddl.push_str(&format!(
+                        "\n\nCOMMENT ON TABLE {} IS '{}';",
+                        table_ref,
+                        comment.replace('\'', "''")
+                    ));
+                }
+                DatabaseDialect::Mysql => {
+                    // MySQL table comment is an option appended after the closing paren,
+                    // but we've already emitted `;` — use ALTER TABLE to set it.
+                    ddl.push_str(&format!(
+                        "\n\nALTER TABLE {} COMMENT = '{}';",
+                        table_ref,
+                        comment.replace('\'', "''")
+                    ));
+                }
+                DatabaseDialect::Sqlite => {}
+            }
+        }
+
+        // Column-level COMMENTs (PostgreSQL / MySQL)
+        for col in &design.columns {
+            if let Some(ref comment) = col.comment
+                && !comment.is_empty()
+            {
+                match design.dialect {
+                    DatabaseDialect::Postgres => {
+                        ddl.push_str(&format!(
+                            "\n\nCOMMENT ON COLUMN {}.{} IS '{}';",
+                            table_ref,
+                            Self::quote_ident(&col.name, q),
+                            comment.replace('\'', "''")
+                        ));
+                    }
+                    DatabaseDialect::Mysql => {
+                        // MySQL sets column comments via MODIFY COLUMN with the COMMENT clause
+                        ddl.push_str(&format!(
+                            "\n\nALTER TABLE {} MODIFY COLUMN {} {} COMMENT '{}';",
+                            table_ref,
+                            Self::quote_ident(&col.name, q),
+                            Self::column_type_spec(col),
+                            comment.replace('\'', "''")
+                        ));
+                    }
+                    DatabaseDialect::Sqlite => {}
+                }
             }
         }
 
@@ -161,15 +242,14 @@ impl DdlGenerator {
                 .columns
                 .iter()
                 .find(|c| c.column_id == new_col.column_id)
+                && old_col.name != new_col.name
             {
-                if old_col.name != new_col.name {
-                    statements.push(format!(
-                        "ALTER TABLE {} RENAME COLUMN {} TO {};",
-                        table,
-                        Self::quote_ident(&old_col.name, q),
-                        Self::quote_ident(&new_col.name, q)
-                    ));
-                }
+                statements.push(format!(
+                    "ALTER TABLE {} RENAME COLUMN {} TO {};",
+                    table,
+                    Self::quote_ident(&old_col.name, q),
+                    Self::quote_ident(&new_col.name, q)
+                ));
             }
         }
 
@@ -208,23 +288,21 @@ impl DdlGenerator {
         // --- Dropped foreign keys ---
         for fk in &original.foreign_keys {
             let still_exists = modified.foreign_keys.iter().any(|f| f.name == fk.name);
-            if !still_exists {
-                if let Some(ref name) = fk.name {
-                    match modified.dialect {
-                        DatabaseDialect::Mysql => {
-                            statements.push(format!(
-                                "ALTER TABLE {} DROP FOREIGN KEY {};",
-                                table,
-                                Self::quote_ident(name, q)
-                            ));
-                        }
-                        _ => {
-                            statements.push(format!(
-                                "ALTER TABLE {} DROP CONSTRAINT {};",
-                                table,
-                                Self::quote_ident(name, q)
-                            ));
-                        }
+            if !still_exists && let Some(ref name) = fk.name {
+                match modified.dialect {
+                    DatabaseDialect::Mysql => {
+                        statements.push(format!(
+                            "ALTER TABLE {} DROP FOREIGN KEY {};",
+                            table,
+                            Self::quote_ident(name, q)
+                        ));
+                    }
+                    _ => {
+                        statements.push(format!(
+                            "ALTER TABLE {} DROP CONSTRAINT {};",
+                            table,
+                            Self::quote_ident(name, q)
+                        ));
                     }
                 }
             }
@@ -267,6 +345,51 @@ impl DdlGenerator {
         for idx in &modified.indexes {
             if !original.indexes.iter().any(|i| i.name == idx.name) && !idx.is_primary {
                 statements.push(Self::generate_create_index(&modified.table_name, idx, q));
+            }
+        }
+
+        // --- Dropped check constraints ---
+        for cc in &original.check_constraints {
+            let still_exists = modified.check_constraints.iter().any(|c| c.name == cc.name);
+            if !still_exists && let Some(ref name) = cc.name {
+                match modified.dialect {
+                    DatabaseDialect::Mysql => {
+                        statements.push(format!(
+                            "ALTER TABLE {} DROP CHECK {};",
+                            table,
+                            Self::quote_ident(name, q)
+                        ));
+                    }
+                    _ => {
+                        statements.push(format!(
+                            "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {};",
+                            table,
+                            Self::quote_ident(name, q)
+                        ));
+                    }
+                }
+            }
+        }
+
+        // --- Added check constraints ---
+        for cc in &modified.check_constraints {
+            let existed = original.check_constraints.iter().any(|c| c.name == cc.name);
+            if !existed {
+                let name_part = cc
+                    .name
+                    .as_ref()
+                    .map(|n| format!("CONSTRAINT {} ", Self::quote_ident(n, q)))
+                    .unwrap_or_default();
+                let no_inherit_suffix =
+                    if cc.no_inherit && matches!(modified.dialect, DatabaseDialect::Postgres) {
+                        " NO INHERIT"
+                    } else {
+                        ""
+                    };
+                statements.push(format!(
+                    "ALTER TABLE {} ADD {}CHECK ({}){};",
+                    table, name_part, cc.expression, no_inherit_suffix
+                ));
             }
         }
 
@@ -428,8 +551,10 @@ impl DdlGenerator {
     }
 
     /// Generate DROP TABLE statement
-    pub fn generate_drop_table(table_name: &str) -> String {
-        format!("DROP TABLE IF EXISTS \"{}\";", table_name)
+    pub fn generate_drop_table(table_name: &str, dialect: &DatabaseDialect) -> String {
+        let info = Self::dialect_info(dialect);
+        let q = info.identifier_quote;
+        format!("DROP TABLE IF EXISTS {};", Self::quote_ident(table_name, q))
     }
 
     /// Generate CREATE INDEX statement
@@ -438,7 +563,16 @@ impl DdlGenerator {
         let columns = index
             .columns
             .iter()
-            .map(|c| Self::quote_ident(c, quote))
+            .enumerate()
+            .map(|(i, c)| {
+                let quoted = Self::quote_ident(c, quote);
+                let is_desc = index.column_descending.get(i).copied().unwrap_or(false);
+                if is_desc {
+                    format!("{} DESC", quoted)
+                } else {
+                    quoted
+                }
+            })
             .collect::<Vec<_>>()
             .join(", ");
 
@@ -496,34 +630,34 @@ impl DdlGenerator {
             def.push_str(" PRIMARY KEY");
 
             // Auto-increment on the PK is driver-determined
-            if column.is_auto_increment {
-                if let Some(ref ai) = info.auto_increment {
-                    match ai.style {
-                        AutoIncrementStyle::Suffix => {
-                            def.push(' ');
-                            def.push_str(&ai.keyword);
-                        }
-                        AutoIncrementStyle::TypeName | AutoIncrementStyle::Generated => {
-                            // TypeName means the type itself already handles
-                            // auto-increment (e.g. PostgreSQL SERIAL).
-                            // Generated would use GENERATED ALWAYS AS IDENTITY.
-                            // Both are handled at a higher level — when the
-                            // user picks the auto-increment type — so nothing
-                            // extra to emit here for the PK suffix.
-                        }
+            if column.is_auto_increment
+                && let Some(ref ai) = info.auto_increment
+            {
+                match ai.style {
+                    AutoIncrementStyle::Suffix => {
+                        def.push(' ');
+                        def.push_str(&ai.keyword);
+                    }
+                    AutoIncrementStyle::TypeName | AutoIncrementStyle::Generated => {
+                        // TypeName means the type itself already handles
+                        // auto-increment (e.g. PostgreSQL SERIAL).
+                        // Generated would use GENERATED ALWAYS AS IDENTITY.
+                        // Both are handled at a higher level — when the
+                        // user picks the auto-increment type — so nothing
+                        // extra to emit here for the PK suffix.
                     }
                 }
             }
         }
 
         // Auto-increment on non-PK columns (only Suffix style makes sense)
-        if column.is_auto_increment && !column.is_primary_key {
-            if let Some(ref ai) = info.auto_increment {
-                if ai.style == AutoIncrementStyle::Suffix {
-                    def.push(' ');
-                    def.push_str(&ai.keyword);
-                }
-            }
+        if column.is_auto_increment
+            && !column.is_primary_key
+            && let Some(ref ai) = info.auto_increment
+            && ai.style == AutoIncrementStyle::Suffix
+        {
+            def.push(' ');
+            def.push_str(&ai.keyword);
         }
 
         if column.is_unique && !column.is_primary_key {
@@ -585,6 +719,13 @@ impl DdlGenerator {
             constraint.push_str(&format!(" ON DELETE {}", fk_action_to_sql(&fk.on_delete)));
         }
 
+        if fk.is_deferrable {
+            constraint.push_str(" DEFERRABLE");
+            if fk.initially_deferred {
+                constraint.push_str(" INITIALLY DEFERRED");
+            }
+        }
+
         constraint
     }
 
@@ -609,7 +750,19 @@ impl DdlGenerator {
                     format!(" {}", opts.join(", "))
                 }
             }
-            DatabaseDialect::Postgres => String::new(),
+            DatabaseDialect::Postgres => {
+                // UNLOGGED is already handled in generate_create_table as a keyword
+                // before the table name. Tablespace is emitted after the closing paren.
+                let mut opts = Vec::new();
+                if let Some(ref tablespace) = options.tablespace {
+                    opts.push(format!("TABLESPACE {}", tablespace));
+                }
+                if opts.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {}", opts.join(" "))
+                }
+            }
             DatabaseDialect::Mysql => {
                 let mut opts = Vec::new();
                 if let Some(ref engine) = options.engine {
@@ -637,6 +790,15 @@ impl DdlGenerator {
     }
 }
 
+/// All possible FK referential actions, in the order shown in the UI dropdown.
+pub const FK_ACTION_LABELS: &[&str] = &[
+    "NO ACTION",
+    "RESTRICT",
+    "CASCADE",
+    "SET NULL",
+    "SET DEFAULT",
+];
+
 /// Convert ForeignKeyAction to SQL syntax
 pub fn fk_action_to_sql(action: &ForeignKeyAction) -> &'static str {
     match action {
@@ -645,6 +807,17 @@ pub fn fk_action_to_sql(action: &ForeignKeyAction) -> &'static str {
         ForeignKeyAction::Cascade => "CASCADE",
         ForeignKeyAction::SetNull => "SET NULL",
         ForeignKeyAction::SetDefault => "SET DEFAULT",
+    }
+}
+
+/// Convert a SQL action label back to `ForeignKeyAction`.
+pub fn fk_action_from_sql(sql: &str) -> ForeignKeyAction {
+    match sql {
+        "RESTRICT" => ForeignKeyAction::Restrict,
+        "CASCADE" => ForeignKeyAction::Cascade,
+        "SET NULL" => ForeignKeyAction::SetNull,
+        "SET DEFAULT" => ForeignKeyAction::SetDefault,
+        _ => ForeignKeyAction::NoAction,
     }
 }
 
@@ -694,8 +867,11 @@ mod tests {
 
     #[test]
     fn test_generate_drop_table() {
-        let ddl = DdlGenerator::generate_drop_table("users");
+        let ddl = DdlGenerator::generate_drop_table("users", &DatabaseDialect::Sqlite);
         assert_eq!(ddl, "DROP TABLE IF EXISTS \"users\";");
+
+        let ddl = DdlGenerator::generate_drop_table("users", &DatabaseDialect::Mysql);
+        assert_eq!(ddl, "DROP TABLE IF EXISTS `users`;");
     }
 
     #[test]

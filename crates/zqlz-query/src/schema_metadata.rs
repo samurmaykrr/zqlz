@@ -282,12 +282,12 @@ impl SchemaMetadata {
             columns: HashMap::new(),
         };
         // Try to extract column info from objects_panel_data if available
-        if let Some(ref schema) = metadata.schema {
-            if let Some(ref _objects_data) = schema.objects_panel_data {
-                // ObjectsPanelData has columns and rows but not in the format we need
-                // This is a placeholder - actual column extraction would require
-                // additional schema queries
-            }
+        if let Some(ref schema) = metadata.schema
+            && let Some(ref _objects_data) = schema.objects_panel_data
+        {
+            // ObjectsPanelData has columns and rows but not in the format we need
+            // This is a placeholder - actual column extraction would require
+            // additional schema queries
         }
         metadata
     }
@@ -360,6 +360,7 @@ impl SchemaMetadataProvider for SchemaMetadata {
         if let Some(info) = table_info {
             Some(ServicesTableDetails {
                 name: info.name.clone(),
+                table_type: info.table_type,
                 columns,
                 indexes,
                 foreign_keys,
@@ -374,6 +375,7 @@ impl SchemaMetadataProvider for SchemaMetadata {
             // Table is in the tables list but not in table_infos - create basic details
             Some(ServicesTableDetails {
                 name: table_name.to_string(),
+                table_type: zqlz_core::TableType::Table,
                 columns,
                 indexes,
                 foreign_keys,
@@ -447,10 +449,10 @@ impl SchemaMetadataProvider for SchemaMetadata {
         }
 
         // Check if it's a table name (case-insensitive)
-        if schema.tables.iter().any(|t| t.eq_ignore_ascii_case(word)) {
-            if let Some(details) = self.get_table_info(word) {
-                return Some(SchemaSymbolInfo::table(word.to_string(), details));
-            }
+        if schema.tables.iter().any(|t| t.eq_ignore_ascii_case(word))
+            && let Some(details) = self.get_table_info(word)
+        {
+            return Some(SchemaSymbolInfo::table(word.to_string(), details));
         }
 
         // Check if it's a view name
@@ -565,8 +567,7 @@ fn is_word_char(c: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zqlz_core::{ForeignKeyInfo, IndexInfo};
-    use zqlz_services::TableDetails;
+    use zqlz_core::IndexInfo;
 
     #[test]
     fn test_schema_symbol_info_creation() {
@@ -739,6 +740,12 @@ mod tests {
             nullable: false,
             is_primary_key: true,
             default_value: Some("nextval('users_id_seq')".to_string()),
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_auto_increment: true,
+            comment: None,
+            enum_values: None,
         };
 
         let details = SchemaSymbolDetails::for_column("users".to_string(), &column, true);
@@ -753,6 +760,7 @@ mod tests {
     fn test_schema_details_for_table() {
         let table_details = ServicesTableDetails {
             name: "users".to_string(),
+            table_type: zqlz_core::TableType::Table,
             columns: vec![
                 ServicesColumnInfo {
                     name: "id".to_string(),
@@ -760,6 +768,12 @@ mod tests {
                     nullable: false,
                     is_primary_key: true,
                     default_value: None,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_auto_increment: true,
+                    comment: None,
+                    enum_values: None,
                 },
                 ServicesColumnInfo {
                     name: "name".to_string(),
@@ -767,6 +781,12 @@ mod tests {
                     nullable: true,
                     is_primary_key: false,
                     default_value: None,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_auto_increment: false,
+                    comment: None,
+                    enum_values: None,
                 },
             ],
             indexes: vec![IndexInfo {

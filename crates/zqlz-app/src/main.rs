@@ -23,9 +23,11 @@ mod workspace_state;
 
 use gpui::*;
 use panic_handler::{PanicData, PanicHandler};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use url::Url;
 use zqlz_settings::ZqlzSettings;
-use zqlz_ui::widgets::menu::AppMenuBar;
+use zqlz_ui::widgets::{Root, menu::AppMenuBar};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -60,6 +62,24 @@ fn main() {
     // Create the GPUI application with combined assets
     // This provides gpui-component icons plus ZQLZ-specific icons
     let app = Application::new().with_assets(assets::CombinedAssets);
+    let launch_paths = collect_launch_paths();
+
+    app.on_open_urls({
+        let launch_paths = launch_paths.clone();
+        move |urls| {
+            if urls.is_empty() {
+                return;
+            }
+
+            if let Ok(mut pending_paths) = launch_paths.lock() {
+                for url in urls {
+                    if let Some(path) = path_from_open_target(&url) {
+                        pending_paths.push(path);
+                    }
+                }
+            }
+        }
+    });
 
     app.run(move |cx| {
         tracing::info!("App run callback started");
@@ -130,7 +150,7 @@ fn main() {
 
         // Open the main window
         tracing::info!("Opening main window...");
-        let result = open_main_window(cx);
+        let result = open_main_window(cx, launch_paths.clone());
         if let Err(e) = result {
             tracing::error!("Failed to open main window: {}", e);
         }
@@ -151,8 +171,8 @@ pub struct AppMenuBarGlobal(pub Entity<AppMenuBar>);
 impl Global for AppMenuBarGlobal {}
 
 /// Open the main application window
-fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
-    use zqlz_ui::widgets::{Root, TitleBar};
+fn open_main_window(cx: &mut App, launch_paths: Arc<Mutex<Vec<PathBuf>>>) -> anyhow::Result<()> {
+    use zqlz_ui::widgets::TitleBar;
 
     let window_options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
@@ -172,6 +192,7 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
 
             // Create the main view
             let main_view = cx.new(|cx| MainView::new(window, cx));
+            drain_launch_paths(launch_paths.clone(), &main_view, window, cx);
 
             // Wrap in Root for theme support, dialogs, notifications, etc.
             cx.new(|cx| Root::new(main_view, window, cx))
@@ -184,6 +205,51 @@ fn open_main_window(cx: &mut App) -> anyhow::Result<()> {
     tracing::info!("Main window opened successfully");
 
     Ok(())
+}
+
+fn collect_launch_paths() -> Arc<Mutex<Vec<PathBuf>>> {
+    let paths = std::env::args_os()
+        .skip(1)
+        .map(PathBuf::from)
+        .collect::<Vec<_>>();
+    Arc::new(Mutex::new(paths))
+}
+
+fn path_from_open_target(target: &str) -> Option<PathBuf> {
+    if let Ok(url) = Url::parse(target) {
+        if url.scheme() == "file" {
+            return url.to_file_path().ok();
+        }
+
+        return None;
+    }
+
+    Some(PathBuf::from(target))
+}
+
+fn drain_launch_paths(
+    launch_paths: Arc<Mutex<Vec<PathBuf>>>,
+    main_view: &Entity<MainView>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Ok(mut pending_paths) = launch_paths.lock() else {
+        tracing::warn!("failed to acquire pending launch path queue");
+        return;
+    };
+
+    if pending_paths.is_empty() {
+        return;
+    }
+
+    let paths = std::mem::take(&mut *pending_paths);
+    drop(pending_paths);
+
+    main_view.update(cx, |main_view, cx| {
+        for path in &paths {
+            main_view.open_external_path(path, window, cx);
+        }
+    });
 }
 
 /// Set the macOS dock icon from the bundled dev icon PNG when running outside

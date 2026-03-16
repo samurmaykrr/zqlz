@@ -1,7 +1,24 @@
 //! Tests for hover information on keywords, tables, and columns
 
 use super::test_helpers::*;
+use lsp_types::{HoverContents, MarkedString, MarkupKind};
 use zqlz_ui::widgets::Rope;
+
+fn hover_to_text(hover: lsp_types::Hover) -> String {
+    match hover.contents {
+        HoverContents::Scalar(MarkedString::String(text)) => text,
+        HoverContents::Scalar(MarkedString::LanguageString(value)) => value.value,
+        HoverContents::Array(items) => items
+            .into_iter()
+            .map(|item| match item {
+                MarkedString::String(text) => text,
+                MarkedString::LanguageString(value) => value.value,
+            })
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HoverContents::Markup(markup) => markup.value,
+    }
+}
 
 #[test]
 fn test_hover_select_keyword() {
@@ -15,6 +32,23 @@ fn test_hover_select_keyword() {
 
     // Hover content should contain SELECT documentation
     // Check that it's present (format may vary)
+}
+
+#[test]
+fn test_hover_uses_markdown_markup_content() {
+    let lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users");
+    let offset = 3;
+
+    let hover = lsp.get_hover(&text, offset).expect("hover for keyword");
+
+    match hover.contents {
+        HoverContents::Markup(markup) => {
+            assert_eq!(markup.kind, MarkupKind::Markdown);
+            assert!(markup.value.contains("**SELECT**"));
+        }
+        other => panic!("expected markdown hover content, got {other:?}"),
+    }
 }
 
 #[test]
@@ -70,6 +104,50 @@ fn test_hover_on_qualified_column() {
     let hover = lsp.get_hover(&text, offset);
 
     assert!(hover.is_some(), "Should provide hover for qualified column");
+}
+
+#[test]
+fn test_hover_on_alias_qualified_column_uses_underlying_table() {
+    let lsp = create_test_lsp();
+    let text = Rope::from("SELECT u.user_id FROM users u");
+    let offset = text.to_string().find("user_id").unwrap() + 3;
+
+    let hover = lsp
+        .get_hover(&text, offset)
+        .expect("hover for alias-qualified column");
+    let hover_text = hover_to_text(hover);
+
+    assert!(
+        hover_text.contains("**Column: user_id**"),
+        "Hover should describe the aliased column. Got: {}",
+        hover_text
+    );
+    assert!(
+        hover_text.contains("Table: `users`"),
+        "Hover should resolve the alias back to the table. Got: {}",
+        hover_text
+    );
+}
+
+#[test]
+fn test_hover_on_table_alias_shows_table_metadata() {
+    let lsp = create_test_lsp();
+    let text = Rope::from("SELECT u.user_id FROM users u");
+    let offset = text.to_string().rfind('u').unwrap();
+
+    let hover = lsp.get_hover(&text, offset).expect("hover for table alias");
+    let hover_text = hover_to_text(hover);
+
+    assert!(
+        hover_text.contains("**Table: users**"),
+        "Hover on an alias should show the aliased table metadata. Got: {}",
+        hover_text
+    );
+    assert!(
+        hover_text.contains("**Columns:**"),
+        "Hover on an alias should include table columns. Got: {}",
+        hover_text
+    );
 }
 
 #[test]

@@ -7,11 +7,14 @@ use crate::widgets::{Side, Size, StyledExt, kbd::Kbd};
 use gpui::{
     Action, AnyElement, App, AppContext, Bounds, Context, Corner, DismissEvent, Edges, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, Pixels, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
+    ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
 };
 use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Subscription};
 use std::rc::Rc;
+
+type PopupMenuItemClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+type PopupMenuElementRenderer = Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>;
 
 const CONTEXT: &str = "PopupMenu";
 
@@ -41,7 +44,7 @@ pub enum PopupMenuItem {
         is_link: bool,
         action: Option<Box<dyn Action>>,
         // For link item
-        handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+        handler: Option<PopupMenuItemClickHandler>,
     },
     /// A menu item with custom element render.
     ElementItem {
@@ -49,8 +52,8 @@ pub enum PopupMenuItem {
         disabled: bool,
         checked: bool,
         action: Option<Box<dyn Action>>,
-        render: Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>,
-        handler: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>>,
+        render: PopupMenuElementRenderer,
+        handler: Option<PopupMenuItemClickHandler>,
     },
     /// A submenu item that opens another popup menu.
     ///
@@ -622,8 +625,12 @@ impl PopupMenu {
     ) -> Self {
         let submenu = PopupMenu::build(window, cx, f);
         let parent_menu = cx.entity().downgrade();
+        let action_context = self.action_context.clone();
         submenu.update(cx, |view, _| {
             view.parent_menu = Some(parent_menu);
+            if view.action_context.is_none() {
+                view.action_context = action_context;
+            }
         });
 
         self.menu_items.push(
@@ -700,13 +707,13 @@ impl PopupMenu {
     }
 
     pub(crate) fn active_submenu(&self) -> Option<Entity<PopupMenu>> {
-        if let Some(ix) = self.selected_index {
-            if let Some(item) = self.menu_items.get(ix) {
-                return match item {
-                    PopupMenuItem::Submenu { menu, .. } => Some(menu.clone()),
-                    _ => None,
-                };
-            }
+        if let Some(ix) = self.selected_index
+            && let Some(item) = self.menu_items.get(ix)
+        {
+            return match item {
+                PopupMenuItem::Submenu { menu, .. } => Some(menu.clone()),
+                _ => None,
+            };
         }
 
         None
@@ -723,6 +730,45 @@ impl PopupMenu {
             .filter(|(_, item)| item.is_clickable())
     }
 
+    fn first_clickable_index(&self) -> Option<usize> {
+        self.clickable_menu_items().next().map(|(ix, _)| ix)
+    }
+
+    fn last_clickable_index(&self) -> Option<usize> {
+        self.clickable_menu_items().last().map(|(ix, _)| ix)
+    }
+
+    fn next_clickable_index(&self, after: usize) -> Option<usize> {
+        self.menu_items
+            .iter()
+            .enumerate()
+            .find(|(ix, item)| *ix > after && item.is_clickable())
+            .map(|(ix, _)| ix)
+    }
+
+    fn previous_clickable_index(&self, before: usize) -> Option<usize> {
+        self.menu_items
+            .iter()
+            .enumerate()
+            .rev()
+            .find(|(ix, item)| *ix < before && item.is_clickable())
+            .map(|(ix, _)| ix)
+    }
+
+    fn set_selected_index_opt(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
+        if self.selected_index != ix {
+            self.selected_index = ix;
+            if let Some(ix) = ix {
+                self.scroll_handle.scroll_to_item(ix);
+            }
+            cx.notify();
+        }
+    }
+
+    pub(crate) fn select_first_clickable(&mut self, cx: &mut Context<Self>) {
+        self.set_selected_index_opt(self.first_clickable_index(), cx);
+    }
+
     fn on_click(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         window.prevent_default();
@@ -731,41 +777,38 @@ impl PopupMenu {
     }
 
     fn confirm(&mut self, _: &Confirm, window: &mut Window, cx: &mut Context<Self>) {
-        match self.selected_index {
-            Some(index) => {
-                let item = self.menu_items.get(index);
-                match item {
-                    Some(PopupMenuItem::Item {
-                        handler, action, ..
-                    }) => {
-                        if let Some(handler) = handler {
-                            handler(&ClickEvent::default(), window, cx);
-                        } else if let Some(action) = action.as_ref() {
-                            self.dispatch_confirm_action(action, window, cx);
-                        }
+        if let Some(index) = self.selected_index {
+            match self.menu_items.get(index) {
+                Some(PopupMenuItem::Item {
+                    handler, action, ..
+                }) => {
+                    if let Some(handler) = handler {
+                        handler(&ClickEvent::default(), window, cx);
+                    } else if let Some(action) = action.as_ref() {
+                        self.dispatch_confirm_action(action.as_ref(), window, cx);
+                    }
 
-                        self.dismiss(&Cancel, window, cx)
-                    }
-                    Some(PopupMenuItem::ElementItem {
-                        handler, action, ..
-                    }) => {
-                        if let Some(handler) = handler {
-                            handler(&ClickEvent::default(), window, cx);
-                        } else if let Some(action) = action.as_ref() {
-                            self.dispatch_confirm_action(action, window, cx);
-                        }
-                        self.dismiss(&Cancel, window, cx)
-                    }
-                    _ => {}
+                    self.dismiss(&Cancel, window, cx)
                 }
+                Some(PopupMenuItem::ElementItem {
+                    handler, action, ..
+                }) => {
+                    if let Some(handler) = handler {
+                        handler(&ClickEvent::default(), window, cx);
+                    } else if let Some(action) = action.as_ref() {
+                        self.dispatch_confirm_action(action.as_ref(), window, cx);
+                    }
+
+                    self.dismiss(&Cancel, window, cx)
+                }
+                _ => {}
             }
-            _ => {}
         }
     }
 
     fn dispatch_confirm_action(
         &self,
-        action: &Box<dyn Action>,
+        action: &dyn Action,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -777,50 +820,34 @@ impl PopupMenu {
     }
 
     fn set_selected_index(&mut self, ix: usize, cx: &mut Context<Self>) {
-        if self.selected_index != Some(ix) {
-            self.selected_index = Some(ix);
-            self.scroll_handle.scroll_to_item(ix);
-            cx.notify();
-        }
+        self.set_selected_index_opt(Some(ix), cx);
     }
 
     fn select_up(&mut self, _: &SelectUp, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
-        let ix = self.selected_index.unwrap_or(0);
+        let ix = self.selected_index.unwrap_or(self.menu_items.len());
 
-        if let Some((prev_ix, _)) = self
-            .menu_items
-            .iter()
-            .enumerate()
-            .rev()
-            .find(|(i, item)| *i < ix && item.is_clickable())
-        {
+        if let Some(prev_ix) = self.previous_clickable_index(ix) {
             self.set_selected_index(prev_ix, cx);
             return;
         }
 
-        let last_clickable_ix = self.clickable_menu_items().last().map(|(ix, _)| ix);
-        self.set_selected_index(last_clickable_ix.unwrap_or(0), cx);
+        self.set_selected_index_opt(self.last_clickable_index(), cx);
     }
 
     fn select_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let Some(ix) = self.selected_index else {
-            self.set_selected_index(0, cx);
+            self.set_selected_index_opt(self.first_clickable_index(), cx);
             return;
         };
 
-        if let Some((next_ix, _)) = self
-            .menu_items
-            .iter()
-            .enumerate()
-            .find(|(i, item)| *i > ix && item.is_clickable())
-        {
+        if let Some(next_ix) = self.next_clickable_index(ix) {
             self.set_selected_index(next_ix, cx);
             return;
         }
 
-        self.set_selected_index(0, cx);
+        self.set_selected_index_opt(self.first_clickable_index(), cx);
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
@@ -869,14 +896,14 @@ impl PopupMenu {
         if let Some(active_submenu) = self.active_submenu() {
             // Focus the submenu, so that can be handle the action.
             active_submenu.update(cx, |view, cx| {
-                view.set_selected_index(0, cx);
+                view.set_selected_index_opt(view.first_clickable_index(), cx);
                 view.focus_handle.focus(window, cx);
             });
             cx.notify();
             return true;
         }
 
-        return false;
+        false
     }
 
     fn _unselect_submenu(&mut self, _: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -888,7 +915,7 @@ impl PopupMenu {
             return true;
         }
 
-        return false;
+        false
     }
 
     fn _focus_parent_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -996,17 +1023,83 @@ impl PopupMenu {
         self.max_width.unwrap_or(px(500.))
     }
 
-    /// Calculate the anchor corner and left offset for child submenu
-    fn update_submenu_menu_anchor(&mut self, window: &Window) {
-        let bounds = self.bounds;
-        let max_width = self.max_width();
-        let (anchor, left) = if max_width + bounds.origin.x > window.bounds().size.width {
-            (Corner::TopRight, -px(16.))
-        } else {
-            (Corner::TopLeft, bounds.size.width - px(8.))
+    fn contains_active_submenu_position(&self, position: Point<Pixels>, cx: &App) -> bool {
+        let Some(active_submenu) = self.active_submenu() else {
+            return false;
         };
 
-        let is_bottom_pos = bounds.origin.y + bounds.size.height > window.bounds().size.height;
+        let submenu = active_submenu.read(cx);
+        submenu.bounds.contains(&position) || submenu.contains_active_submenu_position(position, cx)
+    }
+
+    fn estimated_height(&self) -> Pixels {
+        self.menu_items.iter().fold(px(8.), |height, item| {
+            height
+                + if item.is_separator() {
+                    px(8.)
+                } else {
+                    match self.size {
+                        Size::Small => px(20.),
+                        _ => px(26.),
+                    }
+                }
+        })
+    }
+
+    fn selected_item_top(&self) -> Option<Pixels> {
+        let selected_index = self.selected_index?;
+        let mut top = self.bounds.origin.y + px(4.);
+
+        for (ix, item) in self.menu_items.iter().enumerate() {
+            if ix == selected_index {
+                return Some(top);
+            }
+
+            top += if item.is_separator() {
+                px(8.)
+            } else {
+                match self.size {
+                    Size::Small => px(20.),
+                    _ => px(26.),
+                }
+            };
+        }
+
+        None
+    }
+
+    /// Calculate the anchor corner and left offset for child submenu
+    fn update_submenu_menu_anchor(&mut self, window: &Window, cx: &App) {
+        let bounds = self.bounds;
+        let window_bounds = window.window_bounds().get_bounds();
+        let selected_item_top = self.selected_item_top().unwrap_or(bounds.origin.y);
+        let submenu_width = self
+            .active_submenu()
+            .map(|submenu| {
+                let submenu = submenu.read(cx);
+                submenu
+                    .bounds
+                    .size
+                    .width
+                    .max(submenu.min_width.unwrap_or(px(180.)))
+            })
+            .unwrap_or_else(|| self.max_width().min(px(280.)));
+        let submenu_height = self
+            .active_submenu()
+            .map(|submenu| submenu.read(cx).estimated_height())
+            .unwrap_or_else(|| self.estimated_height());
+
+        let space_to_right = window_bounds.right() - (bounds.right() - px(8.));
+        let space_to_left = (bounds.origin.x + px(8.)) - window_bounds.origin.x;
+        let (anchor, left) = if space_to_right >= submenu_width || space_to_right >= space_to_left {
+            (Corner::TopLeft, bounds.size.width - px(8.))
+        } else {
+            (Corner::TopRight, -px(16.))
+        };
+
+        let space_below = window_bounds.bottom() - selected_item_top;
+        let space_above = selected_item_top - window_bounds.origin.y;
+        let is_bottom_pos = submenu_height > space_below && space_above > space_below;
         self.submenu_anchor = if is_bottom_pos {
             (anchor.other_side_corner_along(gpui::Axis::Vertical), left)
         } else {
@@ -1234,7 +1327,7 @@ struct RenderOptions {
 
 impl Render for PopupMenu {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.update_submenu_menu_anchor(window);
+        self.update_submenu_menu_anchor(window, cx);
 
         let view = cx.entity().clone();
         let items_count = self.menu_items.len();
@@ -1267,13 +1360,16 @@ impl Render for PopupMenu {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::dismiss))
             .on_mouse_down_out(cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                if this.contains_active_submenu_position(ev.position, cx) {
+                    return;
+                }
+
                 // Do not dismiss, if click inside the parent menu
-                if let Some(parent) = this.parent_menu.as_ref() {
-                    if let Some(parent) = parent.upgrade() {
-                        if parent.read(cx).bounds.contains(&ev.position) {
-                            return;
-                        }
-                    }
+                if let Some(parent) = this.parent_menu.as_ref()
+                    && let Some(parent) = parent.upgrade()
+                    && parent.read(cx).bounds.contains(&ev.position)
+                {
+                    return;
                 }
 
                 this.dismiss(&Cancel, window, cx);

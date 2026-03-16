@@ -295,10 +295,10 @@ impl FastCellSelection {
     /// Direct selection check without cache - O(1) for range, O(1) amortized for additional cells
     #[inline]
     pub fn is_selected_direct(&self, row: usize, col: usize) -> bool {
-        if let Some(ref range) = self.range {
-            if range.contains(row, col) {
-                return true;
-            }
+        if let Some(ref range) = self.range
+            && range.contains(row, col)
+        {
+            return true;
         }
         self.additional_cells.contains(&CellPosition { row, col })
     }
@@ -465,7 +465,7 @@ impl FastCellSelection {
         let rows_count = visible_rows.len();
         let cols_count = visible_cols.len();
         let total_cells = rows_count * cols_count;
-        let words_needed = (total_cells + 63) / 64;
+        let words_needed = total_cells.div_ceil(64);
 
         // Resize and clear bits
         self.visible_cache.selected_bits.clear();

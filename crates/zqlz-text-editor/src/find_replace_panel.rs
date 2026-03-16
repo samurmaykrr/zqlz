@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Render, SharedString,
-    Styled, Subscription, Window, actions, div,
+    InteractiveElement as _, IntoElement, KeyBinding, Keystroke, ParentElement as _, Render,
+    SharedString, Styled, Subscription, Window, actions, div,
 };
 
 use crate::find::FindOptions;
@@ -11,6 +11,7 @@ use zqlz_ui::widgets::{
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
+    kbd::Kbd,
     label::Label,
     v_flex,
 };
@@ -78,12 +79,12 @@ impl FindReplacePanel {
             state
         });
 
-        if let Some(query) = &initial_query {
-            if !query.is_empty() {
-                search_input.update(cx, |state: &mut InputState, cx| {
-                    state.set_value(query.clone(), window, cx);
-                });
-            }
+        if let Some(query) = &initial_query
+            && !query.is_empty()
+        {
+            search_input.update(cx, |state: &mut InputState, cx| {
+                state.set_value(query.clone(), window, cx);
+            });
         }
 
         search_input.read(cx).focus_handle(cx).focus(window, cx);
@@ -92,11 +93,10 @@ impl FindReplacePanel {
 
         subscriptions.push(cx.subscribe(
             &search_input,
-            |this: &mut Self, _, event: &InputEvent, cx| match event {
-                InputEvent::Change => {
+            |this: &mut Self, _, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
                     this.emit_query_changed(cx);
                 }
-                _ => {}
             },
         ));
 
@@ -190,6 +190,11 @@ impl Render for FindReplacePanel {
             .read(cx)
             .focus_handle(cx)
             .is_focused(window);
+        let top_primary_label = if self.replace_mode && replace_focused {
+            "Replace"
+        } else {
+            "Next"
+        };
 
         v_flex()
             .id("find-replace-panel")
@@ -203,7 +208,6 @@ impl Render for FindReplacePanel {
                 cx.emit(FindReplacePanelEvent::Closed);
             }))
             .on_action(cx.listener({
-                let replace_focused = replace_focused;
                 move |this, _: &FindNextMatch, _, cx| {
                     if this.replace_mode && replace_focused {
                         let replacement = this.replace_input.read(cx).value().to_string();
@@ -221,6 +225,18 @@ impl Render for FindReplacePanel {
             .bg(cx.theme().popover)
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .justify_end()
+                    .w_full()
+                    .gap_3()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(Self::shortcut_hint(top_primary_label, "enter"))
+                    .child(Self::shortcut_hint("Previous", "shift-enter"))
+                    .child(Self::shortcut_hint("In Selection", "alt-l"))
+                    .child(Self::shortcut_hint("Close", "escape")),
+            )
             // Row 1: Search row
             .child(
                 h_flex()
@@ -308,7 +324,7 @@ impl Render for FindReplacePanel {
                             .xsmall()
                             .ghost()
                             .icon(IconName::ArrowUp)
-                            .tooltip("Previous Match (Shift+Enter)")
+                            .tooltip("Previous Match")
                             .disabled(!has_matches)
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(FindReplacePanelEvent::PrevMatch);
@@ -319,7 +335,7 @@ impl Render for FindReplacePanel {
                             .xsmall()
                             .ghost()
                             .icon(IconName::ArrowDown)
-                            .tooltip("Next Match (Enter)")
+                            .tooltip("Next Match")
                             .disabled(!has_matches)
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(FindReplacePanelEvent::NextMatch);
@@ -340,7 +356,7 @@ impl Render for FindReplacePanel {
                             .xsmall()
                             .ghost()
                             .icon(IconName::Close)
-                            .tooltip("Close (Escape)")
+                            .tooltip("Close")
                             .on_click(cx.listener(|_, _, _, cx| {
                                 cx.emit(FindReplacePanelEvent::Closed);
                             })),
@@ -391,5 +407,15 @@ impl Render for FindReplacePanel {
                         ),
                 )
             })
+    }
+}
+
+impl FindReplacePanel {
+    fn shortcut_hint(label: impl Into<SharedString>, keystroke: &str) -> impl IntoElement {
+        let label = label.into();
+        h_flex().gap_1().items_center().child(label).when_some(
+            Keystroke::parse(keystroke).ok().map(Kbd::new),
+            |this, kbd| this.child(kbd),
+        )
     }
 }

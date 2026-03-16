@@ -244,8 +244,8 @@ impl TableViewerPanel {
                     .small()
                     .tooltip("Column Visibility")
                     .disabled(connection_id.is_none() || table_name.is_none())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.toggle_column_visibility(cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_column_visibility(window, cx);
                     }))
             })
             .child({

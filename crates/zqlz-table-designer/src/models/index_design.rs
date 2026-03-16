@@ -21,6 +21,8 @@ pub struct IndexDesign {
     pub where_clause: Option<String>,
     /// INCLUDE columns for covering indexes
     pub include_columns: Vec<String>,
+    /// Per-column sort direction — `true` means DESC, parallel to `columns`
+    pub column_descending: Vec<bool>,
 }
 
 impl IndexDesign {
@@ -35,6 +37,7 @@ impl IndexDesign {
             comment: None,
             where_clause: None,
             include_columns: Vec::new(),
+            column_descending: Vec::new(),
         }
     }
 
@@ -55,8 +58,9 @@ impl IndexDesign {
             is_primary: info.is_primary,
             index_type: info.index_type.clone(),
             comment: info.comment.clone(),
-            where_clause: None,
-            include_columns: Vec::new(),
+            where_clause: info.where_clause.clone(),
+            include_columns: info.include_columns.clone(),
+            column_descending: info.column_descending.clone(),
         }
     }
 

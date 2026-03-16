@@ -8,6 +8,8 @@ use gpui::{
     div, px, relative,
 };
 
+type TabClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
 /// Tab variants.
 #[derive(Debug, Clone, Default, Copy, PartialEq, Eq, Hash)]
 pub enum TabVariant {
@@ -407,7 +409,7 @@ pub struct Tab {
     size: Size,
     pub(super) disabled: bool,
     pub(super) selected: bool,
-    on_click: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
+    on_click: Option<TabClickHandler>,
 }
 
 impl From<&'static str> for Tab {
@@ -599,11 +601,9 @@ impl RenderOnce for Tab {
             hover_style = self.variant.disabled(self.selected, cx);
         }
         let tab_bar_prefix = self.tab_bar_prefix.unwrap_or_default();
-        if !tab_bar_prefix {
-            if self.ix == 0 && self.variant == TabVariant::Tab {
-                tab_style.borders.left = px(0.);
-                hover_style.borders.left = px(0.);
-            }
+        if !tab_bar_prefix && self.ix == 0 && self.variant == TabVariant::Tab {
+            tab_style.borders.left = px(0.);
+            hover_style.borders.left = px(0.);
         }
         let radius = self.variant.radius(self.size, cx);
         let inner_radius = self.variant.inner_radius(self.size, cx);

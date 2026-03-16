@@ -150,7 +150,7 @@ pub fn generate_bulk_update_sql(
 
     let pk_list = primary_key_values
         .iter()
-        .map(|v| format_value(v))
+        .map(format_value)
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -178,7 +178,7 @@ pub fn generate_bulk_delete_sql(
 
     let pk_list = primary_key_values
         .iter()
-        .map(|v| format_value(v))
+        .map(format_value)
         .collect::<Vec<_>>()
         .join(", ");
 
@@ -222,7 +222,7 @@ fn format_value(value: &Value) -> String {
         Value::DateTimeUtc(dt) => format!("'{}'", dt),
         Value::Json(j) => format!("'{}'", j.to_string().replace('\'', "''")),
         Value::Array(arr) => {
-            let items: Vec<String> = arr.iter().map(|v| format_value(v)).collect();
+            let items: Vec<String> = arr.iter().map(format_value).collect();
             format!("ARRAY[{}]", items.join(", "))
         }
     }

@@ -262,12 +262,10 @@ impl RenderOnce for Input {
 
         let bg = if state.disabled {
             cx.theme().muted
+        } else if state.mode.is_code_editor() {
+            cx.theme().editor_background()
         } else {
-            if state.mode.is_code_editor() {
-                cx.theme().editor_background()
-            } else {
-                cx.theme().background
-            }
+            cx.theme().background
         };
 
         let prefix = self.prefix;
@@ -395,7 +393,7 @@ impl RenderOnce for Input {
                 this.child(Self::render_editor(
                     paddings,
                     &self.state,
-                    &state,
+                    state,
                     window,
                     cx,
                 ))

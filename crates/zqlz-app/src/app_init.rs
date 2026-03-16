@@ -17,7 +17,7 @@ pub fn register_panels(cx: &mut App) {
     register_panel(
         cx,
         "ConnectionSidebar",
-        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(|cx| ConnectionSidebar::new(cx))),
+        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(ConnectionSidebar::new)),
     );
 
     // Register QueryTabsPanel (center)
@@ -40,14 +40,14 @@ pub fn register_panels(cx: &mut App) {
     register_panel(
         cx,
         "ResultsPanel",
-        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(|cx| ResultsPanel::new(cx))),
+        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(ResultsPanel::new)),
     );
 
     // Register SchemaDetailsPanel (right dock)
     register_panel(
         cx,
         "SchemaDetailsPanel",
-        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(|cx| SchemaDetailsPanel::new(cx))),
+        |_dock_area, _state, _info, _window, cx| Box::new(cx.new(SchemaDetailsPanel::new)),
     );
 
     // Register SettingsPanel

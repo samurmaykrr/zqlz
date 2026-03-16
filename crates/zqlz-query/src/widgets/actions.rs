@@ -12,21 +12,6 @@ actions!(
         FormatQuery,
         SaveQuery,
         SaveQueryAs,
-        // Code Editing
-        ToggleLineComment,
-        CommentSelection,
-        UncommentSelection,
-        DuplicateLine,
-        DeleteLine,
-        MoveLineUp,
-        MoveLineDown,
-        CopyLineUp,
-        CopyLineDown,
-        // Navigation
-        GoToDefinition,
-        FindReferences,
-        FindNext,
-        FindPrevious,
         NextProblem,
         PreviousProblem,
         ToggleProblemsPanel,
@@ -41,7 +26,6 @@ actions!(
         DismissInlineSuggestion,
         // Code Actions & Rename
         ShowCodeActions,
-        RenameSymbol,
         // Completion menu navigation
         ConfirmCompletion,
         CancelCompletionMenu,

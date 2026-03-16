@@ -542,9 +542,7 @@ impl Tiles {
         target_id: Option<EntityId>,
         cx: &mut Context<Self>,
     ) -> Option<EntityId> {
-        let Some(old_id) = target_id else {
-            return None;
-        };
+        let old_id = target_id?;
 
         let old_ix = self.panels.iter().position(|item| item.id == old_id)?;
         if old_ix < self.panels.len() {
@@ -625,7 +623,7 @@ impl Tiles {
         self.panels.last().and_then(|item| {
             if let Ok(tab_panel) = item.panel.view().downcast::<TabPanel>() {
                 tab_panel.read(cx).active_panel(cx)
-            } else if let Ok(_) = item.panel.view().downcast::<StackPanel>() {
+            } else if item.panel.view().downcast::<StackPanel>().is_ok() {
                 None
             } else {
                 Some(item.panel.clone())
@@ -1046,8 +1044,8 @@ impl Tiles {
             .h(item.bounds.size.height + px(1.))
             .rounded(cx.theme().tile_radius)
             .child(h_flex().overflow_hidden().size_full().child(panel_view))
-            .children(self.render_resize_handles(window, cx, entity_id, &item))
-            .child(self.render_drag_bar(window, cx, entity_id, &item))
+            .children(self.render_resize_handles(window, cx, entity_id, item))
+            .child(self.render_drag_bar(window, cx, entity_id, item))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(move |this, _, _, _| {
@@ -1076,48 +1074,47 @@ impl Tiles {
             let mut changes_to_push = vec![];
 
             // Handle dragging
-            if let Some(dragging_id) = self.dragging_id {
-                if let Some(idx) = self.panels.iter().position(|p| p.id == dragging_id) {
-                    let initial_bounds = self.dragging_initial_bounds;
-                    let current_bounds = self.panels[idx].bounds;
+            if let Some(dragging_id) = self.dragging_id
+                && let Some(idx) = self.panels.iter().position(|p| p.id == dragging_id)
+            {
+                let initial_bounds = self.dragging_initial_bounds;
+                let current_bounds = self.panels[idx].bounds;
 
-                    // Apply grid alignment to final position
-                    let aligned_origin = round_point_to_nearest_ten(current_bounds.origin, cx);
+                // Apply grid alignment to final position
+                let aligned_origin = round_point_to_nearest_ten(current_bounds.origin, cx);
 
-                    if initial_bounds.origin != aligned_origin
-                        || initial_bounds.size != current_bounds.size
-                    {
-                        self.panels[idx].bounds.origin = aligned_origin;
+                if initial_bounds.origin != aligned_origin
+                    || initial_bounds.size != current_bounds.size
+                {
+                    self.panels[idx].bounds.origin = aligned_origin;
 
-                        changes_to_push.push(TileChange {
-                            tile_id: self.panels[idx].panel.view().entity_id(),
-                            old_bounds: Some(initial_bounds),
-                            new_bounds: Some(self.panels[idx].bounds),
-                            old_order: None,
-                            new_order: None,
-                            version: 0,
-                        });
-                    }
+                    changes_to_push.push(TileChange {
+                        tile_id: self.panels[idx].panel.view().entity_id(),
+                        old_bounds: Some(initial_bounds),
+                        new_bounds: Some(self.panels[idx].bounds),
+                        old_order: None,
+                        new_order: None,
+                        version: 0,
+                    });
                 }
             }
 
             // Handle resizing
-            if let Some(resizing_id) = self.resizing_id {
-                if let Some(drag_data) = &self.resizing_drag_data {
-                    if let Some(item) = self.panel(&resizing_id) {
-                        let initial_bounds = drag_data.last_bounds;
-                        let current_bounds = item.bounds;
-                        if initial_bounds.size != current_bounds.size {
-                            changes_to_push.push(TileChange {
-                                tile_id: item.panel.view().entity_id(),
-                                old_bounds: Some(initial_bounds),
-                                new_bounds: Some(current_bounds),
-                                old_order: None,
-                                new_order: None,
-                                version: 0,
-                            });
-                        }
-                    }
+            if let Some(resizing_id) = self.resizing_id
+                && let Some(drag_data) = &self.resizing_drag_data
+                && let Some(item) = self.panel(&resizing_id)
+            {
+                let initial_bounds = drag_data.last_bounds;
+                let current_bounds = item.bounds;
+                if initial_bounds.size != current_bounds.size {
+                    changes_to_push.push(TileChange {
+                        tile_id: item.panel.view().entity_id(),
+                        old_bounds: Some(initial_bounds),
+                        new_bounds: Some(current_bounds),
+                        old_order: None,
+                        new_order: None,
+                        version: 0,
+                    });
                 }
             }
 

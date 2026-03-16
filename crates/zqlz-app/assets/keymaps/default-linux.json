@@ -33,20 +33,21 @@
       "f5": "zqlz::ExecuteQuery",
       "ctrl-shift-enter": "zqlz::ExecuteSelection",
       "ctrl-shift-e": "zqlz::ExecuteSelection",
-      "ctrl-.": "zqlz::StopQuery",
+      "ctrl-.": "editor::TriggerCompletion",
       "ctrl-shift-.": "query_editor::ShowCodeActions",
-      "ctrl-shift-f": "query_editor::FormatQuery",
+      "ctrl-shift-f": "editor::FormatSQL",
       "ctrl-s": "query_editor::SaveQuery",
       "ctrl-shift-s": "query_editor::SaveQueryAs",
-      "ctrl-space": "query_editor::TriggerCompletion",
+      "ctrl-space": "editor::TriggerCompletion",
       "ctrl-shift-space": "query_editor::TriggerParameterHints",
-      "f12": "query_editor::GoToDefinition",
-      "shift-f12": "query_editor::FindReferences",
-      "f2": "query_editor::RenameSymbol",
+      "f12": "editor::GoToDefinition",
+      "shift-f12": "editor::FindReferences",
+      "f2": "editor::RenameSymbol",
       "f1": "query_editor::ShowHover",
       "f8": "query_editor::NextProblem",
       "shift-f8": "query_editor::PreviousProblem",
-      "ctrl-shift-m": "query_editor::ToggleProblemsPanel"
+      "ctrl-shift-m": "query_editor::ToggleProblemsPanel",
+      "escape": "zqlz::StopQuery"
     }
   },
   {
@@ -54,7 +55,15 @@
     "bindings": {
       "ctrl-s": "table_viewer::CommitChanges",
       "ctrl-e": "table_viewer::OpenRowEditor",
+      "ctrl-a": "table_viewer::SelectAllSelection",
+      "ctrl-c": "table_viewer::CopySelection",
+      "ctrl-v": "table_viewer::PasteClipboard",
+      "ctrl-x": "table_viewer::CutSelection",
       "escape": "table_viewer::CancelCellEditing",
+      "up": "table_viewer::SelectColumnVisibilityPrevious",
+      "down": "table_viewer::SelectColumnVisibilityNext",
+      "enter": "table_viewer::ToggleSelectedColumnVisibility",
+      "space": "table_viewer::ToggleSelectedColumnVisibility",
       "backspace": "table_viewer::DeleteSelectedRows",
       "delete": "table_viewer::DeleteSelectedRows"
     }

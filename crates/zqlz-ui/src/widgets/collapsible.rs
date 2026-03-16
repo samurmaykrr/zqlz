@@ -23,6 +23,12 @@ pub struct Collapsible {
     open: bool,
 }
 
+impl Default for Collapsible {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Collapsible {
     /// Creates a new `Collapsible` instance.
     pub fn new() -> Self {
@@ -58,7 +64,7 @@ impl Styled for Collapsible {
 impl ParentElement for Collapsible {
     fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
         self.children
-            .extend(elements.into_iter().map(|el| CollapsibleChild::Element(el)));
+            .extend(elements.into_iter().map(CollapsibleChild::Element));
     }
 }
 

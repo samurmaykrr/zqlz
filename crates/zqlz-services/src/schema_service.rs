@@ -9,8 +9,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::{
-    Connection, DatabaseObject, FunctionInfo, ObjectType, ObjectsPanelData, ProcedureInfo,
-    TableInfo, TriggerInfo, ViewInfo,
+    ColumnInfo as SchemaColumnInfo, Connection, DatabaseObject, FunctionInfo, ObjectType,
+    ObjectsPanelData, ProcedureInfo, SchemaIntrospection, TableInfo, TableType, TriggerInfo,
+    ViewInfo,
 };
 use zqlz_schema::SchemaCache;
 
@@ -606,23 +607,28 @@ impl SchemaService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
+        let table_info = self
+            .lookup_relation_info(
+                &connection,
+                schema_introspection,
+                connection_id,
+                table_name,
+                schema,
+            )
+            .await
+            .unwrap_or_else(|| Self::placeholder_table_info(table_name, schema, TableType::Table));
+
         // Columns may already be warm in the schema cache; only hit the DB if not.
-        let columns = match self.cache.get_columns(connection_id, table_name) {
-            Some(cached_columns) => {
-                tracing::debug!("Table columns cache hit for {}", table_name);
-                cached_columns
-            }
-            None => {
-                tracing::debug!("Table columns cache miss, loading from database");
-                let cols = schema_introspection
-                    .get_columns(schema, table_name)
-                    .await
-                    .map_err(|e| ServiceError::SchemaLoadFailed(e.to_string()))?;
-                self.cache
-                    .set_columns(connection_id, table_name, cols.clone());
-                cols
-            }
-        };
+        let columns = self
+            .load_relation_columns(
+                &connection,
+                schema_introspection,
+                connection_id,
+                table_name,
+                schema,
+                table_info.table_type,
+            )
+            .await?;
 
         // These three metadata queries share the same underlying connection, which
         // is protected by an async mutex. Running them concurrently via join! causes
@@ -643,11 +649,15 @@ impl SchemaService {
                 tracing::warn!("Failed to load foreign keys for {}: {}", table_name, e);
                 Vec::new()
             });
-        let primary_key = schema_introspection
-            .get_primary_key(schema, table_name)
-            .await
-            .ok()
-            .flatten();
+        let primary_key = if matches!(table_info.table_type, TableType::VirtualTable) {
+            None
+        } else {
+            schema_introspection
+                .get_primary_key(schema, table_name)
+                .await
+                .ok()
+                .flatten()
+        };
 
         // Extract primary key column names
         let pk_columns: Vec<String> = primary_key
@@ -666,12 +676,19 @@ impl SchemaService {
                     nullable: col.nullable,
                     is_primary_key: is_pk,
                     default_value: col.default_value,
+                    max_length: col.max_length,
+                    precision: col.precision,
+                    scale: col.scale,
+                    is_auto_increment: col.is_auto_increment,
+                    comment: col.comment,
+                    enum_values: col.enum_values,
                 }
             })
             .collect();
 
         let details = TableDetails {
             name: table_name.to_string(),
+            table_type: table_info.table_type,
             columns: column_infos,
             indexes,
             foreign_keys,
@@ -791,33 +808,46 @@ impl SchemaService {
         &self,
         connection: &Arc<dyn Connection>,
         connection_id: Uuid,
-        table_name: &str,
+        object_name: &str,
+        schema: Option<&str>,
+        preferred_object_type: Option<ObjectType>,
     ) -> Option<String> {
-        let cache_key = (connection_id, table_name.to_string());
+        let schema_introspection = connection.as_schema_introspection()?;
+        let object_type = self
+            .resolve_object_type(
+                connection,
+                schema_introspection,
+                connection_id,
+                object_name,
+                schema,
+                preferred_object_type,
+            )
+            .await;
+        let cache_identifier = format!("{:?}:{}", object_type, object_name);
+        let cache_key = (connection_id, cache_identifier);
 
         // Fast path: return cached DDL if the main schema cache is still valid
         if self.cache.is_valid(connection_id) {
             if let Some(cached) = self.ddl_cache.read().get(&cache_key).cloned() {
-                tracing::debug!("DDL cache hit for {}", table_name);
+                tracing::debug!("DDL cache hit for {}", object_name);
                 return Some(cached);
             }
         }
 
-        let schema_introspection = connection.as_schema_introspection()?;
         let db_object = DatabaseObject {
-            object_type: ObjectType::Table,
-            schema: None,
-            name: table_name.to_string(),
+            object_type,
+            schema: schema.map(ToOwned::to_owned),
+            name: object_name.to_string(),
         };
 
         match schema_introspection.generate_ddl(&db_object).await {
             Ok(ddl) => {
                 self.ddl_cache.write().insert(cache_key, ddl.clone());
-                tracing::debug!("DDL generated and cached for {}", table_name);
+                tracing::debug!("DDL generated and cached for {}", object_name);
                 Some(ddl)
             }
             Err(e) => {
-                tracing::warn!("Failed to generate DDL for {}: {}", table_name, e);
+                tracing::warn!("Failed to generate DDL for {}: {}", object_name, e);
                 None
             }
         }
@@ -940,6 +970,350 @@ impl SchemaService {
             None
         }
     }
+}
+
+impl SchemaService {
+    fn placeholder_table_info(
+        table_name: &str,
+        schema: Option<&str>,
+        table_type: TableType,
+    ) -> TableInfo {
+        TableInfo {
+            schema: schema.map(ToOwned::to_owned),
+            name: table_name.to_string(),
+            table_type,
+            owner: None,
+            row_count: None,
+            size_bytes: None,
+            comment: None,
+            index_count: None,
+            trigger_count: None,
+            key_value_info: None,
+        }
+    }
+
+    fn table_type_to_object_type(table_type: TableType) -> ObjectType {
+        match table_type {
+            TableType::View => ObjectType::View,
+            TableType::MaterializedView => ObjectType::MaterializedView,
+            TableType::Table
+            | TableType::VirtualTable
+            | TableType::ForeignTable
+            | TableType::PartitionedTable
+            | TableType::Temporary
+            | TableType::System => ObjectType::Table,
+        }
+    }
+
+    async fn resolve_object_type(
+        &self,
+        connection: &Arc<dyn Connection>,
+        schema_introspection: &dyn SchemaIntrospection,
+        connection_id: Uuid,
+        object_name: &str,
+        schema: Option<&str>,
+        preferred_object_type: Option<ObjectType>,
+    ) -> ObjectType {
+        if let Some(info) = self
+            .lookup_relation_info(
+                connection,
+                schema_introspection,
+                connection_id,
+                object_name,
+                schema,
+            )
+            .await
+        {
+            return Self::table_type_to_object_type(info.table_type);
+        }
+
+        preferred_object_type.unwrap_or(ObjectType::Table)
+    }
+
+    async fn lookup_relation_info(
+        &self,
+        connection: &Arc<dyn Connection>,
+        schema_introspection: &dyn SchemaIntrospection,
+        connection_id: Uuid,
+        object_name: &str,
+        schema: Option<&str>,
+    ) -> Option<TableInfo> {
+        if self.cache.is_valid(connection_id) {
+            if let Some(info) = self
+                .cache
+                .get_tables(connection_id)
+                .unwrap_or_default()
+                .into_iter()
+                .find(|info| info.name == object_name)
+            {
+                return Some(info);
+            }
+
+            if self
+                .cache
+                .get_views(connection_id)
+                .unwrap_or_default()
+                .iter()
+                .any(|view| view.name == object_name)
+            {
+                return Some(Self::placeholder_table_info(
+                    object_name,
+                    schema,
+                    TableType::View,
+                ));
+            }
+
+            if self
+                .cache
+                .get_materialized_views(connection_id)
+                .unwrap_or_default()
+                .iter()
+                .any(|view| view.name == object_name)
+            {
+                return Some(Self::placeholder_table_info(
+                    object_name,
+                    schema,
+                    TableType::MaterializedView,
+                ));
+            }
+        }
+
+        if let Ok(tables) = schema_introspection.list_tables(schema).await {
+            if let Some(info) = tables.iter().find(|info| info.name == object_name).cloned() {
+                self.cache.set_tables(connection_id, tables);
+                return Some(info);
+            }
+        }
+
+        if let Ok(views) = schema_introspection.list_views(schema).await {
+            if views.iter().any(|view| view.name == object_name) {
+                return Some(Self::placeholder_table_info(
+                    object_name,
+                    schema,
+                    TableType::View,
+                ));
+            }
+        }
+
+        if connection.driver_name() == "postgres" {
+            if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
+                if views.iter().any(|view| view.name == object_name) {
+                    return Some(Self::placeholder_table_info(
+                        object_name,
+                        schema,
+                        TableType::MaterializedView,
+                    ));
+                }
+            }
+        }
+
+        None
+    }
+
+    async fn load_relation_columns(
+        &self,
+        connection: &Arc<dyn Connection>,
+        schema_introspection: &dyn SchemaIntrospection,
+        connection_id: Uuid,
+        table_name: &str,
+        schema: Option<&str>,
+        table_type: TableType,
+    ) -> ServiceResult<Vec<SchemaColumnInfo>> {
+        if let Some(cached_columns) = self.cache.get_columns(connection_id, table_name) {
+            tracing::debug!("Table columns cache hit for {}", table_name);
+            return Ok(cached_columns);
+        }
+
+        tracing::debug!("Table columns cache miss, loading from database");
+        match schema_introspection.get_columns(schema, table_name).await {
+            Ok(columns) => {
+                self.cache
+                    .set_columns(connection_id, table_name, columns.clone());
+                Ok(columns)
+            }
+            Err(error)
+                if connection.driver_name() == "sqlite"
+                    && matches!(table_type, TableType::VirtualTable) =>
+            {
+                tracing::warn!(
+                    table_name = %table_name,
+                    error = %error,
+                    "Falling back to DDL-based virtual table column parsing"
+                );
+
+                let columns = self
+                    .load_sqlite_virtual_table_columns(schema_introspection, table_name)
+                    .await?;
+                self.cache
+                    .set_columns(connection_id, table_name, columns.clone());
+                Ok(columns)
+            }
+            Err(error) => Err(ServiceError::SchemaLoadFailed(error.to_string())),
+        }
+    }
+
+    async fn load_sqlite_virtual_table_columns(
+        &self,
+        schema_introspection: &dyn SchemaIntrospection,
+        table_name: &str,
+    ) -> ServiceResult<Vec<SchemaColumnInfo>> {
+        let ddl = schema_introspection
+            .generate_ddl(&DatabaseObject {
+                object_type: ObjectType::Table,
+                schema: None,
+                name: table_name.to_string(),
+            })
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+
+        parse_sqlite_virtual_table_columns(&ddl).ok_or_else(|| {
+            ServiceError::SchemaLoadFailed(format!(
+                "Unable to parse virtual table columns from SQLite DDL for '{}'",
+                table_name
+            ))
+        })
+    }
+}
+
+fn parse_sqlite_virtual_table_columns(ddl: &str) -> Option<Vec<SchemaColumnInfo>> {
+    let arguments = extract_sqlite_virtual_table_arguments(ddl)?;
+    let mut columns = Vec::new();
+
+    for (ordinal, argument) in split_top_level_sql_arguments(arguments)
+        .into_iter()
+        .enumerate()
+    {
+        let trimmed = argument.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        if trimmed.contains('=') {
+            break;
+        }
+
+        let Some(name) = parse_virtual_table_column_name(trimmed) else {
+            continue;
+        };
+
+        columns.push(SchemaColumnInfo {
+            name,
+            ordinal,
+            data_type: "TEXT".to_string(),
+            nullable: true,
+            default_value: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_primary_key: false,
+            is_auto_increment: false,
+            is_unique: false,
+            foreign_key: None,
+            comment: None,
+            ..Default::default()
+        });
+    }
+
+    if columns.is_empty() {
+        None
+    } else {
+        Some(columns)
+    }
+}
+
+fn extract_sqlite_virtual_table_arguments(ddl: &str) -> Option<&str> {
+    let using_index = ddl.to_ascii_uppercase().find("USING")?;
+    let after_using = &ddl[using_index + "USING".len()..];
+    let open_paren = after_using.find('(')?;
+    let mut depth = 0usize;
+
+    for (index, character) in after_using[open_paren..].char_indices() {
+        match character {
+            '(' => depth += 1,
+            ')' => {
+                if depth == 0 {
+                    return None;
+                }
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&after_using[open_paren + 1..open_paren + index]);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    None
+}
+
+fn split_top_level_sql_arguments(arguments: &str) -> Vec<String> {
+    let mut result = Vec::new();
+    let mut current = String::new();
+    let mut depth = 0usize;
+    let mut quote = None;
+
+    for character in arguments.chars() {
+        match quote {
+            Some(active_quote) if character == active_quote => {
+                quote = None;
+                current.push(character);
+            }
+            Some(_) => current.push(character),
+            None => match character {
+                '\'' | '"' => {
+                    quote = Some(character);
+                    current.push(character);
+                }
+                '(' => {
+                    depth += 1;
+                    current.push(character);
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    current.push(character);
+                }
+                ',' if depth == 0 => {
+                    result.push(current.trim().to_string());
+                    current.clear();
+                }
+                _ => current.push(character),
+            },
+        }
+    }
+
+    if !current.trim().is_empty() {
+        result.push(current.trim().to_string());
+    }
+
+    result
+}
+
+fn parse_virtual_table_column_name(argument: &str) -> Option<String> {
+    let trimmed = argument.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('"') {
+        let end = rest.find('"')?;
+        return Some(rest[..end].to_string());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('`') {
+        let end = rest.find('`')?;
+        return Some(rest[..end].to_string());
+    }
+
+    if let Some(rest) = trimmed.strip_prefix('[') {
+        let end = rest.find(']')?;
+        return Some(rest[..end].to_string());
+    }
+
+    trimmed
+        .split_whitespace()
+        .next()
+        .map(|name| name.trim_matches(',').to_string())
+        .filter(|name| !name.is_empty())
 }
 
 impl Default for SchemaService {

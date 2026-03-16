@@ -5,7 +5,9 @@ use gpui::{
 };
 
 use crate::widgets::{
-    ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _, button::Button, h_flex,
+    ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _,
+    button::{Button, ButtonVariants},
+    h_flex,
 };
 
 use super::{Input, InputState};
@@ -154,6 +156,7 @@ impl RenderOnce for NumberInput {
             .when(self.disabled, |this| this.bg(cx.theme().muted))
             .child(
                 Button::new("minus")
+                    .secondary()
                     .outline()
                     .with_size(self.size)
                     .icon(IconName::Minus)
@@ -192,6 +195,7 @@ impl RenderOnce for NumberInput {
             )
             .child(
                 Button::new("plus")
+                    .secondary()
                     .outline()
                     .with_size(self.size)
                     .icon(IconName::Plus)

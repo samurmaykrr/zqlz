@@ -36,4 +36,6 @@ pub use models::{
     ForeignKeyDesign, IndexDesign, TableDesign, TableOptions, ValidationError, get_data_types,
 };
 pub use panel::{DesignerTab, TableDesignerPanel, init};
-pub use service::{DdlGenerator, TableLoader, fk_action_to_sql};
+pub use service::{
+    DdlGenerator, FK_ACTION_LABELS, TableLoader, fk_action_from_sql, fk_action_to_sql,
+};

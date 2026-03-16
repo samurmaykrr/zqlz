@@ -128,9 +128,8 @@ impl RenderOnce for WindowBorder {
                         let size = window.window_bounds().get_bounds().size;
                         let pos = window.mouse_position();
 
-                        match resize_edge(pos, SHADOW_SIZE, size) {
-                            Some(edge) => window.start_window_resize(edge),
-                            None => {}
+                        if let Some(edge) = resize_edge(pos, SHADOW_SIZE, size) {
+                            window.start_window_resize(edge)
                         };
                     }),
             })

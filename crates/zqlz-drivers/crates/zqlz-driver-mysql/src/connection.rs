@@ -209,6 +209,17 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
     match val {
         mysql_async::Value::NULL => Value::Null,
         mysql_async::Value::Bytes(bytes) => {
+            if matches!(
+                col_type,
+                ColumnType::MYSQL_TYPE_BLOB
+                    | ColumnType::MYSQL_TYPE_TINY_BLOB
+                    | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+                    | ColumnType::MYSQL_TYPE_LONG_BLOB
+                    | ColumnType::MYSQL_TYPE_BIT
+            ) {
+                return Value::Bytes(bytes);
+            }
+
             if let Ok(s) = String::from_utf8(bytes.clone()) {
                 match col_type {
                     ColumnType::MYSQL_TYPE_TINY
@@ -229,6 +240,9 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
                     | ColumnType::MYSQL_TYPE_NEWDECIMAL => s
                         .parse::<f64>()
                         .map(Value::Float64)
+                        .unwrap_or(Value::String(s)),
+                    ColumnType::MYSQL_TYPE_JSON => serde_json::from_str::<serde_json::Value>(&s)
+                        .map(Value::Json)
                         .unwrap_or(Value::String(s)),
                     _ => Value::String(s),
                 }

@@ -43,6 +43,12 @@ impl Spinner {
     }
 }
 
+impl Default for Spinner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sizable for Spinner {
     fn with_size(mut self, size: impl Into<Size>) -> Self {
         self.size = size.into();

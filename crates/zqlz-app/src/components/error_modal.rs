@@ -376,6 +376,7 @@ impl ErrorModal {
             .gap_3()
             .child(
                 Button::new("copy-details")
+                    .secondary()
                     .outline()
                     .icon(IconName::Copy)
                     .child("Copy Error Details")

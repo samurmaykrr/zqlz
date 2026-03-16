@@ -55,14 +55,64 @@ impl SelectItem for FkSelectItem {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub enum CellValue {
+    Null,
+    Value(Value),
+}
+
+impl CellValue {
+    pub fn from_value(value: &Value) -> Self {
+        if value.is_null() {
+            Self::Null
+        } else {
+            Self::Value(value.clone())
+        }
+    }
+
+    pub fn as_option_string(&self) -> Option<String> {
+        match self {
+            Self::Null => None,
+            Self::Value(value) => Some(value.display_for_editor()),
+        }
+    }
+
+    pub fn display_for_table(&self) -> String {
+        match self {
+            Self::Null => "NULL".to_string(),
+            Self::Value(value) => value.display_for_table(),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+
+    pub fn as_value(&self) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Value(value) => value.clone(),
+        }
+    }
+
+    pub fn to_value(&self, data_type: &str) -> Value {
+        match self {
+            Self::Null => Value::Null,
+            Self::Value(value) => match value {
+                Value::String(text) => Value::parse_from_string(text, data_type),
+                other => other.clone(),
+            },
+        }
+    }
+}
+
 /// Represents a pending cell change (not yet committed to database)
-/// Uses String values for compatibility with event emission boundaries.
 #[derive(Clone, Debug)]
 pub struct PendingCellChange {
-    /// Original value before editing (display string)
-    pub original_value: String,
-    /// New value after editing (display string)
-    pub new_value: String,
+    /// Original persisted value before editing.
+    pub original_value: CellValue,
+    /// New persisted value after editing.
+    pub new_value: CellValue,
 }
 
 #[derive(Clone, Debug)]
@@ -72,9 +122,9 @@ pub(crate) struct SaveCellRequest {
     pub row: usize,
     pub data_col: usize,
     pub column_name: String,
-    pub new_value: String,
-    pub original_value: String,
-    pub all_row_values: Vec<String>,
+    pub new_value: CellValue,
+    pub original_value: CellValue,
+    pub all_row_values: Vec<Value>,
     pub all_column_names: Vec<String>,
     pub all_column_types: Vec<String>,
 }
@@ -163,10 +213,10 @@ impl PendingChanges {
         value: impl Into<Value>,
     ) {
         let value = value.into();
-        if let Some(row) = self.new_rows.get_mut(new_row_index) {
-            if let Some(cell) = row.get_mut(col_index) {
-                *cell = value;
-            }
+        if let Some(row) = self.new_rows.get_mut(new_row_index)
+            && let Some(cell) = row.get_mut(col_index)
+        {
+            *cell = value;
         }
     }
 }

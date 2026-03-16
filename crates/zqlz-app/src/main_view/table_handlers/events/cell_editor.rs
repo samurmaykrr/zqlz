@@ -32,6 +32,7 @@ impl MainView {
             CellEditorEvent::ValueSaved {
                 cell_data,
                 new_value,
+                typed_value,
                 source_viewer,
             } => {
                 tracing::info!(
@@ -65,7 +66,6 @@ impl MainView {
                 let column_name = cell_data.column_name.clone();
                 let row_index = cell_data.row_index;
                 let col_index = cell_data.col_index;
-                let new_value_for_update = new_value.clone();
                 let original_value = cell_data.current_value.clone();
                 let is_redis = connection.driver_name() == "redis";
                 let schema_qualifier = if !is_redis {
@@ -84,7 +84,7 @@ impl MainView {
 
                 let cell_update_data = zqlz_services::CellUpdateData {
                     column_name: cell_data.column_name.clone(),
-                    new_value,
+                    new_value: Some(typed_value.clone()).filter(|value| !value.is_null()),
                     all_column_names: cell_data.all_column_names.clone(),
                     all_row_values: cell_data.all_row_values.clone(),
                     all_column_types: cell_data.all_column_types.clone(),
@@ -136,7 +136,7 @@ impl MainView {
                                     viewer.update_cell_value(
                                         row_index,
                                         col_index,
-                                        new_value_for_update.clone(),
+                                        typed_value.clone(),
                                         cx,
                                     );
                                 });
@@ -194,6 +194,8 @@ impl MainView {
                                         .button_props(
                                             DialogButtonProps::default()
                                                 .ok_text("OK")
+                                                // This alert passes semantic intent into the shared
+                                                // dialog, which later renders the concrete button.
                                                 .ok_variant(ButtonVariant::Primary),
                                         )
                                         .alert()

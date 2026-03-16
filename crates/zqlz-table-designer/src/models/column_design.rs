@@ -84,8 +84,8 @@ impl ColumnDesign {
             is_unique: info.is_unique,
             ordinal: info.ordinal,
             comment: info.comment.clone(),
-            generated_expression: None,
-            generated_stored: false,
+            generated_expression: info.generation_expression.clone(),
+            generated_stored: info.is_generated_stored,
         }
     }
 

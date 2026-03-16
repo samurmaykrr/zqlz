@@ -22,6 +22,47 @@ use crate::AppMenuBarGlobal;
 use super::MainView;
 
 impl MainView {
+    fn activate_inspector_view(
+        &mut self,
+        view: InspectorView,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.inspector_panel.update(cx, |panel, cx| {
+            panel.set_active_view(view, cx);
+        });
+
+        self.dock_area.update(cx, |area, cx| {
+            area.activate_panel(
+                "InspectorPanel",
+                zqlz_ui::widgets::dock::DockPlacement::Right,
+                window,
+                cx,
+            );
+        });
+    }
+
+    fn open_key_editor_for_active_selection(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let active_table_viewer = self.dock_area.read(cx).active_panel(cx).and_then(|panel| {
+            panel
+                .view()
+                .downcast::<crate::components::TableViewerPanel>()
+                .ok()
+        });
+
+        if let Some(viewer) = active_table_viewer {
+            viewer.update(cx, |viewer, cx| {
+                viewer.emit_open_row_editor(cx);
+            });
+        }
+
+        self.activate_inspector_view(InspectorView::KeyEditor, window, cx);
+    }
+
     /// Render the command palette as an overlay with open/close animations.
     pub(super) fn render_command_palette_overlay(
         &self,
@@ -265,10 +306,12 @@ impl MainView {
             .when(!is_active, |style| style.text_color(theme.muted_foreground))
             .child(Icon::new(icon).small())
             .tooltip(move |window, cx| Tooltip::new(tooltip_text).build(window, cx))
-            .on_click(cx.listener(move |this, _, _window, cx| {
-                this.inspector_panel.update(cx, |panel, cx| {
-                    panel.set_active_view(view, cx);
-                });
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if view == InspectorView::KeyEditor {
+                    this.open_key_editor_for_active_selection(window, cx);
+                } else {
+                    this.activate_inspector_view(view, window, cx);
+                }
                 cx.notify();
             }))
     }

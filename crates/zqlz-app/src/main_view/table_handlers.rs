@@ -13,7 +13,7 @@
 mod events;
 mod redis_ops;
 mod standalone_events;
-mod table_ops;
+pub(in crate::main_view) mod table_ops;
 
 // Import standalone event handlers for use within this module's event subscriptions
-pub(self) use standalone_events::*;
+use standalone_events::*;

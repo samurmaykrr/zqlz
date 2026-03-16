@@ -18,6 +18,8 @@ use crate::widgets::{
     v_flex,
 };
 
+type SheetCloseHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+
 const CONTEXT: &str = "Sheet";
 #[allow(dead_code)]
 pub(crate) fn init(cx: &mut App) {
@@ -31,7 +33,7 @@ pub struct Sheet {
     pub(crate) placement: Placement,
     pub(crate) size: DefiniteLength,
     resizable: bool,
-    on_close: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
+    on_close: SheetCloseHandler,
     title: Option<AnyElement>,
     footer: Option<AnyElement>,
     style: StyleRefinement,

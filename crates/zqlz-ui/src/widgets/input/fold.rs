@@ -158,12 +158,12 @@ impl FoldState {
     /// Check if a line is folded (hidden).
     pub fn is_line_folded(&self, line: usize) -> bool {
         for &start_line in self.folded.iter() {
-            if let Some(&idx) = self.region_by_line.get(&start_line) {
-                if let Some(region) = self.regions.get(idx) {
-                    if line > region.start_line && line <= region.end_line {
-                        return true;
-                    }
-                }
+            if let Some(&idx) = self.region_by_line.get(&start_line)
+                && let Some(region) = self.regions.get(idx)
+                && line > region.start_line
+                && line <= region.end_line
+            {
+                return true;
             }
         }
         false
@@ -216,22 +216,14 @@ impl FoldState {
 
     /// Get the next visible line after the given line.
     pub fn next_visible_line(&self, line: usize, total_lines: usize) -> Option<usize> {
-        for next_line in (line + 1)..total_lines {
-            if !self.is_line_folded(next_line) {
-                return Some(next_line);
-            }
-        }
-        None
+        ((line + 1)..total_lines).find(|&next_line| !self.is_line_folded(next_line))
     }
 
     /// Get the previous visible line before the given line.
     pub fn prev_visible_line(&self, line: usize) -> Option<usize> {
-        for prev_line in (0..line).rev() {
-            if !self.is_line_folded(prev_line) {
-                return Some(prev_line);
-            }
-        }
-        None
+        (0..line)
+            .rev()
+            .find(|&prev_line| !self.is_line_folded(prev_line))
     }
 }
 
@@ -261,7 +253,7 @@ mod tests {
     #[test]
     fn test_fold_state_basic() {
         let state = FoldState::new();
-        assert_eq!(state.regions().len(), 0);
+        assert!(state.regions().is_empty());
         assert!(!state.is_folded(0));
     }
 
@@ -273,7 +265,7 @@ mod tests {
 
         // Should detect at least one fold region starting at SELECT
         assert!(
-            state.regions().len() > 0,
+            !state.regions().is_empty(),
             "Expected at least one fold region"
         );
     }

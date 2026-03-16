@@ -89,15 +89,18 @@ impl SchemaIntrospection for PostgresConnection {
         let schema = schema.unwrap_or("public");
         let result = self
             .query(
-                "SELECT 
-                    t.table_name,
-                    t.table_type,
-                    pg_stat.n_live_tup as row_count,
-                    pg_total_relation_size(quote_ident(t.table_schema)||'.'||quote_ident(t.table_name)) as size_bytes
-                 FROM information_schema.tables t
-                 LEFT JOIN pg_stat_user_tables pg_stat ON t.table_name = pg_stat.relname AND t.table_schema = pg_stat.schemaname
-                 WHERE t.table_schema = $1
-                 ORDER BY t.table_name",
+                "SELECT
+                    c.relname,
+                    c.relkind,
+                    CASE WHEN c.relkind IN ('v', 'm') THEN NULL ELSE s.n_live_tup END AS row_count,
+                    CASE WHEN c.relkind IN ('v', 'm') THEN NULL ELSE pg_total_relation_size(c.oid) END AS size_bytes,
+                    obj_description(c.oid, 'pg_class') AS comment
+                 FROM pg_catalog.pg_class c
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+                 WHERE n.nspname = $1
+                   AND c.relkind IN ('r', 'p', 'f')
+                 ORDER BY c.relname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
             .await?;
@@ -111,13 +114,14 @@ impl SchemaIntrospection for PostgresConnection {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let table_type_str = row.get(1).and_then(|v| v.as_str()).unwrap_or("BASE TABLE");
+                let relkind = row.get(1).and_then(|v| v.as_str()).unwrap_or("r");
                 let row_count = row.get(2).and_then(|v| v.as_i64());
                 let size_bytes = row.get(3).and_then(|v| v.as_i64());
+                let comment = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
 
-                let table_type = match table_type_str {
-                    "BASE TABLE" => TableType::Table,
-                    "VIEW" => TableType::View,
+                let table_type = match relkind {
+                    "p" => TableType::PartitionedTable,
+                    "f" => TableType::ForeignTable,
                     _ => TableType::Table,
                 };
 
@@ -128,7 +132,7 @@ impl SchemaIntrospection for PostgresConnection {
                     owner: None,
                     row_count,
                     size_bytes,
-                    comment: None,
+                    comment,
                     index_count: None,
                     trigger_count: None,
                     key_value_info: None,
@@ -246,17 +250,28 @@ impl SchemaIntrospection for PostgresConnection {
         let result = self
             .query(
                 "SELECT 
-                    column_name, 
-                    ordinal_position,
-                    data_type, 
-                    is_nullable, 
-                    column_default,
-                    character_maximum_length,
-                    numeric_precision,
-                    numeric_scale,
-                    is_identity
-                 FROM information_schema.columns 
-                 WHERE table_schema = $1 AND table_name = $2
+                    c.column_name, 
+                    c.ordinal_position,
+                    CASE
+                        WHEN c.data_type = 'ARRAY' THEN concat(regexp_replace(c.udt_name, '^_', ''), '[]')
+                        WHEN c.data_type = 'USER-DEFINED' THEN c.udt_name
+                        ELSE c.data_type
+                    END,
+                    c.is_nullable, 
+                    c.column_default,
+                    c.character_maximum_length,
+                    c.numeric_precision,
+                    c.numeric_scale,
+                    c.is_identity,
+                    (
+                        SELECT array_agg(e.enumlabel ORDER BY e.enumsortorder)
+                        FROM pg_catalog.pg_type t
+                        JOIN pg_catalog.pg_namespace n ON n.oid = t.typnamespace
+                        JOIN pg_catalog.pg_enum e ON e.enumtypid = t.oid
+                        WHERE t.typname = c.udt_name AND n.nspname = c.udt_schema
+                    )
+                 FROM information_schema.columns c
+                 WHERE c.table_schema = $1 AND c.table_name = $2
                  ORDER BY ordinal_position",
                 &[
                     zqlz_core::Value::String(schema.to_string()),
@@ -286,6 +301,7 @@ impl SchemaIntrospection for PostgresConnection {
                 let precision = row.get(6).and_then(|v| v.as_i64()).map(|i| i as i32);
                 let scale = row.get(7).and_then(|v| v.as_i64()).map(|i| i as i32);
                 let is_identity = row.get(8).and_then(|v| v.as_str()).unwrap_or("NO") == "YES";
+                let enum_values = row.get(9).and_then(|value| value.as_string_array());
                 let is_auto_increment = is_identity
                     || default_value
                         .as_ref()
@@ -306,6 +322,7 @@ impl SchemaIntrospection for PostgresConnection {
                     is_unique: false,
                     foreign_key: None,
                     comment: None,
+                    enum_values,
                     ..Default::default()
                 }
             })

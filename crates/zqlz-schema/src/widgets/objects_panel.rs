@@ -3,6 +3,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
+use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_core::{
     DriverCategory, ObjectsPanelColumn, ObjectsPanelColumnAlignment, ObjectsPanelData,
     ObjectsPanelRow,
@@ -175,6 +176,8 @@ pub struct ObjectsTableDelegate {
     is_loading: bool,
     /// Current driver category (determines context menu behavior)
     driver_category: DriverCategory,
+    /// Effective object capabilities for the active connection.
+    object_capabilities: SidebarObjectCapabilities,
     /// Cached selected row indices for context menu (populated when context menu opens)
     context_menu_selected_rows: Vec<usize>,
 }
@@ -196,6 +199,7 @@ impl ObjectsTableDelegate {
             panel,
             is_loading: false,
             driver_category: DriverCategory::Relational,
+            object_capabilities: SidebarObjectCapabilities::default(),
             context_menu_selected_rows: Vec::new(),
         }
     }
@@ -239,6 +243,11 @@ impl ObjectsTableDelegate {
     /// Set the driver category (determines context menu behavior)
     pub fn set_driver_category(&mut self, category: DriverCategory) {
         self.driver_category = category;
+    }
+
+    /// Set the effective object capabilities for the active connection.
+    pub fn set_object_capabilities(&mut self, object_capabilities: SidebarObjectCapabilities) {
+        self.object_capabilities = object_capabilities;
     }
 
     /// Set the database name for multi-database browsing (MySQL)
@@ -297,6 +306,7 @@ impl ObjectsTableDelegate {
         self.objects.clear();
         self.filtered_objects.clear();
         self.driver_category = DriverCategory::Relational;
+        self.object_capabilities = SidebarObjectCapabilities::default();
         let default_data = ObjectsPanelData::from_table_infos(Vec::new());
         let (columns, column_ids) = Self::build_ui_columns(&default_data.columns);
         self.columns = columns;
@@ -516,7 +526,7 @@ impl TableDelegate for ObjectsTableDelegate {
                     self.build_redis_database_context_menu(
                         menu,
                         connection_id,
-                        &obj,
+                        obj,
                         menu_entity,
                         panel,
                         window,
@@ -923,21 +933,22 @@ impl ObjectsTableDelegate {
                     },
                 ))
             })
-            // New View (always single)
-            .item({
-                let panel = panel.clone();
-                let database_name = database_name.clone();
-                PopupMenuItem::new("New View").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::NewView {
-                                connection_id,
-                                database_name: database_name.clone(),
+            .when(self.object_capabilities.supports_views, |menu| {
+                menu.item({
+                    let panel = panel.clone();
+                    let database_name = database_name.clone();
+                    PopupMenuItem::new("New View").on_click(window.listener_for(
+                        &menu_entity,
+                        move |_this, _, _, cx| {
+                            _ = panel.update(cx, |_panel, cx| {
+                                cx.emit(ObjectsPanelEvent::NewView {
+                                    connection_id,
+                                    database_name: database_name.clone(),
+                                });
                             });
-                        });
-                    },
-                ))
+                        },
+                    ))
+                })
             })
             // Delete View(s)
             .item({
@@ -1293,6 +1304,8 @@ pub struct ObjectsPanel {
     table_state: Entity<TableState<ObjectsTableDelegate>>,
     /// Whether the panel has a valid connection
     has_connection: bool,
+    /// Effective object capabilities for the active connection.
+    object_capabilities: SidebarObjectCapabilities,
     /// Currently selected connection ID
     selected_connection_id: Option<Uuid>,
     /// Currently selected connection name
@@ -1344,30 +1357,29 @@ impl ObjectsPanel {
             if let TableEvent::DoubleClickedRow(row_ix) = event {
                 // Open the table/view/database on double-click
                 let table_state = panel.table_state.read(cx);
-                if let Some(obj) = table_state.delegate().filtered_objects().get(*row_ix) {
-                    if let Some(connection_id) = panel.selected_connection_id {
-                        let database_name = panel.database_name.clone();
-                        // Emit appropriate event based on object type
-                        if obj.object_type == "redis_database" {
-                            if let Some(db_index) = obj.redis_database_index {
-                                cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
-                                    connection_id,
-                                    database_index: db_index,
-                                });
-                            }
-                        } else if obj.object_type == "view" {
-                            cx.emit(ObjectsPanelEvent::OpenViews {
+                if let Some(obj) = table_state.delegate().filtered_objects().get(*row_ix)
+                    && let Some(connection_id) = panel.selected_connection_id
+                {
+                    let database_name = panel.database_name.clone();
+                    if obj.object_type == "redis_database" {
+                        if let Some(db_index) = obj.redis_database_index {
+                            cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
                                 connection_id,
-                                view_names: vec![obj.name.clone()],
-                                database_name,
-                            });
-                        } else {
-                            cx.emit(ObjectsPanelEvent::OpenTables {
-                                connection_id,
-                                table_names: vec![obj.name.clone()],
-                                database_name,
+                                database_index: db_index,
                             });
                         }
+                    } else if obj.object_type == "view" {
+                        cx.emit(ObjectsPanelEvent::OpenViews {
+                            connection_id,
+                            view_names: vec![obj.name.clone()],
+                            database_name,
+                        });
+                    } else {
+                        cx.emit(ObjectsPanelEvent::OpenTables {
+                            connection_id,
+                            table_names: vec![obj.name.clone()],
+                            database_name,
+                        });
                     }
                 }
             }
@@ -1379,6 +1391,7 @@ impl ObjectsPanel {
             search_input,
             table_state,
             has_connection: false,
+            object_capabilities: SidebarObjectCapabilities::default(),
             selected_connection_id: None,
             connection_name: None,
             database_name: None,
@@ -1398,15 +1411,20 @@ impl ObjectsPanel {
         database_name: Option<String>,
         data: ObjectsPanelData,
         driver_category: DriverCategory,
+        object_capabilities: SidebarObjectCapabilities,
         cx: &mut Context<Self>,
     ) {
         self.selected_connection_id = Some(connection_id);
         self.connection_name = Some(connection_name);
         self.database_name = database_name.clone();
         self.has_connection = true;
+        self.object_capabilities = object_capabilities;
 
         self.table_state.update(cx, |state, cx| {
             state.delegate_mut().set_driver_category(driver_category);
+            state
+                .delegate_mut()
+                .set_object_capabilities(object_capabilities);
             state.delegate_mut().set_database_name(database_name);
             state.delegate_mut().set_extended_data(connection_id, data);
             if !self.search_text.is_empty() {
@@ -1429,6 +1447,7 @@ impl ObjectsPanel {
         self.selected_connection_id = Some(connection_id);
         self.connection_name = Some(connection_name);
         self.has_connection = true;
+        self.object_capabilities = SidebarObjectCapabilities::for_driver("redis");
 
         let objects: Vec<ObjectsPanelRow> = databases
             .into_iter()
@@ -1456,6 +1475,9 @@ impl ObjectsPanel {
             state
                 .delegate_mut()
                 .set_driver_category(DriverCategory::KeyValue);
+            state
+                .delegate_mut()
+                .set_object_capabilities(self.object_capabilities);
             state.delegate_mut().set_key_value_columns();
             state.delegate_mut().connection_id = Some(connection_id);
             state.delegate_mut().objects = objects.clone();
@@ -1475,6 +1497,7 @@ impl ObjectsPanel {
         self.connection_name = None;
         self.database_name = None;
         self.has_connection = false;
+        self.object_capabilities = SidebarObjectCapabilities::default();
         self.table_state.update(cx, |state, cx| {
             state.delegate_mut().clear();
             state.refresh(cx);
@@ -1587,6 +1610,27 @@ impl ObjectsPanel {
         let Some(connection_id) = self.selected_connection_id else {
             return;
         };
+        let selected_object_type = {
+            let table_state = self.table_state.read(cx);
+            table_state.selected_row().and_then(|row_index| {
+                table_state
+                    .delegate()
+                    .filtered_objects()
+                    .get(row_index)
+                    .map(|object| object.object_type.clone())
+            })
+        };
+
+        if selected_object_type.as_deref() == Some("view")
+            && self.object_capabilities.supports_views
+        {
+            cx.emit(ObjectsPanelEvent::NewView {
+                connection_id,
+                database_name: self.database_name.clone(),
+            });
+            return;
+        }
+
         cx.emit(ObjectsPanelEvent::NewTable {
             connection_id,
             database_name: self.database_name.clone(),
@@ -1606,10 +1650,13 @@ impl ObjectsPanel {
 
         let driver_category = self.table_state.read(cx).delegate().driver_category();
         let is_relational = driver_category == DriverCategory::Relational;
+        let supports_views = self.object_capabilities.supports_views;
         let database_name = self.database_name.clone();
         let panel_weak = cx.entity().downgrade();
+        let action_context = self.focus_handle.clone();
 
         let menu = PopupMenu::build(window, cx, |menu, _, _| {
+            let menu = menu.action_context(action_context.clone());
             let menu = if is_relational {
                 menu.item(PopupMenuItem::new("New Table").on_click({
                     let panel = panel_weak.clone();
@@ -1623,6 +1670,20 @@ impl ObjectsPanel {
                         });
                     }
                 }))
+                .when(supports_views, |menu| {
+                    menu.item(PopupMenuItem::new("New View").on_click({
+                        let panel = panel_weak.clone();
+                        let db = database_name.clone();
+                        move |_, _, cx| {
+                            _ = panel.update(cx, |_, cx| {
+                                cx.emit(ObjectsPanelEvent::NewView {
+                                    connection_id,
+                                    database_name: db.clone(),
+                                });
+                            });
+                        }
+                    }))
+                })
                 .separator()
             } else {
                 menu
@@ -1676,6 +1737,7 @@ impl Render for ObjectsPanel {
         // Get driver category to conditionally show/hide buttons
         let driver_category = self.table_state.read(cx).delegate().driver_category();
         let is_relational = driver_category == DriverCategory::Relational;
+        let supports_views = self.object_capabilities.supports_views;
 
         let refresh_handler = cx.listener(|_this, _, _, cx| {
             cx.emit(ObjectsPanelEvent::Refresh);
@@ -1684,6 +1746,17 @@ impl Render for ObjectsPanel {
         let new_table_handler = cx.listener(|this, _, _, cx| {
             if let Some(conn_id) = this.selected_connection_id {
                 cx.emit(ObjectsPanelEvent::NewTable {
+                    connection_id: conn_id,
+                    database_name: this.database_name.clone(),
+                });
+            }
+        });
+
+        let new_view_handler = cx.listener(|this, _, _, cx| {
+            if let Some(conn_id) = this.selected_connection_id
+                && this.object_capabilities.supports_views
+            {
+                cx.emit(ObjectsPanelEvent::NewView {
                     connection_id: conn_id,
                     database_name: this.database_name.clone(),
                 });
@@ -1753,6 +1826,16 @@ impl Render for ObjectsPanel {
                                 .icon(ZqlzIcon::Plus)
                                 .tooltip("New Table")
                                 .on_click(new_table_handler),
+                        )
+                    })
+                    .when(is_relational && supports_views, |this| {
+                        this.child(
+                            Button::new("add-view")
+                                .ghost()
+                                .xsmall()
+                                .icon(IconName::Eye)
+                                .tooltip("New View")
+                                .on_click(new_view_handler),
                         )
                     })
                     .child(

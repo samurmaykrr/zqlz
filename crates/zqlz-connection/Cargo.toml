@@ -20,5 +20,6 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 chrono.workspace = true
+url.workspace = true
 
 [dev-dependencies]

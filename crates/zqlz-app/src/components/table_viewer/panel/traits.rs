@@ -33,16 +33,15 @@ impl Panel for TableViewerPanel {
     }
 
     fn set_active(&mut self, active: bool, _window: &mut Window, cx: &mut Context<Self>) {
-        if active {
-            if let (Some(connection_id), Some(table_name)) =
+        if active
+            && let (Some(connection_id), Some(table_name)) =
                 (self.connection_id, self.table_name.clone())
-            {
-                cx.emit(TableViewerEvent::BecameActive {
-                    connection_id,
-                    table_name,
-                    database_name: self.database_name.clone(),
-                });
-            }
+        {
+            cx.emit(TableViewerEvent::BecameActive {
+                connection_id,
+                table_name,
+                database_name: self.database_name.clone(),
+            });
         }
     }
 

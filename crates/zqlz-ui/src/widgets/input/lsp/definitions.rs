@@ -85,16 +85,16 @@ impl InputState {
         self.lsp._hover_task = cx.spawn_in(window, async move |_, cx| {
             let locations = task.await?;
 
-            _ = editor.update(cx, |editor, cx| {
+            editor.update(cx, |editor, cx| {
                 if locations.is_empty() {
                     editor.hover_definition.clear();
                 } else {
-                    if let Some(location) = locations.first() {
-                        if let Some(range) = location.origin_selection_range {
-                            let start = editor.text.position_to_offset(&range.start);
-                            let end = editor.text.position_to_offset(&range.end);
-                            symbol_range = start..end;
-                        }
+                    if let Some(location) = locations.first()
+                        && let Some(range) = location.origin_selection_range
+                    {
+                        let start = editor.text.position_to_offset(&range.start);
+                        let end = editor.text.position_to_offset(&range.end);
+                        symbol_range = start..end;
                     }
 
                     editor
@@ -224,9 +224,7 @@ impl TextElement {
             return None;
         };
 
-        let Some(bounds) = editor.range_to_bounds(&editor.hover_definition.symbol_range) else {
-            return None;
-        };
+        let bounds = editor.range_to_bounds(&editor.hover_definition.symbol_range)?;
 
         Some(window.insert_hitbox(bounds, gpui::HitboxBehavior::Normal))
     }

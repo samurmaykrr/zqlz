@@ -56,10 +56,7 @@ fn test_join_suggests_related_tables() {
 
     if let Some(completion) = audit_log_completion {
         assert!(
-            completion
-                .detail
-                .as_ref()
-                .map_or(false, |d| d.contains("FK")),
+            completion.detail.as_ref().is_some_and(|d| d.contains("FK")),
             "Should indicate FK relationship in detail"
         );
     }

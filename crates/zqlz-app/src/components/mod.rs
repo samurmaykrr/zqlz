@@ -27,8 +27,8 @@ pub use zqlz_connection::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarE
 pub use zqlz_query::widgets::QueryHistoryPanel;
 pub use zqlz_query::{
     ExplainResult, ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryEditor,
-    QueryEditorEvent, QueryExecution, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel,
-    ResultsPanelEvent, StatementResult,
+    QueryEditorEvent, QueryExecution, QueryTabsPanel, ResultsPanel, ResultsPanelEvent,
+    StatementResult,
 };
 // Re-export schema widgets from zqlz-schema for backward compatibility
 pub use zqlz_schema::{
@@ -39,6 +39,6 @@ pub use zqlz_schema::{
 pub use zqlz_settings::{SettingsPanel, SettingsPanelEvent};
 // Re-export TableDesigner from zqlz-table-designer for backward compatibility
 pub use table_viewer::{
-    FilterCondition, PendingCellChange, SortCriterion, SortDirection, TableViewerEvent,
+    CellValue, FilterCondition, PendingCellChange, SortCriterion, SortDirection, TableViewerEvent,
     TableViewerPanel,
 };

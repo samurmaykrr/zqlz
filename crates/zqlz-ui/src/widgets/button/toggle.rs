@@ -9,6 +9,9 @@ use smallvec::{SmallVec, smallvec};
 
 use crate::widgets::{ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt, h_flex};
 
+type ToggleClickHandler = Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+type ToggleGroupClickHandler = Rc<dyn Fn(&Vec<bool>, &mut Window, &mut App) + 'static>;
+
 #[derive(Default, Copy, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ToggleVariant {
     #[default]
@@ -38,7 +41,7 @@ pub struct Toggle {
     variant: ToggleVariant,
     disabled: bool,
     children: SmallVec<[AnyElement; 1]>,
-    on_click: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+    on_click: Option<ToggleClickHandler>,
 }
 
 impl Toggle {
@@ -172,7 +175,7 @@ pub struct ToggleGroup {
     variant: ToggleVariant,
     disabled: bool,
     items: Vec<Toggle>,
-    on_click: Option<Rc<dyn Fn(&Vec<bool>, &mut Window, &mut App) + 'static>>,
+    on_click: Option<ToggleGroupClickHandler>,
 }
 
 impl ToggleGroup {

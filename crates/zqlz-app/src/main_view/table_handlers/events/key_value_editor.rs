@@ -9,8 +9,7 @@
 
 use gpui::*;
 use std::sync::Arc;
-use zqlz_core::Connection;
-use zqlz_core::StatementResult;
+use zqlz_core::{Connection, StatementResult, Value};
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
@@ -26,6 +25,101 @@ async fn execute_redis_command(
     command: String,
 ) -> anyhow::Result<StatementResult> {
     connection.execute(&command, &[]).await.map_err(Into::into)
+}
+
+fn empty_collection_save_error(value_type: RedisValueType) -> anyhow::Error {
+    anyhow::anyhow!(match value_type {
+        RedisValueType::List => {
+            "Cannot save an empty Redis list. Add an element or delete the key explicitly."
+        }
+        RedisValueType::Set => {
+            "Cannot save an empty Redis set. Add an element or delete the key explicitly."
+        }
+        RedisValueType::ZSet => {
+            "Cannot save an empty Redis sorted set. Add a member or delete the key explicitly."
+        }
+        RedisValueType::Hash => {
+            "Cannot save an empty Redis hash. Add a field or delete the key explicitly."
+        }
+        _ => "Cannot save an empty Redis collection.",
+    })
+}
+
+fn parse_collection_items(new_value: &str) -> Vec<String> {
+    if new_value.trim().starts_with('[') {
+        serde_json::from_str(&new_value)
+            .unwrap_or_else(|_| new_value.lines().map(|value| value.to_string()).collect())
+    } else {
+        new_value.lines().map(|value| value.to_string()).collect()
+    }
+}
+
+fn parse_zset_items(new_value: &str) -> anyhow::Result<Vec<(f64, String)>> {
+    let value = serde_json::from_str::<serde_json::Value>(new_value)?;
+
+    if let Some(map) = value.as_object() {
+        let mut items = Vec::with_capacity(map.len());
+        for (member, score_value) in map {
+            let score = score_value.as_f64().ok_or_else(|| {
+                anyhow::anyhow!("Invalid sorted set score for '{}': {}", member, score_value)
+            })?;
+            if !score.is_finite() {
+                return Err(anyhow::anyhow!(
+                    "Invalid sorted set score for '{}': {}",
+                    member,
+                    score_value
+                ));
+            }
+            items.push((score, member.clone()));
+        }
+        return Ok(items);
+    }
+
+    if let Some(array) = value.as_array() {
+        let mut items = Vec::new();
+        for chunk in array.chunks(2) {
+            if chunk.len() != 2 {
+                return Err(anyhow::anyhow!(
+                    "Invalid sorted set payload: expected score/member pairs"
+                ));
+            }
+
+            let score = chunk[0]
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("Invalid sorted set score: {}", chunk[0]))?;
+            if !score.is_finite() {
+                return Err(anyhow::anyhow!("Invalid sorted set score: {}", chunk[0]));
+            }
+
+            let member = chunk[1]
+                .as_str()
+                .ok_or_else(|| anyhow::anyhow!("Invalid sorted set member: {}", chunk[1]))?;
+            items.push((score, member.to_string()));
+        }
+        return Ok(items);
+    }
+
+    Err(anyhow::anyhow!(
+        "Invalid sorted set payload: expected JSON object or array"
+    ))
+}
+
+fn parse_hash_fields(new_value: &str) -> anyhow::Result<Vec<(String, String)>> {
+    let value = serde_json::from_str::<serde_json::Value>(new_value)?;
+    let object = value
+        .as_object()
+        .ok_or_else(|| anyhow::anyhow!("Invalid hash payload: expected JSON object"))?;
+
+    Ok(object
+        .iter()
+        .map(|(field, value)| {
+            let value = match value {
+                serde_json::Value::String(string) => string.clone(),
+                _ => value.to_string(),
+            };
+            (field.clone(), value)
+        })
+        .collect())
 }
 
 impl MainView {
@@ -71,6 +165,7 @@ impl MainView {
                 let connection = connection.clone();
                 let key = new_key.clone();
                 let dock_area = self.dock_area.clone();
+                let window_handle = window.window_handle();
 
                 cx.spawn_in(window, async move |_this, cx| {
                     let escaped_key = escape_redis_value(&key);
@@ -89,13 +184,7 @@ impl MainView {
                             true
                         }
                         RedisValueType::List => {
-                            let items: Vec<String> = if new_value.trim().starts_with('[') {
-                                serde_json::from_str(&new_value).unwrap_or_else(|_| {
-                                    new_value.lines().map(|s| s.to_string()).collect()
-                                })
-                            } else {
-                                new_value.lines().map(|s| s.to_string()).collect()
-                            };
+                            let items = parse_collection_items(&new_value);
 
                             if !items.is_empty() {
                                 let escaped_items: Vec<String> =
@@ -108,17 +197,11 @@ impl MainView {
                                 execute_redis_command(&connection, cmd).await?;
                                 true
                             } else {
-                                false
+                                return Err(empty_collection_save_error(value_type));
                             }
                         }
                         RedisValueType::Set => {
-                            let items: Vec<String> = if new_value.trim().starts_with('[') {
-                                serde_json::from_str(&new_value).unwrap_or_else(|_| {
-                                    new_value.lines().map(|s| s.to_string()).collect()
-                                })
-                            } else {
-                                new_value.lines().map(|s| s.to_string()).collect()
-                            };
+                            let items = parse_collection_items(&new_value);
 
                             if !items.is_empty() {
                                 let escaped_items: Vec<String> =
@@ -131,37 +214,11 @@ impl MainView {
                                 execute_redis_command(&connection, cmd).await?;
                                 true
                             } else {
-                                false
+                                return Err(empty_collection_save_error(value_type));
                             }
                         }
                         RedisValueType::ZSet => {
-                            let items: Vec<(f64, String)> = if let Ok(obj) =
-                                serde_json::from_str::<serde_json::Value>(&new_value)
-                            {
-                                if let Some(obj) = obj.as_object() {
-                                    obj.iter()
-                                        .filter_map(|(k, v)| {
-                                            v.as_f64().map(|score| (score, k.clone()))
-                                        })
-                                        .collect()
-                                } else if let Some(arr) = obj.as_array() {
-                                    arr.chunks(2)
-                                        .filter_map(|chunk| {
-                                            if chunk.len() == 2 {
-                                                let score = chunk[0].as_f64()?;
-                                                let member = chunk[1].as_str()?.to_string();
-                                                Some((score, member))
-                                            } else {
-                                                None
-                                            }
-                                        })
-                                        .collect()
-                                } else {
-                                    Vec::new()
-                                }
-                            } else {
-                                Vec::new()
-                            };
+                            let items = parse_zset_items(&new_value)?;
 
                             if !items.is_empty() {
                                 let args: Vec<String> = items
@@ -175,29 +232,11 @@ impl MainView {
                                 execute_redis_command(&connection, cmd).await?;
                                 true
                             } else {
-                                false
+                                return Err(empty_collection_save_error(value_type));
                             }
                         }
                         RedisValueType::Hash => {
-                            let fields: Vec<(String, String)> = if let Ok(obj) =
-                                serde_json::from_str::<serde_json::Value>(&new_value)
-                            {
-                                if let Some(obj) = obj.as_object() {
-                                    obj.iter()
-                                        .map(|(k, v)| {
-                                            let val = match v {
-                                                serde_json::Value::String(s) => s.clone(),
-                                                _ => v.to_string(),
-                                            };
-                                            (k.clone(), val)
-                                        })
-                                        .collect()
-                                } else {
-                                    Vec::new()
-                                }
-                            } else {
-                                Vec::new()
-                            };
+                            let fields = parse_hash_fields(&new_value)?;
 
                             if !fields.is_empty() {
                                 let args: Vec<String> = fields
@@ -211,7 +250,7 @@ impl MainView {
                                 execute_redis_command(&connection, cmd).await?;
                                 true
                             } else {
-                                false
+                                return Err(empty_collection_save_error(value_type));
                             }
                         }
                         RedisValueType::Stream => {
@@ -260,15 +299,6 @@ impl MainView {
 
                         Ok(())
                     } else {
-                        execute_redis_command(&connection, format!("DEL {}", escaped_key)).await?;
-                        if is_rename {
-                            let escaped_original_key = escape_redis_value(&original_key);
-                            execute_redis_command(
-                                &connection,
-                                format!("DEL {}", escaped_original_key),
-                            )
-                            .await?;
-                        }
                         Ok(())
                     };
 
@@ -277,21 +307,27 @@ impl MainView {
                             tracing::info!("Redis key '{}' updated successfully", key);
                             // Refresh the active TableViewer to show updated data
                             _ = dock_area.update_in(cx, |dock_area, _window, cx| {
-                                if let Some(panel) = dock_area.active_panel(cx) {
-                                    if panel.panel_name(cx) == "TableViewer" {
-                                        if let Ok(viewer) =
-                                            panel.view().downcast::<TableViewerPanel>()
-                                        {
-                                            viewer.update(cx, |viewer, cx| {
-                                                viewer.refresh(cx);
-                                            });
-                                        }
-                                    }
+                                if let Some(panel) = dock_area.active_panel(cx)
+                                    && panel.panel_name(cx) == "TableViewer"
+                                    && let Ok(viewer) = panel.view().downcast::<TableViewerPanel>()
+                                {
+                                    viewer.update(cx, |viewer, cx| {
+                                        viewer.refresh(cx);
+                                    });
                                 }
                             });
                         }
                         Err(e) => {
                             tracing::error!("Failed to update Redis key '{}': {}", key, e);
+                            _ = cx.update_window(window_handle, |_, window, cx| {
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "Failed to update Redis key '{}': {}",
+                                        key, e
+                                    )),
+                                    cx,
+                                );
+                            });
                         }
                     }
 
@@ -336,16 +372,13 @@ impl MainView {
                             tracing::info!("Redis key '{}' deleted successfully", key_for_delete);
                             // Refresh the active TableViewer to show updated data
                             _ = dock_area.update_in(cx, |dock_area, _window, cx| {
-                                if let Some(panel) = dock_area.active_panel(cx) {
-                                    if panel.panel_name(cx) == "TableViewer" {
-                                        if let Ok(viewer) =
-                                            panel.view().downcast::<TableViewerPanel>()
-                                        {
-                                            viewer.update(cx, |viewer, cx| {
-                                                viewer.refresh(cx);
-                                            });
-                                        }
-                                    }
+                                if let Some(panel) = dock_area.active_panel(cx)
+                                    && panel.panel_name(cx) == "TableViewer"
+                                    && let Ok(viewer) = panel.view().downcast::<TableViewerPanel>()
+                                {
+                                    viewer.update(cx, |viewer, cx| {
+                                        viewer.refresh(cx);
+                                    });
                                 }
                             });
                         }
@@ -367,7 +400,8 @@ impl MainView {
                 connection_id,
                 column_names,
                 column_types,
-                values,
+                values: _,
+                typed_values,
                 is_new,
                 row_index: _,
                 source_viewer,
@@ -411,7 +445,6 @@ impl MainView {
                 let table_name = table_name.clone();
                 let column_names = column_names.clone();
                 let column_types = column_types.clone();
-                let values = values.clone();
                 let original_row_values = original_row_values.clone();
                 let source_viewer = source_viewer.clone();
                 let window_handle = window.window_handle();
@@ -426,7 +459,16 @@ impl MainView {
                                 schema_qualifier.as_deref(),
                                 RowInsertData {
                                     column_names: column_names.clone(),
-                                    values,
+                                    values: typed_values
+                                        .iter()
+                                        .map(|value| {
+                                            if value.is_null() {
+                                                None
+                                            } else {
+                                                Some(value.clone())
+                                            }
+                                        })
+                                        .collect(),
                                     column_types: column_types.clone(),
                                 },
                             )
@@ -436,7 +478,7 @@ impl MainView {
                         // using the existing cell-level update API
                         let mut update_error: Option<String> = None;
 
-                        for (col_index, new_value) in values.iter().enumerate() {
+                        for (col_index, new_value) in typed_values.iter().enumerate() {
                             let Some(col_name) = column_names.get(col_index) else {
                                 continue;
                             };
@@ -446,10 +488,7 @@ impl MainView {
                                 .unwrap_or_default();
 
                             // Determine if this column actually changed
-                            let changed = match new_value {
-                                None => original != "NULL",
-                                Some(val) => *val != original,
-                            };
+                            let changed = *new_value != original;
 
                             if !changed {
                                 continue;
@@ -457,7 +496,7 @@ impl MainView {
 
                             let cell_update = zqlz_services::CellUpdateData {
                                 column_name: col_name.clone(),
-                                new_value: new_value.clone(),
+                                new_value: Some(new_value.clone()).filter(|value| !value.is_null()),
                                 all_column_names: column_names.clone(),
                                 all_row_values: original_row_values.clone(),
                                 all_column_types: column_types_for_updates.clone(),
@@ -503,7 +542,7 @@ impl MainView {
                     if is_success {
                         _ = window_handle.update(cx, |_, window, cx| {
                             window.push_notification(
-                                Notification::success(&format!("Row {} in {}", action, table_name)),
+                                Notification::success(format!("Row {} in {}", action, table_name)),
                                 cx,
                             );
                         });
@@ -511,7 +550,7 @@ impl MainView {
                         tracing::error!("Failed to save row: table={}, error={}", table_name, err);
                         _ = window_handle.update(cx, |_, window, cx| {
                             window.push_notification(
-                                Notification::error(&format!(
+                                Notification::error(format!(
                                     "Failed to {} row: {}",
                                     if is_new { "insert" } else { "update" },
                                     err
@@ -528,6 +567,7 @@ impl MainView {
             KeyValueEditorEvent::FieldChanged {
                 col_index,
                 new_value,
+                typed_value,
                 is_null,
                 row_index,
                 source_viewer,
@@ -535,12 +575,14 @@ impl MainView {
                 // Sync the field change from the row editor back to the table grid
                 if let (Some(viewer), Some(row_index)) = (&source_viewer, row_index) {
                     let display_value = if is_null {
-                        "NULL".to_string()
+                        Value::Null
+                    } else if matches!(typed_value, Value::Null) {
+                        Value::String(new_value)
                     } else {
-                        new_value.clone()
+                        typed_value.clone()
                     };
                     _ = viewer.update(cx, |panel, cx| {
-                        panel.update_cell_value(row_index, col_index, Some(display_value), cx);
+                        panel.update_cell_value(row_index, col_index, display_value, cx);
                     });
                 }
             }

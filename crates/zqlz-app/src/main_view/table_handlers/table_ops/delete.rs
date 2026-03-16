@@ -66,6 +66,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // Delete-table confirmation is destructive, and this dialog API carries
+                        // variant intent rather than a prebuilt Button instance.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
@@ -204,6 +206,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // Batch delete uses dialog button metadata, so this remains an explicit
+                        // destructive ButtonVariant rather than a `.danger()` helper call.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {

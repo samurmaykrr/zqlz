@@ -6,6 +6,10 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+type ListItemClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+type ListItemMouseEnterHandler = Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static>;
+type ListItemSuffixBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum ListItemMode {
     #[default]
@@ -30,9 +34,9 @@ pub struct ListItem {
     secondary_selected: bool,
     confirmed: bool,
     check_icon: Option<Icon>,
-    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
-    on_mouse_enter: Option<Box<dyn Fn(&MouseMoveEvent, &mut Window, &mut App) + 'static>>,
-    suffix: Option<Box<dyn Fn(&mut Window, &mut App) -> AnyElement + 'static>>,
+    on_click: Option<ListItemClickHandler>,
+    on_mouse_enter: Option<ListItemMouseEnterHandler>,
+    suffix: Option<ListItemSuffixBuilder>,
     children: SmallVec<[AnyElement; 2]>,
 }
 
@@ -154,8 +158,10 @@ impl RenderOnce for ListItem {
 
         let corner_radii = self.style.corner_radii.clone();
 
-        let mut selected_style = StyleRefinement::default();
-        selected_style.corner_radii = corner_radii;
+        let selected_style = StyleRefinement {
+            corner_radii,
+            ..StyleRefinement::default()
+        };
 
         let is_selectable = !(self.disabled || self.mode.is_separator());
 

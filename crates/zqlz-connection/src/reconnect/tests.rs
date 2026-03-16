@@ -338,10 +338,10 @@ mod reconnect_event_tests {
 
             async fn execute(&self, _sql: &str, _params: &[Value]) -> Result<StatementResult> {
                 self.query_count.fetch_add(1, Ordering::SeqCst);
-                if let Some(counter) = &self.failure_counter {
-                    if counter.should_fail() {
-                        return Err(ZqlzError::Connection("Mock connection error".into()));
-                    }
+                if let Some(counter) = &self.failure_counter
+                    && counter.should_fail()
+                {
+                    return Err(ZqlzError::Connection("Mock connection error".into()));
                 }
                 Ok(StatementResult {
                     is_query: false,
@@ -353,10 +353,10 @@ mod reconnect_event_tests {
 
             async fn query(&self, _sql: &str, _params: &[Value]) -> Result<QueryResult> {
                 self.query_count.fetch_add(1, Ordering::SeqCst);
-                if let Some(counter) = &self.failure_counter {
-                    if counter.should_fail() {
-                        return Err(ZqlzError::Connection("Mock connection error".into()));
-                    }
+                if let Some(counter) = &self.failure_counter
+                    && counter.should_fail()
+                {
+                    return Err(ZqlzError::Connection("Mock connection error".into()));
                 }
                 Ok(QueryResult::empty())
             }

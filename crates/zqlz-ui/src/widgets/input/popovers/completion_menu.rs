@@ -100,15 +100,15 @@ impl FuzzyMatcher {
         }
 
         let candidate_no_underscore = candidate_lower.replace('_', "");
-        if candidate_no_underscore.contains(&pattern_lower) {
-            if let Some(pos) = candidate_no_underscore.find(&pattern_lower) {
-                let score = 750 - pos as i32;
-                return Some(FuzzyMatch {
-                    quality: MatchQuality::Substring,
-                    score,
-                    matched_indices: Vec::new(),
-                });
-            }
+        if candidate_no_underscore.contains(&pattern_lower)
+            && let Some(pos) = candidate_no_underscore.find(&pattern_lower)
+        {
+            let score = 750 - pos as i32;
+            return Some(FuzzyMatch {
+                quality: MatchQuality::Substring,
+                score,
+                matched_indices: Vec::new(),
+            });
         }
 
         if let Some(indices) = self.match_acronym(&pattern_chars, &candidate_chars, candidate) {
@@ -212,6 +212,7 @@ impl FuzzyMatcher {
         best_score.map(|score| (score, best_indices))
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn fuzzy_match_recursive(
         &self,
         pattern: &[char],
@@ -450,7 +451,7 @@ fn build_highlights_from_indices(
             label.len()
         };
 
-        ranges.push((start_byte..end_byte, style.clone()));
+        ranges.push((start_byte..end_byte, style));
         i += 1;
     }
 
@@ -493,25 +494,23 @@ impl<E: CompletionMenuEditor> CompletionMenuDelegate<E> {
         for (i, item) in self.items.iter().enumerate() {
             // Try matching against the label first, then filter_text
             let candidate = item.filter_text.as_deref().unwrap_or(&item.label);
-            if let Some(m) = self.matcher.fuzzy_match(query, candidate) {
-                if m.is_match() {
-                    // If we matched on filter_text but want to highlight the label,
-                    // re-match on the label for display purposes
-                    let display_indices = if item.filter_text.is_some() {
-                        self.matcher
-                            .fuzzy_match(query, &item.label)
-                            .filter(|m| m.is_match())
-                            .map(|m| m.matched_indices)
-                            .unwrap_or_default()
-                    } else {
-                        m.matched_indices
-                    };
+            if let Some(m) = self.matcher.fuzzy_match(query, candidate)
+                && m.is_match()
+            {
+                let display_indices = if item.filter_text.is_some() {
+                    self.matcher
+                        .fuzzy_match(query, &item.label)
+                        .filter(|m| m.is_match())
+                        .map(|m| m.matched_indices)
+                        .unwrap_or_default()
+                } else {
+                    m.matched_indices
+                };
 
-                    self.filtered.push(FilteredEntry {
-                        source_index: i,
-                        matched_indices: display_indices,
-                    });
-                }
+                self.filtered.push(FilteredEntry {
+                    source_index: i,
+                    matched_indices: display_indices,
+                });
             }
         }
 
@@ -683,15 +682,15 @@ impl<E: CompletionMenuEditor> CompletionMenu<E> {
                     }
 
                     // Strip trailing space if the next char is already whitespace
-                    if new_text.ends_with(' ') && cursor_offset < text.len() {
-                        if text[cursor_offset..]
+                    if new_text.ends_with(' ')
+                        && cursor_offset < text.len()
+                        && text[cursor_offset..]
                             .chars()
                             .next()
                             .map(|c| c.is_whitespace())
                             .unwrap_or(false)
-                        {
-                            new_text = new_text.trim_end().to_string();
-                        }
+                    {
+                        new_text = new_text.trim_end().to_string();
                     }
 
                     let start_byte = start_byte.min(text.len());

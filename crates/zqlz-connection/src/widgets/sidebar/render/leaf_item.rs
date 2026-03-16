@@ -4,6 +4,7 @@
 
 use gpui::*;
 
+use super::LeafItemProps;
 use crate::widgets::sidebar::ConnectionSidebar;
 use zqlz_ui::widgets::h_flex;
 
@@ -37,18 +38,34 @@ impl ConnectionSidebar {
     ///
     /// Like section headers, indentation is `8 + depth * 12` pixels.
     /// Leaf items typically render at `depth + 1` relative to their section header.
-    pub(super) fn render_leaf_item(
-        element_id: SharedString,
-        icon: impl Into<AnyElement>,
-        label: String,
-        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
-        on_right_click: Option<
-            impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
-        >,
-        list_hover: Hsla,
-        depth: usize,
+    pub(super) fn render_leaf_item<Icon, OnClick, OnRightClick>(
+        props: LeafItemProps<Icon, OnClick, OnRightClick>,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Stateful<Div>
+    where
+        Icon: Into<AnyElement>,
+        OnClick: for<'a, 'b, 'c, 'd> Fn(
+                &'a mut Self,
+                &'b ClickEvent,
+                &'c mut Window,
+                &'d mut Context<Self>,
+            ) + 'static,
+        OnRightClick: for<'a, 'b, 'c, 'd> Fn(
+                &'a mut Self,
+                &'b MouseDownEvent,
+                &'c mut Window,
+                &'d mut Context<Self>,
+            ) + 'static,
+    {
+        let LeafItemProps {
+            element_id,
+            icon,
+            label,
+            on_click,
+            on_right_click,
+            list_hover,
+            depth,
+        } = props;
         let indent = px(8.0 + depth as f32 * 12.0);
 
         let row = h_flex()

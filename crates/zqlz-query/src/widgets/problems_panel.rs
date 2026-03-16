@@ -3,10 +3,11 @@
 //! Displays a list of diagnostics/errors from the query editor
 //! and allows users to click entries to navigate to the problem location.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
-    button::{Button, ButtonVariant, ButtonVariants},
+    ActiveTheme, Disableable, Icon, Selectable, Sizable, ZqlzIcon,
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -395,70 +396,58 @@ impl Render for ProblemsPanel {
                         // Severity filter buttons
                         h_flex().gap_1().children([
                             Button::new("filter-all")
-                                .with_variant(if self.severity_filter == SeverityFilter::All {
-                                    ButtonVariant::Secondary
-                                } else {
-                                    ButtonVariant::Ghost
+                                .map(|button| {
+                                    if self.severity_filter == SeverityFilter::All {
+                                        button.secondary_primary().selected(true)
+                                    } else {
+                                        button.ghost()
+                                    }
                                 })
                                 .xsmall()
                                 .compact()
                                 .label("All")
-                                .text_color(if self.severity_filter == SeverityFilter::All {
-                                    theme.accent
-                                } else {
-                                    theme.muted_foreground
-                                })
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.set_severity_filter(SeverityFilter::All, cx);
                                 })),
                             Button::new("filter-errors")
-                                .with_variant(if self.severity_filter == SeverityFilter::Errors {
-                                    ButtonVariant::Secondary
-                                } else {
-                                    ButtonVariant::Ghost
+                                .map(|button| {
+                                    if self.severity_filter == SeverityFilter::Errors {
+                                        button.secondary_primary().selected(true)
+                                    } else {
+                                        button.ghost()
+                                    }
                                 })
                                 .xsmall()
                                 .compact()
                                 .label("Errors")
-                                .text_color(if self.severity_filter == SeverityFilter::Errors {
-                                    theme.accent
-                                } else {
-                                    theme.muted_foreground
-                                })
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.set_severity_filter(SeverityFilter::Errors, cx);
                                 })),
                             Button::new("filter-warnings")
-                                .with_variant(if self.severity_filter == SeverityFilter::Warnings {
-                                    ButtonVariant::Secondary
-                                } else {
-                                    ButtonVariant::Ghost
+                                .map(|button| {
+                                    if self.severity_filter == SeverityFilter::Warnings {
+                                        button.secondary_primary().selected(true)
+                                    } else {
+                                        button.ghost()
+                                    }
                                 })
                                 .xsmall()
                                 .compact()
                                 .label("Warnings")
-                                .text_color(if self.severity_filter == SeverityFilter::Warnings {
-                                    theme.accent
-                                } else {
-                                    theme.muted_foreground
-                                })
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.set_severity_filter(SeverityFilter::Warnings, cx);
                                 })),
                             Button::new("filter-info")
-                                .with_variant(if self.severity_filter == SeverityFilter::Info {
-                                    ButtonVariant::Secondary
-                                } else {
-                                    ButtonVariant::Ghost
+                                .map(|button| {
+                                    if self.severity_filter == SeverityFilter::Info {
+                                        button.secondary_primary().selected(true)
+                                    } else {
+                                        button.ghost()
+                                    }
                                 })
                                 .xsmall()
                                 .compact()
                                 .label("Info")
-                                .text_color(if self.severity_filter == SeverityFilter::Info {
-                                    theme.accent
-                                } else {
-                                    theme.muted_foreground
-                                })
                                 .on_click(cx.listener(|this, _event, _window, cx| {
                                     this.set_severity_filter(SeverityFilter::Info, cx);
                                 })),
@@ -474,7 +463,7 @@ impl Render for ProblemsPanel {
                     )
                     .child(
                         Button::new("clear-problems")
-                            .with_variant(ButtonVariant::Ghost)
+                            .ghost()
                             .xsmall()
                             .label("Clear")
                             .icon(ZqlzIcon::Trash)

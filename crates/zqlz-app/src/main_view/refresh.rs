@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use gpui::*;
 use uuid::Uuid;
-use zqlz_connection::ConnectionEntry;
+use zqlz_connection::{ConnectionEntry, SchemaObjects, SidebarObjectCapabilities};
 use zqlz_core::ObjectsPanelData;
 use zqlz_services::{ConnectionRefreshPayload, RefreshRequest};
 
@@ -73,6 +73,12 @@ impl MainView {
             .get_saved(connection_id)
             .map(|saved| saved.name)
             .unwrap_or_else(|| "Unknown".to_string());
+        let object_capabilities = app_state
+            .saved_connections()
+            .iter()
+            .find(|connection| connection.id == connection_id)
+            .map(|connection| SidebarObjectCapabilities::for_driver(&connection.driver))
+            .unwrap_or_default();
         let workspace_state = self.workspace_state.downgrade();
         let sidebar = self.connection_sidebar.clone();
         let objects_panel = self.objects_panel.clone();
@@ -92,19 +98,21 @@ impl MainView {
                             schema,
                             databases,
                             driver_category,
-                        } = payload;
+                        } = *payload;
 
                         if options.refresh_sidebar {
-                            _ = sidebar.update(cx, |sidebar, cx| {
+                            sidebar.update(cx, |sidebar, cx| {
                                 sidebar.set_schema(
                                     connection_id,
-                                    schema.tables.clone(),
-                                    schema.views.clone(),
-                                    schema.materialized_views.clone(),
-                                    schema.triggers.clone(),
-                                    schema.functions.clone(),
-                                    schema.procedures.clone(),
-                                    schema.schema_name.clone(),
+                                    SchemaObjects {
+                                        tables: schema.tables.clone(),
+                                        views: schema.views.clone(),
+                                        materialized_views: schema.materialized_views.clone(),
+                                        triggers: schema.triggers.clone(),
+                                        functions: schema.functions.clone(),
+                                        procedures: schema.procedures.clone(),
+                                        schema_name: schema.schema_name.clone(),
+                                    },
                                     cx,
                                 );
 
@@ -120,13 +128,17 @@ impl MainView {
                                         sidebar.set_database_schema(
                                             connection_id,
                                             active_database,
-                                            schema.tables.clone(),
-                                            schema.views.clone(),
-                                            schema.materialized_views.clone(),
-                                            schema.triggers.clone(),
-                                            schema.functions.clone(),
-                                            schema.procedures.clone(),
-                                            schema.schema_name.clone(),
+                                            SchemaObjects {
+                                                tables: schema.tables.clone(),
+                                                views: schema.views.clone(),
+                                                materialized_views: schema
+                                                    .materialized_views
+                                                    .clone(),
+                                                triggers: schema.triggers.clone(),
+                                                functions: schema.functions.clone(),
+                                                procedures: schema.procedures.clone(),
+                                                schema_name: schema.schema_name.clone(),
+                                            },
                                             cx,
                                         );
                                     }
@@ -145,7 +157,7 @@ impl MainView {
                             let objects_data = schema.objects_panel_data.unwrap_or_else(|| {
                                 ObjectsPanelData::from_table_infos(schema.table_infos)
                             });
-                            _ = objects_panel.update(cx, |panel, cx| {
+                            objects_panel.update(cx, |panel, cx| {
                                 let database_name =
                                     panel.database_name().or(schema.database_name.clone());
                                 panel.load_objects(
@@ -154,6 +166,7 @@ impl MainView {
                                     database_name,
                                     objects_data,
                                     driver_category,
+                                    object_capabilities,
                                     cx,
                                 );
                             });
@@ -161,7 +174,7 @@ impl MainView {
                     }
                     ConnectionRefreshPayload::Redis(payload) => {
                         if options.refresh_sidebar {
-                            _ = sidebar.update(cx, |sidebar, cx| {
+                            sidebar.update(cx, |sidebar, cx| {
                                 sidebar.set_redis_databases(
                                     connection_id,
                                     payload.databases.clone(),
@@ -178,7 +191,7 @@ impl MainView {
                                 == Some(connection_id);
 
                         if should_update_objects {
-                            _ = objects_panel.update(cx, |panel, cx| {
+                            objects_panel.update(cx, |panel, cx| {
                                 panel.load_redis_databases(
                                     connection_id,
                                     connection_name.clone(),
@@ -223,7 +236,7 @@ impl MainView {
                 if let Some(existing) = current_entries.get(&saved_connection.id) {
                     let mut entry = existing.clone();
                     entry.name = saved_connection.name;
-                    entry.db_type = saved_connection.driver;
+                    entry.set_db_type(saved_connection.driver);
                     entry
                 } else {
                     ConnectionEntry::new(

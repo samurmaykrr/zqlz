@@ -35,6 +35,30 @@ pub struct SqliteConnection {
 }
 
 impl SqliteConnection {
+    fn sqlite_identifier_literal(identifier: &str) -> String {
+        identifier.replace('"', "\"\"")
+    }
+
+    fn sqlite_string_literal(value: &str) -> String {
+        value.replace('\'', "''")
+    }
+
+    fn classify_sqlite_table_type(create_sql: Option<&str>) -> TableType {
+        let Some(create_sql) = create_sql else {
+            return TableType::Table;
+        };
+
+        if create_sql
+            .trim_start()
+            .to_ascii_uppercase()
+            .starts_with("CREATE VIRTUAL TABLE")
+        {
+            TableType::VirtualTable
+        } else {
+            TableType::Table
+        }
+    }
+
     /// Open a SQLite database
     pub fn open(path: &str) -> Result<Self> {
         tracing::info!(path = %path, "opening SQLite database");
@@ -230,7 +254,10 @@ impl SqliteConnection {
     /// Get the row count for a specific table
     /// Returns an error if the table doesn't exist or query fails
     async fn get_table_row_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!("SELECT COUNT(*) FROM \"{}\"", table_name);
+        let sql = format!(
+            "SELECT COUNT(*) FROM \"{}\"",
+            Self::sqlite_identifier_literal(table_name)
+        );
         let result = self.query(&sql, &[]).await?;
 
         if let Some(row) = result.rows.first()
@@ -246,7 +273,10 @@ impl SqliteConnection {
 
     /// Get the number of indexes for a specific table
     async fn get_table_index_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!("SELECT COUNT(*) FROM pragma_index_list('{}')", table_name);
+        let sql = format!(
+            "SELECT COUNT(*) FROM pragma_index_list('{}')",
+            Self::sqlite_string_literal(table_name)
+        );
         let result = self.query(&sql, &[]).await?;
 
         if let Some(row) = result.rows.first()
@@ -264,7 +294,7 @@ impl SqliteConnection {
     async fn get_table_trigger_count(&self, table_name: &str) -> Result<i64> {
         let sql = format!(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}'",
-            table_name
+            Self::sqlite_string_literal(table_name)
         );
         let result = self.query(&sql, &[]).await?;
 
@@ -470,7 +500,7 @@ impl SchemaIntrospection for SqliteConnection {
         tracing::debug!("listing tables from sqlite_master");
         let result = self
             .query(
-                "SELECT name, type FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
                 &[],
             )
             .await?;
@@ -483,9 +513,17 @@ impl SchemaIntrospection for SqliteConnection {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
+            let table_type =
+                Self::classify_sqlite_table_type(row.get(1).and_then(|value| value.as_str()));
 
-            // Fetch row count for this table
-            let row_count = self.get_table_row_count(&name).await.ok();
+            // Virtual tables can require external modules to instantiate. Avoid
+            // COUNT(*) during discovery so they still appear in schema listings even
+            // when their runtime backing is unavailable.
+            let row_count = if matches!(table_type, TableType::VirtualTable) {
+                None
+            } else {
+                self.get_table_row_count(&name).await.ok()
+            };
 
             // Fetch index count for this table
             let index_count = self.get_table_index_count(&name).await.ok();
@@ -496,7 +534,7 @@ impl SchemaIntrospection for SqliteConnection {
             tables.push(TableInfo {
                 name,
                 schema: Some("main".to_string()),
-                table_type: TableType::Table,
+                table_type,
                 owner: None,
                 row_count,
                 size_bytes: None,
@@ -573,7 +611,13 @@ impl SchemaIntrospection for SqliteConnection {
     async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         tracing::trace!(table = %table, "fetching column information");
         let result = self
-            .query(&format!("PRAGMA table_info('{}')", table), &[])
+            .query(
+                &format!(
+                    "PRAGMA table_info('{}')",
+                    Self::sqlite_string_literal(table)
+                ),
+                &[],
+            )
             .await?;
 
         let columns = result
@@ -627,7 +671,13 @@ impl SchemaIntrospection for SqliteConnection {
     async fn get_indexes(&self, _schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
         tracing::trace!(table = %table, "fetching index information");
         let result = self
-            .query(&format!("PRAGMA index_list('{}')", table), &[])
+            .query(
+                &format!(
+                    "PRAGMA index_list('{}')",
+                    Self::sqlite_string_literal(table)
+                ),
+                &[],
+            )
             .await?;
 
         let mut indexes = Vec::new();
@@ -640,7 +690,13 @@ impl SchemaIntrospection for SqliteConnection {
 
             // Get columns for this index
             let cols_result = self
-                .query(&format!("PRAGMA index_info('{}')", name), &[])
+                .query(
+                    &format!(
+                        "PRAGMA index_info('{}')",
+                        Self::sqlite_string_literal(&name)
+                    ),
+                    &[],
+                )
                 .await?;
 
             let columns: Vec<String> = cols_result
@@ -671,7 +727,13 @@ impl SchemaIntrospection for SqliteConnection {
     ) -> Result<Vec<ForeignKeyInfo>> {
         tracing::trace!(table = %table, "fetching foreign key information");
         let result = self
-            .query(&format!("PRAGMA foreign_key_list('{}')", table), &[])
+            .query(
+                &format!(
+                    "PRAGMA foreign_key_list('{}')",
+                    Self::sqlite_string_literal(table)
+                ),
+                &[],
+            )
             .await?;
 
         let fks = result
@@ -835,7 +897,7 @@ impl SchemaIntrospection for SqliteConnection {
     async fn list_tables_extended(&self, _schema: Option<&str>) -> Result<ObjectsPanelData> {
         let result = self
             .query(
-                "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                "SELECT name, type, sql FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' ORDER BY name",
                 &[],
             )
             .await?;
@@ -879,13 +941,21 @@ impl SchemaIntrospection for SqliteConnection {
                 .and_then(|v| v.as_str())
                 .unwrap_or("table")
                 .to_string();
+            let table_type = if obj_type == "table" {
+                Self::classify_sqlite_table_type(row.get(2).and_then(|value| value.as_str()))
+            } else {
+                TableType::View
+            };
 
-            let row_count = self
-                .get_table_row_count(&name)
-                .await
-                .ok()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
+            let row_count = if matches!(table_type, TableType::VirtualTable) {
+                "-".to_string()
+            } else {
+                self.get_table_row_count(&name)
+                    .await
+                    .ok()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "-".to_string())
+            };
 
             let index_count = self
                 .get_table_index_count(&name)
@@ -906,6 +976,9 @@ impl SchemaIntrospection for SqliteConnection {
             values.insert("row_count".to_string(), row_count);
             values.insert("index_count".to_string(), index_count);
             values.insert("trigger_count".to_string(), trigger_count);
+            if matches!(table_type, TableType::VirtualTable) {
+                values.insert("type".to_string(), table_type.display_name().to_string());
+            }
 
             rows.push(ObjectsPanelRow {
                 name,

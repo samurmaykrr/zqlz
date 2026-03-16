@@ -25,10 +25,16 @@ actions!(
     [
         ToggleSearch,
         CloseSearch,
+        CutSelection,
         CopySelection,
         PasteClipboard,
+        SelectAllSelection,
         OpenRowEditor,
         ToggleReplace,
+        SelectColumnVisibilityPrevious,
+        SelectColumnVisibilityNext,
+        ToggleSelectedColumnVisibility,
+        CloseColumnVisibility,
     ]
 );
 

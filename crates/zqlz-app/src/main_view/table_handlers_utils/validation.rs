@@ -116,15 +116,3 @@ pub(in crate::main_view) fn validate_table_name(name: &str) -> Option<&'static s
 
     None
 }
-
-/// Parses a value for inline cell editing.
-/// - "NULL" (case-insensitive) -> None (database NULL)
-/// - "" (empty string) -> Some("") (empty string in database)
-/// - other values -> Some(value)
-pub(in crate::main_view) fn parse_inline_value(value: &str) -> Option<String> {
-    if value.eq_ignore_ascii_case("null") {
-        None
-    } else {
-        Some(value.to_string())
-    }
-}

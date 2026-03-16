@@ -519,7 +519,7 @@ impl AiCompletionProvider for OpenAiProvider {
                 prompt.push_str(&cols.join(", "));
                 prompt.push_str(")\n");
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
 
         prompt.push_str("SQL query (complete the query):\n");
@@ -690,7 +690,7 @@ impl AiCompletionProvider for AnthropicProvider {
                 prompt.push_str(&cols.join(", "));
                 prompt.push_str(")\n");
             }
-            prompt.push_str("\n");
+            prompt.push('\n');
         }
 
         prompt.push_str("Complete the following SQL query:\n");

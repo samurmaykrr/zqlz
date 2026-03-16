@@ -1,7 +1,6 @@
 use std::{
     cmp::Ordering,
     ops::{Deref, Range},
-    usize,
 };
 
 use gpui::{App, HighlightStyle, Hsla, SharedString, UnderlineStyle, px};
@@ -141,14 +140,14 @@ impl DiagnosticSeverity {
             Self::Hint => Some(theme.style.status.hint(cx)),
         };
 
-        let mut style = HighlightStyle::default();
-        style.underline = Some(UnderlineStyle {
-            color,
-            thickness: px(1.),
-            wavy: true,
-        });
-
-        style
+        HighlightStyle {
+            underline: Some(UnderlineStyle {
+                color,
+                thickness: px(1.),
+                wavy: true,
+            }),
+            ..Default::default()
+        }
     }
 }
 
@@ -299,11 +298,11 @@ impl DiagnosticSet {
         let mut cursor = self.diagnostics.cursor::<DiagnosticSummary>(&());
         cursor.seek(&range.start, Bias::Left);
         std::iter::from_fn(move || {
-            if let Some(entry) = cursor.item() {
-                if entry.range.start < range.end {
-                    cursor.next();
-                    return Some(entry);
-                }
+            if let Some(entry) = cursor.item()
+                && entry.range.start < range.end
+            {
+                cursor.next();
+                return Some(entry);
             }
             None
         })

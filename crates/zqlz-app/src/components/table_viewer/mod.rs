@@ -24,7 +24,11 @@ mod operations;
 mod panel;
 mod sorting;
 
-pub use delegate::PendingCellChange;
+pub use delegate::{CellValue, PendingCellChange};
 pub use events::TableViewerEvent;
 pub use filter_types::{FilterCondition, FilterOperator, SortCriterion, SortDirection};
-pub use panel::{CopySelection, PasteClipboard, TableViewerPanel, ToggleSearch};
+pub use panel::{
+    CloseColumnVisibility, CopySelection, CutSelection, OpenRowEditor, PasteClipboard,
+    SelectAllSelection, SelectColumnVisibilityNext, SelectColumnVisibilityPrevious,
+    TableViewerPanel, ToggleReplace, ToggleSearch, ToggleSelectedColumnVisibility,
+};

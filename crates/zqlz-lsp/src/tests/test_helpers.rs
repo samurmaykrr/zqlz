@@ -3,7 +3,6 @@
 use crate::{ColumnInfo, SchemaCache, SqlDialect, SqlLsp, TableInfo};
 use std::sync::Arc;
 use zqlz_services::SchemaService;
-use zqlz_ui::widgets::Rope;
 
 /// Helper to create an SqlLsp instance with test data
 pub fn create_test_lsp() -> SqlLsp {
@@ -161,9 +160,6 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
         SqlDialect::Generic => "generic",
     };
 
-    // Create a mock connection UUID
-    let connection_id = uuid::Uuid::new_v4();
-
     // Create LSP with connection (which sets the dialect from driver_type)
     // Note: We pass None for connection since we don't have a real connection in tests
     let mut lsp = SqlLsp::new(schema_service);
@@ -297,13 +293,6 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
 
     lsp.set_schema_cache(cache);
     lsp
-}
-
-/// Helper assertion: check if completions contain any item with given prefix
-pub fn has_completion_with_prefix(completions: &[lsp_types::CompletionItem], prefix: &str) -> bool {
-    completions
-        .iter()
-        .any(|c| c.label.to_lowercase().starts_with(prefix))
 }
 
 /// Helper assertion: check if completions contain exact label

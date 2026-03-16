@@ -35,6 +35,7 @@ convert_case.workspace = true
 rusqlite.workspace = true
 sqlformat.workspace = true
 sqlparser.workspace = true
+url.workspace = true
 
 # Async
 futures.workspace = true

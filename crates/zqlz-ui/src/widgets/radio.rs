@@ -10,6 +10,9 @@ use gpui::{
     prelude::FluentBuilder, px, relative, rems,
 };
 
+type RadioClickHandler = Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+type RadioGroupClickHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
+
 /// A Radio element.
 ///
 /// This is not included the Radio group implementation, you can manage the group by yourself.
@@ -25,7 +28,7 @@ pub struct Radio {
     tab_stop: bool,
     tab_index: isize,
     size: Size,
-    on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+    on_click: Option<RadioClickHandler>,
 }
 
 impl Radio {
@@ -85,7 +88,7 @@ impl Radio {
     }
 
     fn handle_click(
-        on_click: &Option<Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+        on_click: &Option<RadioClickHandler>,
         checked: bool,
         window: &mut Window,
         cx: &mut App,
@@ -191,7 +194,7 @@ impl RenderOnce for Radio {
                             _ => this.bg(bg),
                         })
                         .child(checkbox_check_icon(
-                            self.id, self.size, checked, disabled, window, cx,
+                            self.id, self.size, checked, disabled, true, window, cx,
                         )),
                 )
                 .when(!self.children.is_empty() || self.label.is_some(), |this| {
@@ -241,7 +244,7 @@ pub struct RadioGroup {
     layout: Axis,
     selected_index: Option<usize>,
     disabled: bool,
-    on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,
+    on_click: Option<RadioGroupClickHandler>,
 }
 
 impl RadioGroup {

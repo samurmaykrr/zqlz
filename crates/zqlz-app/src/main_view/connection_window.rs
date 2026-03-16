@@ -31,7 +31,7 @@ enum ConnectionWindowMode {
         /// The ID of the connection being edited
         id: Uuid,
         /// The original saved connection data
-        saved: SavedConnection,
+        saved: Box<SavedConnection>,
     },
 }
 
@@ -101,7 +101,7 @@ impl ConnectionWindow {
             step: 0,
             mode: ConnectionWindowMode::Edit {
                 id: saved.id,
-                saved: saved.clone(),
+                saved: Box::new(saved.clone()),
             },
             search_input,
             search_query: String::new(),
@@ -424,7 +424,7 @@ impl ConnectionWindow {
                 id,
                 saved: original,
             } => {
-                let mut updated = original.clone();
+                let mut updated = original.as_ref().clone();
                 updated.name = name.clone();
                 updated.params = params.clone();
                 tracing::info!("Updating connection {}: {}", id, name);
@@ -605,7 +605,7 @@ impl ConnectionWindow {
                             this.select_database(db_clone.clone(), window, cx);
                         }
                     }))
-                    .child(db.logo.clone().large())
+                    .child(db.logo.large())
                     .child(
                         div()
                             .text_sm()
@@ -646,7 +646,7 @@ impl ConnectionWindow {
                             this.select_database(db_clone.clone(), window, cx);
                         }
                     }))
-                    .child(db.logo.clone().medium())
+                    .child(db.logo.medium())
                     .child(
                         div()
                             .text_sm()
@@ -708,7 +708,7 @@ impl ConnectionWindow {
                                 })),
                         )
                     })
-                    .child(db_type.logo.clone().medium())
+                    .child(db_type.logo.medium())
                     .child(
                         div()
                             .text_lg()
@@ -780,18 +780,18 @@ impl ConnectionWindow {
         seen.insert("general".to_string());
 
         for field in &self.field_inputs {
-            if let Some(tab) = &field.tab {
-                if !seen.contains(tab) {
-                    let label = match tab.as_str() {
-                        "ssl" => "SSL",
-                        "ssh" => "SSH",
-                        "http" => "HTTP",
-                        "advanced" => "Advanced",
-                        _ => tab.as_str(),
-                    };
-                    tabs.push((tab.clone(), label.to_string()));
-                    seen.insert(tab.clone());
-                }
+            if let Some(tab) = &field.tab
+                && !seen.contains(tab)
+            {
+                let label = match tab.as_str() {
+                    "ssl" => "SSL",
+                    "ssh" => "SSH",
+                    "http" => "HTTP",
+                    "advanced" => "Advanced",
+                    _ => tab.as_str(),
+                };
+                tabs.push((tab.clone(), label.to_string()));
+                seen.insert(tab.clone());
             }
         }
 
@@ -959,21 +959,21 @@ impl ConnectionWindow {
                                             });
 
                                             cx.spawn(async move |_handle, cx| {
-                                                if let Ok(Ok(Some(paths))) = receiver.await {
-                                                    if let Some(path) = paths.first() {
-                                                        let path_str =
-                                                            path.to_string_lossy().to_string();
-                                                        _ = window_handle.update(
-                                                            cx,
-                                                            |_, window, cx| {
-                                                                input.update(cx, |input, cx| {
-                                                                    input.set_value(
-                                                                        path_str, window, cx,
-                                                                    );
-                                                                });
-                                                            },
-                                                        );
-                                                    }
+                                                if let Ok(Ok(Some(paths))) = receiver.await
+                                                    && let Some(path) = paths.first()
+                                                {
+                                                    let path_str =
+                                                        path.to_string_lossy().to_string();
+                                                    _ = window_handle.update(
+                                                        cx,
+                                                        |_, window, cx| {
+                                                            input.update(cx, |input, cx| {
+                                                                input.set_value(
+                                                                    path_str, window, cx,
+                                                                );
+                                                            });
+                                                        },
+                                                    );
                                                 }
                                             })
                                             .detach();

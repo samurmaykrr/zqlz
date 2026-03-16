@@ -6,9 +6,9 @@
 use std::collections::{HashMap, HashSet};
 
 use uuid::Uuid;
-use zqlz_core::{ColumnMeta, DriverCategory};
+use zqlz_core::{ColumnMeta, DriverCategory, Value};
 
-use super::delegate::PendingCellChange;
+use super::delegate::{CellValue, PendingCellChange};
 use super::filter_types::{FilterCondition, FilterOperator, SortCriterion};
 
 /// Events emitted by the table viewer panel
@@ -18,12 +18,6 @@ use super::filter_types::{FilterCondition, FilterOperator, SortCriterion};
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum TableViewerEvent {
-    /// Cell value should be set to NULL (future feature)
-    SetToNull { row: usize, col: usize },
-
-    /// Cell value should be set to empty string (future feature)
-    SetToEmpty { row: usize, col: usize },
-
     /// Cell value was saved via inline editing
     ///
     /// Emitted when user finishes inline editing (presses Enter/Tab or clicks away).
@@ -34,11 +28,11 @@ pub enum TableViewerEvent {
         row: usize,
         col: usize,
         column_name: String,
-        new_value: String,
+        new_value: CellValue,
         /// Original value before editing (for rollback on failure)
-        original_value: String,
+        original_value: CellValue,
         /// All values in the row (needed for building WHERE clause)
-        all_row_values: Vec<String>,
+        all_row_values: Vec<Value>,
         /// All column names (needed for primary key identification)
         all_column_names: Vec<String>,
         /// Database column types for type-aware value parsing
@@ -56,11 +50,12 @@ pub enum TableViewerEvent {
         connection_id: Uuid,
         row: usize,
         col: usize,
+        column_meta: ColumnMeta,
         column_name: String,
         column_type: String,
-        current_value: Option<String>,
+        current_value: Value,
         /// All values in the row (needed for building WHERE clause)
-        all_row_values: Vec<String>,
+        all_row_values: Vec<Value>,
         /// All column names (needed for primary key identification)
         all_column_names: Vec<String>,
         /// Database column types for type-aware value parsing
@@ -124,7 +119,7 @@ pub enum TableViewerEvent {
         /// All column names in the table
         all_column_names: Vec<String>,
         /// Rows to delete (each row contains all column values for identification)
-        rows_to_delete: Vec<Vec<String>>,
+        rows_to_delete: Vec<Vec<Value>>,
     },
 
     /// Table viewer became active/visible (tab switched to)
@@ -260,11 +255,11 @@ pub enum TableViewerEvent {
         /// Rows marked for deletion
         deleted_rows: HashSet<usize>,
         /// New rows to insert
-        new_rows: Vec<Vec<String>>,
+        new_rows: Vec<Vec<Value>>,
         /// Column metadata for building SQL statements
         column_meta: Vec<ColumnMeta>,
         /// All rows data (needed for building WHERE clauses)
-        all_rows: Vec<Vec<String>>,
+        all_rows: Vec<Vec<Value>>,
     },
 
     /// Discard all pending changes
@@ -285,11 +280,11 @@ pub enum TableViewerEvent {
         /// Rows marked for deletion
         deleted_rows: HashSet<usize>,
         /// New rows to insert
-        new_rows: Vec<Vec<String>>,
+        new_rows: Vec<Vec<Value>>,
         /// Column metadata for building SQL statements
         column_meta: Vec<ColumnMeta>,
         /// All rows data (needed for building WHERE clauses)
-        all_rows: Vec<Vec<String>>,
+        all_rows: Vec<Vec<Value>>,
     },
 
     /// User navigated to a different page
@@ -391,7 +386,7 @@ pub enum TableViewerEvent {
         connection_id: Uuid,
         table_name: String,
         row_index: usize,
-        row_values: Vec<String>,
+        row_values: Vec<Value>,
         column_meta: Vec<ColumnMeta>,
         all_column_names: Vec<String>,
     },
@@ -405,6 +400,10 @@ pub enum TableViewerEvent {
         connection_id: Uuid,
         table_name: String,
         column_meta: Vec<ColumnMeta>,
+        /// Optional draft values for a newly created inline row.
+        row_values: Option<Vec<Value>>,
+        /// Actual row index in the table viewer when row_values are provided.
+        row_index: Option<usize>,
     },
 
     /// A row was selected in the table viewer (clicked the row number)
@@ -416,7 +415,7 @@ pub enum TableViewerEvent {
         connection_id: Uuid,
         table_name: String,
         row_index: usize,
-        row_values: Vec<String>,
+        row_values: Vec<Value>,
         column_meta: Vec<ColumnMeta>,
         all_column_names: Vec<String>,
     },
@@ -432,7 +431,7 @@ pub enum TableViewerEvent {
         row_index: usize,
         /// Data column index (0-based, excludes the row-number column)
         col_index: usize,
-        row_values: Vec<String>,
+        row_values: Vec<Value>,
         column_meta: Vec<ColumnMeta>,
         all_column_names: Vec<String>,
     },

@@ -172,14 +172,14 @@ pub fn extract_parameters_with_style(sql: &str) -> ExtractionResult {
 
     // Extract dollar-positional parameters ($1, $2, etc.)
     for cap in DOLLAR_POSITIONAL_REGEX.captures_iter(&masked_sql) {
-        if let Some(num_match) = cap.get(1) {
-            if let Ok(position) = num_match.as_str().parse::<usize>() {
-                let param = Parameter::Positional(position);
-                if seen.insert(param.clone()) {
-                    parameters.push(param);
-                    if !styles_found.contains(&ParameterStyle::DollarPositional) {
-                        styles_found.push(ParameterStyle::DollarPositional);
-                    }
+        if let Some(num_match) = cap.get(1)
+            && let Ok(position) = num_match.as_str().parse::<usize>()
+        {
+            let param = Parameter::Positional(position);
+            if seen.insert(param.clone()) {
+                parameters.push(param);
+                if !styles_found.contains(&ParameterStyle::DollarPositional) {
+                    styles_found.push(ParameterStyle::DollarPositional);
                 }
             }
         }

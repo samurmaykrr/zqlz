@@ -560,10 +560,10 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
 /// Find a saved connection by name (case-insensitive) or UUID.
 fn find_saved(handle: &IpcServerHandle, name_or_id: &str) -> Option<SavedConnection> {
     let connections = handle.connections.saved_connections();
-    if let Ok(id) = Uuid::parse_str(name_or_id) {
-        if let Some(conn) = connections.iter().find(|c| c.id == id) {
-            return Some(conn.clone());
-        }
+    if let Ok(id) = Uuid::parse_str(name_or_id)
+        && let Some(conn) = connections.iter().find(|c| c.id == id)
+    {
+        return Some(conn.clone());
     }
     connections
         .into_iter()

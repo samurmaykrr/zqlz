@@ -287,13 +287,17 @@ where
                     });
                 });
             }
-            InputEvent::PressEnter { secondary } => self.on_action_confirm(
-                &Confirm {
-                    secondary: *secondary,
-                },
-                window,
-                cx,
-            ),
+            InputEvent::PressEnter { secondary } => {
+                if *secondary {
+                    self.on_action_confirm(
+                        &Confirm {
+                            secondary: *secondary,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+            }
             _ => {}
         }
     }
@@ -584,10 +588,10 @@ where
         self.prepare_items_if_needed(window, cx);
 
         // Scroll to the selected item if it is set.
-        if let Some((ix, strategy)) = self.deferred_scroll_to_index.take() {
-            if let Some(item_ix) = self.rows_cache.position_of(&ix) {
-                self.scroll_handle.scroll_to_item(item_ix, strategy);
-            }
+        if let Some((ix, strategy)) = self.deferred_scroll_to_index.take()
+            && let Some(item_ix) = self.rows_cache.position_of(&ix)
+        {
+            self.scroll_handle.scroll_to_item(item_ix, strategy);
         }
 
         let loading = self.delegate().loading(cx);

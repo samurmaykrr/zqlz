@@ -16,10 +16,11 @@ impl TableViewerDelegate {
 
         let actual_row = self.get_actual_row_index(row);
 
-        if let Some((editing_row, editing_col)) = self.editing_cell {
-            if editing_row == actual_row && editing_col == col {
-                return;
-            }
+        if let Some((editing_row, editing_col)) = self.editing_cell
+            && editing_row == actual_row
+            && editing_col == col
+        {
+            return;
         }
 
         if self.editing_cell.is_some() {
@@ -356,14 +357,12 @@ impl TableViewerDelegate {
                             } else {
                                 None
                             }
+                        } else if col + 1 < col_count {
+                            Some((row, col + 1))
+                        } else if row + 1 < row_count {
+                            Some((row + 1, 1))
                         } else {
-                            if col + 1 < col_count {
-                                Some((row, col + 1))
-                            } else if row + 1 < row_count {
-                                Some((row + 1, 1))
-                            } else {
-                                None
-                            }
+                            None
                         };
 
                         table.delegate_mut().stop_editing(true, cx);
@@ -506,12 +505,10 @@ impl TableViewerDelegate {
         let new_value_str = if save {
             if let Some(input) = &self.cell_input {
                 Some(input.read(cx).value().to_string())
-            } else if let Some(date_picker) = &self.date_picker_state {
-                Some(date_picker.read(cx).value().to_string())
             } else {
-                // Enum and FK selects commit via their Confirm event subscription,
-                // so stop_editing with save=true for those is a no-op.
-                None
+                self.date_picker_state
+                    .as_ref()
+                    .map(|date_picker| date_picker.read(cx).value().to_string())
             }
         } else {
             None

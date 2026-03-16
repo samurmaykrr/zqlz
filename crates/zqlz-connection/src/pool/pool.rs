@@ -157,12 +157,12 @@ impl ConnectionPool {
             match pooled {
                 Some(mut inner) => {
                     // Check if connection has exceeded max lifetime
-                    if let Some(max_lifetime) = self.config.max_lifetime() {
-                        if inner.created_at.elapsed() > max_lifetime {
-                            // Connection too old, close it and try again
-                            let _ = inner.connection.close().await;
-                            continue;
-                        }
+                    if let Some(max_lifetime) = self.config.max_lifetime()
+                        && inner.created_at.elapsed() > max_lifetime
+                    {
+                        // Connection too old, close it and try again
+                        let _ = inner.connection.close().await;
+                        continue;
                     }
 
                     // Check idle timeout

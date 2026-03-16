@@ -7,6 +7,8 @@ use gpui::{
 
 use crate::widgets::{Anchor, Selectable, button::Button, menu::PopupMenu, popover::Popover};
 
+type DropdownMenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
 /// A dropdown menu trait for buttons and other interactive elements
 pub trait DropdownMenu: Styled + Selectable + InteractiveElement + IntoElement + 'static {
     /// Create a dropdown menu with the given items, anchored to the TopLeft corner
@@ -38,7 +40,7 @@ pub struct DropdownMenuPopover<T: Selectable + IntoElement + 'static> {
     style: StyleRefinement,
     anchor: Anchor,
     trigger: T,
-    builder: Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>,
+    builder: DropdownMenuBuilder,
 }
 
 impl<T> DropdownMenuPopover<T>
@@ -104,9 +106,15 @@ where
                     Some(menu) => menu,
                     None => {
                         let builder = builder.clone();
+                        let action_context = window.focused(cx);
                         let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+                            let menu = match action_context.clone() {
+                                Some(action_context) => menu.action_context(action_context),
+                                None => menu,
+                            };
                             builder(menu, window, cx)
                         });
+                        menu.update(cx, |menu, cx| menu.select_first_clickable(cx));
                         menu_state.update(cx, |state, _| {
                             state.menu = Some(menu.clone());
                         });

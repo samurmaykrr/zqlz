@@ -123,14 +123,16 @@ pub(in crate::main_view) fn handle_load_more_event(
             match table_service
                 .browse_table_with_filters(
                     connection,
-                    &table_name,
-                    schema_qualifier.as_deref(),
-                    where_clauses,
-                    order_by_clauses,
-                    visible_columns,
-                    Some(limit),
-                    Some(current_offset),
-                    Some(0),
+                    zqlz_services::BrowseTableWithFiltersRequest {
+                        table_name: &table_name,
+                        schema: schema_qualifier.as_deref(),
+                        where_clauses,
+                        order_by_clauses,
+                        visible_columns,
+                        limit: Some(limit),
+                        offset: Some(current_offset),
+                        cached_total: Some(0),
+                    },
                 )
                 .await
             {
@@ -202,7 +204,7 @@ pub(in crate::main_view) fn handle_load_more_event(
                             });
                         }
                         window.push_notification(
-                            Notification::error(&format!(
+                            Notification::error(format!(
                                 "Failed to load more rows: {}",
                                 e
                             )),

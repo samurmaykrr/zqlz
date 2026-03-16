@@ -9,6 +9,8 @@ use gpui::{
 
 use crate::widgets::menu::PopupMenu;
 
+type ContextMenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
+
 /// A extension trait for adding a context menu to an element.
 pub trait ContextMenuExt: ParentElement + Styled {
     /// Add a context menu to the element.
@@ -29,7 +31,7 @@ impl<E: ParentElement + Styled> ContextMenuExt for E {}
 pub struct ContextMenu<E: ParentElement + Styled + Sized> {
     id: ElementId,
     element: Option<E>,
-    menu: Option<Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>>,
+    menu: Option<ContextMenuBuilder>,
     // This is not in use, just for style refinement forwarding.
     _ignore_style: StyleRefinement,
     anchor: Corner,
@@ -211,7 +213,7 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                     layout_id,
                     ContextMenuState {
                         element: Some(element),
-                        ..Default::default()
+                        shared_state: state.shared_state.clone(),
                     },
                 )
             },
@@ -264,10 +266,8 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                     {
                         {
                             let mut shared_state = shared_state.borrow_mut();
-                            // Clear any existing menu view to allow immediate replacement
-                            // Set the new position and open the menu
-                            shared_state.menu_view = None;
-                            shared_state._subscription = None;
+                            shared_state.menu_view.take();
+                            shared_state._subscription.take();
                             shared_state.position = event.position;
                             shared_state.open = true;
                         }
@@ -277,12 +277,18 @@ impl<E: ParentElement + Styled + IntoElement + 'static> Element for ContextMenu<
                             let shared_state = shared_state.clone();
                             let builder = builder.clone();
                             move |window, cx| {
+                                let action_context = window.focused(cx);
                                 let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
                                     let Some(build) = &builder else {
                                         return menu;
                                     };
+                                    let menu = match action_context.clone() {
+                                        Some(action_context) => menu.action_context(action_context),
+                                        None => menu,
+                                    };
                                     build(menu, window, cx)
                                 });
+                                menu.update(cx, |menu, cx| menu.select_first_clickable(cx));
 
                                 // Set up the subscription for dismiss handling
                                 let _subscription = window.subscribe(&menu, cx, {

@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```
-//! use zqlz_editor::formatter::{SqlFormatter, FormatterConfig};
+//! use zqlz_text_editor::formatter::{SqlFormatter, FormatterConfig};
 //!
 //! let formatter = SqlFormatter::new(FormatterConfig::default());
 //! let formatted = formatter.format("select * from users where id=1").unwrap();
@@ -73,7 +73,7 @@ impl SqlFormatter {
     /// # Example
     ///
     /// ```
-    /// use zqlz_editor::formatter::SqlFormatter;
+    /// use zqlz_text_editor::formatter::SqlFormatter;
     ///
     /// let formatter = SqlFormatter::with_defaults();
     /// let sql = "select id, name from users where active = true";
@@ -167,7 +167,7 @@ impl SqlFormatter {
 /// # Example
 ///
 /// ```
-/// use zqlz_editor::formatter::format_sql;
+/// use zqlz_text_editor::formatter::format_sql;
 ///
 /// let formatted = format_sql("select * from users").unwrap();
 /// assert!(formatted.contains("SELECT"));

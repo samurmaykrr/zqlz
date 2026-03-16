@@ -37,6 +37,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 use zqlz_core::QueryCancelHandle;
+use zqlz_text_editor::{DocumentContext, DocumentIdentity};
 
 /// Unique identifier for a query editor tab
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -60,6 +61,10 @@ pub struct EditorState {
     pub file_path: Option<String>,
     /// Display name for the tab
     pub display_name: String,
+    /// Canonical document identity for this editor.
+    pub document_identity: Option<DocumentIdentity>,
+    /// Cached document context used for workspace-scoped metadata.
+    pub document_context: Option<DocumentContext>,
 }
 
 /// State of a running query
@@ -475,6 +480,22 @@ pub struct WorkspaceState {
 
 impl EventEmitter<WorkspaceStateEvent> for WorkspaceState {}
 
+fn apply_document_metadata(
+    state: &mut EditorState,
+    document_context: &DocumentContext,
+    display_name: String,
+    is_dirty: bool,
+) {
+    state.is_dirty = is_dirty;
+    state.document_identity = Some(document_context.identity.clone());
+    state.file_path = document_context
+        .identity
+        .path()
+        .map(|path| path.to_string_lossy().into_owned());
+    state.display_name = display_name;
+    state.document_context = Some(document_context.clone());
+}
+
 impl WorkspaceState {
     #[allow(dead_code)]
     /// Create a new workspace state
@@ -616,6 +637,8 @@ impl WorkspaceState {
                 is_dirty: false,
                 file_path: None,
                 display_name,
+                document_identity: None,
+                document_context: None,
             },
         );
 
@@ -680,6 +703,23 @@ impl WorkspaceState {
             cx.emit(WorkspaceStateEvent::EditorStateChanged(id));
             cx.notify();
         }
+    }
+
+    pub fn update_editor_document(
+        &mut self,
+        id: EditorId,
+        document_context: DocumentContext,
+        is_dirty: bool,
+        display_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        self.update_editor(
+            id,
+            move |state| {
+                apply_document_metadata(state, &document_context, display_name, is_dirty);
+            },
+            cx,
+        );
     }
 
     /// Get all editor IDs
@@ -825,5 +865,66 @@ impl WorkspaceState {
 impl Default for WorkspaceState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EditorState, apply_document_metadata};
+    use uuid::Uuid;
+    use zqlz_text_editor::{DocumentContext, DocumentIdentity, DocumentSettings};
+
+    fn test_document_context(identity: DocumentIdentity, saved_revision: usize) -> DocumentContext {
+        DocumentContext {
+            id: Uuid::new_v4(),
+            identity,
+            settings: DocumentSettings::default(),
+            saved_revision,
+        }
+    }
+
+    fn test_editor_state() -> EditorState {
+        EditorState {
+            connection_id: None,
+            is_dirty: false,
+            file_path: None,
+            display_name: "Query 1".to_string(),
+            document_identity: None,
+            document_context: None,
+        }
+    }
+
+    #[test]
+    fn apply_document_metadata_uses_explicit_dirty_state() {
+        let mut state = test_editor_state();
+        let context = test_document_context(
+            DocumentIdentity::internal().expect("internal document identity"),
+            42,
+        );
+
+        apply_document_metadata(&mut state, &context, "Query.sql".to_string(), true);
+
+        assert!(state.is_dirty);
+        assert_eq!(state.display_name, "Query.sql");
+        assert_eq!(state.document_identity, Some(context.identity.clone()));
+        assert_eq!(state.document_context, Some(context));
+        assert_eq!(state.file_path, None);
+    }
+
+    #[test]
+    fn apply_document_metadata_projects_external_path_into_workspace_state() {
+        let mut state = test_editor_state();
+        let context = test_document_context(
+            DocumentIdentity::from_path("/tmp/query.sql").expect("external document identity"),
+            0,
+        );
+
+        apply_document_metadata(&mut state, &context, "query.sql".to_string(), false);
+
+        assert!(!state.is_dirty);
+        assert_eq!(state.display_name, "query.sql");
+        assert_eq!(state.file_path.as_deref(), Some("/tmp/query.sql"));
+        assert_eq!(state.document_identity, Some(context.identity.clone()));
+        assert_eq!(state.document_context, Some(context));
     }
 }

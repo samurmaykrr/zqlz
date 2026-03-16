@@ -13,6 +13,8 @@
 //! }
 //! ```
 
+#![allow(dead_code)]
+
 use zqlz_services::DatabaseSchema;
 
 use std::collections::HashMap;

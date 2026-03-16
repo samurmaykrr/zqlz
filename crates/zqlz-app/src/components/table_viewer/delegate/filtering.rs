@@ -177,8 +177,8 @@ fn evaluate_filter(filter: &FilterCondition, row: &[Value], column_meta: &[Colum
 
     // For IsNull / IsNotNull / IsEmpty / IsNotEmpty, operate on the Value directly
     match filter.operator {
-        FilterOperator::IsNull => return cell.map_or(true, |v| v.is_null()),
-        FilterOperator::IsNotNull => return cell.map_or(false, |v| !v.is_null()),
+        FilterOperator::IsNull => return cell.is_none_or(|v| v.is_null()),
+        FilterOperator::IsNotNull => return cell.is_some_and(|v| !v.is_null()),
         _ => {}
     }
 

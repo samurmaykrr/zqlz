@@ -30,38 +30,45 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
         if self.redis_db_context_menu.is_none() {
             self.redis_db_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.redis_db_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
-                    menu.item(PopupMenuItem::new("Open Database").on_click({
-                        let sidebar = sidebar_weak.clone();
-                        move |_event, _window, cx| {
-                            _ = sidebar.update(cx, |_sidebar, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
-                                    connection_id: conn_id,
-                                    database_index,
+                    menu.action_context(action_context.clone())
+                        .item(PopupMenuItem::new("Open Database").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
+                                        connection_id: conn_id,
+                                        database_index,
+                                    });
                                 });
-                            });
-                        }
-                    }))
-                    .separator()
-                    .item(PopupMenuItem::new("Refresh").on_click({
-                        let sidebar = sidebar_weak.clone();
-                        move |_event, _window, cx| {
-                            _ = sidebar.update(cx, |_sidebar, cx| {
-                                cx.emit(ConnectionSidebarEvent::RefreshSchema {
-                                    connection_id: conn_id,
+                            }
+                        }))
+                        .separator()
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshSchema {
+                                        connection_id: conn_id,
+                                    });
                                 });
-                            });
-                        }
-                    }))
+                            }
+                        }))
                 });
 
                 let menu_entity = new_menu.clone();
@@ -71,7 +78,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

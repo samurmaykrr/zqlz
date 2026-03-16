@@ -44,18 +44,25 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
         if self.table_context_menu.is_none() {
             self.table_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
         let table_for_menu = table_name.clone();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.table_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
-                    menu.max_h(px(400.0))
+                    menu.action_context(action_context.clone())
+                        .max_h(px(400.0))
                         .item(PopupMenuItem::new("Open Table").on_click({
                             let sidebar = sidebar_weak.clone();
                             let table = table_for_menu.clone();
@@ -226,7 +233,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

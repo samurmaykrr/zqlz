@@ -8,8 +8,13 @@
 //! handler in `text_editor.rs`; the rendering code in `element.rs` reads it read-only
 //! during prepaint to compute match highlight rectangles and paint the panel.
 
+use crate::{
+    TextBuffer,
+    find_replace::{FindError as SearchError, FindOptions as SearchOptions, Match, SearchEngine},
+};
+
 /// Options that control how find matches are computed.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Default)]
 pub struct FindOptions {
     /// Match regardless of letter case when false (default)
     pub case_sensitive: bool,
@@ -19,24 +24,8 @@ pub struct FindOptions {
     pub use_regex: bool,
 }
 
-impl Default for FindOptions {
-    fn default() -> Self {
-        Self {
-            case_sensitive: false,
-            whole_word: false,
-            use_regex: false,
-        }
-    }
-}
-
 /// A contiguous byte range in the buffer that matches the search query.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct FindMatch {
-    /// Start byte offset (inclusive)
-    pub start: usize,
-    /// End byte offset (exclusive)
-    pub end: usize,
-}
+pub type FindMatch = Match;
 
 /// State of the active find (and optionally replace) panel.
 ///
@@ -64,6 +53,9 @@ pub struct FindState {
     /// If `Some`, contains the most recent regex compile error so the UI
     /// can display an error indicator without crashing.
     pub regex_error: Option<String>,
+
+    /// True when search navigation should prefer earlier matches.
+    pub search_backward: bool,
 }
 
 impl FindState {
@@ -79,6 +71,7 @@ impl FindState {
             search_field_focused: true,
             selection_boundary: None,
             regex_error: None,
+            search_backward: false,
         }
     }
 
@@ -88,6 +81,16 @@ impl FindState {
     /// When `selection_boundary` is set, only matches within that byte range are
     /// kept. `current_match` is clamped to a valid index after recomputation.
     pub fn recompute_matches(&mut self, text: &str) {
+        if let Some((start, end)) = self.selection_boundary {
+            let range_start = start.min(text.len());
+            let range_end = end.min(text.len());
+            self.recompute_matches_in_range(&text[range_start..range_end], range_start);
+        } else {
+            self.recompute_matches_in_range(text, 0);
+        }
+    }
+
+    pub fn recompute_matches_in_buffer(&mut self, buffer: &TextBuffer) {
         self.matches.clear();
         self.regex_error = None;
 
@@ -96,20 +99,32 @@ impl FindState {
             return;
         }
 
-        let search_range = self
-            .selection_boundary
-            .map(|(start, end)| start..end)
-            .unwrap_or(0..text.len());
-
-        // Clamp range to valid UTF-8 boundaries
-        let range_start = search_range.start.min(text.len());
-        let range_end = search_range.end.min(text.len());
-        let search_text = &text[range_start..range_end];
-
-        if self.options.use_regex {
-            self.recompute_matches_regex(text, search_text, range_start);
+        if let Some((start, end)) = self.selection_boundary {
+            let Ok(search_text) = buffer.text_for_range(start..end) else {
+                self.current_match = 0;
+                return;
+            };
+            self.recompute_matches_in_range(&search_text, start);
         } else {
-            self.recompute_matches_plain(text, search_text, range_start);
+            self.recompute_matches_in_rope(buffer);
+        }
+    }
+
+    fn recompute_matches_in_rope(&mut self, buffer: &TextBuffer) {
+        let options = SearchOptions {
+            case_sensitive: self.options.case_sensitive,
+            whole_word: self.options.whole_word,
+            regex: self.options.use_regex,
+        };
+
+        match SearchEngine::new(&self.query, &options) {
+            Ok(engine) => {
+                self.matches = engine.find_all_in_rope(&buffer.rope());
+            }
+            Err(SearchError::InvalidRegex(error)) => {
+                self.regex_error = Some(error);
+                return;
+            }
         }
 
         if self.current_match >= self.matches.len() && !self.matches.is_empty() {
@@ -117,73 +132,44 @@ impl FindState {
         }
     }
 
-    fn recompute_matches_regex(&mut self, full_text: &str, search_text: &str, offset: usize) {
-        let pattern = if self.options.case_sensitive {
-            self.query.clone()
-        } else {
-            format!("(?i){}", self.query)
-        };
+    fn recompute_matches_in_range(&mut self, text: &str, base_offset: usize) {
+        self.matches.clear();
+        self.regex_error = None;
 
-        let regex = match regex::Regex::new(&pattern) {
-            Ok(r) => r,
-            Err(e) => {
-                self.regex_error = Some(e.to_string());
+        if self.query.is_empty() {
+            self.current_match = 0;
+            return;
+        }
+
+        let options = SearchOptions {
+            case_sensitive: self.options.case_sensitive,
+            whole_word: self.options.whole_word,
+            regex: self.options.use_regex,
+        };
+        match SearchEngine::new(&self.query, &options) {
+            Ok(engine) => {
+                self.matches = engine
+                    .find_all(text)
+                    .into_iter()
+                    .map(|found_match| {
+                        FindMatch::new(
+                            base_offset + found_match.start,
+                            base_offset + found_match.end,
+                            found_match.text,
+                        )
+                    })
+                    .collect();
+            }
+            Err(SearchError::InvalidRegex(error)) => {
+                self.regex_error = Some(error);
                 return;
             }
-        };
+        }
 
-        for mat in regex.find_iter(search_text) {
-            let start = offset + mat.start();
-            let end = offset + mat.end();
-
-            if self.options.whole_word && !is_whole_word(full_text, start, end) {
-                continue;
-            }
-
-            self.matches.push(FindMatch { start, end });
+        if self.current_match >= self.matches.len() && !self.matches.is_empty() {
+            self.current_match = 0;
         }
     }
-
-    fn recompute_matches_plain(&mut self, source_text: &str, search_text: &str, offset: usize) {
-        let escaped_query = regex::escape(&self.query);
-        let regex = match regex::RegexBuilder::new(&escaped_query)
-            .case_insensitive(!self.options.case_sensitive)
-            .build()
-        {
-            Ok(regex) => regex,
-            Err(error) => {
-                self.regex_error = Some(error.to_string());
-                return;
-            }
-        };
-
-        for mat in regex.find_iter(search_text) {
-            let start = offset + mat.start();
-            let end = offset + mat.end();
-
-            if !self.options.whole_word || is_whole_word(source_text, start, end) {
-                self.matches.push(FindMatch { start, end });
-            }
-        }
-    }
-}
-
-/// Returns true if the byte range `[start, end)` in `text` is surrounded by
-/// non-word characters (or is at the document boundary).
-fn is_whole_word(text: &str, start: usize, end: usize) -> bool {
-    let before_ok = start == 0
-        || !text[..start]
-            .chars()
-            .last()
-            .map(|c| c.is_alphanumeric() || c == '_')
-            .unwrap_or(false);
-    let after_ok = end >= text.len()
-        || !text[end..]
-            .chars()
-            .next()
-            .map(|c| c.is_alphanumeric() || c == '_')
-            .unwrap_or(false);
-    before_ok && after_ok
 }
 
 #[cfg(test)]
@@ -332,5 +318,37 @@ mod tests {
             );
         }
         assert_eq!(state.matches.len(), 3);
+    }
+
+    #[test]
+    fn test_find_state_uses_shared_search_engine_whole_word_semantics() {
+        let mut state = FindState::new(false);
+        state.query = "id".to_string();
+        state.options.whole_word = true;
+        state.recompute_matches("id userid id");
+
+        assert_eq!(
+            state.matches,
+            vec![
+                FindMatch::new(0, 2, "id".to_string()),
+                FindMatch::new(10, 12, "id".to_string())
+            ]
+        );
+    }
+
+    #[test]
+    fn test_find_state_recomputes_matches_in_buffer_without_materializing_whole_text() {
+        let mut state = FindState::new(false);
+        state.query = "needle".to_string();
+        let mut text = String::from("prefix ");
+        text.push_str(&"x".repeat(1024));
+        text.push_str(" needle suffix needle");
+        let buffer = TextBuffer::new(text);
+
+        state.recompute_matches_in_buffer(&buffer);
+
+        assert_eq!(state.matches.len(), 2);
+        assert_eq!(state.matches[0].text, "needle");
+        assert_eq!(state.matches[1].text, "needle");
     }
 }

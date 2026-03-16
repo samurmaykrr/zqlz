@@ -8,7 +8,6 @@ use ropey::{ChunkCursor, Rope};
 use std::{
     collections::{BTreeSet, HashMap},
     ops::Range,
-    usize,
 };
 use sum_tree::Bias;
 use tree_sitter::{
@@ -159,7 +158,7 @@ impl SyntaxHighlighter {
     /// Create a new SyntaxHighlighter for HTML.
     pub fn new(lang: &str) -> Self {
         tracing::debug!(language = lang, "Initializing SyntaxHighlighter");
-        match Self::build_combined_injections_query(&lang) {
+        match Self::build_combined_injections_query(lang) {
             Ok(result) => {
                 tracing::debug!(
                     language = lang,
@@ -179,7 +178,7 @@ impl SyntaxHighlighter {
     /// https://github.com/tree-sitter/tree-sitter/blob/v0.25.5/highlight/src/lib.rs#L336
     fn build_combined_injections_query(lang: &str) -> Result<Self> {
         tracing::debug!(language = lang, "Building combined injections query");
-        let Some(config) = LanguageRegistry::singleton().language(&lang) else {
+        let Some(config) = LanguageRegistry::singleton().language(lang) else {
             tracing::warn!(language = lang, "Language not found in LanguageRegistry");
             return Err(anyhow!(
                 "language {:?} is not registered in `LanguageRegistry`",
@@ -297,7 +296,7 @@ impl SyntaxHighlighter {
 
         let mut injection_queries = HashMap::new();
         for inj_language in config.injection_languages.iter() {
-            if let Some(inj_config) = LanguageRegistry::singleton().language(&inj_language) {
+            if let Some(inj_config) = LanguageRegistry::singleton().language(inj_language) {
                 match Query::new(&inj_config.language, &inj_config.highlights) {
                     Ok(q) => {
                         injection_queries.insert(inj_config.name.clone(), q);
@@ -383,7 +382,7 @@ impl SyntaxHighlighter {
         if self.language == "sql" {
             let root = new_tree.root_node();
             tracing::trace!("SQL Parse Tree:");
-            print_tree_node(&root, &text, 0);
+            print_tree_node(&root, text, 0);
         }
 
         self.tree = Some(new_tree);
@@ -406,7 +405,7 @@ impl SyntaxHighlighter {
         let source = &self.text;
         let mut cursor = QueryCursor::new();
         cursor.set_byte_range(range);
-        let mut matches = cursor.matches(&query, root_node, TextProvider(&source));
+        let mut matches = cursor.matches(query, root_node, TextProvider(source));
 
         while let Some(query_match) = matches.next() {
             // Ref:
@@ -658,11 +657,9 @@ impl SyntaxHighlighter {
         }
 
         // If the matched styles is empty, return a default range.
-        if styles.len() == 0 {
+        if styles.is_empty() {
             return vec![(start_offset..range.end, HighlightStyle::default())];
         }
-
-        let styles = unique_styles(&range, styles);
 
         // NOTE: DO NOT remove this comment, it is used for debugging.
         // for style in &styles {
@@ -670,7 +667,7 @@ impl SyntaxHighlighter {
         // }
         // println!("--------------------------------");
 
-        styles
+        unique_styles(range, styles)
     }
 }
 
@@ -747,15 +744,14 @@ pub(crate) fn unique_styles(
     // Merge adjacent ranges with the same style, but not across significant boundaries
     let mut merged: Vec<(Range<usize>, HighlightStyle)> = Vec::with_capacity(result.len());
     for (range, style) in result {
-        if let Some((last_range, last_style)) = merged.last_mut() {
-            if last_range.end == range.start
-                && *last_style == style
-                && !significant_intervals.contains(&range.start)
-            {
-                // Merge adjacent ranges with same style, but not across significant boundaries
-                last_range.end = range.end;
-                continue;
-            }
+        if let Some((last_range, last_style)) = merged.last_mut()
+            && last_range.end == range.start
+            && *last_style == style
+            && !significant_intervals.contains(&range.start)
+        {
+            // Merge adjacent ranges with same style, but not across significant boundaries
+            last_range.end = range.end;
+            continue;
         }
         merged.push((range, style));
     }
@@ -830,9 +826,10 @@ mod tests {
     use crate::widgets::theme::Colorize as _;
 
     fn color_style(color: Hsla) -> HighlightStyle {
-        let mut style = HighlightStyle::default();
-        style.color = Some(color);
-        style
+        HighlightStyle {
+            color: Some(color),
+            ..Default::default()
+        }
     }
 
     #[track_caller]

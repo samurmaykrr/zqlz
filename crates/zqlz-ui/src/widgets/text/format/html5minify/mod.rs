@@ -89,11 +89,11 @@ impl<'a> Context<'a> {
     }
 
     fn parent_trim_left(&self) -> bool {
-        self.parent_context.map_or(true, Context::trim_left)
+        self.parent_context.is_none_or(Context::trim_left)
     }
 
     fn trim_right(&self) -> bool {
-        self.right.map_or(true, |siblings| {
+        self.right.is_none_or(|siblings| {
             siblings
                 .iter()
                 .find_map(Self::is_block_element)
@@ -238,11 +238,8 @@ where
 
                     self.write_collapse_whitespace(&contents, reserved_entity, None)?;
 
-                    self.preceding_whitespace = !trim_right
-                        && contents
-                            .iter()
-                            .last()
-                            .map_or(false, u8::is_ascii_whitespace);
+                    self.preceding_whitespace =
+                        !trim_right && contents.iter().last().is_some_and(u8::is_ascii_whitespace);
                 }
 
                 Ok(())
@@ -313,7 +310,7 @@ where
                     .as_bytes()
                     .iter()
                     .next()
-                    .map_or(false, u8::is_ascii_whitespace),
+                    .is_some_and(u8::is_ascii_whitespace),
             )
         }
     }
@@ -331,7 +328,7 @@ where
         ctx.as_ref().map_or((false, false), |ctx| match name {
             "html" => {
                 // The end tag may be omitted if the <html> element is not immediately followed by a comment.
-                let omit_end = ctx.right.map_or(true, |right| !self.next_is_comment(right));
+                let omit_end = ctx.right.is_none_or(|right| !self.next_is_comment(right));
                 // The start tag may be omitted if the first thing inside the <html> element is not a comment.
                 let omit_start =
                     empty_attributes && omit_end && !self.next_is_comment(&*node.children.borrow());
@@ -340,7 +337,7 @@ where
             }
             "head" => {
                 // The end tag may be omitted if the first thing following the <head> element is not a space character or a comment.
-                let omit_end = ctx.right.map_or(true, |right| {
+                let omit_end = ctx.right.is_none_or(|right| {
                     right
                         .iter()
                         .find_map(|node| match &node.data {
@@ -402,12 +399,12 @@ where
                         })
                         .unwrap_or(true);
                 // The end tag may be omitted if the <body> element has contents or has a start tag, and is not immediately followed by a comment.
-                let omit_end = ctx.right.map_or(true, |right| !self.next_is_comment(right));
+                let omit_end = ctx.right.is_none_or(|right| !self.next_is_comment(right));
 
                 (omit_start && omit_end, omit_end)
             }
             "p" => {
-                let omit_end = ctx.next_element().map_or(true, |node| {
+                let omit_end = ctx.next_element().is_none_or(|node| {
                     if let NodeData::Element { name, .. } = &node.data {
                         matches!(
                             name.local.as_ref().to_ascii_lowercase().as_str(),

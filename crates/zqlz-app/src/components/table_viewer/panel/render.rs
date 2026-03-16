@@ -215,8 +215,8 @@ impl Render for TableViewerPanel {
             .on_action(cx.listener(|this, _: &CommitChanges, _window, cx| {
                 this.emit_commit_changes(cx);
             }))
-            .on_action(cx.listener(|this, _: &DeleteSelectedRows, _window, cx| {
-                this.emit_delete_rows(cx);
+            .on_action(cx.listener(|this, _: &DeleteSelectedRows, window, cx| {
+                this.show_delete_confirmation(window, cx);
             }))
             .on_action(cx.listener(|this, _: &UndoEdit, _window, cx| {
                 this.undo_edit(cx);
@@ -233,15 +233,25 @@ impl Render for TableViewerPanel {
             .on_action(cx.listener(|this, _: &ToggleReplace, window, cx| {
                 this.toggle_replace(window, cx);
             }))
+            .on_action(cx.listener(|this, _: &CutSelection, _window, cx| {
+                this.cut_selection(cx);
+            }))
             .on_action(cx.listener(|this, _: &CopySelection, _window, cx| {
                 this.copy_selection(cx);
             }))
             .on_action(cx.listener(|this, _: &PasteClipboard, _window, cx| {
                 this.paste_clipboard(cx);
             }))
+            .on_action(cx.listener(|this, _: &SelectAllSelection, _window, cx| {
+                this.select_all(cx);
+            }))
             .on_action(cx.listener(|this, _: &OpenRowEditor, _window, cx| {
                 this.emit_open_row_editor(cx);
             }))
+            .on_action(cx.listener(Self::on_action_select_column_visibility_previous))
+            .on_action(cx.listener(Self::on_action_select_column_visibility_next))
+            .on_action(cx.listener(Self::on_action_toggle_selected_column_visibility))
+            .on_action(cx.listener(Self::on_action_close_column_visibility))
             .size_full()
             .bg(theme.background)
             .when_some(

@@ -676,6 +676,7 @@ impl TriggerDesignerPanel {
             .child(
                 h_flex().justify_end().pt_2().child(
                     Button::new("copy-ddl")
+                        .secondary()
                         .label("Copy to Clipboard")
                         .small()
                         .on_click(cx.listener(|this, _, _window, cx| {

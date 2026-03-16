@@ -7,5 +7,8 @@
 pub mod find;
 pub mod replace;
 
-pub use find::{FindError, FindOptions, Match, count_matches, find_all, find_first, find_next};
-pub use replace::{ReplaceResult, replace_all, replace_first, replace_next};
+pub use find::{
+    FindError, FindOptions, Match, ReplaceResult, SearchEngine, count_matches, find_all,
+    find_first, find_next,
+};
+pub use replace::{replace_all, replace_first, replace_next};

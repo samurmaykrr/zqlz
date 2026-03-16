@@ -451,7 +451,7 @@ impl ProjectManagerPanel {
             .split(',')
             .map(|s| s.trim())
             .filter(|s| !s.is_empty())
-            .map(|s| SourceTable::new(s))
+            .map(SourceTable::new)
             .collect();
 
         let source = SourceDefinition {

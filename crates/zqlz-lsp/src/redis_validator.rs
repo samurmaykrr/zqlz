@@ -60,10 +60,10 @@ impl RedisCommandSpec {
         if count < min {
             return false;
         }
-        if let Some(max) = self.max_args() {
-            if count > max {
-                return false;
-            }
+        if let Some(max) = self.max_args()
+            && count > max
+        {
+            return false;
         }
         true
     }
@@ -82,6 +82,59 @@ impl Default for RedisValidator {
 }
 
 impl RedisValidator {
+    pub fn top_level_commands(&self, prefix: Option<&str>) -> Vec<String> {
+        let prefix = prefix.unwrap_or_default().to_uppercase();
+        let mut commands: Vec<String> = self
+            .commands
+            .keys()
+            .filter_map(|name| {
+                let top_level = name.split_whitespace().next()?;
+                (!top_level.is_empty()).then_some(top_level.to_string())
+            })
+            .collect();
+        commands.sort();
+        commands.dedup();
+        if prefix.is_empty() {
+            return commands;
+        }
+
+        commands
+            .into_iter()
+            .filter(|command| command.starts_with(&prefix))
+            .collect()
+    }
+
+    pub fn subcommands_for_path(&self, path: &[&str], prefix: Option<&str>) -> Vec<String> {
+        if path.is_empty() {
+            return Vec::new();
+        }
+
+        let path: Vec<String> = path.iter().map(|segment| segment.to_uppercase()).collect();
+        let prefix = prefix.unwrap_or_default().to_uppercase();
+        let mut subcommands = Vec::new();
+
+        for name in self.commands.keys() {
+            let parts: Vec<&str> = name.split_whitespace().collect();
+            if parts.len() <= path.len() {
+                continue;
+            }
+            if parts[..path.len()]
+                .iter()
+                .map(|segment| segment.to_uppercase())
+                .eq(path.iter().cloned())
+            {
+                let candidate = parts[path.len()].to_string();
+                if prefix.is_empty() || candidate.starts_with(&prefix) {
+                    subcommands.push(candidate);
+                }
+            }
+        }
+
+        subcommands.sort();
+        subcommands.dedup();
+        subcommands
+    }
+
     #[allow(dead_code)]
     /// Get command specification by name
     pub fn get_command(&self, name: &str) -> Option<&RedisCommandSpec> {

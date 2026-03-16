@@ -178,3 +178,30 @@ fn test_select_clause_shows_aggregate_functions() {
         functions.iter().map(|f| &f.label).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn test_where_clause_prefers_in_scope_columns_over_keywords() {
+    let mut lsp = create_test_lsp();
+    let text =
+        Rope::from("SELECT * FROM users u JOIN audit_log a ON u.user_id = a.log_id WHERE us");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let user_id_pos = completions
+        .iter()
+        .position(|c| c.label == "u.user_id" || c.label == "user_id");
+    let where_pos = completions
+        .iter()
+        .position(|c| c.label.eq_ignore_ascii_case("WHERE"));
+
+    assert!(
+        user_id_pos.is_some(),
+        "Should include an in-scope user column"
+    );
+    if let Some(keyword_pos) = where_pos {
+        assert!(
+            user_id_pos.unwrap() < keyword_pos,
+            "In-scope columns should rank ahead of keywords in WHERE clause"
+        );
+    }
+}

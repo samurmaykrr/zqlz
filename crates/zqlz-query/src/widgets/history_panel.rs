@@ -3,14 +3,17 @@
 //! Displays a list of executed queries with metadata (timestamp, duration, status)
 //! and allows users to click entries to load them into the query editor.
 
+use std::ops::Range;
+
 use chrono::{DateTime, Utc};
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
-    button::{Button, ButtonVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
-    scroll::ScrollableElement,
+    input::{Input, InputEvent, InputState},
     v_flex,
 };
 
@@ -30,28 +33,83 @@ pub struct QueryHistoryPanel {
     focus_handle: FocusHandle,
     /// History entries to display (most recent first)
     entries: Vec<QueryHistoryEntry>,
+    /// Current search query
+    search_query: String,
+    /// Search input for filtering entries
+    search_input: Entity<InputState>,
+    /// Scroll handle for the virtualized history list
+    scroll_handle: UniformListScrollHandle,
 }
 
 impl QueryHistoryPanel {
     /// Create a new query history panel
-    pub fn new(cx: &mut Context<Self>) -> Self {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let search_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Search history..."));
+        let scroll_handle = UniformListScrollHandle::new();
+
+        cx.subscribe(&search_input, |this, input, event: &InputEvent, cx| {
+            if let InputEvent::Change = event {
+                this.search_query = input.read(cx).value().to_string();
+                this.scroll_handle = UniformListScrollHandle::new();
+                cx.notify();
+            }
+        })
+        .detach();
+
         Self {
             focus_handle: cx.focus_handle(),
             entries: Vec::new(),
+            search_query: String::new(),
+            search_input,
+            scroll_handle,
         }
     }
 
     /// Update the displayed history entries
     pub fn update_entries(&mut self, entries: Vec<QueryHistoryEntry>, cx: &mut Context<Self>) {
         self.entries = entries;
+        self.scroll_handle = UniformListScrollHandle::new();
         cx.notify();
     }
 
     /// Clear all history entries
-    pub fn clear(&mut self, cx: &mut Context<Self>) {
+    pub fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.entries.clear();
+        self.search_query.clear();
+        self.search_input.update(cx, |input, cx| {
+            input.set_value(String::new(), window, cx);
+        });
+        self.scroll_handle = UniformListScrollHandle::new();
         cx.emit(QueryHistoryPanelEvent::ClearHistory);
         cx.notify();
+    }
+
+    /// Replace the search query and keep the input in sync.
+    pub fn set_search_query(
+        &mut self,
+        query: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let query = query.into();
+        self.search_query = query.clone();
+        self.search_input.update(cx, |input, cx| {
+            input.set_value(query, window, cx);
+        });
+        self.scroll_handle = UniformListScrollHandle::new();
+        cx.notify();
+    }
+
+    fn filtered_entries(&self) -> Vec<&QueryHistoryEntry> {
+        if self.search_query.trim().is_empty() {
+            self.entries.iter().collect()
+        } else {
+            self.entries
+                .iter()
+                .filter(|entry| entry.matches_search(&self.search_query))
+                .collect()
+        }
     }
 
     /// Format timestamp for display
@@ -71,16 +129,6 @@ impl QueryHistoryPanel {
         }
     }
 
-    /// Truncate SQL for display
-    fn truncate_sql(sql: &str, max_length: usize) -> String {
-        let trimmed = sql.trim();
-        if trimmed.len() <= max_length {
-            trimmed.to_string()
-        } else {
-            format!("{}...", &trimmed[..max_length])
-        }
-    }
-
     /// Render a single history entry
     fn render_entry(
         &self,
@@ -89,7 +137,6 @@ impl QueryHistoryPanel {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
-        let entry_clone = entry.clone();
         let sql_clone = entry.sql.clone();
 
         let status_color = if entry.success {
@@ -129,7 +176,7 @@ impl QueryHistoryPanel {
                             .text_sm()
                             .text_color(theme.foreground)
                             .font_family(theme.mono_font_family.clone())
-                            .child(Self::truncate_sql(&entry_clone.sql, 80)),
+                            .child(entry.sql_preview(80)),
                     )
                     .child(
                         // Metadata row
@@ -145,8 +192,8 @@ impl QueryHistoryPanel {
                                     .items_center()
                                     .text_color(status_color)
                                     .child(Icon::new(status_icon).size_3())
-                                    .child(if entry_clone.success {
-                                        if let Some(count) = entry_clone.row_count {
+                                    .child(if entry.success {
+                                        if let Some(count) = entry.row_count {
                                             format!("{} rows", count)
                                         } else {
                                             "Success".to_string()
@@ -159,19 +206,19 @@ impl QueryHistoryPanel {
                                 // Duration
                                 div().child(format!(
                                     "• {}",
-                                    Self::format_duration(entry_clone.duration_ms)
+                                    Self::format_duration(entry.duration_ms)
                                 )),
                             )
                             .child(
                                 // Timestamp
                                 div().child(format!(
                                     "• {}",
-                                    Self::format_timestamp(&entry_clone.executed_at)
+                                    Self::format_timestamp(&entry.executed_at)
                                 )),
                             ),
                     ),
             )
-            .children(entry_clone.error.as_ref().map(|error_message| {
+            .children(entry.error_preview(100).map(|error_message| {
                 // Error message
                 div()
                     .px_2()
@@ -179,56 +226,101 @@ impl QueryHistoryPanel {
                     .text_xs()
                     .text_color(theme.red)
                     .font_family(theme.mono_font_family.clone())
-                    .child(Self::truncate_sql(error_message, 100))
+                    .child(error_message)
             }))
             .into_any_element()
     }
 }
 
 impl Render for QueryHistoryPanel {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Render all entries first to avoid closure lifetime issues
-        let entry_elements: Vec<_> = self
-            .entries
-            .iter()
-            .map(|entry| self.render_entry(entry, window, cx))
-            .collect();
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let filtered_entries = self.filtered_entries();
 
         let theme = cx.theme();
         let entries_count = self.entries.len();
-        let is_empty = entry_elements.is_empty();
+        let filtered_count = filtered_entries.len();
+        let is_empty = filtered_count == 0;
+        let has_search = !self.search_query.trim().is_empty();
 
         v_flex()
             .size_full()
             .bg(theme.background)
             .child(
                 // Toolbar
-                h_flex()
+                v_flex()
                     .w_full()
                     .px_2()
-                    .py_1p5()
+                    .py_2()
                     .gap_2()
-                    .items_center()
                     .border_b_1()
                     .border_color(theme.border)
                     .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child(format!("History ({} queries)", entries_count)),
+                        h_flex()
+                            .w_full()
+                            .justify_between()
+                            .items_center()
+                            .child(
+                                v_flex()
+                                    .gap_0p5()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.foreground)
+                                            .child("Query History"),
+                                    )
+                                    .child(
+                                        div().text_xs().text_color(theme.muted_foreground).child(
+                                            if has_search {
+                                                format!(
+                                                    "{filtered_count} of {entries_count} queries"
+                                                )
+                                            } else {
+                                                format!("{entries_count} saved queries")
+                                            },
+                                        ),
+                                    ),
+                            )
+                            .child(
+                                Button::new("clear-history")
+                                    .danger()
+                                    .xsmall()
+                                    .label("Clear")
+                                    .icon(ZqlzIcon::Trash)
+                                    .disabled(entries_count == 0)
+                                    .on_click(cx.listener(|this, _event, window, cx| {
+                                        this.clear(window, cx);
+                                    })),
+                            ),
                     )
                     .child(
-                        Button::new("clear-history")
-                            .with_variant(ButtonVariant::Ghost)
-                            .xsmall()
-                            .label("Clear")
-                            .icon(ZqlzIcon::Trash)
-                            .disabled(is_empty)
-                            .on_click(cx.listener(|this, _event, _window, cx| {
-                                this.clear(cx);
-                            })),
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                div().flex_1().child(
+                                    Input::new(&self.search_input)
+                                        .small()
+                                        .prefix(Icon::new(ZqlzIcon::MagnifyingGlass).size_3()),
+                                ),
+                            )
+                            .when(has_search, |this| {
+                                this.child(
+                                    div()
+                                        .min_w(px(88.))
+                                        .px_2()
+                                        .py_1()
+                                        .rounded_md()
+                                        .bg(theme.secondary)
+                                        .text_xs()
+                                        .text_color(theme.secondary_foreground)
+                                        .child(format!(
+                                            "{filtered_count} match{}",
+                                            if filtered_count == 1 { "" } else { "es" }
+                                        )),
+                                )
+                            }),
                     ),
             )
             .child(if is_empty {
@@ -243,26 +335,56 @@ impl Render for QueryHistoryPanel {
                             .text_color(theme.muted_foreground.opacity(0.5))
                             .child(Icon::new(ZqlzIcon::Clock).size_12()),
                     )
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child("No query history yet"),
-                    )
+                    .child(div().text_sm().text_color(theme.muted_foreground).child(
+                        if has_search {
+                            "No history matches your search"
+                        } else {
+                            "No query history yet"
+                        },
+                    ))
                     .child(
                         div()
                             .text_xs()
                             .text_color(theme.muted_foreground.opacity(0.7))
-                            .child("Execute queries to see them here"),
+                            .child(if has_search {
+                                "Try a different search term"
+                            } else {
+                                "Executed queries appear here automatically"
+                            }),
                     )
                     .into_any_element()
             } else {
                 // History list
-                div()
-                    .flex_1()
-                    .overflow_y_scrollbar()
-                    .children(entry_elements)
-                    .into_any_element()
+                uniform_list(
+                    "query-history-entries",
+                    filtered_count,
+                    cx.processor(
+                        move |state: &mut QueryHistoryPanel,
+                              visible_range: Range<usize>,
+                              window,
+                              cx| {
+                            let filtered_entries = state.filtered_entries();
+                            let mut items = Vec::with_capacity(visible_range.len());
+
+                            for index in visible_range {
+                                let Some(entry) = filtered_entries.get(index) else {
+                                    continue;
+                                };
+
+                                items.push(
+                                    div().id(index).child(state.render_entry(entry, window, cx)),
+                                );
+                            }
+
+                            items
+                        },
+                    ),
+                )
+                .flex_grow()
+                .size_full()
+                .track_scroll(&self.scroll_handle)
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .into_any_element()
             })
     }
 }
