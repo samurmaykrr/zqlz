@@ -39,6 +39,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
+    env:
+      RELEASE_CHANNEL: stable
+      ZQLZ_VERSION: ${{ needs.create-release.outputs.version }}
 
     strategy:
       fail-fast: false
@@ -46,12 +49,15 @@ jobs:
         include:
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+            architecture: x86_64
 
           - os: macos-latest
             target: aarch64-apple-darwin
+            architecture: aarch64
 
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            architecture: x86_64
 
     steps:
       - uses: actions/checkout@v4
@@ -66,9 +72,15 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
+            gettext-base \
             libxcb1-dev \
             libxkbcommon-dev \
             libxkbcommon-x11-dev
+
+      - name: Install Windows packaging dependencies
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
 
       - name: Cache cargo
         uses: actions/cache@v4
@@ -79,31 +91,50 @@ jobs:
             target
           key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Build
+      - name: Make bundle scripts executable
+        if: runner.os != 'Windows'
         shell: bash
-        run: cargo build --release --target ${{ matrix.target }}
+        run: chmod +x script/bundle-mac script/bundle-linux
 
-      - name: Package artifacts
+      - name: Build Linux bundle
+        if: runner.os == 'Linux'
+        shell: bash
+        run: ./script/bundle-linux "${{ matrix.target }}"
+
+      - name: Build macOS bundle
+        if: runner.os == 'macOS'
+        shell: bash
+        run: ./script/bundle-mac "${{ matrix.target }}"
+
+      - name: Build Windows bundle
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: .\script\bundle-windows.ps1 -Architecture ${{ matrix.architecture }} -Channel stable
+
+      - name: Collect Linux release artifacts
+        if: runner.os == 'Linux'
         shell: bash
         run: |
-          BIN=zqlz
           mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/zqlz-linux-${{ matrix.architecture }}.tar.gz" artifacts/
 
-          if [[ "${{ runner.os }}" == "Windows" ]]; then
-            cp target/${{ matrix.target }}/release/${BIN}.exe \
-               artifacts/${BIN}-${{ matrix.target }}.exe
-          else
-            cp target/${{ matrix.target }}/release/${BIN} \
-               artifacts/${BIN}-${{ matrix.target }}
+      - name: Collect macOS release artifacts
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p artifacts
+          cp "target/${{ matrix.target }}/release/ZQLZ-${{ matrix.architecture }}.dmg" artifacts/
+          ditto -c -k --keepParent \
+            "target/${{ matrix.target }}/release/bundle/ZQLZ.app" \
+            "artifacts/ZQLZ-${{ matrix.architecture }}.app.zip"
 
-            chmod +x artifacts/${BIN}-${{ matrix.target }}
-
-            tar -czf artifacts/${BIN}-${{ matrix.target }}.tar.gz \
-              -C artifacts ${BIN}-${{ matrix.target }}
-
-            zip -j artifacts/${BIN}-${{ matrix.target }}.zip \
-              artifacts/${BIN}-${{ matrix.target }}
-          fi
+      - name: Collect Windows release artifacts
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path artifacts | Out-Null
+          Get-ChildItem "target/${{ matrix.target }}/release/ZQLZ-${{ matrix.architecture }}.*" |
+            Copy-Item -Destination artifacts
 
       - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
