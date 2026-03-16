@@ -283,11 +283,11 @@ impl SchemaValidator {
                         .find(|(k, _)| k.to_lowercase() == actual_table_name.to_lowercase())
                         .map(|(_, v)| v);
 
-                    if let Some(columns) = canonical {
-                        if columns.iter().any(|c| c.name.to_lowercase() == col_lower) {
-                            found = true;
-                            break;
-                        }
+                    if let Some(columns) = canonical
+                        && columns.iter().any(|c| c.name.to_lowercase() == col_lower)
+                    {
+                        found = true;
+                        break;
                     }
                 }
 
@@ -314,18 +314,18 @@ impl SchemaValidator {
                         .find(|(k, _)| k.to_lowercase() == actual_table_name.to_lowercase())
                         .map(|(_, v)| v);
 
-                    if let Some(columns) = canonical {
-                        if !columns.iter().any(|c| c.name.to_lowercase() == col_lower) {
-                            issues.push(ValidationIssue {
-                                severity: ValidationSeverity::Error,
-                                message: format!(
-                                    "Column '{}' does not exist in table '{}'",
-                                    parts[1].value, actual_table_name
-                                ),
-                                line: 0,
-                                column: 0,
-                            });
-                        }
+                    if let Some(columns) = canonical
+                        && !columns.iter().any(|c| c.name.to_lowercase() == col_lower)
+                    {
+                        issues.push(ValidationIssue {
+                            severity: ValidationSeverity::Error,
+                            message: format!(
+                                "Column '{}' does not exist in table '{}'",
+                                parts[1].value, actual_table_name
+                            ),
+                            line: 0,
+                            column: 0,
+                        });
                     }
                 } else {
                     issues.push(ValidationIssue {
@@ -465,11 +465,12 @@ impl SchemaValidator {
                     aliases.insert(alias_obj.name.value.to_lowercase(), canonical);
                 }
             }
-            TableFactor::Derived { alias, .. } => {
-                if let Some(alias_obj) = alias {
-                    let alias_name = alias_obj.name.value.to_lowercase();
-                    aliases.insert(alias_name.clone(), alias_name);
-                }
+            TableFactor::Derived {
+                alias: Some(alias_obj),
+                ..
+            } => {
+                let alias_name = alias_obj.name.value.to_lowercase();
+                aliases.insert(alias_name.clone(), alias_name);
             }
             _ => {}
         }

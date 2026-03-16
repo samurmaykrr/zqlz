@@ -65,7 +65,7 @@ impl Inline {
     /// Get link at given mouse position.
     fn link_for_position(
         layout: &TextLayout,
-        links: &Vec<(Range<usize>, LinkMark)>,
+        links: &[(Range<usize>, LinkMark)],
         position: Point<Pixels>,
     ) -> Option<LinkMark> {
         let offset = layout.index_for_position(position).ok()?;
@@ -115,18 +115,18 @@ impl Inline {
 
         let mut selection: Option<Selection> = None;
         let mut offset = 0;
-        let mut chars = self.text.chars().peekable();
-        while let Some(c) = chars.next() {
+        let chars = self.text.chars();
+        for c in chars {
             let Some(pos) = text_layout.position_for_index(offset) else {
                 offset += c.len_utf8();
                 continue;
             };
 
             let mut char_width = line_height.half();
-            if let Some(next_pos) = text_layout.position_for_index(offset + 1) {
-                if next_pos.y == pos.y {
-                    char_width = next_pos.x - pos.x;
-                }
+            if let Some(next_pos) = text_layout.position_for_index(offset + 1)
+                && next_pos.y == pos.y
+            {
+                char_width = next_pos.x - pos.x;
             }
 
             if point_in_text_selection(pos, char_width, &selection_bounds, line_height) {
@@ -281,8 +281,7 @@ impl Element for Inline {
         self.styled_text
             .prepaint(id, inspector_id, bounds, &mut (), window, cx);
 
-        let hitbox = window.insert_hitbox(bounds, HitboxBehavior::Normal);
-        hitbox
+        window.insert_hitbox(bounds, HitboxBehavior::Normal)
     }
 
     fn paint(
@@ -310,13 +309,13 @@ impl Element for Inline {
         state.selection = selection;
 
         if is_selection || is_selectable {
-            window.set_cursor_style(CursorStyle::IBeam, &hitbox);
+            window.set_cursor_style(CursorStyle::IBeam, hitbox);
         }
 
         // link cursor pointer
         let mouse_position = window.mouse_position();
-        if let Some(_) = Self::link_for_position(&text_layout, &self.links, mouse_position) {
-            window.set_cursor_style(CursorStyle::PointingHand, &hitbox);
+        if Self::link_for_position(&text_layout, self.links.as_ref(), mouse_position).is_some() {
+            window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         }
 
         if let Some(selection) = &state.selection {
@@ -355,7 +354,7 @@ impl Element for Inline {
                     }
 
                     if let Some(link) =
-                        Self::link_for_position(&text_layout, &links, event.position)
+                        Self::link_for_position(&text_layout, links.as_ref(), event.position)
                     {
                         cx.stop_propagation();
                         cx.open_url(&link.url);
@@ -393,11 +392,11 @@ fn point_in_text_selection(
     let is_below = pos.y + line_height >= bottom;
 
     if is_above {
-        return pos.x + char_width.half() >= left;
+        pos.x + char_width.half() >= left
     } else if is_below {
-        return pos.x + char_width.half() <= right;
+        pos.x + char_width.half() <= right
     } else {
-        return true;
+        true
     }
 }
 

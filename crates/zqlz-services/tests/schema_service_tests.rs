@@ -8,7 +8,7 @@ mod common;
 
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, ObjectType, Value};
+use zqlz_core::{Connection, ObjectType, TableType, Value};
 use zqlz_services::SchemaService;
 
 use common::{mock_single_value_result, mysql_connection, postgres_connection, MockConnection};
@@ -514,6 +514,36 @@ async fn get_table_details_uses_cached_columns() {
     assert_eq!(details.columns[0].name, "cached_col");
 }
 
+#[tokio::test]
+async fn get_table_details_falls_back_for_sqlite_virtual_tables() {
+    let conn = Arc::new(SqliteVirtualTableFallbackConnection);
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_tables_only(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("should cache virtual table metadata");
+
+    let details = service
+        .get_table_details(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            "items_fts",
+            None,
+        )
+        .await
+        .expect("should fall back to DDL parsing");
+
+    assert_eq!(details.table_type, TableType::VirtualTable);
+    let column_names: Vec<&str> = details
+        .columns
+        .iter()
+        .map(|column| column.name.as_str())
+        .collect();
+    assert_eq!(column_names, vec!["title", "body"]);
+}
+
 // ============ generate_ddl Tests ============
 
 #[tokio::test]
@@ -779,6 +809,200 @@ impl zqlz_core::SchemaIntrospection for EmptyDatabaseConnection {
 
     async fn generate_ddl(&self, _object: &zqlz_core::DatabaseObject) -> zqlz_core::Result<String> {
         Ok(String::new())
+    }
+
+    async fn get_dependencies(
+        &self,
+        _object: &zqlz_core::DatabaseObject,
+    ) -> zqlz_core::Result<Vec<zqlz_core::Dependency>> {
+        Ok(vec![])
+    }
+}
+
+struct SqliteVirtualTableFallbackConnection;
+
+#[async_trait::async_trait]
+impl Connection for SqliteVirtualTableFallbackConnection {
+    fn driver_name(&self) -> &str {
+        "sqlite"
+    }
+
+    async fn execute(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::StatementResult> {
+        Ok(zqlz_core::StatementResult {
+            is_query: false,
+            result: None,
+            affected_rows: 0,
+            error: None,
+        })
+    }
+
+    async fn query(
+        &self,
+        _sql: &str,
+        _params: &[Value],
+    ) -> zqlz_core::Result<zqlz_core::QueryResult> {
+        Ok(zqlz_core::QueryResult::empty())
+    }
+
+    async fn update_cell(&self, _request: zqlz_core::CellUpdateRequest) -> zqlz_core::Result<u64> {
+        Ok(0)
+    }
+
+    async fn begin_transaction(&self) -> zqlz_core::Result<Box<dyn zqlz_core::Transaction>> {
+        Err(zqlz_core::ZqlzError::NotImplemented("no tx".into()))
+    }
+
+    async fn close(&self) -> zqlz_core::Result<()> {
+        Ok(())
+    }
+
+    fn is_closed(&self) -> bool {
+        false
+    }
+
+    fn as_schema_introspection(&self) -> Option<&dyn zqlz_core::SchemaIntrospection> {
+        Some(self)
+    }
+}
+
+#[async_trait::async_trait]
+impl zqlz_core::SchemaIntrospection for SqliteVirtualTableFallbackConnection {
+    async fn list_databases(&self) -> zqlz_core::Result<Vec<zqlz_core::DatabaseInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_schemas(&self) -> zqlz_core::Result<Vec<zqlz_core::SchemaInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_tables(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TableInfo>> {
+        Ok(vec![zqlz_core::TableInfo {
+            schema: Some("main".to_string()),
+            name: "items_fts".to_string(),
+            table_type: TableType::VirtualTable,
+            owner: None,
+            row_count: None,
+            size_bytes: None,
+            comment: None,
+            index_count: None,
+            trigger_count: None,
+            key_value_info: None,
+        }])
+    }
+
+    async fn list_views(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ViewInfo>> {
+        Ok(vec![])
+    }
+
+    async fn get_table(
+        &self,
+        _schema: Option<&str>,
+        _name: &str,
+    ) -> zqlz_core::Result<zqlz_core::TableDetails> {
+        Err(zqlz_core::ZqlzError::NotImplemented("unused".into()))
+    }
+
+    async fn get_columns(
+        &self,
+        _schema: Option<&str>,
+        table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ColumnInfo>> {
+        if table == "items_fts" {
+            Err(zqlz_core::ZqlzError::Schema(
+                "vtable constructor failed: items_fts".into(),
+            ))
+        } else {
+            Ok(vec![])
+        }
+    }
+
+    async fn get_indexes(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::IndexInfo>> {
+        Ok(vec![])
+    }
+
+    async fn get_foreign_keys(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ForeignKeyInfo>> {
+        Ok(vec![])
+    }
+
+    async fn get_primary_key(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Option<zqlz_core::PrimaryKeyInfo>> {
+        Ok(None)
+    }
+
+    async fn get_constraints(
+        &self,
+        _schema: Option<&str>,
+        _table: &str,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ConstraintInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_functions(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::FunctionInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_procedures(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::ProcedureInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_triggers(
+        &self,
+        _schema: Option<&str>,
+        _table: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TriggerInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_sequences(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::SequenceInfo>> {
+        Ok(vec![])
+    }
+
+    async fn list_types(
+        &self,
+        _schema: Option<&str>,
+    ) -> zqlz_core::Result<Vec<zqlz_core::TypeInfo>> {
+        Ok(vec![])
+    }
+
+    async fn generate_ddl(&self, object: &zqlz_core::DatabaseObject) -> zqlz_core::Result<String> {
+        if object.name == "items_fts" {
+            Ok(
+                "CREATE VIRTUAL TABLE items_fts USING fts5(title, body, tokenize='porter')"
+                    .to_string(),
+            )
+        } else {
+            Err(zqlz_core::ZqlzError::NotFound(object.name.clone()))
+        }
     }
 
     async fn get_dependencies(

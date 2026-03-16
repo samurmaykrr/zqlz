@@ -9,6 +9,7 @@ path = "src/zqlz_schema.rs"
 
 [dependencies]
 zqlz-core.workspace = true
+zqlz-connection.workspace = true
 zqlz-ui.workspace = true
 
 gpui.workspace = true

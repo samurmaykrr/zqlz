@@ -14,6 +14,8 @@ use crate::widgets::{
     scroll::ScrollableElement,
 };
 
+type RenderTreeItem = dyn Fn(usize, &TreeEntry, bool, &mut Window, &mut App) -> ListItem;
+
 const CONTEXT: &str = "Tree";
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
@@ -160,7 +162,7 @@ impl TreeItem {
     /// Whether this item is a folder (has children).
     #[inline]
     pub fn is_folder(&self) -> bool {
-        self.children.len() > 0
+        !self.children.is_empty()
     }
 
     /// Return true if the item is disabled.
@@ -181,7 +183,7 @@ pub struct TreeState {
     entries: Vec<TreeEntry>,
     scroll_handle: UniformListScrollHandle,
     selected_ix: Option<usize>,
-    render_item: Rc<dyn Fn(usize, &TreeEntry, bool, &mut Window, &mut App) -> ListItem>,
+    render_item: Rc<RenderTreeItem>,
 }
 
 impl TreeState {
@@ -275,35 +277,34 @@ impl TreeState {
     }
 
     fn on_action_confirm(&mut self, _: &Confirm, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected_ix) = self.selected_ix {
-            if let Some(entry) = self.entries.get(selected_ix) {
-                if entry.is_folder() {
-                    self.toggle_expand(selected_ix);
-                    cx.notify();
-                }
-            }
+        if let Some(selected_ix) = self.selected_ix
+            && let Some(entry) = self.entries.get(selected_ix)
+            && entry.is_folder()
+        {
+            self.toggle_expand(selected_ix);
+            cx.notify();
         }
     }
 
     fn on_action_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected_ix) = self.selected_ix {
-            if let Some(entry) = self.entries.get(selected_ix) {
-                if entry.is_folder() && entry.is_expanded() {
-                    self.toggle_expand(selected_ix);
-                    cx.notify();
-                }
-            }
+        if let Some(selected_ix) = self.selected_ix
+            && let Some(entry) = self.entries.get(selected_ix)
+            && entry.is_folder()
+            && entry.is_expanded()
+        {
+            self.toggle_expand(selected_ix);
+            cx.notify();
         }
     }
 
     fn on_action_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(selected_ix) = self.selected_ix {
-            if let Some(entry) = self.entries.get(selected_ix) {
-                if entry.is_folder() && !entry.is_expanded() {
-                    self.toggle_expand(selected_ix);
-                    cx.notify();
-                }
-            }
+        if let Some(selected_ix) = self.selected_ix
+            && let Some(entry) = self.entries.get(selected_ix)
+            && entry.is_folder()
+            && !entry.is_expanded()
+        {
+            self.toggle_expand(selected_ix);
+            cx.notify();
         }
     }
 
@@ -311,7 +312,7 @@ impl TreeState {
         let mut selected_ix = self.selected_ix.unwrap_or(0);
 
         if selected_ix > 0 {
-            selected_ix = selected_ix - 1;
+            selected_ix -= 1;
         } else {
             selected_ix = self.entries.len().saturating_sub(1);
         }
@@ -325,7 +326,7 @@ impl TreeState {
     fn on_action_down(&mut self, _: &SelectDown, _: &mut Window, cx: &mut Context<Self>) {
         let mut selected_ix = self.selected_ix.unwrap_or(0);
         if selected_ix + 1 < self.entries.len() {
-            selected_ix = selected_ix + 1;
+            selected_ix += 1;
         } else {
             selected_ix = 0;
         }
@@ -391,7 +392,7 @@ pub struct Tree {
     id: ElementId,
     state: Entity<TreeState>,
     style: StyleRefinement,
-    render_item: Rc<dyn Fn(usize, &TreeEntry, bool, &mut Window, &mut App) -> ListItem>,
+    render_item: Rc<RenderTreeItem>,
 }
 
 impl Tree {
@@ -442,20 +443,6 @@ impl RenderOnce for Tree {
 
 #[cfg(test)]
 mod tests {
-    fn assert_entries(entries: &Vec<super::TreeEntry>, expected: &str) {
-        let actual: Vec<String> = entries
-            .iter()
-            .map(|e| {
-                let mut s = String::new();
-                s.push_str(&"    ".repeat(e.depth));
-                s.push_str(e.item().label.as_str());
-                s
-            })
-            .collect();
-        let actual = actual.join("\n");
-        assert_eq!(actual.trim(), expected.trim());
-    }
-
     // Test requires gpui test-support feature which is not enabled
     /*
     #[gpui::test]

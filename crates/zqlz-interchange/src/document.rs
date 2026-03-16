@@ -184,7 +184,7 @@ impl UdifDocument {
     pub fn add_table(&mut self, table: TableDefinition) {
         let name = table.name.clone();
         self.schema.tables.insert(name.clone(), table);
-        self.data.entry(name).or_insert_with(TableData::default);
+        self.data.entry(name).or_default();
     }
 
     /// Add rows to a table

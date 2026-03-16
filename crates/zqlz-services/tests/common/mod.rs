@@ -14,6 +14,7 @@ use zqlz_core::{
 /// SQL-pattern-based query responses for testing driver-specific code paths
 /// (e.g. `SELECT DATABASE()` for MySQL vs `SELECT current_database()` for Postgres).
 pub struct MockConnection {
+    #[allow(dead_code)]
     pub name: String,
     pub driver: String,
     pub should_fail: bool,
@@ -45,11 +46,13 @@ impl MockConnection {
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_failure(mut self) -> Self {
         self.should_fail = true;
         self
     }
 
+    #[allow(dead_code)]
     pub fn with_result(mut self, result: QueryResult) -> Self {
         self.query_results.push(result);
         self
@@ -65,6 +68,7 @@ impl MockConnection {
         self
     }
 
+    #[allow(dead_code)]
     pub fn query_count(&self) -> usize {
         *self.query_count.lock()
     }
@@ -80,7 +84,8 @@ impl Connection for MockConnection {
         &self.driver
     }
 
-    async fn execute(&self, _sql: &str, _params: &[Value]) -> Result<StatementResult> {
+    async fn execute(&self, sql: &str, _params: &[Value]) -> Result<StatementResult> {
+        self.query_log.lock().push(sql.to_string());
         if self.should_fail {
             Err(ZqlzError::Query("Execute failed".into()))
         } else {
@@ -417,22 +422,26 @@ pub fn mock_query_result(column_names: Vec<&str>, row_data: Vec<Vec<Value>>) -> 
 }
 
 /// Helper to create a single-value query result (e.g. `SELECT DATABASE()`)
+#[allow(dead_code)]
 pub fn mock_single_value_result(column_name: &str, value: Value) -> QueryResult {
     mock_query_result(vec![column_name], vec![vec![value]])
 }
 
 /// Helper to create a test connection with "mock" driver
+#[allow(dead_code)]
 pub fn test_connection() -> Arc<dyn Connection> {
     Arc::new(MockConnection::new("test_db"))
 }
 
 /// Helper to create a failing connection
+#[allow(dead_code)]
 pub fn failing_connection() -> Arc<dyn Connection> {
     Arc::new(MockConnection::new("failing_db").with_failure())
 }
 
 /// Helper to create a MySQL-flavored mock connection that responds to
 /// `SELECT DATABASE()` with the given database name.
+#[allow(dead_code)]
 pub fn mysql_connection(database_name: &str) -> Arc<MockConnection> {
     let db_result =
         mock_single_value_result("DATABASE()", Value::String(database_name.to_string()));
@@ -445,6 +454,7 @@ pub fn mysql_connection(database_name: &str) -> Arc<MockConnection> {
 
 /// Helper to create a PostgreSQL-flavored mock connection that responds to
 /// `current_database()` and `current_schema()` queries.
+#[allow(dead_code)]
 pub fn postgres_connection(database_name: &str, schema_name: &str) -> Arc<MockConnection> {
     let db_result = mock_single_value_result(
         "current_database()",

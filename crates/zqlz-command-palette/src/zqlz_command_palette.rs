@@ -5,6 +5,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::SystemTime;
 use uuid::Uuid;
+use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_fuzzy::{FuzzyMatcher, MatchQuality};
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
@@ -437,6 +438,9 @@ pub struct CommandPaletteDelegate {
     fuzzy_matcher: FuzzyMatcher,
     /// Optional persistence backend for durable frecency storage.
     persistence: Option<Arc<dyn CommandUsagePersistence>>,
+    /// Workspace focus to restore before executing a command so actions resolve
+    /// against the main UI instead of the palette search field.
+    action_context: Option<WeakFocusHandle>,
     /// Pending event to be picked up by the wrapper after confirm.
     pub(crate) pending_event: Option<CommandPaletteEvent>,
     /// Pending command id for the CommandExecuted event.
@@ -461,9 +465,16 @@ impl CommandPaletteDelegate {
             usage_stats: CommandUsageStats::default(),
             fuzzy_matcher: FuzzyMatcher::new(false),
             persistence: None,
+            action_context: None,
             pending_event: None,
             pending_command_id: None,
         }
+    }
+
+    /// Keep track of the focus that owned keyboard handling before the palette
+    /// opened so confirmation can execute in that context.
+    pub fn set_action_context(&mut self, action_context: Option<WeakFocusHandle>) {
+        self.action_context = action_context;
     }
 
     /// Attach a persistence backend. Immediately loads stored usage data.
@@ -561,6 +572,7 @@ impl CommandPaletteDelegate {
         connection_name: &str,
         tables: &[String],
         views: &[String],
+        object_capabilities: SidebarObjectCapabilities,
     ) {
         // Remove existing schema commands for this connection.
         self.commands.retain(|cmd| {
@@ -579,12 +591,14 @@ impl CommandPaletteDelegate {
             ));
         }
 
-        for view_name in views {
-            self.commands.push(Command::new_view(
-                connection_id,
-                connection_name,
-                view_name.clone(),
-            ));
+        if object_capabilities.supports_views {
+            for view_name in views {
+                self.commands.push(Command::new_view(
+                    connection_id,
+                    connection_name,
+                    view_name.clone(),
+                ));
+            }
         }
 
         self.rebuild_sections();
@@ -777,6 +791,7 @@ impl ListDelegate for CommandPaletteDelegate {
         let category = command.category.clone();
         let command_id = command.id.clone();
         let action = command.action.as_ref().map(|a| a.boxed_clone());
+        let action_context = self.action_context.clone();
         let matched_indices = self.matched_indices_at(ix).to_vec();
 
         let icon_element = icon_for_command(&command_id, &category);
@@ -838,11 +853,20 @@ impl ListDelegate for CommandPaletteDelegate {
                     }),
             )
             .suffix(move |window, _cx: &mut App| {
-                if let Some(action) = &action
-                    && let Some(kbd) = Kbd::binding_for_action(action.as_ref(), None, window)
-                {
-                    return kbd.into_any_element();
+                if let Some(action) = &action {
+                    let key_binding = action_context
+                        .as_ref()
+                        .and_then(|handle| handle.upgrade())
+                        .and_then(|handle| {
+                            Kbd::binding_for_action_in(action.as_ref(), &handle, window)
+                        })
+                        .or_else(|| Kbd::binding_for_action(action.as_ref(), None, window));
+
+                    if let Some(kbd) = key_binding {
+                        return kbd.into_any_element();
+                    }
                 }
+
                 div().into_any_element()
             });
 
@@ -945,6 +969,14 @@ impl ListDelegate for CommandPaletteDelegate {
         self.usage_stats
             .record_usage(&command_id, self.persistence.as_deref());
 
+        if let Some(action_context) = self
+            .action_context
+            .as_ref()
+            .and_then(|handle| handle.upgrade())
+        {
+            window.focus(&action_context, cx);
+        }
+
         // Dispatch the action if present.
         if let Some(action) = &command.action {
             window.dispatch_action(action.boxed_clone(), cx);
@@ -956,7 +988,13 @@ impl ListDelegate for CommandPaletteDelegate {
     }
 
     fn cancel(&mut self, _window: &mut Window, _cx: &mut Context<ListState<Self>>) {
-        // The wrapper subscribes to ListEvent::Cancel.
+        if let Some(action_context) = self
+            .action_context
+            .as_ref()
+            .and_then(|handle| handle.upgrade())
+        {
+            _window.focus(&action_context, _cx);
+        }
     }
 }
 
@@ -975,6 +1013,7 @@ impl CommandPalette {
     pub fn new(
         commands: Vec<Command>,
         persistence: Option<Arc<dyn CommandUsagePersistence>>,
+        action_context: Option<WeakFocusHandle>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -982,6 +1021,7 @@ impl CommandPalette {
         if let Some(persistence) = persistence {
             delegate.set_persistence(persistence);
         }
+        delegate.set_action_context(action_context);
         delegate.set_commands(commands);
 
         let list_state = cx.new(|cx| {
@@ -1053,12 +1093,17 @@ impl CommandPalette {
         connection_name: &str,
         tables: &[String],
         views: &[String],
+        object_capabilities: SidebarObjectCapabilities,
         cx: &mut Context<Self>,
     ) {
         self.list_state.update(cx, |state, _cx| {
-            state
-                .delegate_mut()
-                .add_schema_commands(connection_id, connection_name, tables, views);
+            state.delegate_mut().add_schema_commands(
+                connection_id,
+                connection_name,
+                tables,
+                views,
+                object_capabilities,
+            );
         });
     }
 

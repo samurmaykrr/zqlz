@@ -124,7 +124,7 @@ impl TableViewerDelegate {
             .pending_changes
             .get_cell_change(actual_row_ix, data_col_ix)
         {
-            return change.new_value.clone();
+            return change.new_value.display_for_table();
         }
 
         self.rows

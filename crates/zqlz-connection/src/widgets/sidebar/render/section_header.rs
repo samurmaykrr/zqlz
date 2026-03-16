@@ -4,6 +4,7 @@
 
 use gpui::*;
 
+use super::SectionHeaderProps;
 use crate::widgets::sidebar::ConnectionSidebar;
 use zqlz_ui::widgets::{Icon, IconName, h_flex};
 
@@ -42,23 +43,39 @@ impl ConnectionSidebar {
     ///
     /// Indentation is calculated as `8 + depth * 12` pixels, allowing nested
     /// sections to be visually distinguished in the tree hierarchy.
-    pub(super) fn render_section_header(
+    pub(super) fn render_section_header<IconType, OnClick, OnRightClick>(
         &self,
-        element_id: SharedString,
-        icon: impl Into<AnyElement>,
-        label: &str,
-        total_count: usize,
-        filtered_count: usize,
-        is_expanded: bool,
-        on_click: impl Fn(&mut Self, &ClickEvent, &mut Window, &mut Context<Self>) + 'static,
-        on_right_click: Option<
-            impl Fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>) + 'static,
-        >,
-        muted_foreground: Hsla,
-        list_hover: Hsla,
-        depth: usize,
+        props: SectionHeaderProps<'_, IconType, OnClick, OnRightClick>,
         cx: &mut Context<Self>,
-    ) -> Stateful<Div> {
+    ) -> Stateful<Div>
+    where
+        IconType: Into<AnyElement>,
+        OnClick: for<'a, 'b, 'c, 'd> Fn(
+                &'a mut Self,
+                &'b ClickEvent,
+                &'c mut Window,
+                &'d mut Context<Self>,
+            ) + 'static,
+        OnRightClick: for<'a, 'b, 'c, 'd> Fn(
+                &'a mut Self,
+                &'b MouseDownEvent,
+                &'c mut Window,
+                &'d mut Context<Self>,
+            ) + 'static,
+    {
+        let SectionHeaderProps {
+            element_id,
+            icon,
+            label,
+            total_count,
+            filtered_count,
+            is_expanded,
+            on_click,
+            on_right_click,
+            muted_foreground,
+            list_hover,
+            depth,
+        } = props;
         let has_search = !self.search_query.is_empty();
         let indent = px(8.0 + depth as f32 * 12.0);
 

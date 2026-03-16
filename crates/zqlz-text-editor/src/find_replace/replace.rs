@@ -1,26 +1,6 @@
 //! Replace functionality with regex capture group support.
-//!
-//! Provides text replacement with support for:
-//! - Simple literal replacement
-//! - Regex replacement with capture groups ($1, $2, etc.)
 
-use super::find::{FindError, FindOptions, build_regex};
-
-/// Result of a replace operation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReplaceResult {
-    /// The new text after replacement.
-    pub text: String,
-    /// Number of replacements made.
-    pub count: usize,
-}
-
-impl ReplaceResult {
-    /// Create a new replace result.
-    pub fn new(text: String, count: usize) -> Self {
-        Self { text, count }
-    }
-}
+use super::find::{FindError, FindOptions, ReplaceResult, SearchEngine};
 
 /// Replace all occurrences of a pattern in text.
 ///
@@ -45,17 +25,7 @@ pub fn replace_all(
         return Ok(ReplaceResult::new(text.to_string(), 0));
     }
 
-    let regex = build_regex(pattern, options)?;
-    let mut count = 0;
-
-    let result = regex
-        .replace_all(text, |caps: &regex::Captures| {
-            count += 1;
-            expand_replacement(replacement, caps)
-        })
-        .into_owned();
-
-    Ok(ReplaceResult::new(result, count))
+    Ok(SearchEngine::new(pattern, options)?.replace_all(text, replacement))
 }
 
 /// Replace the first occurrence of a pattern in text.
@@ -69,16 +39,7 @@ pub fn replace_first(
         return Ok(ReplaceResult::new(text.to_string(), 0));
     }
 
-    let regex = build_regex(pattern, options)?;
-
-    if let Some(m) = regex.find(text) {
-        let caps = regex.captures(text).unwrap();
-        let expanded = expand_replacement(replacement, &caps);
-        let result = format!("{}{}{}", &text[..m.start()], expanded, &text[m.end()..]);
-        Ok(ReplaceResult::new(result, 1))
-    } else {
-        Ok(ReplaceResult::new(text.to_string(), 0))
-    }
+    Ok(SearchEngine::new(pattern, options)?.replace_first(text, replacement))
 }
 
 /// Replace the next occurrence of a pattern starting from a position.
@@ -93,64 +54,7 @@ pub fn replace_next(
         return Ok(ReplaceResult::new(text.to_string(), 0));
     }
 
-    let regex = build_regex(pattern, options)?;
-    let search_text = &text[start_pos..];
-
-    if let Some(m) = regex.find(search_text) {
-        let caps = regex.captures(search_text).unwrap();
-        let expanded = expand_replacement(replacement, &caps);
-        let abs_start = start_pos + m.start();
-        let abs_end = start_pos + m.end();
-        let result = format!("{}{}{}", &text[..abs_start], expanded, &text[abs_end..]);
-        Ok(ReplaceResult::new(result, 1))
-    } else {
-        Ok(ReplaceResult::new(text.to_string(), 0))
-    }
-}
-
-/// Expand replacement string with capture group references.
-fn expand_replacement(replacement: &str, caps: &regex::Captures) -> String {
-    let mut result = String::with_capacity(replacement.len() * 2);
-    let mut chars = replacement.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '$' {
-            if let Some(&next) = chars.peek() {
-                if next == '$' {
-                    result.push('$');
-                    chars.next();
-                } else if next == '&' {
-                    if let Some(m) = caps.get(0) {
-                        result.push_str(m.as_str());
-                    }
-                    chars.next();
-                } else if next.is_ascii_digit() {
-                    let mut num_str = String::new();
-                    while let Some(&d) = chars.peek() {
-                        if d.is_ascii_digit() {
-                            num_str.push(d);
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    if let Ok(num) = num_str.parse::<usize>() {
-                        if let Some(m) = caps.get(num) {
-                            result.push_str(m.as_str());
-                        }
-                    }
-                } else {
-                    result.push(c);
-                }
-            } else {
-                result.push(c);
-            }
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
+    Ok(SearchEngine::new(pattern, options)?.replace_next(text, replacement, start_pos))
 }
 
 #[cfg(test)]

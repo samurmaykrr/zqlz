@@ -8,7 +8,7 @@ use gpui::*;
 use zqlz_text_editor::TextEditor;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, IndexPath, Sizable,
-    button::{Button, ButtonCustomVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
@@ -316,13 +316,12 @@ impl FilterPanelState {
             .filters
             .iter()
             .position(|f| f.condition.id == filter_id)
+            && pos > 0
         {
-            if pos > 0 {
-                self.filters.swap(pos, pos - 1);
-                self.is_dirty = true;
-                cx.emit(FilterPanelEvent::Changed);
-                cx.notify();
-            }
+            self.filters.swap(pos, pos - 1);
+            self.is_dirty = true;
+            cx.emit(FilterPanelEvent::Changed);
+            cx.notify();
         }
     }
 
@@ -332,13 +331,12 @@ impl FilterPanelState {
             .filters
             .iter()
             .position(|f| f.condition.id == filter_id)
+            && pos < self.filters.len() - 1
         {
-            if pos < self.filters.len() - 1 {
-                self.filters.swap(pos, pos + 1);
-                self.is_dirty = true;
-                cx.emit(FilterPanelEvent::Changed);
-                cx.notify();
-            }
+            self.filters.swap(pos, pos + 1);
+            self.is_dirty = true;
+            cx.emit(FilterPanelEvent::Changed);
+            cx.notify();
         }
     }
 
@@ -479,25 +477,25 @@ impl FilterPanelState {
 
     /// Move sort criterion left (earlier in order)
     pub fn move_sort_left(&mut self, sort_id: usize, cx: &mut Context<Self>) {
-        if let Some(pos) = self.sorts.iter().position(|s| s.id == sort_id) {
-            if pos > 0 {
-                self.sorts.swap(pos, pos - 1);
-                self.is_dirty = true;
-                cx.emit(FilterPanelEvent::Changed);
-                cx.notify();
-            }
+        if let Some(pos) = self.sorts.iter().position(|s| s.id == sort_id)
+            && pos > 0
+        {
+            self.sorts.swap(pos, pos - 1);
+            self.is_dirty = true;
+            cx.emit(FilterPanelEvent::Changed);
+            cx.notify();
         }
     }
 
     /// Move sort criterion right (later in order)
     pub fn move_sort_right(&mut self, sort_id: usize, cx: &mut Context<Self>) {
-        if let Some(pos) = self.sorts.iter().position(|s| s.id == sort_id) {
-            if pos < self.sorts.len() - 1 {
-                self.sorts.swap(pos, pos + 1);
-                self.is_dirty = true;
-                cx.emit(FilterPanelEvent::Changed);
-                cx.notify();
-            }
+        if let Some(pos) = self.sorts.iter().position(|s| s.id == sort_id)
+            && pos < self.sorts.len() - 1
+        {
+            self.sorts.swap(pos, pos + 1);
+            self.is_dirty = true;
+            cx.emit(FilterPanelEvent::Changed);
+            cx.notify();
         }
     }
 
@@ -750,12 +748,6 @@ impl RenderOnce for FilterPanel {
             // Apply button row
             .child({
                 let has_criteria = has_filters || has_sorts;
-                let apply_button_style = ButtonCustomVariant::new(cx)
-                    .foreground(theme.primary)
-                    .color(theme.primary.opacity(0.12))
-                    .border(theme.primary.opacity(0.24))
-                    .hover(theme.primary.opacity(0.18))
-                    .active(theme.primary.opacity(0.24));
                 h_flex()
                     .items_center()
                     .gap_2()
@@ -763,7 +755,7 @@ impl RenderOnce for FilterPanel {
                     .child(
                         Button::new("apply-filter-sort")
                             .label("Apply Filter & Sort")
-                            .custom(apply_button_style)
+                            .primary()
                             .disabled(!has_criteria)
                             .small()
                             .on_click({
@@ -1025,7 +1017,7 @@ fn render_sort_chip(
         .label(sort.column.clone())
         .icon(icon)
         .small()
-        .outline()
+        .secondary_primary()
         .on_click({
             let state = panel_state.clone();
             move |_, _window, cx| {

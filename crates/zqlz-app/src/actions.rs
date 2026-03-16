@@ -41,11 +41,8 @@ actions!(
 
 // Re-export query editor actions from zqlz-query crate
 pub use zqlz_query::{
-    AcceptCompletion, CancelCompletion, CommentSelection, CopyLineDown, CopyLineUp, DeleteLine,
-    DuplicateLine, FindNext, FindPrevious, FindReferences, FormatQuery, GoToDefinition,
-    MoveLineDown, MoveLineUp, NextProblem, PreviousProblem, RenameSymbol, SaveQuery, SaveQueryAs,
-    ShowCodeActions, ShowHover, ToggleLineComment, ToggleProblemsPanel, TriggerCompletion,
-    TriggerParameterHints, UncommentSelection,
+    NextProblem, PreviousProblem, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover,
+    ToggleProblemsPanel, TriggerParameterHints,
 };
 
 // Tab management actions

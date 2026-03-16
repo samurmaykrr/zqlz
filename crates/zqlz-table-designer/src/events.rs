@@ -5,6 +5,7 @@ use uuid::Uuid;
 use crate::models::TableDesign;
 
 /// Events emitted by the TableDesignerPanel
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum TableDesignerEvent {
     /// User wants to save the design.

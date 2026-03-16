@@ -19,12 +19,13 @@
 //! ```
 
 mod config;
-mod pool;
+#[path = "pool/pool.rs"]
+mod connection_pool;
 mod stats;
 
 #[cfg(test)]
 mod tests;
 
 pub use config::PoolConfig;
-pub use pool::{ConnectionPool, PooledConnection};
+pub use connection_pool::{ConnectionPool, PooledConnection};
 pub use stats::PoolStats;

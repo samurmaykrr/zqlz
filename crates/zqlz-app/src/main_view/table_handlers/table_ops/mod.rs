@@ -14,7 +14,7 @@
 mod copy_names;
 mod create;
 mod delete;
-mod design;
+pub(in crate::main_view) mod design;
 mod duplicate;
 mod empty;
 mod import_export;

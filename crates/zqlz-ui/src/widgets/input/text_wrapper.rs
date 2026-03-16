@@ -94,7 +94,7 @@ impl TextWrapper {
     /// Get the line item by row index.
     #[inline]
     pub(super) fn line(&self, row: usize) -> Option<&LineItem> {
-        self.lines.iter().skip(row).next()
+        self.lines.get(row)
     }
 
     pub(super) fn set_wrap_width(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
@@ -224,7 +224,7 @@ impl TextWrapper {
             });
         }
 
-        if self.lines.len() == 0 {
+        if self.lines.is_empty() {
             self.lines = new_lines;
         } else {
             self.lines.splice(rows_range, new_lines);
@@ -242,7 +242,7 @@ impl TextWrapper {
     ///
     /// If the `text` is the same as the current text, do nothing.
     fn update_all(&mut self, text: &Rope, cx: &mut App) {
-        self.update(text, &(0..text.len()), &text, cx);
+        self.update(text, &(0..text.len()), text, cx);
     }
 
     /// Return display point (with soft wrap) from the given byte offset in the text.
@@ -274,7 +274,7 @@ impl TextWrapper {
         // Otherwise return the eof of the line.
         let last_range = line.wrapped_lines.last().unwrap_or(&(0..0));
         let ix = line.lines_len().saturating_sub(1);
-        return DisplayPoint::new(wrapped_row + ix, ix, last_range.len());
+        DisplayPoint::new(wrapped_row + ix, ix, last_range.len())
     }
 
     /// Return byte offset in the text from the given display point (with soft wrap).
@@ -297,7 +297,7 @@ impl TextWrapper {
             wrapped_row += line.lines_len();
         }
 
-        return self.text.len();
+        self.text.len()
     }
 
     pub(crate) fn display_point_to_point(&self, point: DisplayPoint) -> tree_sitter::Point {
@@ -733,7 +733,7 @@ mod tests {
             // range: 0..15
             LineItem {
                 line: Rope::from("Hello, 世界!\r"),
-                wrapped_lines: vec![0..15],
+                wrapped_lines: std::iter::once(0..15).collect(),
             },
             // range: 16..36
             LineItem {
@@ -748,7 +748,7 @@ mod tests {
             // range: 57..79
             LineItem {
                 line: Rope::from("这里是第 4 行。"),
-                wrapped_lines: vec![0..22],
+                wrapped_lines: std::iter::once(0..22).collect(),
             },
         ];
 

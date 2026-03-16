@@ -262,10 +262,7 @@ impl TableDelegate for TableViewerDelegate {
         }
 
         let display_value = if value_str.contains('\n') || value_str.contains('\r') {
-            value_str
-                .replace("\r\n", " ")
-                .replace('\n', " ")
-                .replace('\r', " ")
+            value_str.replace("\r\n", " ").replace(['\n', '\r'], " ")
         } else {
             value_str.clone()
         };
@@ -381,9 +378,9 @@ impl TableDelegate for TableViewerDelegate {
 
         let is_primary_key = meta
             .as_ref()
-            .map_or(false, |m| self.primary_key_columns.contains(&m.name));
+            .is_some_and(|m| self.primary_key_columns.contains(&m.name));
         let is_foreign_key = self.fk_by_column.contains_key(&data_col_ix);
-        let is_nullable = meta.as_ref().map_or(false, |m| m.nullable);
+        let is_nullable = meta.as_ref().is_some_and(|m| m.nullable);
 
         div()
             .size_full()
@@ -403,10 +400,12 @@ impl TableDelegate for TableViewerDelegate {
             .child(column.name.clone())
             .when(is_nullable, |this| {
                 this.child(
-                    div()
-                        .text_xs()
-                        .text_color(theme.muted_foreground.opacity(0.6))
-                        .child("∅"),
+                    Button::new(format!("nullable-column-{}", data_col_ix))
+                        .text()
+                        .xsmall()
+                        .label("∅")
+                        .tooltip("Nullable column")
+                        .text_color(theme.muted_foreground.opacity(0.6)),
                 )
             })
             .into_any_element()

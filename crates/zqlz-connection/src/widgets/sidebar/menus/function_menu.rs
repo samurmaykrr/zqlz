@@ -33,18 +33,29 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
+        if !self.supports_sidebar_section(conn_id, "functions") {
+            return;
+        }
+
         if self.function_context_menu.is_none() {
             self.function_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
         let function_for_menu = function_name.clone();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.function_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
-                    menu.max_h(px(400.0))
+                    menu.action_context(action_context.clone())
+                        .max_h(px(400.0))
                         .item(PopupMenuItem::new("View Definition").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = function_for_menu.clone();
@@ -91,7 +102,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

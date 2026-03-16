@@ -3,25 +3,34 @@
 use gpui::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use zqlz_core::ColumnMeta;
+use zqlz_core::{ColumnMeta, Value};
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
-use crate::components::{PendingCellChange, TableViewerPanel};
+use crate::components::{CellValue, PendingCellChange, TableViewerPanel};
 
-use crate::main_view::table_handlers_utils::formatting::format_sql_value;
+use crate::main_view::table_handlers_utils::formatting::{
+    format_sql_value, format_sql_value_from_value,
+};
 
 pub(in crate::main_view) fn handle_generate_sql_event(
     table_name: String,
     modified_cells: HashMap<(usize, usize), PendingCellChange>,
     deleted_rows: HashSet<usize>,
-    new_rows: Vec<Vec<String>>,
+    new_rows: Vec<Vec<Value>>,
     column_meta: Vec<ColumnMeta>,
-    all_rows: Vec<Vec<String>>,
+    all_rows: Vec<Vec<Value>>,
     cx: &mut App,
 ) {
     let column_names: Vec<String> = column_meta.iter().map(|c| c.name.clone()).collect();
     let mut sql_statements: Vec<String> = Vec::new();
+    let display_cell_value = |value: &Value| {
+        if value.is_null() {
+            CellValue::Null
+        } else {
+            CellValue::Value(value.clone())
+        }
+    };
 
     // Generate UPDATE statements for modified cells
     // Group by row to create one UPDATE per row with multiple SET clauses
@@ -50,9 +59,10 @@ pub(in crate::main_view) fn handle_generate_sql_event(
             let where_parts: Vec<String> = column_names
                 .iter()
                 .zip(row_values.iter())
-                .map(|(col_name, value): (&String, &String)| {
-                    let sql_value = format_sql_value(value);
-                    if value.is_empty() || value == "NULL" {
+                .map(|(col_name, value)| {
+                    let cell_value = display_cell_value(value);
+                    let sql_value = format_sql_value(&cell_value);
+                    if cell_value.is_null() {
                         format!("\"{}\" IS NULL", col_name)
                     } else {
                         format!("\"{}\" = {}", col_name, sql_value)
@@ -75,9 +85,10 @@ pub(in crate::main_view) fn handle_generate_sql_event(
             let where_parts: Vec<String> = column_names
                 .iter()
                 .zip(row_values.iter())
-                .map(|(col_name, value): (&String, &String)| {
-                    let sql_value = format_sql_value(value);
-                    if value.is_empty() || value == "NULL" {
+                .map(|(col_name, value)| {
+                    let cell_value = display_cell_value(value);
+                    let sql_value = format_sql_value(&cell_value);
+                    if cell_value.is_null() {
                         format!("\"{}\" IS NULL", col_name)
                     } else {
                         format!("\"{}\" = {}", col_name, sql_value)
@@ -101,7 +112,7 @@ pub(in crate::main_view) fn handle_generate_sql_event(
             .collect::<Vec<_>>()
             .join(", ");
 
-        let values: Vec<String> = row_values.iter().map(|v| format_sql_value(v)).collect();
+        let values: Vec<String> = row_values.iter().map(format_sql_value_from_value).collect();
 
         sql_statements.push(format!(
             "INSERT INTO \"{}\" ({}) VALUES ({});",

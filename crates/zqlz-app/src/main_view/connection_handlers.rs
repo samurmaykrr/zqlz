@@ -1,7 +1,10 @@
 // Connection management methods for MainView
 
 use gpui::*;
+use std::path::Path;
+use std::time::Duration;
 use uuid::Uuid;
+use zqlz_connection::{SavedConnection, SchemaObjects};
 use zqlz_ui::widgets::{
     ActiveTheme, DatabaseLogo, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
     notification::Notification, v_flex,
@@ -9,7 +12,7 @@ use zqlz_ui::widgets::{
 
 use crate::app::AppState;
 use crate::components::ConnectionEntry;
-use zqlz_connection::SavedQueryInfo;
+use zqlz_connection::{SavedQueryInfo, SidebarObjectCapabilities};
 use zqlz_core::{DriverCategory, ObjectsPanelData};
 
 use super::MainView;
@@ -162,6 +165,7 @@ impl MainView {
         let workspace_state = self.workspace_state.downgrade();
         let driver_type = saved.driver.clone(); // Capture driver type for LSP
         let connection_name = saved.name.clone(); // Capture connection name for UI
+        let sidebar_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
         // Known up-front from the saved config; used to pre-populate the sidebar
         // with the active database node before any async queries complete.
         let active_db_from_config = saved.params.get("database").cloned();
@@ -380,8 +384,17 @@ impl MainView {
                                 let conn_name = connection_name.clone();
                                 let driver_category = driver_name_to_category(&driver_type);
                                 let objects_data = ObjectsPanelData::from_table_infos(tables.clone());
+                                let object_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
                                 _ = objects_panel.update(cx, |panel, cx| {
-                                    panel.load_objects(conn_id, conn_name, None, objects_data, driver_category, cx);
+                                    panel.load_objects(
+                                        conn_id,
+                                        conn_name,
+                                        None,
+                                        objects_data,
+                                        driver_category,
+                                        object_capabilities,
+                                        cx,
+                                    );
                                 });
 
                                 // Push table names into every open QueryEditor's LSP cache
@@ -401,78 +414,88 @@ impl MainView {
                                 // Load remaining schema sections sequentially to avoid
                                 // waker contention on the shared Postgres mutex. Each
                                 // result clears its own spinner as soon as it arrives.
-                                match schema_service.load_views(conn.clone(), conn_id).await {
-                                    Ok(v) => {
-                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.set_views_only(conn_id, names, cx);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load views: {}", e);
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.clear_section_loading(conn_id, "views", cx);
-                                        });
-                                    }
-                                }
-
-                                match schema_service.load_materialized_views(conn.clone(), conn_id).await {
-                                    Ok(v) => {
-                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.set_materialized_views_only(conn_id, names, cx);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load materialized views: {}", e);
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.clear_section_loading(conn_id, "materialized_views", cx);
-                                        });
+                                if sidebar_capabilities.supports_views {
+                                    match schema_service.load_views(conn.clone(), conn_id).await {
+                                        Ok(v) => {
+                                            let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.set_views_only(conn_id, names, cx);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to load views: {}", e);
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.clear_section_loading(conn_id, "views", cx);
+                                            });
+                                        }
                                     }
                                 }
 
-                                match schema_service.load_functions(conn.clone(), conn_id).await {
-                                    Ok(v) => {
-                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.set_functions_only(conn_id, names, cx);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load functions: {}", e);
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.clear_section_loading(conn_id, "functions", cx);
-                                        });
-                                    }
-                                }
-
-                                match schema_service.load_procedures(conn.clone(), conn_id).await {
-                                    Ok(v) => {
-                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.set_procedures_only(conn_id, names, cx);
-                                        });
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load procedures: {}", e);
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.clear_section_loading(conn_id, "procedures", cx);
-                                        });
+                                if sidebar_capabilities.supports_materialized_views {
+                                    match schema_service.load_materialized_views(conn.clone(), conn_id).await {
+                                        Ok(v) => {
+                                            let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.set_materialized_views_only(conn_id, names, cx);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to load materialized views: {}", e);
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.clear_section_loading(conn_id, "materialized_views", cx);
+                                            });
+                                        }
                                     }
                                 }
 
-                                match schema_service.load_triggers(conn.clone(), conn_id).await {
-                                    Ok(v) => {
-                                        let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.set_triggers_only(conn_id, names, cx);
-                                        });
+                                if sidebar_capabilities.supports_functions {
+                                    match schema_service.load_functions(conn.clone(), conn_id).await {
+                                        Ok(v) => {
+                                            let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.set_functions_only(conn_id, names, cx);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to load functions: {}", e);
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.clear_section_loading(conn_id, "functions", cx);
+                                            });
+                                        }
                                     }
-                                    Err(e) => {
-                                        tracing::warn!("Failed to load triggers: {}", e);
-                                        _ = sidebar.update_in(cx, |s, _window, cx| {
-                                            s.clear_section_loading(conn_id, "triggers", cx);
-                                        });
+                                }
+
+                                if sidebar_capabilities.supports_procedures {
+                                    match schema_service.load_procedures(conn.clone(), conn_id).await {
+                                        Ok(v) => {
+                                            let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.set_procedures_only(conn_id, names, cx);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to load procedures: {}", e);
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.clear_section_loading(conn_id, "procedures", cx);
+                                            });
+                                        }
+                                    }
+                                }
+
+                                if sidebar_capabilities.supports_triggers {
+                                    match schema_service.load_triggers(conn.clone(), conn_id).await {
+                                        Ok(v) => {
+                                            let names: Vec<String> = v.into_iter().map(|x| x.name).collect();
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.set_triggers_only(conn_id, names, cx);
+                                            });
+                                        }
+                                        Err(e) => {
+                                            tracing::warn!("Failed to load triggers: {}", e);
+                                            _ = sidebar.update_in(cx, |s, _window, cx| {
+                                                s.clear_section_loading(conn_id, "triggers", cx);
+                                            });
+                                        }
                                     }
                                 }
 
@@ -647,8 +670,17 @@ impl MainView {
                         let conn_name = database_name.clone();
                         let db_name = Some(database_name.clone());
                         let driver_category = driver_name_to_category(&driver_type);
+                        let object_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
                         _ = objects_panel.update(cx, |panel, cx| {
-                            panel.load_objects(connection_id, conn_name, db_name, data, driver_category, cx);
+                            panel.load_objects(
+                                connection_id,
+                                conn_name,
+                                db_name,
+                                data,
+                                driver_category,
+                                object_capabilities,
+                                cx,
+                            );
                         });
                     }
 
@@ -656,13 +688,15 @@ impl MainView {
                         sidebar.set_database_schema(
                             connection_id,
                             &database_name,
-                            tables,
-                            views,
-                            materialized_views,
-                            triggers,
-                            functions,
-                            procedures,
-                            schema_name,
+                            SchemaObjects {
+                                tables,
+                                views,
+                                materialized_views,
+                                triggers,
+                                functions,
+                                procedures,
+                                schema_name,
+                            },
                             cx,
                         );
                     });
@@ -767,10 +801,7 @@ impl MainView {
             .get(&saved.driver)
             .ok_or_else(|| anyhow::anyhow!("Driver '{}' not found", saved.driver))?;
 
-        let mut config = zqlz_core::ConnectionConfig::new(&saved.driver, &saved.name);
-        for (key, value) in &saved.params {
-            config = config.with_param(key, value.clone());
-        }
+        let mut config = saved.to_connection_config();
         config = config.with_param("database", database_name);
 
         let temp_conn = driver.connect(&config).await?;
@@ -937,6 +968,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // This dialog API stores button intent as data before render, which is why
+                        // the destructive action remains a ButtonVariant here.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _, cx| {
@@ -1031,6 +1064,68 @@ impl MainView {
         super::connection_window::ConnectionWindow::open(cx);
     }
 
+    pub(super) fn import_database_file_and_open_query(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let path_string = path.to_string_lossy().into_owned();
+        let imported = match SavedConnection::from_external_target(&path_string) {
+            Ok(Some(connection)) => connection,
+            Ok(None) => {
+                window.push_notification(
+                    Notification::warning("That file is not a supported database file"),
+                    cx,
+                );
+                return;
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(format!("Failed to import database file: {error}")),
+                    cx,
+                );
+                return;
+            }
+        };
+
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            window.push_notification(Notification::error("Application state not available"), cx);
+            return;
+        };
+
+        let connection_id = imported.id;
+        let connection_name = imported.name.clone();
+
+        app_state.save_connection(imported);
+        self.refresh_connections_list_preserving_state(cx);
+
+        self.workspace_state.update(cx, |state, cx| {
+            state.set_active_connection(Some(connection_id), cx);
+        });
+
+        self.connect_to_database(connection_id, window, cx);
+
+        cx.spawn_in(window, async move |this, cx| {
+            cx.background_spawn(async move {
+                smol::Timer::after(Duration::from_millis(150)).await;
+            })
+            .await;
+
+                if let Err(error) = this.update_in(cx, |this, window, cx| {
+                    let _ = this.create_new_query_editor(window, cx);
+                }) {
+                    tracing::warn!(%error, connection_id = %connection_id, "failed to open query after importing database file");
+                }
+        })
+        .detach();
+
+        window.push_notification(
+            Notification::success(format!("Opened database file as {connection_name}")),
+            cx,
+        );
+    }
+
     /// Fetch a single sidebar section on demand (lazy loading).
     ///
     /// Called when the user first expands a section that has never been loaded.
@@ -1058,6 +1153,23 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let sidebar = self.connection_sidebar.downgrade();
+        let sidebar_capabilities = SidebarObjectCapabilities::for_driver(connection.driver_name());
+
+        let is_supported = match section {
+            "views" => sidebar_capabilities.supports_views,
+            "materialized_views" => sidebar_capabilities.supports_materialized_views,
+            "functions" => sidebar_capabilities.supports_functions,
+            "procedures" => sidebar_capabilities.supports_procedures,
+            "triggers" => sidebar_capabilities.supports_triggers,
+            _ => true,
+        };
+
+        if !is_supported {
+            self.connection_sidebar.update(cx, |sidebar, cx| {
+                sidebar.clear_section_loading(connection_id, section, cx);
+            });
+            return;
+        }
 
         cx.spawn_in(window, async move |_this, cx| {
             match section {

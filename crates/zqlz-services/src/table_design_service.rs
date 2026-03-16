@@ -94,8 +94,8 @@ impl TableDesignService {
     }
 
     /// Generate DDL for dropping a table
-    pub fn generate_drop_table_ddl(&self, table_name: &str) -> String {
-        DdlGenerator::generate_drop_table(table_name)
+    pub fn generate_drop_table_ddl(&self, table_name: &str, dialect: &DatabaseDialect) -> String {
+        DdlGenerator::generate_drop_table(table_name, dialect)
     }
 
     /// Drop a table
@@ -103,9 +103,10 @@ impl TableDesignService {
     pub async fn drop_table(
         &self,
         connection: Arc<dyn Connection>,
+        dialect: &DatabaseDialect,
         table_name: &str,
     ) -> ServiceResult<()> {
-        let ddl = self.generate_drop_table_ddl(table_name);
+        let ddl = self.generate_drop_table_ddl(table_name, dialect);
 
         connection.execute(&ddl, &[]).await.map_err(|e| {
             ServiceError::TableOperationFailed(format!("Failed to drop table: {}", e))

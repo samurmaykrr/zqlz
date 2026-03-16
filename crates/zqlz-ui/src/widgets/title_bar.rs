@@ -12,6 +12,8 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+type CloseWindowHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
+
 pub const TITLE_BAR_HEIGHT: Pixels = px(34.);
 #[cfg(target_os = "macos")]
 const TITLE_BAR_LEFT_PADDING: Pixels = px(80.);
@@ -25,7 +27,7 @@ const TITLE_BAR_LEFT_PADDING: Pixels = px(12.);
 pub struct TitleBar {
     style: StyleRefinement,
     children: SmallVec<[AnyElement; 1]>,
-    on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    on_close_window: Option<CloseWindowHandler>,
 }
 
 impl TitleBar {
@@ -54,9 +56,15 @@ impl TitleBar {
         f: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
     ) -> Self {
         if cfg!(target_os = "linux") {
-            self.on_close_window = Some(Rc::new(Box::new(f)));
+            self.on_close_window = Some(Rc::new(f));
         }
         self
+    }
+}
+
+impl Default for TitleBar {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -70,7 +78,7 @@ enum ControlIcon {
     Restore,
     Maximize,
     Close {
-        on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+        on_close_window: Option<CloseWindowHandler>,
     },
 }
 
@@ -87,7 +95,7 @@ impl ControlIcon {
         Self::Maximize
     }
 
-    fn close(on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>) -> Self {
+    fn close(on_close_window: Option<CloseWindowHandler>) -> Self {
         Self::Close { on_close_window }
     }
 
@@ -203,7 +211,7 @@ impl RenderOnce for ControlIcon {
 
 #[derive(IntoElement)]
 struct WindowControls {
-    on_close_window: Option<Rc<Box<dyn Fn(&ClickEvent, &mut Window, &mut App)>>>,
+    on_close_window: Option<CloseWindowHandler>,
 }
 
 impl RenderOnce for WindowControls {

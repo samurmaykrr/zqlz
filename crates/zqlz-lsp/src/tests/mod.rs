@@ -92,3 +92,6 @@ mod test_no_snippets;
 
 #[cfg(test)]
 mod test_create_table_completions;
+
+#[cfg(test)]
+mod test_redis_completions;

@@ -607,10 +607,10 @@ impl ImportWizard {
         self.state.sources = sources;
 
         // Detect format from first file
-        if let Some(source) = self.state.sources.first() {
-            if let Some(path) = source.path() {
-                self.state.detected_format = Some(ImportFormat::from_path(path));
-            }
+        if let Some(source) = self.state.sources.first()
+            && let Some(path) = source.path()
+        {
+            self.state.detected_format = Some(ImportFormat::from_path(path));
         }
 
         self.update_source_select(window, cx);
@@ -1925,11 +1925,9 @@ impl ImportWizard {
                                                             .state
                                                             .field_mappings
                                                             .get_mut(&source_idx)
+                                                            && let Some(m) = mappings.get_mut(idx)
                                                         {
-                                                            if let Some(m) = mappings.get_mut(idx) {
-                                                                m.is_primary_key =
-                                                                    !m.is_primary_key;
-                                                            }
+                                                            m.is_primary_key = !m.is_primary_key;
                                                         }
                                                         cx.notify();
                                                     },
@@ -1948,10 +1946,9 @@ impl ImportWizard {
                                                             .state
                                                             .field_mappings
                                                             .get_mut(&source_idx)
+                                                            && let Some(m) = mappings.get_mut(idx)
                                                         {
-                                                            if let Some(m) = mappings.get_mut(idx) {
-                                                                m.skip = !m.skip;
-                                                            }
+                                                            m.skip = !m.skip;
                                                         }
                                                         cx.notify();
                                                     },

@@ -97,50 +97,46 @@ impl TableViewerDelegate {
             return Ok(());
         }
 
-        if self.is_integer_column(data_col) {
-            if value.parse::<i64>().is_err() {
-                let col_name = self
-                    .column_meta
-                    .get(data_col)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("column");
-                return Err(format!(
-                    "'{}' is not a valid integer for column '{}'",
-                    value, col_name
-                ));
-            }
+        if self.is_integer_column(data_col) && value.parse::<i64>().is_err() {
+            let col_name = self
+                .column_meta
+                .get(data_col)
+                .map(|c| c.name.as_str())
+                .unwrap_or("column");
+            return Err(format!(
+                "'{}' is not a valid integer for column '{}'",
+                value, col_name
+            ));
         }
 
-        if self.is_float_column(data_col) {
-            if value.parse::<f64>().is_err() {
-                let col_name = self
-                    .column_meta
-                    .get(data_col)
-                    .map(|c| c.name.as_str())
-                    .unwrap_or("column");
-                return Err(format!(
-                    "'{}' is not a valid number for column '{}'",
-                    value, col_name
-                ));
-            }
+        if self.is_float_column(data_col) && value.parse::<f64>().is_err() {
+            let col_name = self
+                .column_meta
+                .get(data_col)
+                .map(|c| c.name.as_str())
+                .unwrap_or("column");
+            return Err(format!(
+                "'{}' is not a valid number for column '{}'",
+                value, col_name
+            ));
         }
 
-        if self.is_string_column(data_col) {
-            if let Some(max_length) = self.column_meta.get(data_col).and_then(|c| c.max_length) {
-                if max_length > 0 && value.len() > max_length as usize {
-                    let col_name = self
-                        .column_meta
-                        .get(data_col)
-                        .map(|c| c.name.as_str())
-                        .unwrap_or("column");
-                    return Err(format!(
-                        "Value exceeds max length {} for column '{}' ({} chars)",
-                        max_length,
-                        col_name,
-                        value.len()
-                    ));
-                }
-            }
+        if self.is_string_column(data_col)
+            && let Some(max_length) = self.column_meta.get(data_col).and_then(|c| c.max_length)
+            && max_length > 0
+            && value.len() > max_length as usize
+        {
+            let col_name = self
+                .column_meta
+                .get(data_col)
+                .map(|c| c.name.as_str())
+                .unwrap_or("column");
+            return Err(format!(
+                "Value exceeds max length {} for column '{}' ({} chars)",
+                max_length,
+                col_name,
+                value.len()
+            ));
         }
 
         Ok(())

@@ -7,30 +7,28 @@ const BULLETS: [&str; 5] = ["▪", "•", "◦", "‣", "⁃"];
 pub(super) fn list_item_prefix(ix: usize, ordered: bool, depth: usize) -> String {
     if ordered {
         if depth == 0 {
-            return format!("{}. ", ix + 1);
-        }
-
-        if depth == 1 {
-            return format!(
+            format!("{}. ", ix + 1)
+        } else if depth == 1 {
+            format!(
                 "{}. ",
                 NUMBERED_PREFIXES_1
                     .chars()
                     .nth(ix % NUMBERED_PREFIXES_1.len())
                     .unwrap()
-            );
+            )
         } else {
-            return format!(
+            format!(
                 "{}. ",
                 NUMBERED_PREFIXES_2
                     .chars()
                     .nth(ix % NUMBERED_PREFIXES_2.len())
                     .unwrap()
-            );
+            )
         }
     } else {
         let depth = depth.min(BULLETS.len() - 1);
         let bullet = BULLETS[depth];
-        return format!("{} ", bullet);
+        format!("{} ", bullet)
     }
 }
 

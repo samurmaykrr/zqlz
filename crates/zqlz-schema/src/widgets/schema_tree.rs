@@ -5,6 +5,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
+use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, IconName, Sizable,
     button::{Button, ButtonVariants},
@@ -151,7 +152,10 @@ pub struct DatabaseSchemaData {
 
 impl DatabaseSchemaData {
     /// Build tree nodes from schema data
-    pub fn into_tree_nodes(self) -> Vec<SchemaNode> {
+    pub fn into_tree_nodes(
+        self,
+        object_capabilities: SidebarObjectCapabilities,
+    ) -> Vec<SchemaNode> {
         let mut root_nodes = Vec::new();
 
         // Tables folder
@@ -169,7 +173,7 @@ impl DatabaseSchemaData {
         }
 
         // Views folder
-        if !self.views.is_empty() {
+        if object_capabilities.supports_views && !self.views.is_empty() {
             let view_nodes: Vec<SchemaNode> = self
                 .views
                 .into_iter()
@@ -183,7 +187,7 @@ impl DatabaseSchemaData {
         }
 
         // Triggers folder
-        if !self.triggers.is_empty() {
+        if object_capabilities.supports_triggers && !self.triggers.is_empty() {
             let trigger_nodes: Vec<SchemaNode> = self
                 .triggers
                 .into_iter()
@@ -197,7 +201,7 @@ impl DatabaseSchemaData {
         }
 
         // Functions folder
-        if !self.functions.is_empty() {
+        if object_capabilities.supports_functions && !self.functions.is_empty() {
             let function_nodes: Vec<SchemaNode> = self
                 .functions
                 .into_iter()
@@ -211,7 +215,7 @@ impl DatabaseSchemaData {
         }
 
         // Procedures folder
-        if !self.procedures.is_empty() {
+        if object_capabilities.supports_procedures && !self.procedures.is_empty() {
             let procedure_nodes: Vec<SchemaNode> = self
                 .procedures
                 .into_iter()
@@ -317,10 +321,12 @@ pub enum SchemaTreeEvent {
 pub struct SchemaTreePanel {
     focus_handle: FocusHandle,
     connection_id: Option<Uuid>,
+    object_capabilities: SidebarObjectCapabilities,
     root_nodes: Vec<SchemaNode>,
     selected_node: Option<SchemaNodeType>,
     is_loading: bool,
     context_menu: Option<Entity<ContextMenuState>>,
+    emitted_panel_event_warning: bool,
 }
 
 impl SchemaTreePanel {
@@ -328,10 +334,12 @@ impl SchemaTreePanel {
         Self {
             focus_handle: cx.focus_handle(),
             connection_id: None,
+            object_capabilities: SidebarObjectCapabilities::default(),
             root_nodes: Vec::new(),
             selected_node: None,
             is_loading: false,
             context_menu: None,
+            emitted_panel_event_warning: false,
         }
     }
 
@@ -339,9 +347,20 @@ impl SchemaTreePanel {
     pub fn set_connection_id(&mut self, connection_id: Option<Uuid>, cx: &mut Context<Self>) {
         self.connection_id = connection_id;
         if connection_id.is_none() {
+            self.object_capabilities = SidebarObjectCapabilities::default();
             self.root_nodes.clear();
             self.selected_node = None;
         }
+        cx.notify();
+    }
+
+    /// Set the effective object capabilities for the active connection.
+    pub fn set_object_capabilities(
+        &mut self,
+        object_capabilities: SidebarObjectCapabilities,
+        cx: &mut Context<Self>,
+    ) {
+        self.object_capabilities = object_capabilities;
         cx.notify();
     }
 
@@ -353,7 +372,7 @@ impl SchemaTreePanel {
 
     /// Set the schema data (parent loads and provides this)
     pub fn set_schema(&mut self, schema: DatabaseSchemaData, cx: &mut Context<Self>) {
-        self.root_nodes = schema.into_tree_nodes();
+        self.root_nodes = schema.into_tree_nodes(self.object_capabilities);
         self.is_loading = false;
         cx.notify();
     }
@@ -361,6 +380,7 @@ impl SchemaTreePanel {
     /// Clear the tree
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.connection_id = None;
+        self.object_capabilities = SidebarObjectCapabilities::default();
         self.root_nodes.clear();
         self.selected_node = None;
         self.is_loading = false;
@@ -371,9 +391,19 @@ impl SchemaTreePanel {
     pub fn request_refresh(&mut self, cx: &mut Context<Self>) {
         if self.connection_id.is_some() {
             self.is_loading = true;
+            self.emit_panel_event_once(cx);
             cx.emit(SchemaTreeEvent::RefreshRequested);
             cx.notify();
         }
+    }
+
+    fn emit_panel_event_once(&mut self, cx: &mut Context<Self>) {
+        if self.emitted_panel_event_warning {
+            return;
+        }
+
+        self.emitted_panel_event_warning = true;
+        cx.emit(PanelEvent::LayoutChanged);
     }
 
     /// Toggle node expansion
@@ -395,6 +425,7 @@ impl SchemaTreePanel {
     /// Select a node
     fn select_node(&mut self, node_type: SchemaNodeType, cx: &mut Context<Self>) {
         self.selected_node = Some(node_type.clone());
+        self.emit_panel_event_once(cx);
         cx.emit(SchemaTreeEvent::NodeSelected(node_type));
         cx.notify();
     }
@@ -429,7 +460,7 @@ impl SchemaTreePanel {
         &self,
         node: &SchemaNode,
         level: usize,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
@@ -507,7 +538,7 @@ impl SchemaTreePanel {
                 let children_elements: Vec<_> = node
                     .children
                     .iter()
-                    .map(|child| self.render_node(child, level + 1, window, cx))
+                    .map(|child| self.render_node(child, level + 1, _window, cx))
                     .collect();
                 this.children(children_elements)
             })
@@ -532,17 +563,25 @@ impl SchemaTreePanel {
 
         if let Some(menu_state) = &self.context_menu {
             let node_type = node_type.clone();
+            let action_context = self.focus_handle.clone();
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
 
                 let new_menu = match &node_type {
-                    SchemaNodeType::View(name) => {
-                        Self::build_view_menu(&panel_weak, connection_id, name.clone(), window, cx)
-                    }
+                    SchemaNodeType::View(name) => Self::build_view_menu(
+                        &panel_weak,
+                        connection_id,
+                        name.clone(),
+                        action_context.clone(),
+                        window,
+                        cx,
+                    ),
                     SchemaNodeType::Function(name) => Self::build_function_menu(
                         &panel_weak,
                         connection_id,
                         name.clone(),
+                        action_context.clone(),
                         window,
                         cx,
                     ),
@@ -550,6 +589,7 @@ impl SchemaTreePanel {
                         &panel_weak,
                         connection_id,
                         name.clone(),
+                        action_context.clone(),
                         window,
                         cx,
                     ),
@@ -557,12 +597,18 @@ impl SchemaTreePanel {
                         &panel_weak,
                         connection_id,
                         name.clone(),
+                        action_context.clone(),
                         window,
                         cx,
                     ),
-                    SchemaNodeType::Table(name) => {
-                        Self::build_table_menu(&panel_weak, connection_id, name.clone(), window, cx)
-                    }
+                    SchemaNodeType::Table(name) => Self::build_table_menu(
+                        &panel_weak,
+                        connection_id,
+                        name.clone(),
+                        action_context,
+                        window,
+                        cx,
+                    ),
                     _ => return,
                 };
 
@@ -574,7 +620,7 @@ impl SchemaTreePanel {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });
@@ -599,6 +645,7 @@ impl SchemaTreePanel {
         panel_weak: &WeakEntity<Self>,
         connection_id: Uuid,
         view_name: String,
+        action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
@@ -608,45 +655,49 @@ impl SchemaTreePanel {
         let view_name_history = view_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.item(PopupMenuItem::new("Open View").on_click({
-                let panel = panel.clone();
-                let name = view_name_open.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::OpenView {
-                            connection_id,
-                            view_name: name.clone(),
+            menu.action_context(action_context.clone())
+                .item(PopupMenuItem::new("Open View").on_click({
+                    let panel = panel.clone();
+                    let name = view_name_open.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::OpenView {
+                                connection_id,
+                                view_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Design View").on_click({
-                let panel = panel.clone();
-                let name = view_name_design.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::DesignView {
-                            connection_id,
-                            view_name: name.clone(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Design View").on_click({
+                    let panel = panel.clone();
+                    let name = view_name_design.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::DesignView {
+                                connection_id,
+                                view_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("View History").on_click({
-                let panel = panel.clone();
-                let name = view_name_history.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::ViewHistory {
-                            connection_id,
-                            object_name: name.clone(),
-                            object_type: "view".to_string(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("View History").on_click({
+                    let panel = panel.clone();
+                    let name = view_name_history.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::ViewHistory {
+                                connection_id,
+                                object_name: name.clone(),
+                                object_type: "view".to_string(),
+                            });
                         });
-                    });
-                }
-            }))
+                    }
+                }))
         })
     }
 
@@ -655,6 +706,7 @@ impl SchemaTreePanel {
         panel_weak: &WeakEntity<Self>,
         connection_id: Uuid,
         function_name: String,
+        action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
@@ -664,45 +716,49 @@ impl SchemaTreePanel {
         let function_name_delete = function_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.item(PopupMenuItem::new("View Definition").on_click({
-                let panel = panel.clone();
-                let name = function_name_open.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::OpenFunction {
-                            connection_id,
-                            function_name: name.clone(),
+            menu.action_context(action_context.clone())
+                .item(PopupMenuItem::new("View Definition").on_click({
+                    let panel = panel.clone();
+                    let name = function_name_open.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::OpenFunction {
+                                connection_id,
+                                function_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("View History").on_click({
-                let panel = panel.clone();
-                let name = function_name_history.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::ViewHistory {
-                            connection_id,
-                            object_name: name.clone(),
-                            object_type: "function".to_string(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("View History").on_click({
+                    let panel = panel.clone();
+                    let name = function_name_history.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::ViewHistory {
+                                connection_id,
+                                object_name: name.clone(),
+                                object_type: "function".to_string(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Delete Function").on_click({
-                let panel = panel.clone();
-                let name = function_name_delete.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::DeleteFunction {
-                            connection_id,
-                            function_name: name.clone(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Delete Function").on_click({
+                    let panel = panel.clone();
+                    let name = function_name_delete.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::DeleteFunction {
+                                connection_id,
+                                function_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
+                    }
+                }))
         })
     }
 
@@ -711,6 +767,7 @@ impl SchemaTreePanel {
         panel_weak: &WeakEntity<Self>,
         connection_id: Uuid,
         procedure_name: String,
+        action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
@@ -720,45 +777,49 @@ impl SchemaTreePanel {
         let procedure_name_delete = procedure_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.item(PopupMenuItem::new("View Definition").on_click({
-                let panel = panel.clone();
-                let name = procedure_name_open.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::OpenProcedure {
-                            connection_id,
-                            procedure_name: name.clone(),
+            menu.action_context(action_context.clone())
+                .item(PopupMenuItem::new("View Definition").on_click({
+                    let panel = panel.clone();
+                    let name = procedure_name_open.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::OpenProcedure {
+                                connection_id,
+                                procedure_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("View History").on_click({
-                let panel = panel.clone();
-                let name = procedure_name_history.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::ViewHistory {
-                            connection_id,
-                            object_name: name.clone(),
-                            object_type: "procedure".to_string(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("View History").on_click({
+                    let panel = panel.clone();
+                    let name = procedure_name_history.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::ViewHistory {
+                                connection_id,
+                                object_name: name.clone(),
+                                object_type: "procedure".to_string(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Delete Procedure").on_click({
-                let panel = panel.clone();
-                let name = procedure_name_delete.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::DeleteProcedure {
-                            connection_id,
-                            procedure_name: name.clone(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Delete Procedure").on_click({
+                    let panel = panel.clone();
+                    let name = procedure_name_delete.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::DeleteProcedure {
+                                connection_id,
+                                procedure_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
+                    }
+                }))
         })
     }
 
@@ -767,6 +828,7 @@ impl SchemaTreePanel {
         panel_weak: &WeakEntity<Self>,
         connection_id: Uuid,
         trigger_name: String,
+        action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
@@ -776,45 +838,49 @@ impl SchemaTreePanel {
         let trigger_name_delete = trigger_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.item(PopupMenuItem::new("View Definition").on_click({
-                let panel = panel.clone();
-                let name = trigger_name_open.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::OpenTrigger {
-                            connection_id,
-                            trigger_name: name.clone(),
+            menu.action_context(action_context.clone())
+                .item(PopupMenuItem::new("View Definition").on_click({
+                    let panel = panel.clone();
+                    let name = trigger_name_open.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::OpenTrigger {
+                                connection_id,
+                                trigger_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("View History").on_click({
-                let panel = panel.clone();
-                let name = trigger_name_history.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::ViewHistory {
-                            connection_id,
-                            object_name: name.clone(),
-                            object_type: "trigger".to_string(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("View History").on_click({
+                    let panel = panel.clone();
+                    let name = trigger_name_history.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::ViewHistory {
+                                connection_id,
+                                object_name: name.clone(),
+                                object_type: "trigger".to_string(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Delete Trigger").on_click({
-                let panel = panel.clone();
-                let name = trigger_name_delete.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::DeleteTrigger {
-                            connection_id,
-                            trigger_name: name.clone(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Delete Trigger").on_click({
+                    let panel = panel.clone();
+                    let name = trigger_name_delete.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::DeleteTrigger {
+                                connection_id,
+                                trigger_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
+                    }
+                }))
         })
     }
 
@@ -823,6 +889,7 @@ impl SchemaTreePanel {
         panel_weak: &WeakEntity<Self>,
         connection_id: Uuid,
         table_name: String,
+        action_context: FocusHandle,
         window: &mut Window,
         cx: &mut App,
     ) -> Entity<PopupMenu> {
@@ -831,31 +898,34 @@ impl SchemaTreePanel {
         let table_name_design = table_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
-            menu.item(PopupMenuItem::new("Open Table").on_click({
-                let panel = panel.clone();
-                let name = table_name_open.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::OpenTable {
-                            connection_id,
-                            table_name: name.clone(),
+            menu.action_context(action_context.clone())
+                .item(PopupMenuItem::new("Open Table").on_click({
+                    let panel = panel.clone();
+                    let name = table_name_open.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::OpenTable {
+                                connection_id,
+                                table_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Design Table").on_click({
-                let panel = panel.clone();
-                let name = table_name_design.clone();
-                move |_event, _window, cx| {
-                    _ = panel.update(cx, |_panel, cx| {
-                        cx.emit(SchemaTreeEvent::DesignTable {
-                            connection_id,
-                            table_name: name.clone(),
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("Design Table").on_click({
+                    let panel = panel.clone();
+                    let name = table_name_design.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::DesignTable {
+                                connection_id,
+                                table_name: name.clone(),
+                            });
                         });
-                    });
-                }
-            }))
+                    }
+                }))
         })
     }
 

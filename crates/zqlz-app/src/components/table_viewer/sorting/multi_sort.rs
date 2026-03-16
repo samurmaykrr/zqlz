@@ -505,8 +505,9 @@ mod tests {
 
     #[test]
     fn test_float_sort() {
+        let pi = std::f64::consts::PI;
         let mut rows = vec![
-            vec![Value::Float64(3.14)],
+            vec![Value::Float64(pi)],
             vec![Value::Float64(1.0)],
             vec![Value::Float64(2.5)],
         ];
@@ -517,7 +518,7 @@ mod tests {
 
         assert_eq!(rows[0][0], Value::Float64(1.0));
         assert_eq!(rows[1][0], Value::Float64(2.5));
-        assert_eq!(rows[2][0], Value::Float64(3.14));
+        assert_eq!(rows[2][0], Value::Float64(pi));
     }
 
     #[test]

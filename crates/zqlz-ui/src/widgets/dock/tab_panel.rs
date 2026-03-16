@@ -166,7 +166,7 @@ impl Panel for TabPanel {
 
     fn inner_padding(&self, cx: &App) -> bool {
         self.active_panel(cx)
-            .map_or(true, |panel| panel.inner_padding(cx))
+            .is_none_or(|panel| panel.inner_padding(cx))
     }
 }
 
@@ -260,6 +260,43 @@ impl TabPanel {
 
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
+    }
+
+    /// Switch to the next tab, wrapping around to the first if at the end.
+    pub fn activate_next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panels.is_empty() {
+            return;
+        }
+        let next = (self.active_ix + 1) % self.panels.len();
+        self.set_active_ix(next, window, cx);
+    }
+
+    /// Switch to the previous tab, wrapping around to the last if at the beginning.
+    pub fn activate_prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.panels.is_empty() {
+            return;
+        }
+        let prev = if self.active_ix == 0 {
+            self.panels.len() - 1
+        } else {
+            self.active_ix - 1
+        };
+        self.set_active_ix(prev, window, cx);
+    }
+
+    /// Switch to a tab by its 1-based number (e.g. 1 = first tab).
+    /// Clamps to valid range if the number exceeds the tab count.
+    pub fn activate_tab_by_number(
+        &mut self,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.panels.is_empty() || number == 0 {
+            return;
+        }
+        let ix = (number - 1).min(self.panels.len() - 1);
+        self.set_active_ix(ix, window, cx);
     }
 
     /// Add a panel to the end of the tabs
@@ -407,6 +444,8 @@ impl TabPanel {
                         .button_props(
                             DialogButtonProps::default()
                                 .ok_text("Discard & Close")
+                                // This confirmation is destructive to unsaved work, and the dock
+                                // dialog only carries semantic button intent at this stage.
                                 .ok_variant(ButtonVariant::Danger)
                                 .cancel_text("Cancel"),
                         )
@@ -425,6 +464,27 @@ impl TabPanel {
             // Remove the panel
             self.remove_panel(panel, window, cx);
         }
+    }
+
+    pub fn force_close_panel_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if index >= self.panels.len() {
+            return;
+        }
+
+        let Some(panel) = self.panels.get(index).cloned() else {
+            return;
+        };
+
+        if !panel.closable(cx) {
+            return;
+        }
+
+        self.remove_panel(panel, window, cx);
     }
 
     /// Close all tabs except the one at the specified index.
@@ -567,12 +627,11 @@ impl TabPanel {
 
     /// Return true if self or parent only have last panel.
     fn is_last_panel(&self, cx: &App) -> bool {
-        if let Some(parent) = &self.stack_panel {
-            if let Some(stack_panel) = parent.upgrade() {
-                if !stack_panel.read(cx).is_last_panel(cx) {
-                    return false;
-                }
-            }
+        if let Some(parent) = &self.stack_panel
+            && let Some(stack_panel) = parent.upgrade()
+            && !stack_panel.read(cx).is_last_panel(cx)
+        {
+            return false;
         }
 
         self.panels.len() <= 1
@@ -615,7 +674,7 @@ impl TabPanel {
 
         let zoomed = self.zoomed;
         let view = cx.entity().clone();
-        let zoomable_toolbar_visible = state.zoomable.map_or(false, |v| v.toolbar_visible());
+        let zoomable_toolbar_visible = state.zoomable.is_some_and(|v| v.toolbar_visible());
 
         h_flex()
             .gap_1()
@@ -659,7 +718,7 @@ impl TabPanel {
                         .icon(IconName::Ellipsis)
                         .xsmall()
                         .ghost()
-                        .tab_stop(false)
+                        .tab_stop(true)
                         .dropdown_menu({
                             let zoomable = state.zoomable.is_some();
                             let closable = state.closable;
@@ -812,7 +871,7 @@ impl TabPanel {
         let visible_panels = self.visible_panels(cx).collect::<Vec<_>>();
 
         if visible_panels.len() == 1 && panel_style == PanelStyle::default() {
-            let panel = visible_panels.get(0).unwrap();
+            let panel = visible_panels.first().unwrap();
 
             let title_style = panel.title_style(cx);
 
@@ -866,7 +925,7 @@ impl TabPanel {
                         .flex_shrink_0()
                         .ml_1()
                         .gap_1()
-                        .child(self.render_toolbar(&state, window, cx))
+                        .child(self.render_toolbar(state, window, cx))
                         .children(right_dock_button),
                 )
                 .into_any_element();
@@ -1160,14 +1219,11 @@ impl TabPanel {
         let is_same_tab = drag.tab_panel == cx.entity();
 
         // If target is same tab, and it is only one panel, do nothing.
-        if is_same_tab && ix.is_none() {
-            if self.will_split_placement.is_none() {
-                return;
-            } else {
-                if self.panels.len() == 1 {
-                    return;
-                }
-            }
+        if is_same_tab
+            && ix.is_none()
+            && (self.will_split_placement.is_none() || self.panels.len() == 1)
+        {
+            return;
         }
 
         // Here is looks like remove_panel on a same item, but it difference.
@@ -1177,7 +1233,7 @@ impl TabPanel {
         if is_same_tab {
             self.detach_panel(panel.clone(), window, cx);
         } else {
-            let _ = drag.tab_panel.update(cx, |view, cx| {
+            drag.tab_panel.update(cx, |view, cx| {
                 view.detach_panel(panel.clone(), window, cx);
                 view.remove_self_if_empty(window, cx);
             });
@@ -1186,12 +1242,10 @@ impl TabPanel {
         // Insert into new tabs
         if let Some(placement) = self.will_split_placement {
             self.split_panel(panel, placement, None, window, cx);
+        } else if let Some(ix) = ix {
+            self.insert_panel_at(panel, ix, window, cx)
         } else {
-            if let Some(ix) = ix {
-                self.insert_panel_at(panel, ix, window, cx)
-            } else {
-                self.add_panel_with_active(panel, active, window, cx)
-            }
+            self.add_panel_with_active(panel, active, window, cx)
         }
 
         self.remove_self_if_empty(window, cx);

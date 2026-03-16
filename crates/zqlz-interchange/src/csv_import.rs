@@ -272,17 +272,15 @@ impl CsvImporter {
             // before inserting any rows. The table DDL is built from the CSV header row
             // so we need to peek at the file independently of the main import loop.
             let wants_create = target_config.map(|c| c.create_new_table).unwrap_or(false);
-            if wants_create {
-                if let Some(path) = source.path() {
-                    let headers = self.read_csv_headers(path)?;
-                    if !headers.is_empty() {
-                        let create_sql =
-                            generate_create_table_sql(&target_table, &headers, &field_mappings);
-                        self.connection
-                            .execute(&create_sql, &[])
-                            .await
-                            .map_err(|e| CsvImportError::QueryError(e.to_string()))?;
-                    }
+            if wants_create && let Some(path) = source.path() {
+                let headers = self.read_csv_headers(path)?;
+                if !headers.is_empty() {
+                    let create_sql =
+                        generate_create_table_sql(&target_table, &headers, &field_mappings);
+                    self.connection
+                        .execute(&create_sql, &[])
+                        .await
+                        .map_err(|e| CsvImportError::QueryError(e.to_string()))?;
                 }
             }
 
@@ -402,7 +400,7 @@ impl CsvImporter {
         let delimiter = format.field_delimiter;
 
         let mut result = CsvImportResult::default();
-        let mut lines = reader.lines();
+        let lines = reader.lines();
         let mut line_number = 0;
         let mut headers: Vec<String> = Vec::new();
 
@@ -415,7 +413,7 @@ impl CsvImporter {
         let data_start_row = format.data_row_start;
         let data_end_row = format.data_row_end;
 
-        while let Some(line_result) = lines.next() {
+        for line_result in lines {
             line_number += 1;
             let line = line_result?;
 
@@ -428,10 +426,10 @@ impl CsvImporter {
                 continue;
             }
 
-            if let Some(end) = data_end_row {
-                if line_number > end {
-                    break;
-                }
+            if let Some(end) = data_end_row
+                && line_number > end
+            {
+                break;
             }
 
             // Parse data row
@@ -1092,8 +1090,10 @@ mod tests {
         connection: Arc<TrackingConnection>,
         mode: ImportMode,
     ) -> CsvImporter {
-        let mut state = ImportWizardState::default();
-        state.import_mode = mode;
+        let state = ImportWizardState {
+            import_mode: mode,
+            ..Default::default()
+        };
         CsvImporter {
             connection,
             state,

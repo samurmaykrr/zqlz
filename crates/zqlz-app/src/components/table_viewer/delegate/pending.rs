@@ -1,10 +1,20 @@
 use super::*;
 use std::collections::HashSet;
 
+type PendingCommitSnapshot = (
+    HashMap<(usize, usize), PendingCellChange>,
+    HashSet<usize>,
+    Vec<Vec<Value>>,
+    Vec<ColumnMeta>,
+    String,
+    Uuid,
+    Vec<Vec<Value>>,
+);
+
 impl TableViewerDelegate {
     fn find_matching_row_index(
-        row_strings: &[Vec<String>],
-        target_row: &[String],
+        row_strings: &[Vec<Value>],
+        target_row: &[Value],
         consumed_indices: &mut HashSet<usize>,
     ) -> Option<usize> {
         row_strings
@@ -29,15 +39,15 @@ impl TableViewerDelegate {
 
     pub fn discard_pending_changes(&mut self) {
         for ((row, col), change) in &self.pending_changes.modified_cells {
-            if let Some(row_data) = self.rows.get_mut(*row) {
-                if let Some(cell) = row_data.get_mut(*col) {
-                    let data_type = self
-                        .column_meta
-                        .get(*col)
-                        .map(|c| c.data_type.as_str())
-                        .unwrap_or("text");
-                    *cell = Value::parse_from_string(&change.original_value, data_type);
-                }
+            if let Some(row_data) = self.rows.get_mut(*row)
+                && let Some(cell) = row_data.get_mut(*col)
+            {
+                let data_type = self
+                    .column_meta
+                    .get(*col)
+                    .map(|c| c.data_type.as_str())
+                    .unwrap_or("text");
+                *cell = change.original_value.to_value(data_type);
             }
         }
 
@@ -79,18 +89,18 @@ impl TableViewerDelegate {
     #[allow(dead_code)]
     pub fn is_new_row_ready_to_commit(&self, row_idx: usize) -> Option<usize> {
         let total_rows = self.rows.len();
-        if let Some(new_row_idx) = self.pending_changes.get_new_row_index(row_idx, total_rows) {
-            if let Some(new_row_data) = self.pending_changes.new_rows.get(new_row_idx) {
-                for (col_idx, col_meta) in self.column_meta.iter().enumerate() {
-                    if !col_meta.nullable && col_meta.default_value.is_none() {
-                        let value = new_row_data.get(col_idx).cloned().unwrap_or_default();
-                        if value.is_null() || value.display_for_table().trim().is_empty() {
-                            return None;
-                        }
+        if let Some(new_row_idx) = self.pending_changes.get_new_row_index(row_idx, total_rows)
+            && let Some(new_row_data) = self.pending_changes.new_rows.get(new_row_idx)
+        {
+            for (col_idx, col_meta) in self.column_meta.iter().enumerate() {
+                if !col_meta.nullable && col_meta.default_value.is_none() {
+                    let value = new_row_data.get(col_idx).cloned().unwrap_or_default();
+                    if value.is_null() || value.display_for_table().trim().is_empty() {
+                        return None;
                     }
                 }
-                return Some(new_row_idx);
             }
+            return Some(new_row_idx);
         }
         None
     }
@@ -127,36 +137,15 @@ impl TableViewerDelegate {
         );
     }
 
-    pub fn get_pending_changes_for_commit(
-        &self,
-    ) -> (
-        HashMap<(usize, usize), PendingCellChange>,
-        HashSet<usize>,
-        Vec<Vec<String>>,
-        Vec<ColumnMeta>,
-        String,
-        Uuid,
-        Vec<Vec<String>>,
-    ) {
-        let new_rows_strings: Vec<Vec<String>> = self
-            .pending_changes
-            .new_rows
-            .iter()
-            .map(|row| row.iter().map(|v| v.display_for_table()).collect())
-            .collect();
-        let rows_strings: Vec<Vec<String>> = self
-            .rows
-            .iter()
-            .map(|row| row.iter().map(|v| v.display_for_table()).collect())
-            .collect();
+    pub fn get_pending_changes_for_commit(&self) -> PendingCommitSnapshot {
         (
             self.pending_changes.modified_cells.clone(),
             self.pending_changes.deleted_rows.clone(),
-            new_rows_strings,
+            self.pending_changes.new_rows.clone(),
             self.column_meta.clone(),
             self.table_name.clone(),
             self.connection_id,
-            rows_strings,
+            self.rows.clone(),
         )
     }
 
@@ -181,18 +170,9 @@ impl TableViewerDelegate {
             row,
             data_col,
             column_name,
-            new_value: new_value.display_for_table(),
-            original_value: original_value.display_for_table(),
-            all_row_values: self
-                .rows
-                .get(row)
-                .map(|current_row| {
-                    current_row
-                        .iter()
-                        .map(|value| value.display_for_table())
-                        .collect()
-                })
-                .unwrap_or_default(),
+            new_value: CellValue::from_value(new_value),
+            original_value: CellValue::from_value(original_value),
+            all_row_values: self.rows.get(row).cloned().unwrap_or_default(),
             all_column_names: self
                 .column_meta
                 .iter()
@@ -225,8 +205,8 @@ impl TableViewerDelegate {
         self.pending_changes.modified_cells.insert(
             (row, data_col),
             PendingCellChange {
-                original_value: original_value.display_for_table(),
-                new_value: new_value.display_for_table(),
+                original_value: CellValue::from_value(original_value),
+                new_value: CellValue::from_value(&new_value),
             },
         );
     }
@@ -294,19 +274,15 @@ impl TableViewerDelegate {
 
     pub fn restore_failed_commit_state(
         &mut self,
-        failed_modified_cells: Vec<(Vec<String>, usize, PendingCellChange)>,
-        failed_deleted_rows: Vec<Vec<String>>,
-        failed_new_rows: Vec<Vec<String>>,
+        failed_modified_cells: Vec<(Vec<Value>, usize, PendingCellChange)>,
+        failed_deleted_rows: Vec<Vec<Value>>,
+        failed_new_rows: Vec<Vec<Value>>,
     ) {
         self.pending_changes.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
 
-        let current_row_strings: Vec<Vec<String>> = self
-            .rows
-            .iter()
-            .map(|row| row.iter().map(|value| value.display_for_table()).collect())
-            .collect();
+        let current_row_strings = self.rows.clone();
 
         let mut consumed_modified_rows = HashSet::new();
         for (original_row_values, column_index, change) in failed_modified_cells {
@@ -329,7 +305,7 @@ impl TableViewerDelegate {
             if let Some(row_data) = self.rows.get_mut(row_index)
                 && let Some(cell) = row_data.get_mut(column_index)
             {
-                *cell = Value::parse_from_string(&change.new_value, data_type);
+                *cell = change.new_value.to_value(data_type);
             }
 
             self.pending_changes
@@ -354,25 +330,8 @@ impl TableViewerDelegate {
         }
 
         for failed_new_row in failed_new_rows {
-            let restored_row: Vec<Value> = failed_new_row
-                .iter()
-                .enumerate()
-                .map(|(column_index, value)| {
-                    if value == super::inline_edit::AUTO_INCREMENT_PLACEHOLDER {
-                        Value::String(value.clone())
-                    } else {
-                        let data_type = self
-                            .column_meta
-                            .get(column_index)
-                            .map(|column| column.data_type.as_str())
-                            .unwrap_or("text");
-                        Value::parse_from_string(value, data_type)
-                    }
-                })
-                .collect();
-
-            self.pending_changes.new_rows.push(restored_row.clone());
-            self.rows.push(restored_row);
+            self.pending_changes.new_rows.push(failed_new_row.clone());
+            self.rows.push(failed_new_row);
 
             if self.is_filtering {
                 self.filtered_row_indices.push(self.rows.len() - 1);
@@ -408,21 +367,20 @@ impl TableViewerDelegate {
         };
 
         for edit in &entry.edits {
-            if let Some(row_data) = self.rows.get_mut(edit.row) {
-                if let Some(cell) = row_data.get_mut(edit.data_col) {
-                    *cell = edit.old_value.clone();
-                }
+            if let Some(row_data) = self.rows.get_mut(edit.row)
+                && let Some(cell) = row_data.get_mut(edit.data_col)
+            {
+                *cell = edit.old_value.clone();
             }
             // Sync pending_changes: if the old_value matches the original recorded in
             // pending_changes, remove the entry entirely (cell is back to its DB state).
             // Otherwise update the pending new_value.
-            let old_value_str = edit.old_value.display_for_table();
             if let Some(pending) = self
                 .pending_changes
                 .modified_cells
                 .get(&(edit.row, edit.data_col))
             {
-                if pending.original_value == old_value_str {
+                if pending.original_value == CellValue::from_value(&edit.old_value) {
                     self.pending_changes
                         .modified_cells
                         .remove(&(edit.row, edit.data_col));
@@ -431,7 +389,7 @@ impl TableViewerDelegate {
                         (edit.row, edit.data_col),
                         PendingCellChange {
                             original_value: pending.original_value.clone(),
-                            new_value: old_value_str,
+                            new_value: CellValue::from_value(&edit.old_value),
                         },
                     );
                 }
@@ -448,10 +406,10 @@ impl TableViewerDelegate {
         };
 
         for edit in &entry.edits {
-            if let Some(row_data) = self.rows.get_mut(edit.row) {
-                if let Some(cell) = row_data.get_mut(edit.data_col) {
-                    *cell = edit.new_value.clone();
-                }
+            if let Some(row_data) = self.rows.get_mut(edit.row)
+                && let Some(cell) = row_data.get_mut(edit.data_col)
+            {
+                *cell = edit.new_value.clone();
             }
             // Re-insert into pending_changes
             let original_value = self
@@ -459,12 +417,12 @@ impl TableViewerDelegate {
                 .modified_cells
                 .get(&(edit.row, edit.data_col))
                 .map(|p| p.original_value.clone())
-                .unwrap_or_else(|| edit.old_value.display_for_table());
+                .unwrap_or_else(|| CellValue::from_value(&edit.old_value));
             self.pending_changes.modified_cells.insert(
                 (edit.row, edit.data_col),
                 PendingCellChange {
                     original_value,
-                    new_value: edit.new_value.display_for_table(),
+                    new_value: CellValue::from_value(&edit.new_value),
                 },
             );
         }

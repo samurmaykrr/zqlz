@@ -152,10 +152,10 @@ fn test_no_match_returns_empty_or_general() {
         .any(|c| c.label == "user_id" || c.label == "username" || c.label == "email");
 
     // This test is flexible: either no results or only keywords
-    if has_column_match {
-        // If columns are returned, they shouldn't be close matches
-        assert!(false, "Shouldn't match unrelated columns for 'xyzqwerty'");
-    }
+    assert!(
+        !has_column_match,
+        "Shouldn't match unrelated columns for 'xyzqwerty'"
+    );
 }
 
 #[test]
@@ -393,5 +393,24 @@ fn test_completion_deduplication() {
         duplicates.is_empty(),
         "Should not have duplicate completions. Duplicates: {:?}",
         duplicates
+    );
+}
+
+#[test]
+fn test_context_bucket_beats_keyword_fuzzy_match() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT us FROM users");
+    let offset = text.to_string().find("us").unwrap() + 2;
+
+    let completions = lsp.get_completions(&text, offset);
+    let first_label = completions
+        .first()
+        .map(|item| item.label.clone())
+        .unwrap_or_default();
+
+    assert!(
+        first_label == "username" || first_label == "user_id" || first_label == "u.user_id",
+        "Column results should outrank fuzzy keyword matches. Got first item: {}",
+        first_label
     );
 }

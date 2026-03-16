@@ -132,11 +132,28 @@ pub struct TableInfo {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TableType {
     Table,
+    VirtualTable,
     View,
     MaterializedView,
     ForeignTable,
+    PartitionedTable,
     Temporary,
     System,
+}
+
+impl TableType {
+    pub fn display_name(self) -> &'static str {
+        match self {
+            Self::Table => "Table",
+            Self::VirtualTable => "Virtual Table",
+            Self::View => "View",
+            Self::MaterializedView => "Materialized View",
+            Self::ForeignTable => "Foreign Table",
+            Self::PartitionedTable => "Partitioned Table",
+            Self::Temporary => "Temporary Table",
+            Self::System => "System Table",
+        }
+    }
 }
 
 /// Detailed table information
@@ -187,6 +204,9 @@ pub struct ColumnInfo {
     /// Only meaningful when `generation_expression` is `Some`.
     #[serde(default)]
     pub is_generated_stored: bool,
+    /// Enumerated labels for enum/set-like columns when the driver can resolve them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enum_values: Option<Vec<String>>,
 }
 
 /// Foreign key reference (for column info)

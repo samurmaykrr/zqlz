@@ -373,6 +373,12 @@ impl SliderState {
     }
 }
 
+impl Default for SliderState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventEmitter<SliderEvent> for SliderState {}
 impl Render for SliderState {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {

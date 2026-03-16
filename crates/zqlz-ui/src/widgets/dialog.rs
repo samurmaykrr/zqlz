@@ -26,6 +26,8 @@ pub(crate) fn init(cx: &mut App) {
     ]);
 }
 
+type DialogCloseHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+type DialogDecisionHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>;
 type RenderButtonFn = Box<dyn FnOnce(&mut Window, &mut App) -> AnyElement>;
 type FooterFn =
     Box<dyn Fn(RenderButtonFn, RenderButtonFn, &mut Window, &mut App) -> Vec<AnyElement>>;
@@ -42,6 +44,8 @@ impl Default for DialogButtonProps {
     fn default() -> Self {
         Self {
             ok_text: None,
+            // Dialog actions are configured before the actual Button exists, so this stays as a
+            // ButtonVariant default instead of using the concrete `.primary()` button helper.
             ok_variant: ButtonVariant::Primary,
             cancel_text: None,
             // Ghost gives Cancel a transparent background so it reads as secondary/dismiss
@@ -89,9 +93,9 @@ pub struct Dialog {
     margin_top: Option<Pixels>,
     overlay_top: Option<Pixels>,
 
-    on_close: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>,
-    on_ok: Option<Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>>,
-    on_cancel: Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) -> bool + 'static>,
+    on_close: DialogCloseHandler,
+    on_ok: Option<DialogDecisionHandler>,
+    on_cancel: DialogDecisionHandler,
     button_props: DialogButtonProps,
     close_button: bool,
     overlay: bool,
@@ -326,10 +330,10 @@ impl RenderOnce for Dialog {
                         let on_close = on_close.clone();
 
                         move |_, window, cx| {
-                            if let Some(on_ok) = &on_ok {
-                                if !on_ok(&ClickEvent::default(), window, cx) {
-                                    return;
-                                }
+                            if let Some(on_ok) = &on_ok
+                                && !on_ok(&ClickEvent::default(), window, cx)
+                            {
+                                return;
                             }
 
                             window.close_dialog(cx);
@@ -541,6 +545,7 @@ impl RenderOnce for Dialog {
                                 this.child(
                                     h_flex()
                                         .gap_2()
+                                        .flex_wrap()
                                         .pl(paddings.left)
                                         .pr(paddings.right)
                                         .line_height(relative(1.))

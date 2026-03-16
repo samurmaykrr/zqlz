@@ -5,6 +5,7 @@ mod cursor;
 mod element;
 mod fold;
 mod indent;
+#[allow(clippy::module_inception)]
 mod input;
 pub mod lsp;
 mod mask_pattern;

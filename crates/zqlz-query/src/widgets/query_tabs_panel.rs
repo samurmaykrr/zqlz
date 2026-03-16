@@ -11,7 +11,9 @@ use zqlz_ui::widgets::{
     ActiveTheme,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
-    h_flex, v_flex,
+    h_flex,
+    tooltip::Tooltip,
+    v_flex,
 };
 
 use super::{DiagnosticInfo, EditorObjectType, QueryEditor, QueryEditorEvent};
@@ -90,8 +92,6 @@ pub enum QueryTabsPanelEvent {
 pub struct QueryTabsPanel {
     focus_handle: FocusHandle,
     query_editors: Vec<Entity<QueryEditor>>,
-    /// Display names cached at push/remove time so render never calls `.read(cx)` in a loop.
-    tab_names: Vec<String>,
     active_editor_index: Option<usize>,
     show_welcome: bool,
     schema_service: Option<Arc<SchemaService>>,
@@ -99,12 +99,126 @@ pub struct QueryTabsPanel {
 }
 
 impl QueryTabsPanel {
+    fn shortcut_label(macos: &str, _other: &str) -> String {
+        #[cfg(target_os = "macos")]
+        let shortcut = macos;
+        #[cfg(not(target_os = "macos"))]
+        let shortcut = _other;
+
+        shortcut.to_string()
+    }
+
+    fn subscribe_to_editor(
+        &mut self,
+        editor: &Entity<QueryEditor>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        let editor_entity_id = editor.entity_id();
+        cx.subscribe(editor, {
+            move |this, _editor, event: &QueryEditorEvent, cx| {
+                let Some(editor_index) = this
+                    .query_editors
+                    .iter()
+                    .position(|existing| existing.entity_id() == editor_entity_id)
+                else {
+                    return;
+                };
+
+                match event {
+                    QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
+                        cx.emit(QueryTabsPanelEvent::ExecuteQuery {
+                            sql: sql.clone(),
+                            connection_id: *connection_id,
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::ExecuteSelection { sql, connection_id } => {
+                        cx.emit(QueryTabsPanelEvent::ExecuteSelection {
+                            sql: sql.clone(),
+                            connection_id: *connection_id,
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::ExplainQuery { sql, connection_id } => {
+                        cx.emit(QueryTabsPanelEvent::ExplainQuery {
+                            sql: sql.clone(),
+                            connection_id: *connection_id,
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::ExplainSelection { sql, connection_id } => {
+                        cx.emit(QueryTabsPanelEvent::ExplainSelection {
+                            sql: sql.clone(),
+                            connection_id: *connection_id,
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::CancelQuery => {
+                        cx.emit(QueryTabsPanelEvent::CancelQuery { editor_index });
+                    }
+                    QueryEditorEvent::SaveObject {
+                        connection_id,
+                        object_type,
+                        definition,
+                    } => {
+                        cx.emit(QueryTabsPanelEvent::SaveObject {
+                            connection_id: *connection_id,
+                            object_type: object_type.clone(),
+                            definition: definition.clone(),
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::PreviewDdl {
+                        object_type,
+                        definition,
+                    } => {
+                        cx.emit(QueryTabsPanelEvent::PreviewDdl {
+                            object_type: object_type.clone(),
+                            definition: definition.clone(),
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::SaveQuery {
+                        saved_query_id,
+                        connection_id,
+                        sql,
+                    } => {
+                        cx.emit(QueryTabsPanelEvent::SaveQuery {
+                            saved_query_id: *saved_query_id,
+                            connection_id: *connection_id,
+                            sql: sql.clone(),
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::DiagnosticsChanged { diagnostics } => {
+                        cx.emit(QueryTabsPanelEvent::DiagnosticsChanged {
+                            diagnostics: diagnostics.clone(),
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::DocumentStateChanged => {}
+                    QueryEditorEvent::SwitchConnection { connection_id } => {
+                        cx.emit(QueryTabsPanelEvent::SwitchConnection {
+                            connection_id: *connection_id,
+                            editor_index,
+                        });
+                    }
+                    QueryEditorEvent::SwitchDatabase { database_name } => {
+                        cx.emit(QueryTabsPanelEvent::SwitchDatabase {
+                            database_name: database_name.clone(),
+                            editor_index,
+                        });
+                    }
+                }
+            }
+        })
+    }
+
     pub fn new(cx: &mut Context<Self>) -> Self {
         tracing::debug!("QueryTabsPanel::new() - initializing new instance");
         Self {
             focus_handle: cx.focus_handle(),
             query_editors: Vec::new(),
-            tab_names: Vec::new(),
             active_editor_index: None,
             show_welcome: true,
             schema_service: None,
@@ -144,98 +258,10 @@ impl QueryTabsPanel {
         let editor =
             cx.new(|cx| QueryEditor::new(name.clone(), connection_id, schema_service, window, cx));
 
-        let editor_index = self.query_editors.len();
-        let subscription = cx.subscribe(&editor, {
-            move |_this, _editor, event: &QueryEditorEvent, cx| match event {
-                QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExecuteQuery {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExecuteSelection { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExecuteSelection {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExplainQuery { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExplainQuery {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExplainSelection { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExplainSelection {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::CancelQuery => {
-                    cx.emit(QueryTabsPanelEvent::CancelQuery { editor_index });
-                }
-                QueryEditorEvent::SaveObject {
-                    connection_id,
-                    object_type,
-                    definition,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::SaveObject {
-                        connection_id: *connection_id,
-                        object_type: object_type.clone(),
-                        definition: definition.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::PreviewDdl {
-                    object_type,
-                    definition,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::PreviewDdl {
-                        object_type: object_type.clone(),
-                        definition: definition.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SaveQuery {
-                    saved_query_id,
-                    connection_id,
-                    sql,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::SaveQuery {
-                        saved_query_id: *saved_query_id,
-                        connection_id: *connection_id,
-                        sql: sql.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::DiagnosticsChanged { diagnostics } => {
-                    cx.emit(QueryTabsPanelEvent::DiagnosticsChanged {
-                        diagnostics: diagnostics.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SwitchConnection { connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::SwitchConnection {
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SwitchDatabase { database_name } => {
-                    cx.emit(QueryTabsPanelEvent::SwitchDatabase {
-                        database_name: database_name.clone(),
-                        editor_index,
-                    });
-                }
-            }
-        });
+        let subscription = self.subscribe_to_editor(&editor, cx);
         self._subscriptions.push(subscription);
 
         self.query_editors.push(editor);
-        self.tab_names.push(name);
         self.active_editor_index = Some(self.query_editors.len() - 1);
         self.show_welcome = false;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -272,98 +298,10 @@ impl QueryTabsPanel {
             editor.set_content(sql, window, cx);
         });
 
-        let editor_index = self.query_editors.len();
-        let subscription = cx.subscribe(&editor, {
-            move |_this, _editor, event: &QueryEditorEvent, cx| match event {
-                QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExecuteQuery {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExecuteSelection { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExecuteSelection {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExplainQuery { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExplainQuery {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::ExplainSelection { sql, connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::ExplainSelection {
-                        sql: sql.clone(),
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::CancelQuery => {
-                    cx.emit(QueryTabsPanelEvent::CancelQuery { editor_index });
-                }
-                QueryEditorEvent::SaveObject {
-                    connection_id,
-                    object_type,
-                    definition,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::SaveObject {
-                        connection_id: *connection_id,
-                        object_type: object_type.clone(),
-                        definition: definition.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::PreviewDdl {
-                    object_type,
-                    definition,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::PreviewDdl {
-                        object_type: object_type.clone(),
-                        definition: definition.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SaveQuery {
-                    saved_query_id,
-                    connection_id,
-                    sql,
-                } => {
-                    cx.emit(QueryTabsPanelEvent::SaveQuery {
-                        saved_query_id: *saved_query_id,
-                        connection_id: *connection_id,
-                        sql: sql.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::DiagnosticsChanged { diagnostics } => {
-                    cx.emit(QueryTabsPanelEvent::DiagnosticsChanged {
-                        diagnostics: diagnostics.clone(),
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SwitchConnection { connection_id } => {
-                    cx.emit(QueryTabsPanelEvent::SwitchConnection {
-                        connection_id: *connection_id,
-                        editor_index,
-                    });
-                }
-                QueryEditorEvent::SwitchDatabase { database_name } => {
-                    cx.emit(QueryTabsPanelEvent::SwitchDatabase {
-                        database_name: database_name.clone(),
-                        editor_index,
-                    });
-                }
-            }
-        });
+        let subscription = self.subscribe_to_editor(&editor, cx);
         self._subscriptions.push(subscription);
 
         self.query_editors.push(editor);
-        self.tab_names.push(table_name);
         self.active_editor_index = Some(self.query_editors.len() - 1);
         self.show_welcome = false;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -377,7 +315,6 @@ impl QueryTabsPanel {
     pub fn close_query(&mut self, index: usize, cx: &mut Context<Self>) {
         if index < self.query_editors.len() {
             self.query_editors.remove(index);
-            self.tab_names.remove(index);
             if self.query_editors.is_empty() {
                 self.active_editor_index = None;
                 self.show_welcome = true;
@@ -451,6 +388,33 @@ impl QueryTabsPanel {
         }
     }
 
+    /// Execute the current statement in the active editor.
+    pub fn execute_current_statement(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.emit_execute_selection(cx);
+            });
+        }
+    }
+
+    /// Explain the entire query in the active editor.
+    pub fn explain_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_query(cx);
+            });
+        }
+    }
+
+    /// Explain the selected text or current statement in the active editor.
+    pub fn explain_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_selection(cx);
+            });
+        }
+    }
+
     /// Activate the next tab
     pub fn activate_next_tab(&mut self, cx: &mut Context<Self>) {
         if let Some(active) = self.active_editor_index {
@@ -484,9 +448,7 @@ impl QueryTabsPanel {
             // Keep only the active editor
             let active_editor = self.query_editors.get(active_idx).cloned();
             if let Some(editor) = active_editor {
-                let active_name = self.tab_names.get(active_idx).cloned().unwrap_or_default();
                 self.query_editors = vec![editor];
-                self.tab_names = vec![active_name];
                 self.active_editor_index = Some(0);
                 cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
                     editor_index: self.active_editor_index,
@@ -502,7 +464,6 @@ impl QueryTabsPanel {
         if let Some(active_idx) = self.active_editor_index {
             // Remove all editors after the active index
             self.query_editors.truncate(active_idx + 1);
-            self.tab_names.truncate(active_idx + 1);
             cx.emit(PanelEvent::LayoutChanged);
             cx.notify();
         }
@@ -511,7 +472,6 @@ impl QueryTabsPanel {
     /// Close all tabs
     pub fn close_all_tabs(&mut self, cx: &mut Context<Self>) {
         self.query_editors.clear();
-        self.tab_names.clear();
         self.active_editor_index = None;
         self.show_welcome = true;
         cx.emit(QueryTabsPanelEvent::ActiveEditorChanged {
@@ -545,13 +505,13 @@ impl QueryTabsPanel {
             .border_b_1()
             .border_color(theme.border)
             .overflow_x_scroll()
-            .children(self.query_editors.iter().enumerate().map(|(idx, _editor)| {
+            .children(self.query_editors.iter().enumerate().map(|(idx, editor)| {
                 let is_active = self.active_editor_index == Some(idx);
-                let cached_name = self.tab_names.get(idx).map(String::as_str).unwrap_or("");
-                let display_name = if cached_name.is_empty() {
+                let current_name = editor.read(cx).name();
+                let display_name = if current_name.is_empty() {
                     format!("Query {}", idx + 1)
                 } else {
-                    cached_name.to_string()
+                    current_name
                 };
 
                 h_flex()
@@ -604,6 +564,13 @@ impl QueryTabsPanel {
                     .items_center()
                     .cursor_pointer()
                     .text_color(theme.muted_foreground)
+                    .tooltip(move |window, cx| {
+                        Tooltip::new(format!(
+                            "New Query ({})",
+                            Self::shortcut_label("⌘N", "Ctrl+N")
+                        ))
+                        .build(window, cx)
+                    })
                     .hover(|this| this.text_color(theme.foreground))
                     .on_click(cx.listener(|this, _, window, cx| {
                         tracing::info!("New query button clicked");
@@ -663,14 +630,23 @@ impl QueryTabsPanel {
                         Button::new("welcome-add-connection")
                             .primary()
                             .label("Add Connection")
+                            .tooltip(format!(
+                                "Add Connection ({})",
+                                Self::shortcut_label("⌘⇧N", "Ctrl+Shift+N")
+                            ))
                             .on_click(cx.listener(|_this, _, _, cx| {
                                 cx.emit(QueryTabsPanelEvent::AddConnection);
                             })),
                     )
                     .child(
                         Button::new("welcome-new-query")
+                            .secondary()
                             .outline()
                             .label("New Query")
+                            .tooltip(format!(
+                                "New Query ({})",
+                                Self::shortcut_label("⌘N", "Ctrl+N")
+                            ))
                             .on_click(cx.listener(|this, _, window, cx| {
                                 tracing::info!("New query welcome button clicked");
                                 this.new_query(None, window, cx);

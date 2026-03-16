@@ -5,6 +5,24 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 use uuid::Uuid;
 
+fn normalize_history_text(text: &str) -> String {
+    text.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase()
+}
+
+fn preview_history_text(text: &str, max_length: usize) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let truncated: String = normalized.chars().take(max_length).collect();
+
+    if normalized.chars().count() <= max_length {
+        normalized
+    } else {
+        format!("{}...", truncated)
+    }
+}
+
 /// A single query history entry
 #[derive(Clone, Debug)]
 pub struct QueryHistoryEntry {
@@ -70,6 +88,32 @@ impl QueryHistoryEntry {
             error: Some(error),
             success: false,
         }
+    }
+
+    /// Return a single-line preview of the SQL for compact UI rendering.
+    pub fn sql_preview(&self, max_length: usize) -> String {
+        preview_history_text(&self.sql, max_length)
+    }
+
+    /// Return a single-line preview of the error, if present.
+    pub fn error_preview(&self, max_length: usize) -> Option<String> {
+        self.error
+            .as_ref()
+            .map(|error| preview_history_text(error, max_length))
+    }
+
+    /// Whether this entry matches a user search query.
+    pub fn matches_search(&self, query: &str) -> bool {
+        let normalized_query = normalize_history_text(query);
+        if normalized_query.is_empty() {
+            return true;
+        }
+
+        normalize_history_text(&self.sql).contains(&normalized_query)
+            || self
+                .error
+                .as_ref()
+                .is_some_and(|error| normalize_history_text(error).contains(&normalized_query))
     }
 }
 
@@ -172,10 +216,9 @@ impl QueryHistory {
 
     /// Search history by SQL content
     pub fn search(&self, query: &str) -> impl Iterator<Item = &QueryHistoryEntry> {
-        let query_lower = query.to_lowercase();
         self.entries
             .iter()
-            .filter(move |e| e.sql.to_lowercase().contains(&query_lower))
+            .filter(move |entry| entry.matches_search(query))
     }
 
     /// Clear all history
@@ -202,5 +245,42 @@ impl QueryHistory {
 impl Default for QueryHistory {
     fn default() -> Self {
         Self::new(1000)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::QueryHistoryEntry;
+
+    #[test]
+    fn search_matches_sql_across_newlines() {
+        let entry = QueryHistoryEntry::success(
+            "SELECT *\nFROM users\nWHERE id = 1".to_string(),
+            None,
+            12,
+            1,
+        );
+
+        assert!(entry.matches_search("select * from users"));
+        assert!(entry.matches_search("where id = 1"));
+    }
+
+    #[test]
+    fn search_matches_error_text() {
+        let entry = QueryHistoryEntry::failure(
+            "SELECT * FROM users".to_string(),
+            None,
+            8,
+            "syntax error near FROM".to_string(),
+        );
+
+        assert!(entry.matches_search("syntax error"));
+    }
+
+    #[test]
+    fn preview_flattens_newlines() {
+        let entry = QueryHistoryEntry::success("SELECT\n*\nFROM users".to_string(), None, 5, 1);
+
+        assert_eq!(entry.sql_preview(100), "SELECT * FROM users");
     }
 }

@@ -36,6 +36,61 @@ pub struct Position {
     pub column: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TransactionId(pub u64);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Bias {
+    Left,
+    Right,
+}
+
+/// Durable document coordinate that can be rebased through later edits.
+///
+/// Anchors keep the revision they were created against so the text layer can be
+/// responsible for translating long-lived state into current offsets instead of
+/// forcing every caller to manually track edits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Anchor {
+    offset: usize,
+    revision: usize,
+    bias: Bias,
+}
+
+impl Anchor {
+    pub fn new(offset: usize, revision: usize, bias: Bias) -> Self {
+        Self {
+            offset,
+            revision,
+            bias,
+        }
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
+    }
+
+    pub fn revision(&self) -> usize {
+        self.revision
+    }
+
+    pub fn bias(&self) -> Bias {
+        self.bias
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AnchoredRange {
+    pub start: Anchor,
+    pub end: Anchor,
+}
+
+impl AnchoredRange {
+    pub fn new(start: Anchor, end: Anchor) -> Self {
+        Self { start, end }
+    }
+}
+
 impl Position {
     pub fn new(line: usize, column: usize) -> Self {
         Self { line, column }
@@ -88,6 +143,41 @@ pub struct Change {
 
     /// When the change occurred
     pub timestamp: SystemTime,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RevisionEdit {
+    pub start_revision: usize,
+    pub end_revision: usize,
+    pub change: Change,
+}
+
+impl RevisionEdit {
+    fn rebase_offset(&self, offset: usize, bias: Bias) -> usize {
+        let start = self.change.offset;
+        let old_len = self.change.old_text.len();
+        let new_len = self.change.new_text.len();
+        let old_end = start + old_len;
+        let new_end = start + new_len;
+
+        if offset < start {
+            offset
+        } else if offset > old_end {
+            offset - old_len + new_len
+        } else if offset == start {
+            match bias {
+                Bias::Left => start,
+                Bias::Right => new_end,
+            }
+        } else if offset == old_end {
+            new_end
+        } else {
+            match bias {
+                Bias::Left => start,
+                Bias::Right => new_end,
+            }
+        }
+    }
 }
 
 impl Change {
@@ -210,6 +300,20 @@ impl Change {
 pub struct TextBuffer {
     rope: Rope,
     changes: Vec<Change>,
+    edit_log: Vec<RevisionEdit>,
+    revision: usize,
+    next_transaction_id: u64,
+    active_transaction: Option<TransactionId>,
+}
+
+/// Immutable snapshot of buffer contents and revision state.
+///
+/// Rope clones are shallow, so snapshots stay cheap while still preserving the
+/// exact text and line mapping that were current when the snapshot was taken.
+#[derive(Debug, Clone)]
+pub struct BufferSnapshot {
+    rope: Rope,
+    revision: usize,
 }
 
 impl TextBuffer {
@@ -227,6 +331,10 @@ impl TextBuffer {
         Self {
             rope: Rope::from_str(text.as_ref()),
             changes: Vec::new(),
+            edit_log: Vec::new(),
+            revision: 0,
+            next_transaction_id: 1,
+            active_transaction: None,
         }
     }
 
@@ -235,7 +343,154 @@ impl TextBuffer {
         Self {
             rope: Rope::new(),
             changes: Vec::new(),
+            edit_log: Vec::new(),
+            revision: 0,
+            next_transaction_id: 1,
+            active_transaction: None,
         }
+    }
+
+    pub fn start_transaction_at(&mut self) -> TransactionId {
+        let id = TransactionId(self.next_transaction_id);
+        self.next_transaction_id = self.next_transaction_id.saturating_add(1);
+        self.active_transaction = Some(id);
+        id
+    }
+
+    pub fn end_transaction_at(&mut self, id: TransactionId) {
+        if self.active_transaction == Some(id) {
+            self.active_transaction = None;
+        }
+    }
+
+    pub fn active_transaction(&self) -> Option<TransactionId> {
+        self.active_transaction
+    }
+
+    /// Returns the current monotonic revision for the buffer.
+    pub fn revision(&self) -> usize {
+        self.revision
+    }
+
+    /// Creates an immutable snapshot of the buffer's current text and revision.
+    pub fn snapshot(&self) -> BufferSnapshot {
+        BufferSnapshot {
+            rope: self.rope.clone(),
+            revision: self.revision,
+        }
+    }
+
+    pub fn edits_since(&self, revision: usize) -> Result<&[RevisionEdit]> {
+        if revision > self.revision {
+            return Err(anyhow!(
+                "Revision {} is newer than current buffer revision {}",
+                revision,
+                self.revision
+            ));
+        }
+
+        Ok(&self.edit_log[revision..])
+    }
+
+    pub fn anchor_at(&self, offset: usize, bias: Bias) -> Result<Anchor> {
+        if offset > self.len() {
+            return Err(anyhow!(
+                "Anchor offset {} is out of bounds (buffer length: {})",
+                offset,
+                self.len()
+            ));
+        }
+
+        Ok(Anchor::new(offset, self.revision, bias))
+    }
+
+    pub fn anchor_before(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_at(offset, Bias::Left)
+    }
+
+    pub fn anchor_after(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_at(offset, Bias::Right)
+    }
+
+    pub fn anchor_for_position(&self, position: Position, bias: Bias) -> Result<Anchor> {
+        let offset = self.position_to_offset(position)?;
+        self.anchor_at(offset, bias)
+    }
+
+    pub fn anchored_range(
+        &self,
+        range: std::ops::Range<usize>,
+        start_bias: Bias,
+        end_bias: Bias,
+    ) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.anchor_at(range.start, start_bias)?,
+            self.anchor_at(range.end, end_bias)?,
+        ))
+    }
+
+    pub fn anchored_position_range(
+        &self,
+        range: Range,
+        start_bias: Bias,
+        end_bias: Bias,
+    ) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.anchor_for_position(range.start, start_bias)?,
+            self.anchor_for_position(range.end, end_bias)?,
+        ))
+    }
+
+    pub fn resolve_anchor_offset(&self, anchor: Anchor) -> Result<usize> {
+        if anchor.revision > self.revision {
+            return Err(anyhow!(
+                "Anchor revision {} is newer than current buffer revision {}",
+                anchor.revision,
+                self.revision
+            ));
+        }
+
+        let mut offset = anchor.offset;
+        for edit in self.edits_since(anchor.revision)? {
+            offset = edit.rebase_offset(offset, anchor.bias);
+        }
+
+        Ok(offset.min(self.len()))
+    }
+
+    pub fn resolve_anchor_position(&self, anchor: Anchor) -> Result<Position> {
+        let offset = self.resolve_anchor_offset(anchor)?;
+        self.offset_to_position(offset)
+    }
+
+    pub fn rebase_anchor(&self, anchor: Anchor) -> Result<Anchor> {
+        let offset = self.resolve_anchor_offset(anchor)?;
+        Ok(Anchor::new(offset, self.revision, anchor.bias()))
+    }
+
+    pub fn resolve_anchored_range(&self, range: AnchoredRange) -> Result<std::ops::Range<usize>> {
+        Ok(self.resolve_anchor_offset(range.start)?..self.resolve_anchor_offset(range.end)?)
+    }
+
+    pub fn resolve_anchored_position_range(&self, range: AnchoredRange) -> Result<Range> {
+        Ok(Range::new(
+            self.resolve_anchor_position(range.start)?,
+            self.resolve_anchor_position(range.end)?,
+        ))
+    }
+
+    pub fn rebase_anchored_range(&self, range: AnchoredRange) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.rebase_anchor(range.start)?,
+            self.rebase_anchor(range.end)?,
+        ))
+    }
+
+    pub fn restore_snapshot(&mut self, snapshot: &BufferSnapshot) {
+        self.rope = snapshot.rope.clone();
+        self.revision = snapshot.revision;
+        self.edit_log.truncate(snapshot.revision);
+        self.changes.clear();
     }
 
     /// Returns the entire text content as a `String`.
@@ -250,6 +505,44 @@ impl TextBuffer {
         self.rope.to_string()
     }
 
+    /// Returns a UTF-8 string slice copy for a local byte range.
+    ///
+    /// This still allocates, but only for the requested span instead of the
+    /// whole document, which keeps hot-path callers bounded to local work.
+    pub fn text_for_range(&self, range: std::ops::Range<usize>) -> Result<String> {
+        if range.end > self.rope.len_bytes() {
+            return Err(anyhow!(
+                "Range {:?} is out of bounds (buffer length: {})",
+                range,
+                self.rope.len_bytes()
+            ));
+        }
+
+        if range.start > range.end {
+            return Err(anyhow!("Range {:?} has start > end", range));
+        }
+
+        let char_start = self.rope.byte_to_char(range.start);
+        let char_end = self.rope.byte_to_char(range.end);
+        Ok(self.rope.slice(char_start..char_end).to_string())
+    }
+
+    /// Returns a local line window as a single string.
+    pub fn text_for_line_range(&self, line_range: std::ops::Range<usize>) -> Result<String> {
+        if line_range.start > line_range.end {
+            return Err(anyhow!("Line range {:?} has start > end", line_range));
+        }
+
+        let start = self.line_to_byte(line_range.start).unwrap_or(self.len());
+        let end = if line_range.end >= self.line_count() {
+            self.len()
+        } else {
+            self.line_to_byte(line_range.end).unwrap_or(self.len())
+        };
+
+        self.text_for_range(start..end)
+    }
+
     /// Returns a cheap clone of the underlying rope.
     ///
     /// Rope clones are shallow and share the same underlying chunks, making
@@ -262,6 +555,9 @@ impl TextBuffer {
     /// Replace the internal rope with a snapshot, used for undo rollback.
     pub fn restore_rope(&mut self, rope: Rope) {
         self.rope = rope;
+        self.revision = self.revision.saturating_add(1);
+        self.edit_log.clear();
+        self.changes.clear();
     }
 
     /// Returns the length of the buffer in bytes.
@@ -312,6 +608,33 @@ impl TextBuffer {
 
         let char_index = self.rope.byte_to_char(offset);
         Ok(self.rope.char_to_byte(char_index + 1))
+    }
+
+    /// Returns the nearest valid UTF-8 boundary at or before `offset`.
+    pub fn floor_char_boundary(&self, offset: usize) -> usize {
+        let clamped_offset = offset.min(self.rope.len_bytes());
+        if clamped_offset == self.rope.len_bytes() {
+            return clamped_offset;
+        }
+
+        let char_index = self.rope.byte_to_char(clamped_offset);
+        self.rope.char_to_byte(char_index)
+    }
+
+    /// Returns the nearest valid UTF-8 boundary at or after `offset`.
+    pub fn ceil_char_boundary(&self, offset: usize) -> usize {
+        let clamped_offset = offset.min(self.rope.len_bytes());
+        if clamped_offset == self.rope.len_bytes() {
+            return clamped_offset;
+        }
+
+        let floor = self.floor_char_boundary(clamped_offset);
+        if floor == clamped_offset {
+            floor
+        } else {
+            self.next_char_boundary(floor)
+                .unwrap_or(self.rope.len_bytes())
+        }
     }
 
     /// Returns true if the buffer is empty.
@@ -426,9 +749,9 @@ impl TextBuffer {
         let text_str = text.as_ref();
         let char_idx = self.rope.byte_to_char(offset);
         self.rope.insert(char_idx, text_str);
-
-        // Track the change
-        self.changes.push(Change::insert(offset, text_str));
+        let change = Change::insert(offset, text_str);
+        self.record_edit(&change);
+        self.changes.push(change);
 
         Ok(())
     }
@@ -482,9 +805,9 @@ impl TextBuffer {
         let deleted_text = self.rope.slice(char_start..char_end).to_string();
 
         self.rope.remove(char_start..char_end);
-
-        // Track the change
-        self.changes.push(Change::delete(range.start, deleted_text));
+        let change = Change::delete(range.start, deleted_text);
+        self.record_edit(&change);
+        self.changes.push(change);
 
         Ok(())
     }
@@ -797,7 +1120,236 @@ impl TextBuffer {
                 .insert(self.rope.byte_to_char(change.offset), &change.new_text);
         }
 
+        self.record_edit(change);
+
         Ok(())
+    }
+
+    fn record_edit(&mut self, change: &Change) {
+        let start_revision = self.revision;
+        self.revision = self.revision.saturating_add(1);
+        self.edit_log.push(RevisionEdit {
+            start_revision,
+            end_revision: self.revision,
+            change: change.clone(),
+        });
+    }
+}
+
+impl BufferSnapshot {
+    /// Returns the revision captured by this snapshot.
+    pub fn revision(&self) -> usize {
+        self.revision
+    }
+
+    pub fn anchor_at(&self, offset: usize, bias: Bias) -> Result<Anchor> {
+        if offset > self.len() {
+            return Err(anyhow!(
+                "Anchor offset {} is out of bounds (buffer length: {})",
+                offset,
+                self.len()
+            ));
+        }
+
+        Ok(Anchor::new(offset, self.revision, bias))
+    }
+
+    pub fn anchor_before(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_at(offset, Bias::Left)
+    }
+
+    pub fn anchor_after(&self, offset: usize) -> Result<Anchor> {
+        self.anchor_at(offset, Bias::Right)
+    }
+
+    pub fn anchor_for_position(&self, position: Position, bias: Bias) -> Result<Anchor> {
+        let offset = self.position_to_offset(position)?;
+        self.anchor_at(offset, bias)
+    }
+
+    pub fn anchored_range(
+        &self,
+        range: std::ops::Range<usize>,
+        start_bias: Bias,
+        end_bias: Bias,
+    ) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.anchor_at(range.start, start_bias)?,
+            self.anchor_at(range.end, end_bias)?,
+        ))
+    }
+
+    pub fn anchored_position_range(
+        &self,
+        range: Range,
+        start_bias: Bias,
+        end_bias: Bias,
+    ) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.anchor_for_position(range.start, start_bias)?,
+            self.anchor_for_position(range.end, end_bias)?,
+        ))
+    }
+
+    pub fn resolve_anchor_offset(&self, anchor: Anchor) -> Result<usize> {
+        if anchor.revision != self.revision {
+            return Err(anyhow!(
+                "Snapshot revision {} can only resolve anchors created at the same revision, got {}",
+                self.revision,
+                anchor.revision
+            ));
+        }
+
+        Ok(anchor.offset.min(self.len()))
+    }
+
+    pub fn resolve_anchor_position(&self, anchor: Anchor) -> Result<Position> {
+        let offset = self.resolve_anchor_offset(anchor)?;
+        self.offset_to_position(offset)
+    }
+
+    pub fn rebase_anchor(&self, anchor: Anchor) -> Result<Anchor> {
+        let offset = self.resolve_anchor_offset(anchor)?;
+        Ok(Anchor::new(offset, self.revision, anchor.bias()))
+    }
+
+    pub fn resolve_anchored_range(&self, range: AnchoredRange) -> Result<std::ops::Range<usize>> {
+        Ok(self.resolve_anchor_offset(range.start)?..self.resolve_anchor_offset(range.end)?)
+    }
+
+    pub fn resolve_anchored_position_range(&self, range: AnchoredRange) -> Result<Range> {
+        Ok(Range::new(
+            self.resolve_anchor_position(range.start)?,
+            self.resolve_anchor_position(range.end)?,
+        ))
+    }
+
+    pub fn rebase_anchored_range(&self, range: AnchoredRange) -> Result<AnchoredRange> {
+        Ok(AnchoredRange::new(
+            self.rebase_anchor(range.start)?,
+            self.rebase_anchor(range.end)?,
+        ))
+    }
+
+    /// Returns the length of the snapshot in bytes.
+    pub fn len(&self) -> usize {
+        self.rope.len_bytes()
+    }
+
+    /// Returns true if the snapshot has no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.rope.len_bytes() == 0
+    }
+
+    /// Returns the number of lines in the snapshot.
+    pub fn line_count(&self) -> usize {
+        self.rope.len_lines()
+    }
+
+    /// Returns the text for a given line, including its trailing newline.
+    pub fn line(&self, line_idx: usize) -> Option<String> {
+        if line_idx >= self.rope.len_lines() {
+            return None;
+        }
+
+        Some(self.rope.line(line_idx).to_string())
+    }
+
+    /// Returns the byte offset for the start of the given line.
+    pub fn line_to_byte(&self, line_idx: usize) -> Option<usize> {
+        if line_idx >= self.rope.len_lines() {
+            return None;
+        }
+
+        Some(self.rope.line_to_byte(line_idx))
+    }
+
+    /// Returns the line containing the given byte offset.
+    pub fn byte_to_line(&self, offset: usize) -> Option<usize> {
+        if offset > self.rope.len_bytes() {
+            return None;
+        }
+
+        Some(self.rope.byte_to_line(offset))
+    }
+
+    /// Converts a position to a byte offset within the snapshot.
+    pub fn position_to_offset(&self, pos: Position) -> Result<usize> {
+        if pos.line >= self.rope.len_lines() {
+            return Err(anyhow!(
+                "Position line {} is out of bounds (buffer has {} lines)",
+                pos.line,
+                self.rope.len_lines()
+            ));
+        }
+
+        let line_start = self.rope.line_to_byte(pos.line);
+        let line_end = if pos.line + 1 < self.rope.len_lines() {
+            self.rope.line_to_byte(pos.line + 1)
+        } else {
+            self.rope.len_bytes()
+        };
+
+        let offset = line_start + pos.column;
+        if offset > line_end {
+            return Err(anyhow!(
+                "Position column {} is out of bounds for line {} (line length: {})",
+                pos.column,
+                pos.line,
+                line_end - line_start
+            ));
+        }
+
+        Ok(offset)
+    }
+
+    /// Converts a byte offset to a position within the snapshot.
+    pub fn offset_to_position(&self, offset: usize) -> Result<Position> {
+        if offset > self.rope.len_bytes() {
+            return Err(anyhow!(
+                "Offset {} is out of bounds (buffer length: {})",
+                offset,
+                self.rope.len_bytes()
+            ));
+        }
+
+        let line = self.rope.byte_to_line(offset);
+        let line_start = self.rope.line_to_byte(line);
+        let column = offset - line_start;
+
+        Ok(Position::new(line, column))
+    }
+
+    /// Clamps a position to valid snapshot bounds.
+    pub fn clamp_position(&self, pos: Position) -> Position {
+        let line = pos.line.min(self.rope.len_lines().saturating_sub(1));
+        let line_start = self.rope.line_to_byte(line);
+        let line_end = if line + 1 < self.rope.len_lines() {
+            self.rope.line_to_byte(line + 1)
+        } else {
+            self.rope.len_bytes()
+        };
+
+        Position::new(line, pos.column.min(line_end - line_start))
+    }
+
+    /// Returns a slice of snapshot text between two byte offsets.
+    pub fn slice(&self, range: std::ops::Range<usize>) -> Result<String> {
+        if range.end > self.rope.len_bytes() {
+            return Err(anyhow!(
+                "Slice range {:?} is out of bounds (buffer length: {})",
+                range,
+                self.rope.len_bytes()
+            ));
+        }
+
+        if range.start > range.end {
+            return Err(anyhow!("Slice range {:?} has start > end", range));
+        }
+
+        let char_start = self.rope.byte_to_char(range.start);
+        let char_end = self.rope.byte_to_char(range.end);
+        Ok(self.rope.slice(char_start..char_end).to_string())
     }
 }
 
@@ -915,7 +1467,7 @@ mod tests {
     #[test]
     fn test_delete_invalid_range() {
         let mut buffer = TextBuffer::new("Hello");
-        let result = buffer.delete(3..1);
+        let result = buffer.delete(std::ops::Range { start: 3, end: 1 });
         assert!(result.is_err());
     }
 
@@ -992,6 +1544,113 @@ mod tests {
         assert_eq!(buffer.line(5000), Some("Line 5000\n".to_string()));
     }
 
+    #[test]
+    fn test_anchor_rebases_after_insertion() {
+        let mut buffer = TextBuffer::new("abcd");
+        let anchor = buffer.anchor_before(2).unwrap();
+
+        buffer.insert(1, "XYZ").unwrap();
+
+        assert_eq!(buffer.resolve_anchor_offset(anchor).unwrap(), 5);
+        assert_eq!(
+            buffer.resolve_anchor_position(anchor).unwrap(),
+            Position::new(0, 5)
+        );
+    }
+
+    #[test]
+    fn test_anchor_bias_controls_insertion_boundary_resolution() {
+        let mut buffer = TextBuffer::new("abcd");
+        let left_anchor = buffer.anchor_before(2).unwrap();
+        let right_anchor = buffer.anchor_after(2).unwrap();
+
+        buffer.insert(2, "XYZ").unwrap();
+
+        assert_eq!(buffer.resolve_anchor_offset(left_anchor).unwrap(), 2);
+        assert_eq!(buffer.resolve_anchor_offset(right_anchor).unwrap(), 5);
+    }
+
+    #[test]
+    fn test_snapshot_resolves_old_revision_anchor_deterministically() {
+        let mut buffer = TextBuffer::new("hello");
+        let snapshot = buffer.snapshot();
+        let anchor = snapshot.anchor_after(5).unwrap();
+
+        buffer.insert(0, "say ").unwrap();
+
+        assert_eq!(snapshot.resolve_anchor_offset(anchor).unwrap(), 5);
+        assert_eq!(buffer.resolve_anchor_offset(anchor).unwrap(), 9);
+    }
+
+    #[test]
+    fn test_anchored_range_rebases_both_ends() {
+        let mut buffer = TextBuffer::new("hello world");
+        let range = buffer
+            .anchored_range(6..11, Bias::Left, Bias::Right)
+            .unwrap();
+
+        buffer.insert(0, "wide ").unwrap();
+
+        assert_eq!(buffer.resolve_anchored_range(range).unwrap(), 11..16);
+    }
+
+    #[test]
+    fn test_rebase_anchor_updates_revision_without_changing_future_resolution() {
+        let mut buffer = TextBuffer::new("abcdef");
+        let original_anchor = buffer.anchor_after(4).unwrap();
+
+        buffer.delete(1..3).unwrap();
+
+        let rebased_anchor = buffer.rebase_anchor(original_anchor).unwrap();
+        assert_eq!(rebased_anchor.offset(), 2);
+        assert_eq!(rebased_anchor.revision(), buffer.revision());
+        assert_eq!(rebased_anchor.bias(), Bias::Right);
+
+        buffer.insert(0, "Z").unwrap();
+
+        assert_eq!(buffer.resolve_anchor_offset(original_anchor).unwrap(), 3);
+        assert_eq!(buffer.resolve_anchor_offset(rebased_anchor).unwrap(), 3);
+    }
+
+    #[test]
+    fn test_rebase_anchored_range_updates_both_endpoints() {
+        let mut buffer = TextBuffer::new("hello world");
+        let original_range = buffer
+            .anchored_range(6..11, Bias::Left, Bias::Right)
+            .unwrap();
+
+        buffer.insert(0, "wide ").unwrap();
+
+        let rebased_range = buffer.rebase_anchored_range(original_range).unwrap();
+        assert_eq!(rebased_range.start.revision(), buffer.revision());
+        assert_eq!(rebased_range.end.revision(), buffer.revision());
+        assert_eq!(
+            buffer.resolve_anchored_range(rebased_range).unwrap(),
+            11..16
+        );
+
+        buffer.insert(0, "very ").unwrap();
+
+        assert_eq!(
+            buffer.resolve_anchored_range(original_range).unwrap(),
+            16..21
+        );
+        assert_eq!(
+            buffer.resolve_anchored_range(rebased_range).unwrap(),
+            16..21
+        );
+    }
+
+    #[test]
+    fn test_snapshot_rebase_anchor_normalizes_to_snapshot_revision() {
+        let snapshot = TextBuffer::new("hello").snapshot();
+        let anchor = snapshot.anchor_after(5).unwrap();
+        let rebased_anchor = snapshot.rebase_anchor(anchor).unwrap();
+
+        assert_eq!(rebased_anchor, anchor);
+        assert_eq!(rebased_anchor.revision(), snapshot.revision());
+    }
+
     // Change tracking tests
 
     #[test]
@@ -1053,6 +1712,69 @@ mod tests {
         let changes = buffer.take_changes();
         assert_eq!(changes.len(), 2);
         assert_eq!(buffer.changes().len(), 0); // Changes cleared
+    }
+
+    #[test]
+    fn test_snapshot_preserves_original_text_after_mutation() {
+        let mut buffer = TextBuffer::new("hello");
+        let snapshot = buffer.snapshot();
+
+        buffer.insert(5, " world").unwrap();
+
+        assert_eq!(snapshot.slice(0..5).unwrap(), "hello");
+        assert_eq!(snapshot.len(), 5);
+        assert_eq!(buffer.text(), "hello world");
+    }
+
+    #[test]
+    fn test_snapshot_preserves_original_line_mapping_after_mutation() {
+        let mut buffer = TextBuffer::new("alpha\nbeta");
+        let snapshot = buffer.snapshot();
+
+        buffer.insert(0, "prefix\n").unwrap();
+
+        assert_eq!(snapshot.line_count(), 2);
+        assert_eq!(snapshot.offset_to_position(6).unwrap(), Position::new(1, 0));
+        assert_eq!(snapshot.position_to_offset(Position::new(1, 2)).unwrap(), 8);
+    }
+
+    #[test]
+    fn test_snapshot_revision_stays_stable_after_mutation() {
+        let mut buffer = TextBuffer::new("hello");
+        let snapshot = buffer.snapshot();
+        let original_revision = snapshot.revision();
+
+        buffer.insert(5, "!").unwrap();
+
+        assert_eq!(snapshot.revision(), original_revision);
+        assert!(buffer.revision() > original_revision);
+    }
+
+    #[test]
+    fn test_transaction_start_and_end() {
+        let mut buffer = TextBuffer::new("hello");
+        let transaction = buffer.start_transaction_at();
+
+        assert_eq!(buffer.active_transaction(), Some(transaction));
+
+        buffer.end_transaction_at(transaction);
+        assert_eq!(buffer.active_transaction(), None);
+    }
+
+    #[test]
+    fn test_text_for_range_reads_local_slice() {
+        let buffer = TextBuffer::new("alpha\nbeta\ngamma");
+
+        let text = buffer.text_for_range(6..10).unwrap();
+        assert_eq!(text, "beta");
+    }
+
+    #[test]
+    fn test_text_for_line_range_reads_local_lines() {
+        let buffer = TextBuffer::new("alpha\nbeta\ngamma");
+
+        let text = buffer.text_for_line_range(1..3).unwrap();
+        assert_eq!(text, "beta\ngamma");
     }
 
     #[test]

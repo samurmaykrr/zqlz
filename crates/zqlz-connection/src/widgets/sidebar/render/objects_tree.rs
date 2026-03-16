@@ -3,9 +3,11 @@
 //! Renders trees of schema objects (tables, views, triggers, functions, procedures, queries).
 
 use gpui::*;
-use uuid::Uuid;
 
-use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo};
+use super::{LeafItemProps, SectionHeaderProps};
+use crate::widgets::sidebar::{
+    ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo, SidebarObjectCapabilities,
+};
 use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, v_flex};
 
 impl ConnectionSidebar {
@@ -53,9 +55,11 @@ impl ConnectionSidebar {
     ///
     /// This allows the same tree builder to work with both connection-level
     /// and per-database toggle handlers.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn render_objects_tree(
         &self,
-        conn_id: Uuid,
+        conn_id: uuid::Uuid,
+        object_capabilities: SidebarObjectCapabilities,
         id_suffix: &str,
         database_name: Option<String>,
         tables: &[String],
@@ -117,30 +121,37 @@ impl ConnectionSidebar {
         if !has_search || tables_loading || !filtered_tables.is_empty() {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("tables-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::Table).size_3().into_any_element(),
-                "Tables",
-                tables.len(),
-                filtered_tables.len(),
-                tables_expanded,
-                move |this, _, _, cx| toggle(this, "tables", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "tables",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("tables-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::Table).size_3().into_any_element(),
+                    label: "Tables",
+                    total_count: tables.len(),
+                    filtered_count: filtered_tables.len(),
+                    is_expanded: tables_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "tables", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "tables",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -160,36 +171,41 @@ impl ConnectionSidebar {
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!("table-{}-{}", id_suffix, table_name)),
-                            Icon::new(ZqlzIcon::Table)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*table_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenTable {
-                                    connection_id: conn_id,
-                                    table_name: table.clone(),
-                                    database_name: db_name_for_click.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_table_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        db_name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "table-{}-{}",
+                                    id_suffix, table_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Table)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*table_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenTable {
+                                        connection_id: conn_id,
+                                        table_name: table.clone(),
+                                        database_name: db_name_for_click.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_table_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            db_name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -199,34 +215,42 @@ impl ConnectionSidebar {
         }
 
         // ── Views ───────────────────────────────────────────────────────
-        // Always rendered unless the user is searching and this section has no matches.
-        if !has_search || views_loading || !filtered_views.is_empty() {
+        if object_capabilities.supports_views
+            && (!has_search || views_loading || !filtered_views.is_empty())
+        {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("views-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::Eye).size_3().into_any_element(),
-                "Views",
-                views.len(),
-                filtered_views.len(),
-                views_expanded,
-                move |this, _, _, cx| toggle(this, "views", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "views",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("views-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::Eye).size_3().into_any_element(),
+                    label: "Views",
+                    total_count: views.len(),
+                    filtered_count: filtered_views.len(),
+                    is_expanded: views_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "views", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "views",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -246,36 +270,41 @@ impl ConnectionSidebar {
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!("view-{}-{}", id_suffix, view_name)),
-                            Icon::new(ZqlzIcon::Eye)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*view_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenView {
-                                    connection_id: conn_id,
-                                    view_name: view.clone(),
-                                    database_name: db_name_for_click.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_view_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        db_name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "view-{}-{}",
+                                    id_suffix, view_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Eye)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*view_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                        database_name: db_name_for_click.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_view_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            db_name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -285,36 +314,44 @@ impl ConnectionSidebar {
         }
 
         // ── Materialized Views ──────────────────────────────────────────
-        // Always rendered unless the user is searching and this section has no matches.
-        if !has_search || materialized_views_loading || !filtered_mat_views.is_empty() {
+        if object_capabilities.supports_materialized_views
+            && (!has_search || materialized_views_loading || !filtered_mat_views.is_empty())
+        {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("matviews-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::TreeStructure)
-                    .size_3()
-                    .into_any_element(),
-                "Materialized Views",
-                materialized_views.len(),
-                filtered_mat_views.len(),
-                mat_views_expanded,
-                move |this, _, _, cx| toggle(this, "materialized_views", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "materialized_views",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("matviews-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::TreeStructure)
+                        .size_3()
+                        .into_any_element(),
+                    label: "Materialized Views",
+                    total_count: materialized_views.len(),
+                    filtered_count: filtered_mat_views.len(),
+                    is_expanded: mat_views_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "materialized_views", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "materialized_views",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -334,36 +371,41 @@ impl ConnectionSidebar {
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!("matview-{}-{}", id_suffix, view_name)),
-                            Icon::new(ZqlzIcon::TreeStructure)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*view_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenView {
-                                    connection_id: conn_id,
-                                    view_name: view.clone(),
-                                    database_name: db_name_for_click.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_materialized_view_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        db_name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "matview-{}-{}",
+                                    id_suffix, view_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::TreeStructure)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*view_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenView {
+                                        connection_id: conn_id,
+                                        view_name: view.clone(),
+                                        database_name: db_name_for_click.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_materialized_view_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            db_name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -373,36 +415,44 @@ impl ConnectionSidebar {
         }
 
         // ── Triggers ────────────────────────────────────────────────────
-        // Always rendered unless the user is searching and this section has no matches.
-        if !has_search || triggers_loading || !filtered_triggers.is_empty() {
+        if object_capabilities.supports_triggers
+            && (!has_search || triggers_loading || !filtered_triggers.is_empty())
+        {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("triggers-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::LightningBolt)
-                    .size_3()
-                    .into_any_element(),
-                "Triggers",
-                triggers.len(),
-                filtered_triggers.len(),
-                triggers_expanded,
-                move |this, _, _, cx| toggle(this, "triggers", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "triggers",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("triggers-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::LightningBolt)
+                        .size_3()
+                        .into_any_element(),
+                    label: "Triggers",
+                    total_count: triggers.len(),
+                    filtered_count: filtered_triggers.len(),
+                    is_expanded: triggers_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "triggers", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "triggers",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -420,34 +470,39 @@ impl ConnectionSidebar {
                         let trig = (*trigger_name).clone();
                         let name_for_menu = (*trigger_name).clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!("trigger-{}-{}", id_suffix, trigger_name)),
-                            Icon::new(ZqlzIcon::LightningBolt)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*trigger_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::DesignTrigger {
-                                    connection_id: conn_id,
-                                    trigger_name: trig.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_trigger_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "trigger-{}-{}",
+                                    id_suffix, trigger_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::LightningBolt)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*trigger_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::DesignTrigger {
+                                        connection_id: conn_id,
+                                        trigger_name: trig.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_trigger_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -457,34 +512,42 @@ impl ConnectionSidebar {
         }
 
         // ── Functions ───────────────────────────────────────────────────
-        // Always rendered unless the user is searching and this section has no matches.
-        if !has_search || functions_loading || !filtered_functions.is_empty() {
+        if object_capabilities.supports_functions
+            && (!has_search || functions_loading || !filtered_functions.is_empty())
+        {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("functions-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::Function).size_3().into_any_element(),
-                "Functions",
-                functions.len(),
-                filtered_functions.len(),
-                functions_expanded,
-                move |this, _, _, cx| toggle(this, "functions", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "functions",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("functions-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::Function).size_3().into_any_element(),
+                    label: "Functions",
+                    total_count: functions.len(),
+                    filtered_count: filtered_functions.len(),
+                    is_expanded: functions_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "functions", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "functions",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -502,34 +565,39 @@ impl ConnectionSidebar {
                         let func = (*function_name).clone();
                         let name_for_menu = (*function_name).clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!("function-{}-{}", id_suffix, function_name)),
-                            Icon::new(ZqlzIcon::Function)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*function_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenFunction {
-                                    connection_id: conn_id,
-                                    function_name: func.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_function_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "function-{}-{}",
+                                    id_suffix, function_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Function)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*function_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenFunction {
+                                        connection_id: conn_id,
+                                        function_name: func.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_function_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -539,34 +607,42 @@ impl ConnectionSidebar {
         }
 
         // ── Procedures ──────────────────────────────────────────────────
-        // Always rendered unless the user is searching and this section has no matches.
-        if !has_search || procedures_loading || !filtered_procedures.is_empty() {
+        if object_capabilities.supports_procedures
+            && (!has_search || procedures_loading || !filtered_procedures.is_empty())
+        {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("procedures-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::Gear).size_3().into_any_element(),
-                "Procedures",
-                procedures.len(),
-                filtered_procedures.len(),
-                procedures_expanded,
-                move |this, _, _, cx| toggle(this, "procedures", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "procedures",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("procedures-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::Gear).size_3().into_any_element(),
+                    label: "Procedures",
+                    total_count: procedures.len(),
+                    filtered_count: filtered_procedures.len(),
+                    is_expanded: procedures_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "procedures", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "procedures",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -584,37 +660,39 @@ impl ConnectionSidebar {
                         let proc = (*procedure_name).clone();
                         let name_for_menu = (*procedure_name).clone();
                         section = section.child(Self::render_leaf_item(
-                            SharedString::from(format!(
-                                "procedure-{}-{}",
-                                id_suffix, procedure_name
-                            )),
-                            Icon::new(ZqlzIcon::Gear)
-                                .size_3()
-                                .text_color(muted_foreground)
-                                .into_any_element(),
-                            (*procedure_name).clone(),
-                            move |_this, _, _, cx| {
-                                cx.emit(ConnectionSidebarEvent::OpenProcedure {
-                                    connection_id: conn_id,
-                                    procedure_name: proc.clone(),
-                                });
-                            },
-                            Some(
-                                move |this: &mut Self,
-                                      event: &MouseDownEvent,
-                                      window: &mut Window,
-                                      cx: &mut Context<Self>| {
-                                    this.show_procedure_context_menu(
-                                        conn_id,
-                                        name_for_menu.clone(),
-                                        event.position,
-                                        window,
-                                        cx,
-                                    );
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "procedure-{}-{}",
+                                    id_suffix, procedure_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Gear)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*procedure_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenProcedure {
+                                        connection_id: conn_id,
+                                        procedure_name: proc.clone(),
+                                    });
                                 },
-                            ),
-                            list_hover,
-                            leaf_depth,
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_procedure_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
                             cx,
                         ));
                     }
@@ -627,30 +705,37 @@ impl ConnectionSidebar {
         if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
             let toggle = toggle_section.clone();
             let header = self.render_section_header(
-                SharedString::from(format!("queries-header-{}", id_suffix)),
-                Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
-                "Queries",
-                queries.len(),
-                filtered_queries.len(),
-                queries_expanded,
-                move |this, _, _, cx| toggle(this, "queries", cx),
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "queries",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("queries-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
+                    label: "Queries",
+                    total_count: queries.len(),
+                    filtered_count: filtered_queries.len(),
+                    is_expanded: queries_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        toggle(this, "queries", cx)
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                depth,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "queries",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
                 cx,
             );
 
@@ -662,37 +747,39 @@ impl ConnectionSidebar {
                     let name_for_click = query.name.clone();
                     let name_for_menu = query.name.clone();
                     section = section.child(Self::render_leaf_item(
-                        SharedString::from(format!("query-{}-{}", id_suffix, query_id)),
-                        Icon::new(ZqlzIcon::FileSql)
-                            .size_3()
-                            .text_color(muted_foreground)
-                            .into_any_element(),
-                        query_name,
-                        move |_this, _, _, cx| {
-                            tracing::info!(query_id = %query_id, query_name = %name_for_click, "Sidebar query item clicked");
-                            cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
-                                connection_id: conn_id,
-                                query_id,
-                                query_name: name_for_click.clone(),
-                            });
-                        },
-                        Some(
-                            move |this: &mut Self,
-                                  event: &MouseDownEvent,
-                                  window: &mut Window,
-                                  cx: &mut Context<Self>| {
-                                this.show_query_context_menu(
-                                    conn_id,
+                        LeafItemProps {
+                            element_id: SharedString::from(format!("query-{}-{}", id_suffix, query_id)),
+                            icon: Icon::new(ZqlzIcon::FileSql)
+                                .size_3()
+                                .text_color(muted_foreground)
+                                .into_any_element(),
+                            label: query_name,
+                            on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                tracing::info!(query_id = %query_id, query_name = %name_for_click, "Sidebar query item clicked");
+                                cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
+                                    connection_id: conn_id,
                                     query_id,
-                                    name_for_menu.clone(),
-                                    event.position,
-                                    window,
-                                    cx,
-                                );
+                                    query_name: name_for_click.clone(),
+                                });
                             },
-                        ),
-                        list_hover,
-                        leaf_depth,
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_query_context_menu(
+                                        conn_id,
+                                        query_id,
+                                        name_for_menu.clone(),
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            list_hover,
+                            depth: leaf_depth,
+                        },
                         cx,
                     ));
                 }

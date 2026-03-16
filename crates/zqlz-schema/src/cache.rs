@@ -168,7 +168,7 @@ impl SchemaCache {
         let mut cache = self.cache.write();
         let entry = cache
             .entry(connection_id)
-            .or_insert_with(|| CachedSchema::empty());
+            .or_insert_with(CachedSchema::empty);
         entry.database_name = database_name;
         entry.schema_name = schema_name;
     }
@@ -179,7 +179,7 @@ impl SchemaCache {
         let mut cache = self.cache.write();
         let entry = cache
             .entry(connection_id)
-            .or_insert_with(|| CachedSchema::empty());
+            .or_insert_with(CachedSchema::empty);
         entry.tables = tables;
         entry.cached_at = Instant::now();
     }
@@ -191,7 +191,7 @@ impl SchemaCache {
         let mut cache = self.cache.write();
         let entry = cache
             .entry(connection_id)
-            .or_insert_with(|| CachedSchema::empty());
+            .or_insert_with(CachedSchema::empty);
         entry.columns.insert(table.to_string(), columns);
     }
 

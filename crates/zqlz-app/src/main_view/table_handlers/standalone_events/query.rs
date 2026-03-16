@@ -3,7 +3,7 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
-use zqlz_services::TableService;
+use zqlz_services::{BrowseTableWithFiltersRequest, TableService};
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
@@ -14,23 +14,27 @@ fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) 
     viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
 }
 
+pub(in crate::main_view) struct ApplyFiltersRequest {
+    pub connection_id: Uuid,
+    pub table_name: String,
+    pub filters: Vec<crate::components::FilterCondition>,
+    pub sorts: Vec<crate::components::SortCriterion>,
+    pub visible_columns: Vec<String>,
+    pub search_text: String,
+}
+
 pub(in crate::main_view) fn handle_apply_filters_event(
-    connection_id: Uuid,
-    table_name: &str,
-    filters: &[crate::components::FilterCondition],
-    sorts: &[crate::components::SortCriterion],
-    visible_columns: &[String],
-    search_text: &str,
+    request: ApplyFiltersRequest,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
 ) {
     tracing::info!(
         "ApplyFilters event: table={}, filters={}, sorts={}, search='{}'",
-        table_name,
-        filters.len(),
-        sorts.len(),
-        search_text
+        request.table_name,
+        request.filters.len(),
+        request.sorts.len(),
+        request.search_text
     );
 
     let Some(app_state) = cx.try_global::<AppState>() else {
@@ -39,28 +43,29 @@ pub(in crate::main_view) fn handle_apply_filters_event(
     };
 
     let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
+        request.connection_id,
         viewer_entity.read(cx).database_name().as_deref(),
     ) else {
-        tracing::error!("Connection not found: {}", connection_id);
+        tracing::error!("Connection not found: {}", request.connection_id);
         return;
     };
 
     let table_service = app_state.table_service.clone();
-    let table_name = table_name.to_string();
+    let table_name = request.table_name;
     let connection = connection.clone();
     // Get connection name for tab title
     let connection_name = app_state
         .connection_manager()
-        .get_saved(connection_id)
+        .get_saved(request.connection_id)
         .map(|s| s.name.clone())
         .unwrap_or_else(|| "Unknown".to_string());
 
     // Convert FilterCondition to SQL WHERE fragments
-    let mut where_clauses: Vec<String> = filters.iter().filter_map(|f| f.to_sql()).collect();
+    let mut where_clauses: Vec<String> =
+        request.filters.iter().filter_map(|f| f.to_sql()).collect();
 
     // Build search WHERE clause: search across all string-like columns with CAST/LIKE
-    if !search_text.is_empty() {
+    if !request.search_text.is_empty() {
         let column_meta = viewer_entity.read(cx).column_meta.clone();
         let searchable_columns: Vec<String> = column_meta
             .iter()
@@ -69,7 +74,8 @@ pub(in crate::main_view) fn handle_apply_filters_event(
             .collect();
 
         if !searchable_columns.is_empty() {
-            let escaped_search = search_text
+            let escaped_search = request
+                .search_text
                 .replace("'", "''")
                 .replace("%", "\\%")
                 .replace("_", "\\_");
@@ -88,9 +94,9 @@ pub(in crate::main_view) fn handle_apply_filters_event(
     }
 
     // Convert SortCriterion to SQL ORDER BY fragments
-    let order_by_clauses: Vec<String> = sorts.iter().map(|s| s.to_sql()).collect();
+    let order_by_clauses: Vec<String> = request.sorts.iter().map(|s| s.to_sql()).collect();
 
-    let visible_columns = visible_columns.to_vec();
+    let visible_columns = request.visible_columns;
 
     // Capture the is_view state and database_name before loading
     let is_view = viewer_entity.read(cx).is_view();
@@ -107,14 +113,16 @@ pub(in crate::main_view) fn handle_apply_filters_event(
             match table_service
                 .browse_table_with_filters(
                     connection,
-                    &table_name,
-                    schema_qualifier.as_deref(),
-                    where_clauses,
-                    order_by_clauses,
-                    visible_columns,
-                    None,
-                    None,
-                    None,
+                    BrowseTableWithFiltersRequest {
+                        table_name: &table_name,
+                        schema: schema_qualifier.as_deref(),
+                        where_clauses,
+                        order_by_clauses,
+                        visible_columns,
+                        limit: None,
+                        offset: None,
+                        cached_total: None,
+                    },
                 )
                 .await
             {
@@ -138,7 +146,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
                         }
 
                         viewer.load_table(
-                            connection_id,
+                            request.connection_id,
                             connection_name.clone(),
                             table_name.clone(),
                             database_name.clone(),
@@ -170,7 +178,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
                         if viewer.is_current_request(request_generation) {
                             viewer.set_loading(false, cx);
                             window.push_notification(
-                                Notification::error(&format!("Failed to apply filters: {}", e)),
+                                Notification::error(format!("Failed to apply filters: {}", e)),
                                 cx,
                             );
                         }
@@ -205,7 +213,7 @@ pub(in crate::main_view) fn handle_sort_column_event(
 
     // Use the panel's apply_sort method which handles everything internally
     // (updating filter panel state, emitting ApplyFilters, etc.)
-    _ = viewer_entity.update(cx, |panel, cx| {
+    viewer_entity.update(cx, |panel, cx| {
         panel.apply_sort(column_name.to_string(), direction, cx);
     });
 }

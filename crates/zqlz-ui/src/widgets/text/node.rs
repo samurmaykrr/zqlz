@@ -111,7 +111,7 @@ impl BlockNode {
             BlockNode::Break { span, .. } => *span,
             BlockNode::Divider { span, .. } => *span,
             BlockNode::Definition { span, .. } => *span,
-            BlockNode::Unknown { .. } => None,
+            BlockNode::Unknown => None,
         }
     }
 
@@ -193,7 +193,7 @@ impl BlockNode {
             BlockNode::Definition { .. }
             | BlockNode::Break { .. }
             | BlockNode::Divider { .. }
-            | BlockNode::Unknown { .. } => {}
+            | BlockNode::Unknown => {}
         }
 
         text
@@ -522,7 +522,7 @@ impl CodeBlock {
     ) -> Self {
         let mut styles = vec![];
         if let Some(lang) = &lang {
-            let mut highlighter = SyntaxHighlighter::new(&lang);
+            let mut highlighter = SyntaxHighlighter::new(lang);
             highlighter.update(None, &Rope::from_str(code.as_str()));
             styles = highlighter.styles(&(0..code.len()), highlight_theme);
         };
@@ -584,7 +584,7 @@ impl CodeBlock {
                                 .right_2()
                                 .bg(cx.theme().muted)
                                 .rounded(cx.theme().radius)
-                                .child(actions(&self, window, cx)),
+                                .child(actions(self, window, cx)),
                         )
                     }),
             )
@@ -640,7 +640,7 @@ impl Paragraph {
             text.push_str(&inline_node.text);
 
             if let Some(image) = &inline_node.image {
-                if text.len() > 0 {
+                if !text.is_empty() {
                     inline_node
                         .state
                         .lock()
@@ -710,10 +710,10 @@ impl Paragraph {
                         });
 
                         // convert link references, replace link
-                        if let Some(identifier) = link_mark.identifier.as_ref() {
-                            if let Some(mark) = node_cx.link_refs.get(identifier) {
-                                link_mark = mark.clone();
-                            }
+                        if let Some(identifier) = link_mark.identifier.as_ref()
+                            && let Some(mark) = node_cx.link_refs.get(identifier)
+                        {
+                            link_mark = mark.clone();
                         }
 
                         links.push((inner_range.clone(), link_mark));
@@ -729,7 +729,7 @@ impl Paragraph {
         }
 
         // Add the last text node
-        if text.len() > 0 {
+        if !text.is_empty() {
             self.state.lock().unwrap().set_text(text.into());
             child_nodes
                 .push(Inline::new(ix, self.state.clone(), links, highlights).into_any_element());
@@ -916,7 +916,7 @@ impl BlockNode {
                     format!("[{}]: {}", identifier, url)
                 }
             }
-            BlockNode::Unknown { .. } => "".to_string(),
+            BlockNode::Unknown => "".to_string(),
         }
         .trim()
         .to_string()
@@ -964,13 +964,11 @@ impl BlockNode {
                                 );
 
                                 // merge content into last item.
-                                if last_not_list {
-                                    if let Some(item_item) = items.last_mut() {
-                                        item_item.extend(vec![
-                                            div().overflow_hidden().child(text).into_any_element(),
-                                        ]);
-                                        continue;
-                                    }
+                                if last_not_list && let Some(item_item) = items.last_mut() {
+                                    item_item.extend(vec![
+                                        div().overflow_hidden().child(text).into_any_element(),
+                                    ]);
+                                    continue;
                                 }
 
                                 items.push(
@@ -1154,7 +1152,7 @@ impl BlockNode {
         match self {
             BlockNode::Root { children, .. } => div()
                 .id(("div", ix))
-                .children(children.into_iter().enumerate().map(move |(ix, node)| {
+                .children(children.iter().enumerate().map(move |(ix, node)| {
                     node.render_block(NodeRenderOptions { ix, ..options }, node_cx, window, cx)
                 }))
                 .into_any_element(),
@@ -1203,7 +1201,7 @@ impl BlockNode {
                         .px_4()
                         .children({
                             let children_len = children.len();
-                            children.into_iter().enumerate().map(move |(index, c)| {
+                            children.iter().enumerate().map(move |(index, c)| {
                                 let is_last = index == children_len - 1;
                                 c.render_block(options.is_last(is_last), node_cx, window, cx)
                             })
@@ -1218,7 +1216,7 @@ impl BlockNode {
                 .children({
                     let mut items = Vec::with_capacity(children.len());
                     let mut item_index = 0;
-                    for (ix, item) in children.into_iter().enumerate() {
+                    for (ix, item) in children.iter().enumerate() {
                         let is_item = item.is_list_item();
 
                         items.push(Self::render_list_item(
@@ -1250,7 +1248,7 @@ impl BlockNode {
                 .child(div().id("divider").bg(cx.theme().border).h(px(2.)))
                 .into_any_element(),
             BlockNode::Break { .. } => div().id("break").into_any_element(),
-            BlockNode::Unknown { .. } | BlockNode::Definition { .. } => div().into_any_element(),
+            BlockNode::Unknown | BlockNode::Definition { .. } => div().into_any_element(),
             _ => {
                 if cfg!(debug_assertions) {
                     tracing::warn!("unknown implementation: {:?}", self);

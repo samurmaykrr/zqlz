@@ -90,18 +90,13 @@ impl Default for BatchOptions {
 }
 
 /// Execution mode for batch operations
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum ExecutionMode {
     /// Execute statements one at a time in order
+    #[default]
     Sequential,
     /// Execute statements in parallel (order not guaranteed)
     Parallel,
-}
-
-impl Default for ExecutionMode {
-    fn default() -> Self {
-        Self::Sequential
-    }
 }
 
 /// Status of a single statement in the batch
@@ -407,7 +402,7 @@ impl BatchExecutor {
             }
 
             let result = self
-                .execute_single(conn, transaction.as_ref(), index, sql)
+                .execute_single(conn, transaction.as_deref(), index, sql)
                 .await;
 
             if result.is_failed() && self.options.stop_on_error {
@@ -528,7 +523,7 @@ impl BatchExecutor {
     async fn execute_single(
         &self,
         conn: &Arc<dyn Connection>,
-        tx: Option<&Box<dyn zqlz_core::Transaction>>,
+        tx: Option<&dyn zqlz_core::Transaction>,
         index: usize,
         sql: String,
     ) -> BatchResult {
@@ -584,7 +579,7 @@ async fn execute_single_statement(
 
 /// Execute a single statement within a transaction
 async fn execute_single_in_transaction(
-    tx: &Box<dyn zqlz_core::Transaction>,
+    tx: &dyn zqlz_core::Transaction,
     sql: &str,
 ) -> Result<(Option<QueryResult>, u64)> {
     let trimmed = sql.trim().to_uppercase();

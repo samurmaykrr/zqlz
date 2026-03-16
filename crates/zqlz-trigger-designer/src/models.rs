@@ -276,12 +276,12 @@ impl TriggerDesign {
         ddl.push_str("    FOR EACH ROW\n");
 
         // WHEN condition
-        if let Some(ref cond) = self.when_condition {
-            if !cond.trim().is_empty() {
-                ddl.push_str("    WHEN (");
-                ddl.push_str(cond);
-                ddl.push_str(")\n");
-            }
+        if let Some(ref cond) = self.when_condition
+            && !cond.trim().is_empty()
+        {
+            ddl.push_str("    WHEN (");
+            ddl.push_str(cond);
+            ddl.push_str(")\n");
         }
 
         // Body
@@ -337,12 +337,12 @@ impl TriggerDesign {
         ddl.push('\n');
 
         // WHEN condition
-        if let Some(ref cond) = self.when_condition {
-            if !cond.trim().is_empty() {
-                ddl.push_str("    WHEN (");
-                ddl.push_str(cond);
-                ddl.push_str(")\n");
-            }
+        if let Some(ref cond) = self.when_condition
+            && !cond.trim().is_empty()
+        {
+            ddl.push_str("    WHEN (");
+            ddl.push_str(cond);
+            ddl.push_str(")\n");
         }
 
         // EXECUTE FUNCTION

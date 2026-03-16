@@ -367,6 +367,8 @@ fn postgres_functions() -> Vec<SqlFunctionInfo> {
             .with_signature("TO_DATE(string, format)"),
         SqlFunctionInfo::new("TO_TIMESTAMP", FunctionCategory::DateTime)
             .with_signature("TO_TIMESTAMP(string, format)"),
+        SqlFunctionInfo::new("GENERATE_SERIES", FunctionCategory::Other)
+            .with_signature("GENERATE_SERIES(start, stop[, step])"),
         SqlFunctionInfo::new("MAKE_DATE", FunctionCategory::DateTime)
             .with_signature("MAKE_DATE(year, month, day)"),
         SqlFunctionInfo::new("MAKE_TIME", FunctionCategory::DateTime)

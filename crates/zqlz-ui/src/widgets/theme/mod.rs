@@ -168,9 +168,11 @@ impl Theme {
     pub fn change(mode: impl Into<ThemeMode>, window: Option<&mut Window>, cx: &mut App) {
         let mode = mode.into();
         if !cx.has_global::<Theme>() {
-            let mut theme = Theme::default();
-            theme.light_theme = ThemeRegistry::global(cx).default_light_theme().clone();
-            theme.dark_theme = ThemeRegistry::global(cx).default_dark_theme().clone();
+            let theme = Theme {
+                light_theme: ThemeRegistry::global(cx).default_light_theme().clone(),
+                dark_theme: ThemeRegistry::global(cx).default_dark_theme().clone(),
+                ..Default::default()
+            };
             cx.set_global(theme);
         }
 

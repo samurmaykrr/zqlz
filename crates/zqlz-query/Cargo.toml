@@ -18,6 +18,7 @@ zqlz-lsp.workspace = true
 zqlz-templates.workspace = true
 zqlz-analyzer.workspace = true
 zqlz-text-editor.workspace = true
+zqlz-drivers.workspace = true
 
 # GPUI
 gpui.workspace = true

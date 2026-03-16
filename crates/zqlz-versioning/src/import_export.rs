@@ -240,11 +240,9 @@ pub fn import_versions(
             entry.connection_id = new_conn_id;
         }
 
-        if options.skip_duplicates {
-            if storage.get_version(entry.id)?.is_some() {
-                result.versions_skipped += 1;
-                continue;
-            }
+        if options.skip_duplicates && storage.get_version(entry.id)?.is_some() {
+            result.versions_skipped += 1;
+            continue;
         }
 
         storage.save_version(&entry)?;

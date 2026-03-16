@@ -74,11 +74,10 @@ impl TableRef {
 
     /// Check if the given identifier matches this table reference
     pub fn matches(&self, identifier: &str) -> bool {
-        if let Some(alias) = &self.alias {
-            alias == identifier
-        } else {
-            self.table_name == identifier
-        }
+        self.alias
+            .as_ref()
+            .is_some_and(|alias| alias.eq_ignore_ascii_case(identifier))
+            || self.table_name.eq_ignore_ascii_case(identifier)
     }
 }
 
@@ -224,14 +223,19 @@ impl ContextAnalyzer {
             // SelectList instead of FromClause. We check the last two tokens to cover both:
             //   - bare keyword:   `... FROM |`  (last token is FROM)
             //   - partial name:   `... FROM cus|` (second-to-last token is FROM)
-            let trimmed = text_before
-                .trim_end_matches(|c: char| c == ')' || c == ' ' || c == '\t' || c == '\n');
+            let trimmed = text_before.trim_end_matches([')', ' ', '\t', '\n']);
             let tokens: Vec<&str> = trimmed
                 .split(|c: char| c.is_whitespace() || c == '(' || c == ',')
                 .filter(|s| !s.is_empty())
                 .collect();
 
             let last_token_upper = tokens.last().copied().unwrap_or("").to_uppercase();
+
+            if last_token_upper == "SELECT" {
+                return SqlContext::SelectList {
+                    available_tables: available_tables.clone(),
+                };
+            }
 
             if matches!(
                 last_token_upper.as_str(),
@@ -241,12 +245,28 @@ impl ContextAnalyzer {
                 return SqlContext::FromClause;
             }
 
+            if last_token_upper == "JOIN" {
+                return SqlContext::JoinClause {
+                    existing_tables: available_tables.clone(),
+                };
+            }
+
             // User has started typing a table/view name after a clause keyword.
             if tokens.len() >= 2 {
                 let prev_token_upper = tokens[tokens.len() - 2].to_uppercase();
+                if prev_token_upper == "SELECT" {
+                    return SqlContext::SelectList {
+                        available_tables: available_tables.clone(),
+                    };
+                }
+                if prev_token_upper == "JOIN" {
+                    return SqlContext::JoinClause {
+                        existing_tables: available_tables.clone(),
+                    };
+                }
                 if matches!(
                     prev_token_upper.as_str(),
-                    "FROM" | "JOIN" | "INTO" | "UPDATE" | "TABLE"
+                    "FROM" | "INTO" | "UPDATE" | "TABLE"
                 ) {
                     tracing::trace!(
                         prev_token = %prev_token_upper,
@@ -257,19 +277,18 @@ impl ContextAnalyzer {
                 }
             }
 
-            // After a dot: cursor is requesting columns from a specific table/alias
-            if text_before.ends_with('.') {
-                tracing::trace!("Text before cursor ends with dot");
-                // Find the identifier before the dot
-                if let Some(last_word) = text_before.trim_end_matches('.').split_whitespace().last()
-                {
-                    let table_name = last_word.trim_end_matches('.');
-                    tracing::trace!(table_name = table_name, "Found table name before dot");
-                    return SqlContext::AfterDot {
-                        table_or_alias: table_name.to_string(),
-                        available_tables: available_tables.clone(),
-                    };
-                }
+            // In incomplete SELECT lists tree-sitter often stops attaching the later FROM
+            // clause once the user starts a qualified reference (`u.` / `u.us`). We recover
+            // that intent directly from the text so column completion keeps working while typing.
+            if let Some(table_or_alias) = Self::qualified_reference_prefix(text_before) {
+                tracing::trace!(
+                    table_or_alias = table_or_alias,
+                    "Detected qualified reference before cursor"
+                );
+                return SqlContext::AfterDot {
+                    table_or_alias,
+                    available_tables: available_tables.clone(),
+                };
             }
         }
 
@@ -306,12 +325,12 @@ impl ContextAnalyzer {
                     // Extract CTE name
                     let mut cursor = current.walk();
                     for child in current.children(&mut cursor) {
-                        if child.kind() == "identifier" {
-                            if let Ok(cte_name) = child.utf8_text(source.as_bytes()) {
-                                return SqlContext::CommonTableExpression {
-                                    cte_name: cte_name.to_string(),
-                                };
-                            }
+                        if child.kind() == "identifier"
+                            && let Ok(cte_name) = child.utf8_text(source.as_bytes())
+                        {
+                            return SqlContext::CommonTableExpression {
+                                cte_name: cte_name.to_string(),
+                            };
                         }
                     }
                     return SqlContext::General;
@@ -379,6 +398,28 @@ impl ContextAnalyzer {
         Some(SqlContext::CreateTable)
     }
 
+    fn qualified_reference_prefix(text_before: &str) -> Option<String> {
+        let trimmed = text_before.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let token_start = trimmed
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .map_or(0, |idx| idx + 1);
+        let token = &trimmed[token_start..];
+
+        let (qualifier, _partial_column) = token.rsplit_once('.')?;
+        if qualifier.is_empty() {
+            return None;
+        }
+
+        qualifier
+            .split('.')
+            .rfind(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     fn analyze_condition_clause(&self, node: tree_sitter::Node, source: &str) -> SqlContext {
         tracing::warn!(
             "🔍 analyze_condition_clause called for node: {}",
@@ -418,12 +459,12 @@ impl ContextAnalyzer {
         // Extract CTE name
         let mut cursor = node.walk();
         for child in node.children(&mut cursor) {
-            if child.kind() == "identifier" {
-                if let Ok(cte_name) = child.utf8_text(source.as_bytes()) {
-                    return SqlContext::CommonTableExpression {
-                        cte_name: cte_name.to_string(),
-                    };
-                }
+            if child.kind() == "identifier"
+                && let Ok(cte_name) = child.utf8_text(source.as_bytes())
+            {
+                return SqlContext::CommonTableExpression {
+                    cte_name: cte_name.to_string(),
+                };
             }
         }
 
@@ -721,10 +762,13 @@ pub fn build_alias_map(table_refs: &[TableRef]) -> HashMap<String, String> {
     let mut map = HashMap::new();
     for table_ref in table_refs {
         if let Some(alias) = &table_ref.alias {
-            map.insert(alias.clone(), table_ref.table_name.clone());
+            map.insert(alias.to_lowercase(), table_ref.table_name.clone());
         }
         // Also map table name to itself for consistency
-        map.insert(table_ref.table_name.clone(), table_ref.table_name.clone());
+        map.insert(
+            table_ref.table_name.to_lowercase(),
+            table_ref.table_name.clone(),
+        );
     }
     map
 }
@@ -738,7 +782,7 @@ mod tests {
         let table = TableRef::new("users".to_string(), Some("u".to_string()));
         assert_eq!(table.identifier(), "u");
         assert!(table.matches("u"));
-        assert!(!table.matches("users"));
+        assert!(table.matches("users"));
 
         let table_no_alias = TableRef::new("posts".to_string(), None);
         assert_eq!(table_no_alias.identifier(), "posts");
@@ -756,5 +800,21 @@ mod tests {
         assert_eq!(map.get("u"), Some(&"users".to_string()));
         assert_eq!(map.get("users"), Some(&"users".to_string()));
         assert_eq!(map.get("posts"), Some(&"posts".to_string()));
+    }
+
+    #[test]
+    fn qualified_reference_prefix_detects_bare_alias_after_dot() {
+        assert_eq!(
+            ContextAnalyzer::qualified_reference_prefix("SELECT u. "),
+            Some("u".to_string())
+        );
+    }
+
+    #[test]
+    fn qualified_reference_prefix_detects_partial_column_after_dot() {
+        assert_eq!(
+            ContextAnalyzer::qualified_reference_prefix("SELECT users.us"),
+            Some("users".to_string())
+        );
     }
 }

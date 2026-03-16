@@ -10,10 +10,13 @@
 //! - Find & Replace panel (Phase 9)
 
 use gpui::*;
-use std::ops::Range;
-use zqlz_ui::widgets::ActiveTheme;
+use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc};
+use zqlz_ui::widgets::{ActiveTheme, ThemeColor, ThemeMode, highlighter::HighlightTheme};
 
-use crate::{CachedScrollbarBounds, TextEditor, buffer::Position, syntax::HighlightKind};
+use crate::{
+    CachedScrollbarBounds, CursorShapeStyle, Selection, TextEditor, VisibleWrapLayout,
+    buffer::Position, display_map::DisplayViewport, syntax::HighlightKind,
+};
 
 /// The width of the cursor in pixels
 const CURSOR_WIDTH: Pixels = px(1.5);
@@ -45,11 +48,29 @@ struct CompletionItemData {
 
 /// Inline (ghost-text) suggestion render data
 struct InlineSuggestionRenderData {
-    /// The ghost text to paint after the cursor
-    text: String,
+    /// Shaped ghost text ready to paint.
+    shaped: Arc<ShapedLine>,
     /// Top-left corner at which to start painting the ghost text
     origin: Point<Pixels>,
     /// Line height (for vertical positioning)
+    line_height: Pixels,
+}
+
+struct EditPredictionRenderData {
+    shaped: Arc<ShapedLine>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+}
+
+/// Inlay hint render data prepared during prepaint.
+struct InlayHintRenderData {
+    /// Background chip bounds, if this hint should render as a pill.
+    background_bounds: Option<Bounds<Pixels>>,
+    /// Shaped label text.
+    shaped: Arc<ShapedLine>,
+    /// Top-left corner at which to paint the hint.
+    origin: Point<Pixels>,
+    /// Height used for vertical centering and paint.
     line_height: Pixels,
 }
 
@@ -70,6 +91,107 @@ struct CompletionMenuRenderData {
 /// Element that renders a TextEditor
 pub struct EditorElement {
     editor: Entity<TextEditor>,
+    renderer_caches: RefCell<RendererCaches>,
+}
+
+#[derive(Default)]
+struct RendererCaches {
+    line_shapes: HashMap<LineShapeCacheKey, Arc<ShapedLine>>,
+    wrapped_line_shapes: HashMap<WrappedLineShapeCacheKey, Arc<WrappedLine>>,
+    viewport_layouts: HashMap<ViewportLayoutCacheKey, Arc<CachedViewportLayout>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ColorCacheKey {
+    h: u32,
+    s: u32,
+    l: u32,
+    a: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct TextRunCacheKey {
+    len: usize,
+    font: Font,
+    color: ColorCacheKey,
+    background_color: Option<ColorCacheKey>,
+    underline: Option<UnderlineStyle>,
+    strikethrough: Option<StrikethroughStyle>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct LineShapeCacheKey {
+    text: String,
+    font_size_bits: u32,
+    runs: Vec<TextRunCacheKey>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct WrappedLineShapeCacheKey {
+    line: LineShapeCacheKey,
+    wrap_width_bits: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ViewportTextStyleCacheKey {
+    font: Font,
+    default_text_color: Hsla,
+    active_gutter_color: Hsla,
+    inactive_gutter_color: Hsla,
+    keyword_color: Hsla,
+    string_color: Hsla,
+    comment_color: Hsla,
+    number_color: Hsla,
+    identifier_color: Hsla,
+    operator_color: Hsla,
+    function_color: Hsla,
+    punctuation_color: Hsla,
+    boolean_color: Hsla,
+    null_color: Hsla,
+    error_color: Hsla,
+}
+
+impl From<Hsla> for ColorCacheKey {
+    fn from(color: Hsla) -> Self {
+        Self {
+            h: color.h.to_bits(),
+            s: color.s.to_bits(),
+            l: color.l.to_bits(),
+            a: color.a.to_bits(),
+        }
+    }
+}
+
+impl RendererCaches {
+    fn line_key(text: &str, font_size: Pixels, runs: &[TextRun]) -> LineShapeCacheKey {
+        LineShapeCacheKey {
+            text: text.to_string(),
+            font_size_bits: f32::from(font_size).to_bits(),
+            runs: runs
+                .iter()
+                .map(|run| TextRunCacheKey {
+                    len: run.len,
+                    font: run.font.clone(),
+                    color: run.color.into(),
+                    background_color: run.background_color.map(Into::into),
+                    underline: run.underline,
+                    strikethrough: run.strikethrough,
+                })
+                .collect(),
+        }
+    }
+
+    fn prune_if_needed(&mut self) {
+        if self.line_shapes.len() > 4_096 {
+            self.line_shapes.clear();
+        }
+        if self.wrapped_line_shapes.len() > 2_048 {
+            self.wrapped_line_shapes.clear();
+        }
+        if self.viewport_layouts.len() > 128 {
+            self.viewport_layouts.clear();
+        }
+    }
 }
 
 /// Per-line fold chevron data produced during prepaint.
@@ -82,58 +204,549 @@ struct FoldChevronData {
     rect: Bounds<Pixels>,
 }
 
+struct ViewportLayoutBuildParams<'a> {
+    visible_range: Range<usize>,
+    relative_line_numbers: bool,
+    cursor_line: usize,
+    font_size: Pixels,
+    text_style: &'a ViewportTextStyleCacheKey,
+    wrap_width: Option<Pixels>,
+    wrap_column: usize,
+    scroll_offset: f32,
+    line_height: Pixels,
+}
+
+struct ViewportLayoutKeyInput {
+    revision: usize,
+    syntax_generation: u64,
+    visible_rows: Range<usize>,
+    relative_line_numbers: bool,
+    cursor_line: usize,
+    text_style: ViewportTextStyleCacheKey,
+    scroll_offset: f32,
+    line_height: Pixels,
+    font_size: Pixels,
+    gutter_width: Pixels,
+    char_width: Pixels,
+    bounds: Bounds<Pixels>,
+    soft_wrap: bool,
+}
+
+struct WrappedPositionContext<'a> {
+    wrap_layout: Option<&'a VisibleWrapLayout>,
+    display_snapshot: &'a crate::DisplaySnapshot,
+    bounds: Bounds<Pixels>,
+    gutter_width: Pixels,
+    char_width: Pixels,
+    horizontal_scroll_offset: f32,
+    scroll_offset: f32,
+    line_height: Pixels,
+}
+
+struct CursorPixelLayout {
+    line_height: Pixels,
+    char_width: Pixels,
+    horizontal_scroll_offset: f32,
+    scroll_offset: f32,
+    gutter_width: Pixels,
+}
+
 impl EditorElement {
+    fn chunk_text_runs(
+        chunk: &crate::display_map::DisplayTextChunk,
+        text_style: &ViewportTextStyleCacheKey,
+    ) -> Vec<TextRun> {
+        if chunk.highlights.is_empty() || chunk.text.is_empty() {
+            return vec![TextRun {
+                len: chunk.text.len(),
+                font: text_style.font.clone(),
+                color: text_style.default_text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
+        }
+
+        let mut runs = Vec::new();
+        for highlight in &chunk.highlights {
+            let run_start = chunk
+                .text
+                .floor_char_boundary(highlight.start.min(chunk.text.len()));
+            let run_end = chunk
+                .text
+                .ceil_char_boundary(highlight.end.min(chunk.text.len()));
+
+            if run_start < run_end {
+                runs.push((run_start, run_end, highlight.kind));
+            }
+        }
+
+        if runs.is_empty() {
+            return vec![TextRun {
+                len: chunk.text.len(),
+                font: text_style.font.clone(),
+                color: text_style.default_text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }];
+        }
+
+        runs.sort_by(|left, right| left.0.cmp(&right.0));
+
+        let mut result = Vec::new();
+        let mut current_pos = 0;
+        for (start, end, kind) in runs {
+            if end <= current_pos {
+                continue;
+            }
+
+            let start = start.max(current_pos);
+
+            if start > current_pos {
+                result.push(TextRun {
+                    len: start - current_pos,
+                    font: text_style.font.clone(),
+                    color: text_style.default_text_color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+
+            result.push(TextRun {
+                len: end - start,
+                font: text_style.font.clone(),
+                color: match kind {
+                    HighlightKind::Keyword => text_style.keyword_color,
+                    HighlightKind::String => text_style.string_color,
+                    HighlightKind::Comment => text_style.comment_color,
+                    HighlightKind::Number => text_style.number_color,
+                    HighlightKind::Identifier => text_style.identifier_color,
+                    HighlightKind::Operator => text_style.operator_color,
+                    HighlightKind::Function => text_style.function_color,
+                    HighlightKind::Punctuation => text_style.punctuation_color,
+                    HighlightKind::Boolean => text_style.boolean_color,
+                    HighlightKind::Null => text_style.null_color,
+                    HighlightKind::Error => text_style.error_color,
+                    HighlightKind::Default => text_style.default_text_color,
+                },
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+
+            current_pos = end;
+        }
+
+        if current_pos < chunk.text.len() {
+            result.push(TextRun {
+                len: chunk.text.len() - current_pos,
+                font: text_style.font.clone(),
+                color: text_style.default_text_color,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        result
+    }
+
+    fn build_viewport_layout_cache(
+        &self,
+        viewport: DisplayViewport,
+        params: ViewportLayoutBuildParams<'_>,
+        window: &mut Window,
+    ) -> CachedViewportLayout {
+        let text_chunks = viewport.text_chunks();
+        let row_infos = viewport.row_infos();
+
+        let ViewportLayoutBuildParams {
+            visible_range,
+            relative_line_numbers,
+            cursor_line,
+            font_size,
+            text_style,
+            wrap_width,
+            wrap_column,
+            scroll_offset,
+            line_height,
+        } = params;
+
+        let (shaped_lines, wrapped_shaped_lines, wrap_layout) = if let Some(wrap_width) = wrap_width
+        {
+            let wrapped_shaped_lines = text_chunks
+                .iter()
+                .filter_map(|chunk| {
+                    let text_runs = Self::chunk_text_runs(chunk, text_style);
+                    self.shape_wrapped_line_cached(
+                        &chunk.text,
+                        font_size,
+                        &text_runs,
+                        wrap_width,
+                        window,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let visual_rows = wrapped_shaped_lines
+                .iter()
+                .map(|line| line.wrap_boundaries().len().saturating_add(1))
+                .collect::<Vec<_>>();
+            (
+                Vec::new(),
+                Some(wrapped_shaped_lines),
+                Some(VisibleWrapLayout::new(
+                    visible_range.clone(),
+                    visual_rows,
+                    wrap_column,
+                    scroll_offset,
+                    line_height,
+                )),
+            )
+        } else {
+            let shaped_lines = text_chunks
+                .iter()
+                .map(|chunk| {
+                    let text_runs = Self::chunk_text_runs(chunk, text_style);
+                    self.shape_line_cached(&chunk.text, font_size, &text_runs, window)
+                })
+                .collect::<Vec<_>>();
+            (shaped_lines, None, None)
+        };
+
+        let gutter_lines = row_infos
+            .iter()
+            .map(|row_info| {
+                let buffer_line = row_info.buffer_line;
+                let line_number = if relative_line_numbers {
+                    if buffer_line == cursor_line {
+                        buffer_line + 1
+                    } else {
+                        buffer_line.abs_diff(cursor_line)
+                    }
+                } else {
+                    buffer_line + 1
+                };
+                let label = line_number.to_string();
+                let is_active = buffer_line == cursor_line;
+                let has_diagnostics = text_chunks
+                    .get(row_info.display_row.saturating_sub(visible_range.start))
+                    .map(|chunk| !chunk.diagnostics.is_empty())
+                    .unwrap_or(false);
+                let color: Hsla = if is_active {
+                    text_style.active_gutter_color
+                } else {
+                    text_style.inactive_gutter_color
+                };
+                let text_run = TextRun {
+                    len: label.len(),
+                    font: text_style.font.clone(),
+                    color,
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+                let shaped = self.shape_line_cached(&label, font_size, &[text_run], window);
+                GutterLine {
+                    shaped,
+                    is_active,
+                    has_diagnostics,
+                }
+            })
+            .collect::<Vec<_>>();
+
+        CachedViewportLayout {
+            shaped_lines,
+            wrapped_shaped_lines,
+            gutter_lines,
+            viewport,
+            wrap_layout,
+        }
+    }
+
+    fn viewport_layout_key(input: ViewportLayoutKeyInput) -> ViewportLayoutCacheKey {
+        let ViewportLayoutKeyInput {
+            revision,
+            syntax_generation,
+            visible_rows,
+            relative_line_numbers,
+            cursor_line,
+            text_style,
+            scroll_offset,
+            line_height,
+            font_size,
+            gutter_width,
+            char_width,
+            bounds,
+            soft_wrap,
+        } = input;
+
+        ViewportLayoutCacheKey {
+            revision,
+            syntax_generation,
+            visible_rows,
+            relative_line_numbers,
+            cursor_line,
+            text_style,
+            scroll_offset_bits: scroll_offset.to_bits(),
+            line_height_bits: f32::from(line_height).to_bits(),
+            font_size_bits: f32::from(font_size).to_bits(),
+            gutter_width_bits: f32::from(gutter_width).to_bits(),
+            char_width_bits: f32::from(char_width).to_bits(),
+            bounds_width_bits: f32::from(bounds.size.width).to_bits(),
+            bounds_height_bits: f32::from(bounds.size.height).to_bits(),
+            soft_wrap,
+        }
+    }
+
+    fn viewport_text_style_key(font: &Font, cx: &App) -> ViewportTextStyleCacheKey {
+        let theme = cx.theme();
+        let highlight_theme = theme.highlight_theme.as_ref();
+
+        ViewportTextStyleCacheKey {
+            font: font.clone(),
+            default_text_color: Self::editor_foreground_color(highlight_theme, &theme.colors),
+            active_gutter_color: Self::gutter_line_number_color(
+                highlight_theme,
+                &theme.colors,
+                true,
+            ),
+            inactive_gutter_color: Self::gutter_line_number_color(
+                highlight_theme,
+                &theme.colors,
+                false,
+            ),
+            keyword_color: Self::highlight_color(HighlightKind::Keyword, cx),
+            string_color: Self::highlight_color(HighlightKind::String, cx),
+            comment_color: Self::highlight_color(HighlightKind::Comment, cx),
+            number_color: Self::highlight_color(HighlightKind::Number, cx),
+            identifier_color: Self::highlight_color(HighlightKind::Identifier, cx),
+            operator_color: Self::highlight_color(HighlightKind::Operator, cx),
+            function_color: Self::highlight_color(HighlightKind::Function, cx),
+            punctuation_color: Self::highlight_color(HighlightKind::Punctuation, cx),
+            boolean_color: Self::highlight_color(HighlightKind::Boolean, cx),
+            null_color: Self::highlight_color(HighlightKind::Null, cx),
+            error_color: Self::highlight_color(HighlightKind::Error, cx),
+        }
+    }
+
+    fn line_y_for_slot(
+        wrap_layout: Option<&VisibleWrapLayout>,
+        display_slot: usize,
+        scroll_offset: f32,
+        line_height: Pixels,
+    ) -> Pixels {
+        wrap_layout
+            .and_then(|layout| layout.line_y_offset_for_slot(display_slot))
+            .unwrap_or(line_height * (display_slot as f32 - scroll_offset))
+    }
+
+    fn wrapped_position_origin(
+        context: &WrappedPositionContext<'_>,
+        position: Position,
+        display_slot: usize,
+    ) -> Point<Pixels> {
+        let display_column = context
+            .display_snapshot
+            .display_column_for_position(position)
+            .unwrap_or(position.column);
+        let scroll_x = context.char_width * context.horizontal_scroll_offset.max(0.0);
+
+        if let Some(wrap_layout) = context.wrap_layout
+            && let Some(row_y) = wrap_layout.line_y_offset_for_slot(display_slot)
+        {
+            let wrap_column = wrap_layout.wrap_column().max(1);
+            let visual_row = display_column / wrap_column;
+            let visual_column = display_column % wrap_column;
+            return point(
+                context.bounds.origin.x
+                    + context.gutter_width
+                    + context.char_width * (visual_column as f32)
+                    - scroll_x,
+                context.bounds.origin.y + row_y + context.line_height * (visual_row as f32),
+            );
+        }
+
+        point(
+            context.bounds.origin.x
+                + context.gutter_width
+                + context.char_width * (display_column as f32)
+                - scroll_x,
+            context.bounds.origin.y
+                + context.line_height * (display_slot as f32 - context.scroll_offset),
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_visible_range(
+        total_lines: usize,
+        line_height: Pixels,
+        viewport_height: Pixels,
+        scroll_offset: f32,
+    ) -> Range<usize> {
+        let visible_lines = (viewport_height / line_height).ceil() as usize;
+        let start_line = (scroll_offset.floor() as usize).min(total_lines.saturating_sub(1));
+        let end_line = (start_line + visible_lines).min(total_lines);
+        start_line..end_line
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_cursor_pixel_position(
+        cursor_pos: Position,
+        line_height: Pixels,
+        char_width: Pixels,
+        scroll_offset: f32,
+        gutter_width: Pixels,
+        display_slot: usize,
+    ) -> Point<Pixels> {
+        point(
+            gutter_width + char_width * (cursor_pos.column as f32),
+            line_height * (display_slot as f32 - scroll_offset),
+        )
+    }
+
     /// Resolve the display color for a syntax highlight kind from the active theme.
     ///
     /// Each kind maps to a named slot in `SyntaxColors` (via `HighlightTheme`).
     /// When a theme doesn't define a slot, we fall back to a semantic color from
     /// the main theme palette (e.g. `primary` for keywords, `danger` for errors).
     fn highlight_color(kind: HighlightKind, cx: &App) -> Hsla {
-        let ht = &cx.theme().highlight_theme;
+        let theme = cx.theme();
+        let fallback_theme = match theme.mode {
+            ThemeMode::Dark => HighlightTheme::default_dark(),
+            ThemeMode::Light => HighlightTheme::default_light(),
+        };
+        Self::resolve_highlight_color(
+            kind,
+            theme.highlight_theme.as_ref(),
+            fallback_theme.as_ref(),
+            &theme.colors,
+            Self::editor_foreground_color(theme.highlight_theme.as_ref(), &theme.colors),
+        )
+    }
+
+    fn editor_background_color(active_theme: &HighlightTheme, colors: &ThemeColor) -> Hsla {
+        active_theme
+            .style
+            .editor_background
+            .unwrap_or(colors.background)
+    }
+
+    fn editor_foreground_color(active_theme: &HighlightTheme, colors: &ThemeColor) -> Hsla {
+        active_theme
+            .style
+            .editor_foreground
+            .unwrap_or(colors.foreground)
+    }
+
+    fn gutter_line_number_color(
+        active_theme: &HighlightTheme,
+        colors: &ThemeColor,
+        active: bool,
+    ) -> Hsla {
+        if active {
+            active_theme
+                .style
+                .editor_active_line_number
+                .unwrap_or_else(|| Self::editor_foreground_color(active_theme, colors))
+        } else {
+            active_theme
+                .style
+                .editor_line_number
+                .unwrap_or(colors.muted_foreground)
+        }
+    }
+
+    fn active_line_background_color(active_theme: &HighlightTheme, colors: &ThemeColor) -> Hsla {
+        active_theme
+            .style
+            .editor_active_line
+            .unwrap_or(colors.list_hover)
+    }
+
+    fn default_syntax_palette_color(kind: HighlightKind, colors: &ThemeColor) -> Hsla {
         match kind {
-            HighlightKind::Keyword => ht
-                .keyword
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.primary),
-            HighlightKind::String => ht
-                .string
-                .and_then(|s| s.color)
-                .unwrap_or_else(|| rgb(0xce9178).into()),
-            HighlightKind::Comment => ht
-                .comment
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.muted_foreground),
-            HighlightKind::Number => ht
-                .number
-                .and_then(|s| s.color)
-                .unwrap_or_else(|| rgb(0xb5cea8).into()),
-            HighlightKind::Identifier => ht
-                .variable
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.foreground),
-            HighlightKind::Operator => ht
-                .operator
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.foreground),
-            HighlightKind::Function => ht
-                .function
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.primary),
-            HighlightKind::Punctuation => ht
-                .punctuation
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.foreground),
-            HighlightKind::Boolean => ht
+            HighlightKind::Keyword => colors.blue,
+            HighlightKind::String => colors.green,
+            HighlightKind::Comment => colors.muted_foreground,
+            HighlightKind::Number => colors.green,
+            HighlightKind::Identifier => colors.foreground,
+            HighlightKind::Operator => colors.foreground,
+            HighlightKind::Function => colors.cyan,
+            HighlightKind::Punctuation => colors.foreground,
+            HighlightKind::Boolean => colors.green,
+            HighlightKind::Null => colors.magenta,
+            HighlightKind::Error => colors.danger,
+            HighlightKind::Default => colors.foreground,
+        }
+    }
+
+    fn resolve_highlight_color(
+        kind: HighlightKind,
+        active_theme: &HighlightTheme,
+        fallback_theme: &HighlightTheme,
+        colors: &ThemeColor,
+        default_text_color: Hsla,
+    ) -> Hsla {
+        let active_color = Self::syntax_theme_color(kind, active_theme);
+        let fallback_color = Self::syntax_theme_color(kind, fallback_theme);
+        let default_palette_color = Self::default_syntax_palette_color(kind, colors);
+
+        active_color
+            .filter(|color| *color != default_text_color)
+            .or(fallback_color.filter(|color| *color != default_text_color))
+            .or(active_color)
+            .or(fallback_color)
+            .unwrap_or_else(|| {
+                Self::generic_highlight_fallback_color(
+                    kind,
+                    colors,
+                    default_text_color,
+                    default_palette_color,
+                )
+            })
+    }
+
+    fn syntax_theme_color(kind: HighlightKind, theme: &HighlightTheme) -> Option<Hsla> {
+        match kind {
+            HighlightKind::Keyword => theme.keyword.and_then(|style| style.color),
+            HighlightKind::String => theme.string.and_then(|style| style.color),
+            HighlightKind::Comment => theme.comment.and_then(|style| style.color),
+            HighlightKind::Number => theme.number.and_then(|style| style.color),
+            HighlightKind::Identifier => theme.variable.and_then(|style| style.color),
+            HighlightKind::Operator => theme.operator.and_then(|style| style.color),
+            HighlightKind::Function => theme.function.and_then(|style| style.color),
+            HighlightKind::Punctuation => theme.punctuation.and_then(|style| style.color),
+            HighlightKind::Boolean => theme
                 .boolean
-                .and_then(|s| s.color)
-                .or_else(|| ht.keyword.and_then(|s| s.color))
-                .unwrap_or(cx.theme().colors.primary),
-            HighlightKind::Null => ht
-                .keyword
-                .and_then(|s| s.color)
-                .unwrap_or(cx.theme().colors.primary),
-            HighlightKind::Error => cx.theme().colors.danger,
-            HighlightKind::Default => cx.theme().colors.foreground,
+                .and_then(|style| style.color)
+                .or_else(|| theme.keyword.and_then(|style| style.color)),
+            HighlightKind::Null => theme.keyword.and_then(|style| style.color),
+            HighlightKind::Error => None,
+            HighlightKind::Default => None,
+        }
+    }
+
+    fn generic_highlight_fallback_color(
+        kind: HighlightKind,
+        colors: &ThemeColor,
+        default_text_color: Hsla,
+        default_palette_color: Hsla,
+    ) -> Hsla {
+        match kind {
+            HighlightKind::Identifier
+            | HighlightKind::Operator
+            | HighlightKind::Punctuation
+            | HighlightKind::Default => default_text_color,
+            HighlightKind::Keyword
+            | HighlightKind::String
+            | HighlightKind::Comment
+            | HighlightKind::Number
+            | HighlightKind::Function
+            | HighlightKind::Boolean
+            | HighlightKind::Null => default_palette_color,
+            HighlightKind::Error => colors.danger,
         }
     }
 
@@ -146,32 +759,146 @@ impl EditorElement {
         total_lines: usize,
         font_size: Pixels,
         window: &mut Window,
+        show_line_numbers: bool,
+        show_folding: bool,
     ) -> Pixels {
-        // Determine how many digits we need for the highest line number (1-indexed)
-        let max_line_number = total_lines.max(1);
-        let digit_count = max_line_number.ilog10() as usize + 1;
+        if !show_line_numbers && !show_folding {
+            return px(0.0);
+        }
 
-        // Shape a string of the same digit count (using "9" for widest digit in most fonts)
-        let sample: String = "9".repeat(digit_count);
-        let text_run = TextRun {
-            len: sample.len(),
-            font: Font::default(),
-            color: gpui::white(),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
+        let line_number_width = if show_line_numbers {
+            let max_line_number = total_lines.max(1);
+            let digit_count = max_line_number.ilog10() as usize + 1;
+            let sample: String = "9".repeat(digit_count);
+            let text_run = TextRun {
+                len: sample.len(),
+                font: Font::default(),
+                color: gpui::white(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped =
+                window
+                    .text_system()
+                    .shape_line(sample.into(), font_size, &[text_run], None);
+
+            shaped.width + GUTTER_PADDING * 2.0
+        } else {
+            px(0.0)
         };
-        let shaped = window
-            .text_system()
-            .shape_line(sample.into(), font_size, &[text_run], None);
 
-        shaped.width + GUTTER_PADDING * 2.0 + FOLD_CHEVRON_ZONE + GUTTER_SEPARATOR_WIDTH
+        let fold_width = if show_folding {
+            FOLD_CHEVRON_ZONE
+        } else {
+            px(0.0)
+        };
+        let separator_width = if show_line_numbers || show_folding {
+            GUTTER_SEPARATOR_WIDTH
+        } else {
+            px(0.0)
+        };
+
+        line_number_width + fold_width + separator_width
     }
 }
 
 impl EditorElement {
     pub fn new(editor: Entity<TextEditor>) -> Self {
-        Self { editor }
+        Self {
+            editor,
+            renderer_caches: RefCell::new(RendererCaches::default()),
+        }
+    }
+
+    fn shape_line_cached(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[TextRun],
+        window: &mut Window,
+    ) -> Arc<ShapedLine> {
+        let key = RendererCaches::line_key(text, font_size, runs);
+        if let Some(cached) = self.renderer_caches.borrow().line_shapes.get(&key).cloned() {
+            return cached;
+        }
+
+        let shaped = Arc::new(window.text_system().shape_line(
+            text.to_string().into(),
+            font_size,
+            runs,
+            None,
+        ));
+        let mut caches = self.renderer_caches.borrow_mut();
+        caches.prune_if_needed();
+        caches.line_shapes.insert(key, shaped.clone());
+        shaped
+    }
+
+    fn shape_wrapped_line_cached(
+        &self,
+        text: &str,
+        font_size: Pixels,
+        runs: &[TextRun],
+        wrap_width: Pixels,
+        window: &mut Window,
+    ) -> Option<Arc<WrappedLine>> {
+        let key = WrappedLineShapeCacheKey {
+            line: RendererCaches::line_key(text, font_size, runs),
+            wrap_width_bits: f32::from(wrap_width).to_bits(),
+        };
+        if let Some(cached) = self
+            .renderer_caches
+            .borrow()
+            .wrapped_line_shapes
+            .get(&key)
+            .cloned()
+        {
+            return Some(cached);
+        }
+
+        let wrapped = window
+            .text_system()
+            .shape_text(
+                text.to_string().into(),
+                font_size,
+                runs,
+                Some(wrap_width),
+                None,
+            )
+            .ok()?
+            .pop()
+            .map(Arc::new)?;
+        let mut caches = self.renderer_caches.borrow_mut();
+        caches.prune_if_needed();
+        caches.wrapped_line_shapes.insert(key, wrapped.clone());
+        Some(wrapped)
+    }
+
+    fn paint_cursor_shape(
+        bounds: Bounds<Pixels>,
+        shape: CursorShapeStyle,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        match shape {
+            CursorShapeStyle::Line => {
+                window.paint_quad(fill(bounds, cx.theme().colors.caret));
+            }
+            CursorShapeStyle::Block => {
+                window.paint_quad(fill(bounds, cx.theme().colors.caret.opacity(0.5)));
+            }
+            CursorShapeStyle::Underline => {
+                let underline_bounds = Bounds::new(
+                    point(
+                        bounds.origin.x,
+                        bounds.origin.y + bounds.size.height - px(2.0),
+                    ),
+                    size(bounds.size.width.max(px(8.0)), px(2.0)),
+                );
+                window.paint_quad(fill(underline_bounds, cx.theme().colors.caret));
+            }
+        }
     }
 
     /// Calculate which lines are visible in the viewport
@@ -204,39 +931,14 @@ impl EditorElement {
     fn cursor_pixel_position(
         &self,
         cursor_pos: Position,
-        line_height: Pixels,
-        char_width: Pixels,
-        scroll_offset: f32,
-        gutter_width: Pixels,
+        layout: CursorPixelLayout,
         display_slot: usize,
     ) -> Point<Pixels> {
         point(
-            gutter_width + char_width * (cursor_pos.column as f32),
-            line_height * (display_slot as f32 - scroll_offset),
+            layout.gutter_width + layout.char_width * (cursor_pos.column as f32)
+                - layout.char_width * layout.horizontal_scroll_offset.max(0.0),
+            layout.line_height * (display_slot as f32 - layout.scroll_offset),
         )
-    }
-
-    fn cursor_pixel_position_wrapped(
-        cursor_pos: Position,
-        line_height: Pixels,
-        char_width: Pixels,
-        gutter_width: Pixels,
-        base_y: Pixels,
-        wrap_col: usize,
-    ) -> Point<Pixels> {
-        if wrap_col > 0 {
-            let sub_line = cursor_pos.column / wrap_col;
-            let visual_col = cursor_pos.column % wrap_col;
-            point(
-                gutter_width + char_width * (visual_col as f32),
-                base_y + line_height * (sub_line as f32),
-            )
-        } else {
-            point(
-                gutter_width + char_width * (cursor_pos.column as f32),
-                base_y,
-            )
-        }
     }
 }
 
@@ -252,7 +954,7 @@ impl IntoElement for EditorElement {
 pub struct PrepaintState {
     bounds: Bounds<Pixels>,
     line_height: Pixels,
-    shaped_lines: Vec<ShapedLine>,
+    shaped_lines: Vec<Arc<ShapedLine>>,
     cursor_bounds: Option<Bounds<Pixels>>,
     /// Selection rectangles to paint (if any)
     selection_rects: Vec<Bounds<Pixels>>,
@@ -271,15 +973,38 @@ pub struct PrepaintState {
     diagnostics: Vec<(crate::syntax::Highlight, Bounds<Pixels>)>,
     /// Hover tooltip data (if hovering over a word)
     hover_tooltip: Option<HoverTooltipData>,
+    /// Signature-help tooltip data (if explicitly requested)
+    signature_help_tooltip: Option<SignatureHelpTooltipData>,
     /// Find/replace panel data (if the panel is open)
     find_panel: Option<FindPanelData>,
     // ── Gutter (Phase 6) ──────────────────────────────────────────────────────
     /// Pixel width of the line-number gutter (includes padding and separator)
     gutter_width: Pixels,
+    /// Whether line numbers are enabled for this frame.
+    show_line_numbers: bool,
+    /// Whether fold chevrons are enabled for this frame.
+    show_folding: bool,
+    /// Whether current-line highlighting is enabled for this frame.
+    highlight_current_line: bool,
+    /// Whether gutter diagnostics should be painted.
+    show_gutter_diagnostics: bool,
+    /// Cursor style for the current frame.
+    cursor_shape: CursorShapeStyle,
+    /// Whether the cursor should be painted as solid.
+    cursor_blink_enabled: bool,
+    /// Whether selection fills should be rounded.
+    rounded_selection: bool,
+    /// Whether non-primary reference highlights should be rendered.
+    selection_highlight_enabled: bool,
+    /// Whether the blinking caret is currently visible.
+    cursor_visible: bool,
     /// Pre-shaped line number labels for each visible line
     gutter_lines: Vec<GutterLine>,
     /// Ghost-text inline suggestion to paint after the cursor (if any)
     inline_suggestion: Option<InlineSuggestionRenderData>,
+    edit_prediction: Option<EditPredictionRenderData>,
+    /// Inlay hints visible in the viewport.
+    inlay_hints: Vec<InlayHintRenderData>,
     /// Go-to-line overlay dialog (if open)
     goto_line_panel: Option<GoToLinePanelData>,
     /// Indent guide X-coordinates (one per indent level) for visible lines
@@ -288,32 +1013,32 @@ pub struct PrepaintState {
     scrollbar: Option<ScrollbarData>,
     /// When soft_wrap is on, shaped lines stored as WrappedLine (with wrap boundaries).
     /// When None, the `shaped_lines` Vec is used instead.
-    wrapped_shaped_lines: Option<Vec<gpui::WrappedLine>>,
+    wrapped_shaped_lines: Option<Vec<Arc<gpui::WrappedLine>>>,
     /// Y-offset (from bounds.origin.y) for each shaped/wrapped line entry.
     /// Accounts for scroll offset and any extra height from wrapped lines.
     line_y_offsets: Vec<Pixels>,
+    horizontal_scroll_pixels: Pixels,
     /// Pixel rectangles for each visible reference highlight (feat-047)
     reference_highlights: Vec<ReferenceHighlightData>,
-    /// Inline rename overlay data (feat-048), present while rename dialog is open
-    rename_overlay: Option<RenameOverlayData>,
     /// Right-click context menu render data (feat-045)
     context_menu: Option<ContextMenuRenderData>,
-    /// Fractional-scroll sub-line Y offset (in pixels).
-    ///
-    /// When `scroll_offset` has a fractional part (e.g. `2.7`), the first
-    /// visible line is partially scrolled off the top by this many pixels.
-    /// Subtracting this from every slot-indexed Y coordinate keeps overlays
-    /// (cursor, selections, hover anchor, etc.) aligned with the rendered text.
-    sub_line_offset: Pixels,
+    /// Sticky structural header pinned to the top of the viewport.
+    sticky_header: Option<StickyHeaderRenderData>,
+    minimap: Option<MinimapRenderData>,
+    inline_code_actions: Vec<InlineCodeActionRenderData>,
+    block_widgets: Vec<BlockWidgetRenderData>,
     /// Fold chevron hit-rects and state for each visible foldable line.
     fold_chevrons: Vec<FoldChevronData>,
 }
 
-/// Hover tooltip data for rendering
 struct HoverTooltipData {
-    /// The documentation text to display
     documentation: String,
-    /// Position to anchor the tooltip (cursor position or word position)
+    anchor_bounds: Bounds<Pixels>,
+}
+
+/// Signature-help overlay data for rendering near the invocation site.
+struct SignatureHelpTooltipData {
+    content: String,
     anchor_bounds: Bounds<Pixels>,
 }
 
@@ -325,11 +1050,14 @@ struct FindPanelData {
 }
 
 /// A pre-shaped line number label for one visible line in the gutter.
+#[derive(Clone)]
 struct GutterLine {
     /// The shaped text ready to paint
-    shaped: ShapedLine,
+    shaped: Arc<ShapedLine>,
     /// Whether this is the cursor (active) line, drawn with a brighter color
     is_active: bool,
+    /// Whether this line has any diagnostics to mark in the gutter.
+    has_diagnostics: bool,
 }
 
 /// Data needed to paint the go-to-line overlay dialog.
@@ -352,6 +1080,53 @@ struct ScrollbarData {
     thumb: Bounds<Pixels>,
 }
 
+struct StickyHeaderRenderData {
+    shaped: Arc<ShapedLine>,
+    bounds: Bounds<Pixels>,
+}
+
+struct MinimapRenderData {
+    bounds: Bounds<Pixels>,
+    viewport_bounds: Bounds<Pixels>,
+}
+
+struct InlineCodeActionRenderData {
+    shaped: Arc<ShapedLine>,
+    bounds: Bounds<Pixels>,
+}
+
+struct BlockWidgetRenderData {
+    shaped: Arc<ShapedLine>,
+    bounds: Bounds<Pixels>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct ViewportLayoutCacheKey {
+    revision: usize,
+    syntax_generation: u64,
+    visible_rows: Range<usize>,
+    relative_line_numbers: bool,
+    cursor_line: usize,
+    text_style: ViewportTextStyleCacheKey,
+    scroll_offset_bits: u32,
+    line_height_bits: u32,
+    font_size_bits: u32,
+    gutter_width_bits: u32,
+    char_width_bits: u32,
+    bounds_width_bits: u32,
+    bounds_height_bits: u32,
+    soft_wrap: bool,
+}
+
+#[derive(Clone)]
+struct CachedViewportLayout {
+    shaped_lines: Vec<Arc<ShapedLine>>,
+    wrapped_shaped_lines: Option<Vec<Arc<gpui::WrappedLine>>>,
+    gutter_lines: Vec<GutterLine>,
+    viewport: DisplayViewport,
+    wrap_layout: Option<VisibleWrapLayout>,
+}
+
 /// A single vertical indent guide line to paint over the text area.
 struct IndentGuideData {
     /// X pixel coordinate (absolute, includes gutter offset)
@@ -370,22 +1145,12 @@ struct ReferenceHighlightData {
     rect: Bounds<Pixels>,
 }
 
-/// Data for the inline rename-symbol overlay (feat-048).
-struct RenameOverlayData {
-    /// The text currently typed as the new name
-    new_name: String,
-    /// Pixel bounds of the word being renamed (anchor for the overlay box)
-    word_rect: Bounds<Pixels>,
-    /// Line height (for sizing the box)
-    line_height: Pixels,
-}
-
 /// Data for rendering the right-click context menu (feat-045).
 struct ContextMenuRenderData {
     /// Ordered items to display (separators have `is_separator = true`)
     items: Vec<(String, bool, bool)>, // (label, is_separator, is_disabled)
-    /// Pixel origin (top-left of the menu box)
-    origin: Point<Pixels>,
+    /// Pixel bounds after clamping into the editor viewport.
+    bounds: Bounds<Pixels>,
     /// Index of the highlighted item, if any
     highlighted: Option<usize>,
     /// Line height for menu item sizing
@@ -435,144 +1200,110 @@ impl Element for EditorElement {
         // Calculate viewport lines for auto-scroll
         let viewport_lines = (bounds.size.height / line_height).ceil() as usize;
 
-        let (
-            buffer,
-            cursor_pos,
-            scroll_offset,
-            has_selection,
-            sel_start,
-            sel_end,
-            block_ranges,
-            total_lines,
-            completion_menu_cursor_pos,
-            syntax_highlights,
-            diagnostics,
-            hover_state,
-            find_info,
-            inline_suggestion_snapshot,
-            extra_cursors_snapshot,
-            bracket_pairs_snapshot,
-            goto_line_info,
-            soft_wrap,
-            reference_ranges_snapshot,
-            rename_snapshot,
-            context_menu_snapshot,
-        ) = {
+        let editor_snapshot = {
             let editor = self.editor.read(cx);
-            let buffer = editor.buffer();
-            let cursor_pos = editor.get_cursor_position(cx);
-            let scroll_offset = editor.scroll_offset();
-            let total_lines = buffer.line_count();
-            let is_large_file_mode = editor.is_large_file();
-            let syntax_highlights = editor.get_syntax_highlights_arc();
-            let diagnostics = if is_large_file_mode {
-                Vec::new()
-            } else {
-                editor.get_diagnostics().to_vec()
-            };
-            let hover_state = editor.hover_state(cx);
-            let bracket_pairs_snapshot = editor.bracket_highlight_pairs();
-
-            let (has_selection, sel_start, sel_end, block_ranges) = if editor.has_selection() {
-                let selection = editor.selection();
-                let sel_range = selection.range();
-                let block = selection.block_ranges();
-                (true, sel_range.start, sel_range.end, block)
-            } else {
-                (false, Position::new(0, 0), Position::new(0, 0), Vec::new())
-            };
-
-            // Snapshot extra cursor positions and their selection ranges for multi-cursor rendering.
-            // We only need the position and optional selection range — Cursor/Selection are Clone.
-            let extra_cursors_snapshot: Vec<(
-                crate::buffer::Position,
-                Option<(crate::buffer::Position, crate::buffer::Position)>,
-            )> = editor
-                .extra_cursor_selections()
-                .iter()
-                .map(|(cursor, selection)| {
-                    let sel_range = if selection.has_selection() {
-                        Some((selection.range().start, selection.range().end))
-                    } else {
-                        None
-                    };
-                    (cursor.position(), sel_range)
-                })
-                .collect();
-
-            // Get completion menu data (store cursor position for now, calculate bounds later)
-            let completion_menu_cursor_pos = if editor.is_completion_menu_open(cx) {
-                Some(cursor_pos)
-            } else {
-                None
-            };
-
-            // Snapshot the inline suggestion (text + anchor offset) for ghost-text painting
-            let inline_suggestion_snapshot = editor
-                .inline_suggestion()
-                .map(|(text, offset)| (text.clone(), *offset));
-
-            // Snapshot the find state so we can build match highlight rects below
-            let find_info = editor
-                .find_state
-                .as_ref()
-                .map(|fs| (fs.matches.clone(), fs.current_match));
-
-            // Snapshot go-to-line dialog state so we can paint the overlay
-            let goto_line_info = editor
-                .goto_line_state
-                .as_ref()
-                .map(|s| (s.query.clone(), s.is_valid, buffer.line_count()));
-
-            let soft_wrap = editor.soft_wrap;
-
-            // Snapshot reference highlight ranges (feat-047)
-            let reference_ranges_snapshot = if is_large_file_mode {
-                Vec::new()
-            } else {
-                editor.reference_ranges.clone()
-            };
-
-            // Snapshot rename overlay state (feat-048)
-            let rename_snapshot = editor
-                .rename_state
-                .as_ref()
-                .map(|s| (s.new_name.clone(), s.word_start, s.word_end));
-
-            // Snapshot context menu state (feat-045)
-            let context_menu_snapshot = editor.context_menu.as_ref().map(|m| {
-                let items: Vec<(String, bool, bool)> = m
-                    .items
-                    .iter()
-                    .map(|item| (item.label.clone(), item.is_separator, item.disabled))
-                    .collect();
-                (items, m.origin_x, m.origin_y, m.highlighted)
-            });
-
-            (
-                buffer.clone(),
-                cursor_pos,
-                scroll_offset,
-                has_selection,
-                sel_start,
-                sel_end,
-                block_ranges,
-                total_lines,
-                completion_menu_cursor_pos,
-                syntax_highlights,
-                diagnostics,
-                hover_state,
-                find_info,
-                inline_suggestion_snapshot,
-                extra_cursors_snapshot,
-                bracket_pairs_snapshot,
-                goto_line_info,
-                soft_wrap,
-                reference_ranges_snapshot,
-                rename_snapshot,
-                context_menu_snapshot,
-            )
+            editor.editor_snapshot()
         };
+        let document_snapshot = editor_snapshot.document.clone();
+        let buffer = document_snapshot.buffer.clone();
+        let cursor_pos = editor_snapshot
+            .cursor()
+            .map(|cursor| cursor.position())
+            .unwrap_or_else(Position::zero);
+        let scroll_offset = editor_snapshot.scroll_offset;
+        let total_lines = buffer.line_count();
+        let diagnostics = document_snapshot
+            .display_snapshot
+            .diagnostics()
+            .iter()
+            .filter_map(|diagnostic| {
+                let range = buffer.resolve_anchored_range(diagnostic.range).ok()?;
+                Some(crate::syntax::Highlight {
+                    start: range.start,
+                    end: range.end,
+                    kind: diagnostic.kind,
+                })
+            })
+            .collect::<Vec<_>>();
+        let hover_state = document_snapshot.hover_state.clone();
+        let signature_help_state = document_snapshot.signature_help_state.clone();
+        let bracket_pairs_snapshot = editor_snapshot.bracket_pairs.clone();
+
+        let (has_selection, sel_start, sel_end, block_ranges) = if editor_snapshot
+            .selection()
+            .map(|selection| selection.has_selection())
+            .unwrap_or(false)
+        {
+            let selection = editor_snapshot
+                .selection()
+                .cloned()
+                .unwrap_or_else(Selection::new);
+            let sel_range = selection.range();
+            let block = selection.block_ranges();
+            (true, sel_range.start, sel_range.end, block)
+        } else {
+            (false, Position::new(0, 0), Position::new(0, 0), Vec::new())
+        };
+
+        let extra_cursors_snapshot: Vec<(
+            crate::buffer::Position,
+            Option<(crate::buffer::Position, crate::buffer::Position)>,
+        )> = editor_snapshot
+            .extra_cursors()
+            .into_iter()
+            .map(|(cursor, selection)| {
+                let sel_range = if selection.has_selection() {
+                    Some((selection.range().start, selection.range().end))
+                } else {
+                    None
+                };
+                (cursor.position(), sel_range)
+            })
+            .collect();
+
+        let completion_menu_cursor_pos =
+            editor_snapshot.completion_menu.as_ref().map(|_| cursor_pos);
+        let inline_suggestion_snapshot = document_snapshot.inline_suggestion.clone();
+        let edit_prediction_snapshot = document_snapshot.edit_prediction.clone();
+        let find_info = editor_snapshot
+            .find_info
+            .as_ref()
+            .map(|snapshot| (snapshot.matches.clone(), snapshot.current_match));
+        let goto_line_info = editor_snapshot.goto_line_info.as_ref().map(|snapshot| {
+            (
+                snapshot.query.clone(),
+                snapshot.is_valid,
+                snapshot.total_lines,
+            )
+        });
+        let soft_wrap = document_snapshot.soft_wrap;
+        let show_line_numbers = editor_snapshot.show_line_numbers;
+        let show_folding = editor_snapshot.show_folding;
+        let highlight_current_line = editor_snapshot.highlight_current_line;
+        let relative_line_numbers = editor_snapshot.relative_line_numbers;
+        let show_gutter_diagnostics = editor_snapshot.show_gutter_diagnostics;
+        let horizontal_scroll_offset = editor_snapshot.horizontal_scroll_offset;
+        let cursor_shape = editor_snapshot.cursor_shape;
+        let cursor_blink_enabled = editor_snapshot.cursor_blink_enabled;
+        let cursor_visible = editor_snapshot.cursor_visible;
+        let rounded_selection = editor_snapshot.rounded_selection;
+        let selection_highlight_enabled = editor_snapshot.selection_highlight_enabled;
+        let reference_ranges_snapshot = if !document_snapshot
+            .large_file_policy
+            .reference_highlights_enabled
+        {
+            Vec::new()
+        } else {
+            document_snapshot.reference_ranges().to_vec()
+        };
+        let context_menu_snapshot = editor_snapshot.context_menu.as_ref().map(|snapshot| {
+            (
+                snapshot.items.clone(),
+                snapshot.origin_x,
+                snapshot.origin_y,
+                snapshot.highlighted,
+            )
+        });
 
         // Update viewport lines for auto-scroll (after read lock is released)
         self.editor.update(cx, |editor, _cx| {
@@ -582,7 +1313,8 @@ impl Element for EditorElement {
         // Obtain the display-line list via an Arc clone — O(1) regardless of
         // file size. The Vec is rebuilt in TextEditor only when the buffer or
         // fold state changes.
-        let display_lines = self.editor.read(cx).display_lines_cache();
+        let fold_snapshot = document_snapshot.display_snapshot.fold_snapshot();
+        let display_lines = fold_snapshot.display_lines();
         let display_line_count = display_lines.len();
 
         // Calculate visible range (in display-slot space, not buffer-line space)
@@ -593,127 +1325,11 @@ impl Element for EditorElement {
             scroll_offset,
         );
 
-        // Build the reverse (buffer-line → display-slot) map only for the
-        // visible window. Everything rendered on this frame lives in
-        // `visible_range`, so limiting the map keeps this O(viewport_lines)
-        // instead of O(total_lines).
-        let buf_to_display: std::collections::HashMap<usize, usize> = display_lines
-            [visible_range.clone()]
-        .iter()
-        .enumerate()
-        .map(|(i, &buf)| (buf, visible_range.start + i))
-        .collect();
-
-        // Fractional part of scroll_offset expressed as pixels. When
-        // scroll_offset = 2.7 the top of the viewport is 0.7 lines into line
-        // 2, so every slot-indexed Y must be shifted up by this amount.
-        let sub_line_offset = (scroll_offset - visible_range.start as f32) * line_height;
-
-        // Closure (not a nested fn) so it can capture `cx` for theme-aware colors.
-        let get_line_text_runs = |line_text: &str,
-                                  line_start_offset: usize,
-                                  syntax_highlights: &[crate::syntax::Highlight],
-                                  font: &Font,
-                                  default_color: Hsla|
-         -> Vec<TextRun> {
-            if syntax_highlights.is_empty() || line_text.is_empty() {
-                // No highlights - return single default run
-                return vec![TextRun {
-                    len: line_text.len(),
-                    font: font.clone(),
-                    color: default_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }];
-            }
-
-            let mut runs = Vec::new();
-            let line_end_offset = line_start_offset + line_text.len();
-
-            // Highlights are sorted by `start`. Skip ahead to the first one
-            // that could possibly overlap this line (end > line_start_offset),
-            // then stop as soon as a highlight starts beyond the line. This
-            // reduces the per-line scan from O(all_highlights) to
-            // O(log(all_highlights) + overlapping_highlights).
-            let first_candidate = syntax_highlights.partition_point(|h| h.end <= line_start_offset);
-
-            for highlight in &syntax_highlights[first_candidate..] {
-                // All remaining highlights start at or after line_end — done.
-                if highlight.start >= line_end_offset {
-                    break;
-                }
-
-                let run_start = line_text
-                    .floor_char_boundary(highlight.start.saturating_sub(line_start_offset));
-                let run_end = line_text
-                    .ceil_char_boundary((highlight.end - line_start_offset).min(line_text.len()));
-
-                if run_start < run_end {
-                    runs.push((run_start, run_end, highlight.kind));
-                }
-            }
-
-            if runs.is_empty() {
-                return vec![TextRun {
-                    len: line_text.len(),
-                    font: font.clone(),
-                    color: default_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                }];
-            }
-
-            // Highlights are already ordered by start (sorted at ingestion time),
-            // so no sort is required here.
-
-            // Build runs, filling gaps with default color
-            let mut result = Vec::new();
-            let mut current_pos = 0;
-
-            for (start, end, kind) in runs {
-                // Add gap if there's space before this run
-                if start > current_pos {
-                    result.push(TextRun {
-                        len: start - current_pos,
-                        font: font.clone(),
-                        color: default_color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    });
-                }
-
-                // Add the highlight run
-                result.push(TextRun {
-                    len: end - start,
-                    font: font.clone(),
-                    color: EditorElement::highlight_color(kind, cx),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-
-                current_pos = end;
-            }
-
-            // Add remaining gap at end of line
-            if current_pos < line_text.len() {
-                result.push(TextRun {
-                    len: line_text.len() - current_pos,
-                    font: font.clone(),
-                    color: default_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-            }
-
-            result
+        let visible_display_slot = |buffer_line: usize| {
+            document_snapshot
+                .display_snapshot
+                .display_slot_for_buffer_line_in_rows(buffer_line, &visible_range)
         };
-
-        let default_text_color = cx.theme().colors.foreground;
 
         // Calculate character width (use monospace assumption) — needed before shaping
         // loop to compute wrap column for soft-wrap.
@@ -733,7 +1349,13 @@ impl Element for EditorElement {
         let char_width = single_char.width;
 
         // ── Gutter (Phase 6) ──────────────────────────────────────────────────
-        let gutter_width = Self::calculate_gutter_width(total_lines, font_size, window);
+        let gutter_width = Self::calculate_gutter_width(
+            total_lines,
+            font_size,
+            window,
+            show_line_numbers,
+            show_folding,
+        );
 
         // Soft-wrap: compute the available text area width and wrap_width for shape_text
         let wrap_width: Option<Pixels> = if soft_wrap {
@@ -747,136 +1369,149 @@ impl Element for EditorElement {
             None
         };
 
-        // Shape visible lines with syntax highlighting.
-        // When soft_wrap is on, we use `shape_text` with wrap_width to get WrappedLine
-        // entries that paint across multiple visual rows. Otherwise, `shape_line` is used.
-        let mut shaped_lines: Vec<ShapedLine> = Vec::new();
-        let mut wrapped_shaped_lines: Option<Vec<gpui::WrappedLine>> = None;
-
-        if wrap_width.is_some() {
-            let mut wrapped = Vec::with_capacity(visible_range.len());
-            for display_slot in visible_range.clone() {
-                let buffer_line = display_lines[display_slot];
-                let line_text = buffer
-                    .line(buffer_line)
-                    .unwrap_or_default()
-                    .trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .to_string();
-                let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
-                let text_runs = get_line_text_runs(
-                    &line_text,
-                    line_start_offset,
-                    &syntax_highlights,
-                    &font,
-                    default_text_color,
-                );
-                match window.text_system().shape_text(
-                    line_text.into(),
-                    font_size,
-                    &text_runs,
-                    wrap_width,
-                    None,
-                ) {
-                    Ok(mut lines) => {
-                        if let Some(wl) = lines.pop() {
-                            wrapped.push(wl);
-                        }
-                    }
-                    Err(_) => {}
-                }
-            }
-            wrapped_shaped_lines = Some(wrapped);
-        } else {
-            for display_slot in visible_range.clone() {
-                let buffer_line = display_lines[display_slot];
-                let line_text = buffer
-                    .line(buffer_line)
-                    .unwrap_or_default()
-                    .trim_end_matches('\n')
-                    .trim_end_matches('\r')
-                    .to_string();
-                let line_start_offset = buffer.line_to_byte(buffer_line).unwrap_or(0);
-                let text_runs = get_line_text_runs(
-                    &line_text,
-                    line_start_offset,
-                    &syntax_highlights,
-                    &font,
-                    default_text_color,
-                );
-                let shaped_line =
-                    window
-                        .text_system()
-                        .shape_line(line_text.into(), font_size, &text_runs, None);
-                shaped_lines.push(shaped_line);
-            }
-        }
-
-        // Compute per-line y-offsets accounting for soft-wrap extra height.
-        // line_y_offsets[i] is the y-offset (from bounds.origin.y) of shaped entry i.
-        let line_count = if let Some(ref wl) = wrapped_shaped_lines {
-            wl.len()
-        } else {
-            shaped_lines.len()
-        };
-        let mut line_y_offsets = Vec::with_capacity(line_count);
+        let wrap_snapshot = document_snapshot.display_snapshot.wrap_snapshot();
+        let wrap_layout =
+            wrap_snapshot.layout_for_rows(visible_range.clone(), scroll_offset, line_height);
+        let viewport = document_snapshot
+            .display_snapshot
+            .viewport(visible_range.clone());
+        let viewport_text_style = Self::viewport_text_style_key(&font, cx);
+        let viewport_layout_key = Self::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: document_snapshot.revision(),
+            syntax_generation: document_snapshot.language.syntax_generation,
+            visible_rows: visible_range.clone(),
+            relative_line_numbers,
+            cursor_line: cursor_pos.line,
+            text_style: viewport_text_style.clone(),
+            scroll_offset,
+            line_height,
+            font_size,
+            gutter_width,
+            char_width,
+            bounds,
+            soft_wrap,
+        });
+        let cached_viewport_layout = if let Some(cached) = self
+            .renderer_caches
+            .borrow()
+            .viewport_layouts
+            .get(&viewport_layout_key)
+            .cloned()
         {
-            let mut y = -sub_line_offset;
-            for i in 0..line_count {
-                line_y_offsets.push(y);
-                if let Some(ref wl) = wrapped_shaped_lines {
-                    let visual_rows = wl[i].wrap_boundaries().len() as f32 + 1.0;
-                    y += line_height * visual_rows;
-                } else {
-                    y += line_height;
-                }
-            }
-        }
+            cached
+        } else {
+            let layout = Arc::new(self.build_viewport_layout_cache(
+                viewport,
+                ViewportLayoutBuildParams {
+                    visible_range: visible_range.clone(),
+                    relative_line_numbers,
+                    cursor_line: cursor_pos.line,
+                    font_size,
+                    text_style: &viewport_text_style,
+                    wrap_width,
+                    wrap_column: wrap_layout.wrap_column(),
+                    scroll_offset,
+                    line_height,
+                },
+                window,
+            ));
+            let mut caches = self.renderer_caches.borrow_mut();
+            caches.prune_if_needed();
+            caches
+                .viewport_layouts
+                .insert(viewport_layout_key, layout.clone());
+            layout
+        };
+        let visible_chunks = cached_viewport_layout.viewport.text_chunks();
+        tracing::trace!(
+            visible_chunk_count = visible_chunks.len(),
+            total_visible_highlights = visible_chunks
+                .iter()
+                .map(|chunk| chunk.highlights.len())
+                .sum::<usize>(),
+            syntax_generation = document_snapshot.language.syntax_generation,
+            "Preparing editor element prepaint"
+        );
+        let effective_wrap_layout = cached_viewport_layout
+            .wrap_layout
+            .clone()
+            .unwrap_or_else(|| wrap_layout.clone());
+        let line_y_offsets = effective_wrap_layout.line_y_offsets();
+        let wrap_layout = effective_wrap_layout.clone();
+        let horizontal_scroll_pixels = char_width * horizontal_scroll_offset.max(0.0);
+        let wrapped_position_context = WrappedPositionContext {
+            wrap_layout: soft_wrap.then_some(&wrap_layout),
+            display_snapshot: &document_snapshot.display_snapshot,
+            bounds,
+            gutter_width,
+            char_width,
+            horizontal_scroll_offset,
+            scroll_offset,
+            line_height,
+        };
+        let zero_origin_wrapped_position_context = WrappedPositionContext {
+            wrap_layout: soft_wrap.then_some(&wrap_layout),
+            display_snapshot: &document_snapshot.display_snapshot,
+            bounds: Bounds::new(point(px(0.0), px(0.0)), bounds.size),
+            gutter_width,
+            char_width,
+            horizontal_scroll_offset,
+            scroll_offset,
+            line_height,
+        };
+        let cursor_pixel_layout = CursorPixelLayout {
+            line_height,
+            char_width,
+            horizontal_scroll_offset,
+            scroll_offset,
+            gutter_width,
+        };
 
         // Push the gutter width and the element's bounds origin back to the
         // editor so that mouse handlers can correctly convert pixel positions.
         self.editor.update(cx, |editor, _cx| {
-            editor.update_cached_gutter_width(f32::from(gutter_width));
-            editor.update_cached_char_width(char_width);
-            editor.update_cached_bounds_origin(bounds.origin);
-            editor.update_cached_bounds_size(bounds.size);
+            editor.update_cached_layout(crate::CachedEditorLayout {
+                gutter_width: f32::from(gutter_width),
+                char_width,
+                bounds_origin: bounds.origin,
+                bounds_size: bounds.size,
+                line_height,
+                wrap_layout: soft_wrap.then_some(effective_wrap_layout.clone()),
+            });
+            editor.refresh_display_layout_settings();
         });
 
-        // Shape a line-number label for every visible line.
-        let mut gutter_lines: Vec<GutterLine> = Vec::with_capacity(visible_range.len());
-        for display_slot in visible_range.clone() {
-            let buffer_line = display_lines[display_slot];
-            let line_number = buffer_line + 1; // 1-based display
-            let label = line_number.to_string();
-            let is_active = buffer_line == cursor_pos.line;
-            let color: Hsla = if is_active {
-                cx.theme().colors.foreground
-            } else {
-                cx.theme().colors.muted_foreground
-            };
-            let text_run = TextRun {
-                len: label.len(),
-                font: font.clone(),
-                color,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            };
-            let shaped =
-                window
-                    .text_system()
-                    .shape_line(label.into(), font_size, &[text_run], None);
-            gutter_lines.push(GutterLine { shaped, is_active });
+        let shaped_lines = cached_viewport_layout.shaped_lines.clone();
+        let wrapped_shaped_lines = cached_viewport_layout.wrapped_shaped_lines.clone();
+        let gutter_lines = cached_viewport_layout.gutter_lines.clone();
+
+        if soft_wrap {
+            self.editor.update(cx, |editor, _cx| {
+                editor.update_visible_wrap_layout(
+                    effective_wrap_layout.wrap_column(),
+                    visible_range.clone(),
+                    effective_wrap_layout.visual_rows().as_ref(),
+                );
+            });
         }
         // ─────────────────────────────────────────────────────────────────────
+
+        // Calculate selection rectangles (offset by gutter_width into text area)
+        // Helper to compute y-offset for a given display slot, accounting for soft-wrap
+        let slot_y = |display_slot: usize| -> Pixels {
+            Self::line_y_for_slot(
+                soft_wrap.then_some(&wrap_layout),
+                display_slot,
+                scroll_offset,
+                line_height,
+            )
+        };
 
         // ── Fold chevrons ─────────────────────────────────────────────────────
         // Snapshot fold state under a read lock so we don't hold the borrow
         // while computing geometry below.
-        let (fold_regions_snap, folded_lines_snap) = {
-            let editor = self.editor.read(cx);
-            (editor.fold_regions().to_vec(), editor.folded_lines.clone())
-        };
+        let fold_regions_snap = fold_snapshot.fold_regions().to_vec();
+        let folded_lines_snap = fold_snapshot.folded_lines().clone();
 
         let chevron_size = line_height * 0.55;
         // Center the chevron within the dedicated FOLD_CHEVRON_ZONE that sits between
@@ -886,14 +1521,14 @@ impl Element for EditorElement {
         let chevron_x = chevron_zone_origin + (FOLD_CHEVRON_ZONE - chevron_size) / 2.0;
 
         let mut fold_chevrons: Vec<FoldChevronData> = Vec::new();
-        for (slot_offset, display_slot) in visible_range.clone().enumerate() {
+        for display_slot in visible_range.clone() {
             let buffer_line = display_lines[display_slot];
             if let Some(region) = fold_regions_snap
                 .iter()
                 .find(|r| r.start_line == buffer_line)
             {
                 let is_folded = folded_lines_snap.contains(&buffer_line);
-                let line_y = bounds.origin.y + line_height * (slot_offset as f32) - sub_line_offset;
+                let line_y = bounds.origin.y + slot_y(display_slot);
                 let rect = Bounds::new(
                     point(chevron_x, line_y + (line_height - chevron_size) / 2.0),
                     size(chevron_size, chevron_size),
@@ -907,29 +1542,19 @@ impl Element for EditorElement {
         }
         // ─────────────────────────────────────────────────────────────────────
 
-        // Calculate selection rectangles (offset by gutter_width into text area)
-        // Helper to compute y-offset for a given display slot, accounting for soft-wrap
-        let slot_y = |display_slot: usize| -> Pixels {
-            let shaped_idx = display_slot.saturating_sub(visible_range.start);
-            if soft_wrap && shaped_idx < line_y_offsets.len() {
-                line_y_offsets[shaped_idx]
-            } else {
-                line_height * (display_slot as f32 - scroll_offset)
-            }
-        };
-
         let mut selection_rects = Vec::new();
         if has_selection {
             if !block_ranges.is_empty() {
                 // Block (rectangular/column) selection: each entry is (line, left_col, right_col)
                 for (line_idx, start_col, end_col) in &block_ranges {
-                    let Some(&display_slot) = buf_to_display.get(line_idx) else {
+                    let Some(display_slot) = visible_display_slot(*line_idx) else {
                         continue;
                     };
                     if start_col < end_col {
                         selection_rects.push(Bounds::new(
                             point(
-                                bounds.origin.x + gutter_width + char_width * (*start_col as f32),
+                                bounds.origin.x + gutter_width + char_width * (*start_col as f32)
+                                    - horizontal_scroll_pixels,
                                 bounds.origin.y + slot_y(display_slot),
                             ),
                             size(char_width * ((*end_col - *start_col) as f32), line_height),
@@ -938,7 +1563,7 @@ impl Element for EditorElement {
                 }
             } else {
                 for line_idx in sel_start.line..=sel_end.line {
-                    let Some(&display_slot) = buf_to_display.get(&line_idx) else {
+                    let Some(display_slot) = visible_display_slot(line_idx) else {
                         continue;
                     };
                     let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
@@ -955,7 +1580,8 @@ impl Element for EditorElement {
                     if start_col < end_col {
                         selection_rects.push(Bounds::new(
                             point(
-                                bounds.origin.x + gutter_width + char_width * (start_col as f32),
+                                bounds.origin.x + gutter_width + char_width * (start_col as f32)
+                                    - horizontal_scroll_pixels,
                                 bounds.origin.y + slot_y(display_slot),
                             ),
                             size(char_width * ((end_col - start_col) as f32), line_height),
@@ -971,33 +1597,28 @@ impl Element for EditorElement {
         // multiple lines and the end column is smaller than the start column.
         let mut diagnostic_bounds = Vec::new();
         for highlight in &diagnostics {
-            if let Ok(start_pos) = buffer.offset_to_position(highlight.start) {
-                if let Ok(end_pos) = buffer.offset_to_position(highlight.end) {
-                    let start_line = start_pos.line as usize;
-                    let end_line = end_pos.line as usize;
-                    for line_idx in start_line..=end_line {
-                        if !buf_to_display.contains_key(&line_idx) {
-                            continue;
-                        }
-                        let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
-                        let start_col = if line_idx == start_line {
-                            start_pos.column
-                        } else {
-                            0
-                        };
-                        let end_col = if line_idx == end_line {
-                            end_pos.column
-                        } else {
-                            line_len
-                        };
-                        if start_col < end_col {
-                            diagnostic_bounds.push((
-                                highlight.clone(),
-                                line_idx,
-                                start_col,
-                                end_col,
-                            ));
-                        }
+            if let Ok(start_pos) = buffer.offset_to_position(highlight.start)
+                && let Ok(end_pos) = buffer.offset_to_position(highlight.end)
+            {
+                let start_line = start_pos.line;
+                let end_line = end_pos.line;
+                for line_idx in start_line..=end_line {
+                    if visible_display_slot(line_idx).is_none() {
+                        continue;
+                    }
+                    let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
+                    let start_col = if line_idx == start_line {
+                        start_pos.column
+                    } else {
+                        0
+                    };
+                    let end_col = if line_idx == end_line {
+                        end_pos.column
+                    } else {
+                        line_len
+                    };
+                    if start_col < end_col {
+                        diagnostic_bounds.push((highlight.clone(), line_idx, start_col, end_col));
                     }
                 }
             }
@@ -1005,40 +1626,12 @@ impl Element for EditorElement {
 
         // Calculate cursor bounds — only when the cursor's buffer line is visible.
         let cursor_height = line_height * 0.85; // 85% of line height, centered
-        // Wrap column for cursor positioning on soft-wrapped lines
-        let wrap_col = if soft_wrap {
-            let text_area = f32::from(bounds.size.width - gutter_width);
-            let cw = f32::from(char_width);
-            if cw > 0.0 {
-                (text_area / cw).floor() as usize
-            } else {
-                0
-            }
-        } else {
-            0
-        };
-
-        let cursor_bounds = buf_to_display.get(&cursor_pos.line).map(|&slot| {
-            let shaped_idx = slot.saturating_sub(visible_range.start);
-            let cursor_pixel_pos = if soft_wrap && shaped_idx < line_y_offsets.len() {
-                Self::cursor_pixel_position_wrapped(
-                    cursor_pos,
-                    line_height,
-                    char_width,
-                    gutter_width,
-                    line_y_offsets[shaped_idx],
-                    wrap_col,
-                )
-            } else {
-                self.cursor_pixel_position(
-                    cursor_pos,
-                    line_height,
-                    char_width,
-                    scroll_offset,
-                    gutter_width,
-                    slot,
-                )
-            };
+        let cursor_bounds = visible_display_slot(cursor_pos.line).map(|slot| {
+            let cursor_pixel_pos = Self::wrapped_position_origin(
+                &zero_origin_wrapped_position_context,
+                cursor_pos,
+                slot,
+            );
             Bounds::new(
                 point(
                     bounds.origin.x + cursor_pixel_pos.x,
@@ -1052,13 +1645,10 @@ impl Element for EditorElement {
         let mut extra_cursor_bounds: Vec<Bounds<Pixels>> = Vec::new();
         let mut extra_selection_rects: Vec<Bounds<Pixels>> = Vec::new();
         for (extra_pos, extra_sel_range) in &extra_cursors_snapshot {
-            if let Some(&extra_slot) = buf_to_display.get(&extra_pos.line) {
-                let extra_pixel_pos = self.cursor_pixel_position(
+            if let Some(extra_slot) = visible_display_slot(extra_pos.line) {
+                let extra_pixel_pos = Self::wrapped_position_origin(
+                    &zero_origin_wrapped_position_context,
                     *extra_pos,
-                    line_height,
-                    char_width,
-                    scroll_offset,
-                    gutter_width,
                     extra_slot,
                 );
                 extra_cursor_bounds.push(Bounds::new(
@@ -1072,7 +1662,7 @@ impl Element for EditorElement {
 
             if let Some((sel_start_pos, sel_end_pos)) = extra_sel_range {
                 for line_idx in sel_start_pos.line..=sel_end_pos.line {
-                    let Some(&slot) = buf_to_display.get(&line_idx) else {
+                    let Some(slot) = visible_display_slot(line_idx) else {
                         continue;
                     };
                     let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
@@ -1087,10 +1677,12 @@ impl Element for EditorElement {
                         line_len
                     };
                     if start_col < end_col {
+                        let line_y = slot_y(slot);
                         extra_selection_rects.push(Bounds::new(
                             point(
-                                bounds.origin.x + gutter_width + char_width * (start_col as f32),
-                                bounds.origin.y + line_height * (slot as f32 - scroll_offset),
+                                bounds.origin.x + gutter_width + char_width * (start_col as f32)
+                                    - horizontal_scroll_pixels,
+                                bounds.origin.y + line_y,
                             ),
                             size(
                                 char_width * (end_col.saturating_sub(start_col) as f32),
@@ -1111,11 +1703,13 @@ impl Element for EditorElement {
             ) {
                 // Hidden lines (inside a collapsed fold) return None from this closure.
                 let make_rect = |pos: Position| -> Option<Bounds<Pixels>> {
-                    let &slot = buf_to_display.get(&pos.line)?;
+                    let slot = visible_display_slot(pos.line)?;
+                    let y = slot_y(slot);
                     Some(Bounds::new(
                         point(
-                            bounds.origin.x + gutter_width + char_width * (pos.column as f32),
-                            bounds.origin.y + line_height * (slot as f32 - scroll_offset),
+                            bounds.origin.x + gutter_width + char_width * (pos.column as f32)
+                                - horizontal_scroll_pixels,
+                            bounds.origin.y + y,
                         ),
                         size(char_width, line_height),
                     ))
@@ -1134,19 +1728,11 @@ impl Element for EditorElement {
 
         // Calculate completion menu data if needed
         let completion_menu = if let Some(menu_cursor_pos) = completion_menu_cursor_pos {
-            if let Some(menu) = self.editor.read(cx).completion_menu(cx) {
-                let menu_slot = buf_to_display
-                    .get(&menu_cursor_pos.line)
-                    .copied()
-                    .unwrap_or(menu_cursor_pos.line);
-                let cursor_pixel_pos = self.cursor_pixel_position(
-                    menu_cursor_pos,
-                    line_height,
-                    char_width,
-                    scroll_offset,
-                    gutter_width,
-                    menu_slot,
-                );
+            if let Some(menu) = editor_snapshot.completion_menu.clone() {
+                let menu_slot =
+                    visible_display_slot(menu_cursor_pos.line).unwrap_or(menu_cursor_pos.line);
+                let cursor_pixel_pos =
+                    self.cursor_pixel_position(menu_cursor_pos, cursor_pixel_layout, menu_slot);
                 let menu_cursor_bounds = Bounds::new(
                     point(
                         bounds.origin.x + cursor_pixel_pos.x,
@@ -1188,46 +1774,87 @@ impl Element for EditorElement {
         // Build diagnostic bounds for rendering squiggles (offset into text area by gutter_width)
         let mut diag_bounds = Vec::new();
         for (highlight, line_idx, start_col, end_col) in diagnostic_bounds {
-            if let Some(&display_slot) = buf_to_display.get(&line_idx) {
+            if let Some(display_slot) = visible_display_slot(line_idx) {
+                let start_position = Position::new(line_idx, start_col);
+                let end_position = Position::new(line_idx, end_col);
+                let origin = Self::wrapped_position_origin(
+                    &wrapped_position_context,
+                    start_position,
+                    display_slot,
+                );
+                let width_columns = document_snapshot
+                    .display_snapshot
+                    .display_column_for_position(end_position)
+                    .unwrap_or(end_col)
+                    .saturating_sub(
+                        document_snapshot
+                            .display_snapshot
+                            .display_column_for_position(start_position)
+                            .unwrap_or(start_col),
+                    )
+                    .max(1);
                 let rect = Bounds::new(
-                    point(
-                        bounds.origin.x + gutter_width + char_width * (start_col as f32),
-                        bounds.origin.y + line_height * (display_slot as f32 - scroll_offset),
-                    ),
-                    size(char_width * ((end_col - start_col) as f32), line_height),
+                    origin,
+                    size(char_width * (width_columns as f32), line_height),
                 );
                 diag_bounds.push((highlight, rect));
             }
         }
 
-        // Calculate hover tooltip bounds if hovering (offset into text area by gutter_width)
         let hover_tooltip = if let Some(ref hover) = hover_state {
-            // Get the position of the hovered word
-            if let Ok(start_pos) = buffer.offset_to_position(hover.range.start) {
-                if let Ok(end_pos) = buffer.offset_to_position(hover.range.end) {
-                    // Check if the hovered word is on a visible (non-folded) line
-                    if let Some(&display_slot) = buf_to_display.get(&start_pos.line) {
-                        let anchor_bounds = Bounds::new(
-                            point(
-                                bounds.origin.x
-                                    + gutter_width
-                                    + char_width * (start_pos.column as f32),
-                                bounds.origin.y
-                                    + line_height * (display_slot as f32 - scroll_offset),
-                            ),
-                            size(
-                                char_width
-                                    * (end_pos.column.saturating_sub(start_pos.column) as f32),
-                                line_height,
-                            ),
-                        );
-                        Some(HoverTooltipData {
-                            documentation: hover.documentation.clone(),
-                            anchor_bounds,
-                        })
-                    } else {
-                        None
-                    }
+            if let (Ok(start_pos), Ok(end_pos)) = (
+                buffer.offset_to_position(hover.range.start),
+                buffer.offset_to_position(hover.range.end),
+            ) {
+                if let Some(display_slot) = visible_display_slot(start_pos.line) {
+                    let origin = Self::wrapped_position_origin(
+                        &wrapped_position_context,
+                        start_pos,
+                        display_slot,
+                    );
+                    let width_columns = document_snapshot
+                        .display_snapshot
+                        .display_column_for_position(end_pos)
+                        .unwrap_or(end_pos.column)
+                        .saturating_sub(
+                            document_snapshot
+                                .display_snapshot
+                                .display_column_for_position(start_pos)
+                                .unwrap_or(start_pos.column),
+                        )
+                        .max(1);
+                    let anchor_bounds = Bounds::new(
+                        origin,
+                        size(char_width * (width_columns as f32), line_height),
+                    );
+                    Some(HoverTooltipData {
+                        documentation: hover.documentation.clone(),
+                        anchor_bounds,
+                    })
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let signature_help_tooltip = if let Some(signature_help) = signature_help_state {
+            if let Ok(anchor_pos) = buffer.resolve_anchor_position(signature_help.anchor) {
+                if let Some(display_slot) = visible_display_slot(anchor_pos.line) {
+                    let origin = Self::wrapped_position_origin(
+                        &wrapped_position_context,
+                        anchor_pos,
+                        display_slot,
+                    );
+                    let anchor_bounds =
+                        Bounds::new(origin, size(char_width.max(px(1.0)), line_height));
+                    Some(SignatureHelpTooltipData {
+                        content: signature_help.content,
+                        anchor_bounds,
+                    })
                 } else {
                     None
                 }
@@ -1251,25 +1878,30 @@ impl Element for EditorElement {
                     buffer.offset_to_position(m.end),
                 ) {
                     // Only render matches that are on the same line and on a visible (non-folded) line
-                    if start_pos.line == end_pos.line {
-                        if let Some(&display_slot) = buf_to_display.get(&start_pos.line) {
-                            let rect = Bounds::new(
-                                point(
-                                    bounds.origin.x
-                                        + gutter_width
-                                        + char_width * (start_pos.column as f32),
-                                    bounds.origin.y
-                                        + line_height * (display_slot as f32 - scroll_offset),
-                                ),
-                                size(
-                                    char_width
-                                        * (end_pos.column.saturating_sub(start_pos.column) as f32)
-                                            .max(1.0),
-                                    line_height,
-                                ),
-                            );
-                            match_rects.push((rect, is_current));
-                        }
+                    if start_pos.line == end_pos.line
+                        && let Some(display_slot) = visible_display_slot(start_pos.line)
+                    {
+                        let origin = Self::wrapped_position_origin(
+                            &wrapped_position_context,
+                            start_pos,
+                            display_slot,
+                        );
+                        let width_columns = document_snapshot
+                            .display_snapshot
+                            .display_column_for_position(end_pos)
+                            .unwrap_or(end_pos.column)
+                            .saturating_sub(
+                                document_snapshot
+                                    .display_snapshot
+                                    .display_column_for_position(start_pos)
+                                    .unwrap_or(start_pos.column),
+                            )
+                            .max(1);
+                        let rect = Bounds::new(
+                            origin,
+                            size(char_width * (width_columns as f32), line_height),
+                        );
+                        match_rects.push((rect, is_current));
                     }
                 }
             }
@@ -1279,21 +1911,144 @@ impl Element for EditorElement {
 
         // Compute inline suggestion render data — the ghost text is painted right
         // after the real text on the cursor's line, at the cursor X position.
-        let inline_suggestion = inline_suggestion_snapshot.and_then(|(text, anchor_offset)| {
+        let inline_suggestion = inline_suggestion_snapshot.and_then(|suggestion| {
             // Resolve the anchor offset to a line/column so we can compute the pixel origin.
-            let Ok(anchor_pos) = buffer.offset_to_position(anchor_offset) else {
+            let Ok(anchor_pos) = buffer.resolve_anchor_position(suggestion.anchor) else {
                 return None;
             };
             // Only paint when the anchor line is visible (not folded) in the viewport.
-            let &display_slot = buf_to_display.get(&anchor_pos.line)?;
-            let pixel_x = bounds.origin.x + gutter_width + char_width * (anchor_pos.column as f32);
-            let pixel_y = bounds.origin.y + line_height * (display_slot as f32 - scroll_offset);
+            let display_slot = visible_display_slot(anchor_pos.line)?;
+            let origin =
+                Self::wrapped_position_origin(&wrapped_position_context, anchor_pos, display_slot);
+            let display_text = suggestion.text.lines().next().unwrap_or("");
+            if display_text.is_empty() {
+                return None;
+            }
+            let shaped = self.shape_line_cached(
+                display_text,
+                line_height * 0.9,
+                &[TextRun {
+                    len: display_text.len(),
+                    font: Font::default(),
+                    color: cx.theme().colors.muted_foreground.opacity(0.5),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                window,
+            );
             Some(InlineSuggestionRenderData {
-                text,
-                origin: point(pixel_x, pixel_y),
+                shaped,
+                origin,
                 line_height,
             })
         });
+
+        let edit_prediction = edit_prediction_snapshot.and_then(|prediction| {
+            let Ok(anchor_pos) = buffer.resolve_anchor_position(prediction.anchor) else {
+                return None;
+            };
+            let display_slot = visible_display_slot(anchor_pos.line)?;
+            let origin =
+                Self::wrapped_position_origin(&wrapped_position_context, anchor_pos, display_slot);
+            let display_text = prediction.text.lines().next().unwrap_or("");
+            if display_text.is_empty() {
+                return None;
+            }
+            let shaped = self.shape_line_cached(
+                display_text,
+                line_height * 0.9,
+                &[TextRun {
+                    len: display_text.len(),
+                    font: Font::default(),
+                    color: cx.theme().colors.muted_foreground.opacity(0.5),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                }],
+                window,
+            );
+            Some(EditPredictionRenderData {
+                shaped,
+                origin,
+                line_height,
+            })
+        });
+
+        let inlay_hints = visible_chunks
+            .iter()
+            .flat_map(|chunk| chunk.inlay_hints.iter())
+            .filter_map(|hint| {
+                let Ok(anchor_pos) = buffer.resolve_anchor_position(hint.anchor) else {
+                    return None;
+                };
+                let display_slot = visible_display_slot(anchor_pos.line)?;
+                let mut label = hint.label.clone();
+                if hint.padding_left {
+                    label.insert(0, ' ');
+                }
+                if hint.padding_right {
+                    label.push(' ');
+                }
+                if label.is_empty() {
+                    return None;
+                }
+
+                let color = match hint.kind {
+                    Some(crate::InlayHintKind::Type) => {
+                        cx.theme().colors.muted_foreground.opacity(0.85)
+                    }
+                    Some(crate::InlayHintKind::Parameter) => {
+                        cx.theme().colors.primary.opacity(0.75)
+                    }
+                    None => cx.theme().colors.muted_foreground.opacity(0.75),
+                };
+                let shaped = self.shape_line_cached(
+                    &label,
+                    font_size * 0.92,
+                    &[TextRun {
+                        len: hint.label.len()
+                            + usize::from(hint.padding_left)
+                            + usize::from(hint.padding_right),
+                        font: font.clone(),
+                        color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    window,
+                );
+
+                let base_origin = Self::wrapped_position_origin(
+                    &wrapped_position_context,
+                    anchor_pos,
+                    display_slot,
+                );
+
+                let origin_x = match hint.side {
+                    crate::InlayHintSide::After => base_origin.x + char_width * 0.35,
+                    crate::InlayHintSide::Before => base_origin.x + char_width * 0.35,
+                };
+
+                let background_bounds = match hint.kind {
+                    Some(crate::InlayHintKind::Type) => Some(Bounds::new(
+                        point(origin_x - px(4.0), base_origin.y + px(1.0)),
+                        size(
+                            shaped.width + px(8.0),
+                            (line_height - px(2.0)).max(px(12.0)),
+                        ),
+                    )),
+                    _ => None,
+                };
+
+                Some(InlayHintRenderData {
+                    background_bounds,
+                    shaped,
+                    origin: point(origin_x, base_origin.y),
+                    line_height,
+                })
+            })
+            .collect::<Vec<_>>();
 
         // Build go-to-line overlay data if the dialog is open
         let goto_line_panel =
@@ -1338,7 +2093,8 @@ impl Element for EditorElement {
             for level in 1..=max_depth {
                 let guide_x = bounds.origin.x
                     + gutter_width
-                    + char_width * ((level * indent_tab_size) as f32);
+                    + char_width * ((level * indent_tab_size) as f32)
+                    - horizontal_scroll_pixels;
                 let is_active = level <= cursor_depth;
 
                 let mut run_start: Option<usize> = None;
@@ -1398,6 +2154,100 @@ impl Element for EditorElement {
             None
         };
 
+        let sticky_header = document_snapshot
+            .display_snapshot
+            .sticky_header_excerpt(visible_range.start)
+            .map(|header| {
+                let label = format!("{}: {}", header.kind_label, header.text);
+                let shaped = self.shape_line_cached(
+                    &label,
+                    font_size * 0.92,
+                    &[TextRun {
+                        len: label.len(),
+                        font: font.clone(),
+                        color: cx.theme().colors.muted_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    window,
+                );
+                StickyHeaderRenderData {
+                    shaped,
+                    bounds: Bounds::new(
+                        point(
+                            bounds.origin.x + gutter_width + px(6.0) - horizontal_scroll_pixels,
+                            bounds.origin.y,
+                        ),
+                        size(
+                            (bounds.size.width - gutter_width - px(12.0)).max(px(0.0)),
+                            line_height,
+                        ),
+                    ),
+                }
+            });
+
+        let minimap = if editor_snapshot.minimap_visible && display_line_count > 0 {
+            let minimap_width = px(56.0);
+            let bounds = Bounds::new(
+                point(bounds.right() - minimap_width, bounds.origin.y),
+                size(minimap_width, bounds.size.height),
+            );
+            let visible_rows = editor_snapshot.visible_display_row_range();
+            let row_height = bounds.size.height / display_line_count.max(1) as f32;
+            let viewport_bounds = Bounds::new(
+                point(
+                    bounds.origin.x,
+                    bounds.origin.y + row_height * visible_rows.start as f32,
+                ),
+                size(
+                    bounds.size.width,
+                    (row_height * (visible_rows.end.saturating_sub(visible_rows.start)) as f32)
+                        .max(px(8.0)),
+                ),
+            );
+
+            Some(MinimapRenderData {
+                bounds,
+                viewport_bounds,
+            })
+        } else {
+            None
+        };
+
+        let inline_code_actions = Vec::new();
+
+        let block_widgets = cached_viewport_layout
+            .viewport
+            .block_widgets()
+            .iter()
+            .map(|(display_slot, block)| {
+                let shaped = self.shape_line_cached(
+                    &block.label,
+                    line_height * 0.8,
+                    &[TextRun {
+                        len: block.label.len(),
+                        font: window.text_style().font(),
+                        color: cx.theme().colors.muted_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    window,
+                );
+                BlockWidgetRenderData {
+                    shaped,
+                    bounds: Bounds::new(
+                        point(
+                            bounds.origin.x + gutter_width + px(8.0) - horizontal_scroll_pixels,
+                            bounds.origin.y + slot_y(*display_slot) + line_height,
+                        ),
+                        size(px(180.0), line_height),
+                    ),
+                }
+            })
+            .collect::<Vec<_>>();
+
         // ── Reference highlights (feat-047) ──────────────────────────────────
         // Convert buffer byte ranges to pixel rects for visible ranges only.
         let reference_highlights: Vec<ReferenceHighlightData> = reference_ranges_snapshot
@@ -1411,50 +2261,64 @@ impl Element for EditorElement {
                     return None;
                 };
                 // Only show if the start of the range is on a visible (non-folded) line
-                let &display_slot = buf_to_display.get(&start_pos.line)?;
-                let x = bounds.origin.x + gutter_width + char_width * (start_pos.column as f32);
-                let y = bounds.origin.y + line_height * (display_slot as f32 - scroll_offset);
+                let display_slot = visible_display_slot(start_pos.line)?;
+                let origin = Self::wrapped_position_origin(
+                    &wrapped_position_context,
+                    start_pos,
+                    display_slot,
+                );
                 let width = char_width
                     * if start_pos.line == end_pos.line {
-                        (end_pos.column.saturating_sub(start_pos.column)) as f32
+                        document_snapshot
+                            .display_snapshot
+                            .display_column_for_position(end_pos)
+                            .unwrap_or(end_pos.column)
+                            .saturating_sub(
+                                document_snapshot
+                                    .display_snapshot
+                                    .display_column_for_position(start_pos)
+                                    .unwrap_or(start_pos.column),
+                            ) as f32
                     } else {
                         // Multi-line: just highlight to end of line
                         let line_text = buffer.line(start_pos.line).unwrap_or_default();
-                        (line_text.chars().count().saturating_sub(start_pos.column)) as f32
+                        let end_column = document_snapshot
+                            .display_snapshot
+                            .tab_snapshot()
+                            .display_column_for_text_column(&line_text, line_text.chars().count());
+                        end_column.saturating_sub(
+                            document_snapshot
+                                .display_snapshot
+                                .display_column_for_position(start_pos)
+                                .unwrap_or(start_pos.column),
+                        ) as f32
                     };
                 Some(ReferenceHighlightData {
-                    rect: Bounds::new(point(x, y), size(width.max(char_width), line_height)),
+                    rect: Bounds::new(origin, size(width.max(char_width), line_height)),
                 })
             })
             .collect();
 
-        // ── Rename overlay (feat-048) ──────────────────────────────────────────
-        // Compute pixel bounds of the word being renamed so the overlay box can
-        // be painted directly over it.
-        let rename_overlay = rename_snapshot.and_then(|(new_name, word_start, _word_end)| {
-            let Ok(start_pos) = buffer.offset_to_position(word_start) else {
-                return None;
-            };
-            // Only show when the renamed word's line is visible (not folded)
-            let &display_slot = buf_to_display.get(&start_pos.line)?;
-            let x = bounds.origin.x + gutter_width + char_width * (start_pos.column as f32);
-            let y = bounds.origin.y + line_height * (display_slot as f32 - scroll_offset);
-            let box_width = (char_width * new_name.len().max(6) as f32 + px(16.0)).max(px(80.0));
-            Some(RenameOverlayData {
-                new_name,
-                word_rect: Bounds::new(point(x, y), size(box_width, line_height)),
-                line_height,
-            })
-        });
-
         // ── Context menu (feat-045) ────────────────────────────────────────────
         let context_menu = context_menu_snapshot.map(|(items, origin_x, origin_y, highlighted)| {
+            let item_height = line_height * 1.2;
+            let total_height: Pixels = items.iter().fold(px(8.0), |height, (_, is_sep, _)| {
+                height + if *is_sep { px(8.0) } else { item_height }
+            });
+            let menu_width = px(180.0);
+            let margin = px(8.0);
+            let max_x = (bounds.size.width - menu_width - margin).max(px(0.0));
+            let max_y = (bounds.size.height - total_height - margin).max(px(0.0));
+            let min_x = margin.min(max_x);
+            let min_y = margin.min(max_y);
+            let clamped_origin = point(
+                bounds.origin.x + px(origin_x).clamp(min_x, max_x),
+                bounds.origin.y + px(origin_y).clamp(min_y, max_y),
+            );
+
             ContextMenuRenderData {
                 items,
-                origin: point(
-                    bounds.origin.x + px(origin_x),
-                    bounds.origin.y + px(origin_y),
-                ),
+                bounds: Bounds::new(clamped_origin, size(menu_width, total_height)),
                 highlighted,
                 line_height,
             }
@@ -1485,19 +2349,34 @@ impl Element for EditorElement {
             completion_menu,
             diagnostics: diag_bounds,
             hover_tooltip,
+            signature_help_tooltip,
             find_panel,
             gutter_width,
+            show_line_numbers,
+            show_folding,
+            highlight_current_line,
+            show_gutter_diagnostics,
+            cursor_shape,
+            cursor_blink_enabled,
+            cursor_visible,
+            rounded_selection,
+            selection_highlight_enabled,
             gutter_lines,
             inline_suggestion,
+            edit_prediction,
+            inlay_hints,
             goto_line_panel,
             indent_guides,
             scrollbar,
             wrapped_shaped_lines,
-            line_y_offsets,
+            line_y_offsets: line_y_offsets.as_ref().clone(),
+            horizontal_scroll_pixels,
             reference_highlights,
-            rename_overlay,
             context_menu,
-            sub_line_offset,
+            sticky_header,
+            minimap,
+            inline_code_actions,
+            block_widgets,
             fold_chevrons,
         }
     }
@@ -1528,8 +2407,15 @@ impl Element for EditorElement {
             cx,
         );
 
+        let editor_background =
+            Self::editor_background_color(cx.theme().highlight_theme.as_ref(), &cx.theme().colors);
+        let active_line_background = Self::active_line_background_color(
+            cx.theme().highlight_theme.as_ref(),
+            &cx.theme().colors,
+        );
+
         // Paint background for the full editor area
-        window.paint_quad(fill(prepaint.bounds, cx.theme().colors.background));
+        window.paint_quad(fill(prepaint.bounds, editor_background));
 
         // ── Gutter (Phase 6) ──────────────────────────────────────────────────
         let gutter_width = prepaint.gutter_width;
@@ -1541,28 +2427,46 @@ impl Element for EditorElement {
             ),
         );
         // Gutter background – same as the editor background
-        window.paint_quad(fill(gutter_bounds, cx.theme().colors.background));
+        window.paint_quad(fill(gutter_bounds, editor_background));
 
         // Paint line numbers right-aligned inside the gutter padding, excluding the chevron zone
+        let fold_chevron_zone = if prepaint.show_folding {
+            FOLD_CHEVRON_ZONE
+        } else {
+            px(0.0)
+        };
         let gutter_text_area_width =
-            gutter_width - GUTTER_SEPARATOR_WIDTH - FOLD_CHEVRON_ZONE - GUTTER_PADDING * 2.0;
+            (gutter_width - GUTTER_SEPARATOR_WIDTH - fold_chevron_zone - GUTTER_PADDING * 2.0)
+                .max(px(0.0));
         for (slot_idx, gutter_line) in prepaint.gutter_lines.iter().enumerate() {
-            let line_y = if !prepaint.line_y_offsets.is_empty()
-                && slot_idx < prepaint.line_y_offsets.len()
-            {
-                prepaint.bounds.origin.y + prepaint.line_y_offsets[slot_idx]
-            } else {
-                prepaint.bounds.origin.y + prepaint.line_height * (slot_idx as f32)
-                    - prepaint.sub_line_offset
-            };
+            let line_y = prepaint.bounds.origin.y
+                + prepaint
+                    .line_y_offsets
+                    .get(slot_idx)
+                    .copied()
+                    .unwrap_or(prepaint.line_height * (slot_idx as f32));
 
             // Highlight the current-line row across the entire gutter
-            if gutter_line.is_active {
+            if prepaint.highlight_current_line && gutter_line.is_active {
                 let active_row_bounds = Bounds::new(
                     point(prepaint.bounds.origin.x, line_y),
                     size(gutter_width - GUTTER_SEPARATOR_WIDTH, prepaint.line_height),
                 );
-                window.paint_quad(fill(active_row_bounds, cx.theme().colors.list_hover));
+                window.paint_quad(fill(active_row_bounds, active_line_background));
+            }
+
+            if !prepaint.show_line_numbers {
+                if prepaint.show_gutter_diagnostics && gutter_line.has_diagnostics {
+                    let marker_bounds = Bounds::new(
+                        point(
+                            prepaint.bounds.origin.x + px(3.0),
+                            line_y + (prepaint.line_height - px(6.0)) / 2.0,
+                        ),
+                        size(px(6.0), px(6.0)),
+                    );
+                    window.paint_quad(fill(marker_bounds, cx.theme().colors.danger));
+                }
+                continue;
             }
 
             // Right-align: start so that the text ends at GUTTER_PADDING from separator
@@ -1578,6 +2482,17 @@ impl Element for EditorElement {
                 window,
                 cx,
             );
+
+            if prepaint.show_gutter_diagnostics && gutter_line.has_diagnostics {
+                let marker_bounds = Bounds::new(
+                    point(
+                        prepaint.bounds.origin.x + px(3.0),
+                        line_y + (prepaint.line_height - px(6.0)) / 2.0,
+                    ),
+                    size(px(6.0), px(6.0)),
+                );
+                window.paint_quad(fill(marker_bounds, cx.theme().colors.danger));
+            }
         }
 
         // Separator line between gutter and text content
@@ -1588,13 +2503,70 @@ impl Element for EditorElement {
             ),
             size(GUTTER_SEPARATOR_WIDTH, prepaint.bounds.size.height),
         );
-        window.paint_quad(fill(separator_bounds, cx.theme().colors.border));
+        if prepaint.gutter_width > px(0.0) {
+            window.paint_quad(fill(separator_bounds, cx.theme().colors.border));
+        }
+
+        if let Some(sticky_header) = &prepaint.sticky_header {
+            window.paint_quad(fill(sticky_header.bounds, editor_background.opacity(0.96)));
+            let underline = Bounds::new(
+                point(
+                    sticky_header.bounds.origin.x,
+                    sticky_header.bounds.bottom() - px(1.0),
+                ),
+                size(sticky_header.bounds.size.width, px(1.0)),
+            );
+            window.paint_quad(fill(underline, cx.theme().colors.border));
+            _ = sticky_header.shaped.paint(
+                point(
+                    sticky_header.bounds.origin.x + px(4.0),
+                    sticky_header.bounds.origin.y,
+                ),
+                prepaint.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+
+        if let Some(minimap) = &prepaint.minimap {
+            window.paint_quad(fill(minimap.bounds, editor_background.opacity(0.9)));
+            window.paint_quad(fill(
+                minimap.viewport_bounds,
+                cx.theme().colors.primary.opacity(0.25),
+            ));
+        }
+
+        for action in &prepaint.inline_code_actions {
+            window.paint_quad(fill(action.bounds, cx.theme().colors.primary.opacity(0.12)));
+            _ = action.shaped.paint(
+                point(action.bounds.origin.x + px(6.0), action.bounds.origin.y),
+                prepaint.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+
+        for block in &prepaint.block_widgets {
+            window.paint_quad(fill(block.bounds, editor_background.opacity(0.85)));
+            _ = block.shaped.paint(
+                point(block.bounds.origin.x + px(6.0), block.bounds.origin.y),
+                prepaint.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
 
         // ── Fold chevrons ─────────────────────────────────────────────────────
         // Geometric triangles drawn with paint_path so they scale criply at any
         // DPI. The triangle points right (▶) when folded and down (▼) when open.
         // The chevron brightens to full foreground when the cursor is over it.
-        {
+        if prepaint.show_folding {
             let mouse_pos = window.mouse_position();
             let normal_color = cx.theme().colors.muted_foreground.opacity(0.55);
             let hover_color = cx.theme().colors.foreground;
@@ -1638,17 +2610,43 @@ impl Element for EditorElement {
             self.editor.update(cx, |editor, _cx| {
                 editor.update_cached_fold_chevrons(chevrons_for_cache);
             });
+        } else {
+            self.editor.update(cx, |editor, _cx| {
+                editor.update_cached_fold_chevrons(Vec::new());
+            });
         }
         // ─────────────────────────────────────────────────────────────────────
 
         // Paint selection highlighting (already offset for gutter in prepaint)
         for sel_rect in &prepaint.selection_rects {
-            window.paint_quad(fill(*sel_rect, cx.theme().colors.selection));
+            if prepaint.rounded_selection {
+                window.paint_quad(quad(
+                    *sel_rect,
+                    Corners::all(px(3.0)),
+                    cx.theme().colors.selection,
+                    px(0.0),
+                    transparent_black(),
+                    BorderStyle::Solid,
+                ));
+            } else {
+                window.paint_quad(fill(*sel_rect, cx.theme().colors.selection));
+            }
         }
 
         // Paint extra cursor selection highlights with the same color as the primary selection.
         for sel_rect in &prepaint.extra_selection_rects {
-            window.paint_quad(fill(*sel_rect, cx.theme().colors.selection));
+            if prepaint.rounded_selection {
+                window.paint_quad(quad(
+                    *sel_rect,
+                    Corners::all(px(3.0)),
+                    cx.theme().colors.selection,
+                    px(0.0),
+                    transparent_black(),
+                    BorderStyle::Solid,
+                ));
+            } else {
+                window.paint_quad(fill(*sel_rect, cx.theme().colors.selection));
+            }
         }
 
         // Paint bracket pair highlights (feat-026).
@@ -1684,7 +2682,8 @@ impl Element for EditorElement {
         }
 
         // Paint visible text lines, starting after the gutter
-        let text_origin_x = prepaint.bounds.origin.x + gutter_width;
+        let text_origin_x =
+            prepaint.bounds.origin.x + gutter_width - prepaint.horizontal_scroll_pixels;
         let origin_y = prepaint.bounds.origin.y;
 
         if let Some(ref wrapped_lines) = prepaint.wrapped_shaped_lines {
@@ -1705,8 +2704,12 @@ impl Element for EditorElement {
                 );
             }
         } else {
-            let mut offset_y = -prepaint.sub_line_offset;
-            for shaped_line in prepaint.shaped_lines.iter() {
+            for (index, shaped_line) in prepaint.shaped_lines.iter().enumerate() {
+                let offset_y = prepaint
+                    .line_y_offsets
+                    .get(index)
+                    .copied()
+                    .unwrap_or(prepaint.line_height * (index as f32));
                 let line_origin = point(text_origin_x, origin_y + offset_y);
                 _ = shaped_line.paint(
                     line_origin,
@@ -1716,19 +2719,20 @@ impl Element for EditorElement {
                     window,
                     cx,
                 );
-                offset_y += prepaint.line_height;
             }
         }
 
         // Paint cursor if focused (already offset for gutter in prepaint)
-        if is_focused {
+        let cursor_is_solid =
+            is_focused && prepaint.cursor_blink_enabled && prepaint.cursor_visible;
+        if cursor_is_solid {
             if let Some(cursor_bounds) = prepaint.cursor_bounds {
-                window.paint_quad(fill(cursor_bounds, cx.theme().colors.caret));
+                Self::paint_cursor_shape(cursor_bounds, prepaint.cursor_shape, window, cx);
             }
 
             // Paint extra cursors (multi-cursor) with the same style as the primary.
             for extra_bounds in &prepaint.extra_cursor_bounds {
-                window.paint_quad(fill(*extra_bounds, cx.theme().colors.caret));
+                Self::paint_cursor_shape(*extra_bounds, prepaint.cursor_shape, window, cx);
             }
         } else {
             // When unfocused, render a hollow (outline) cursor so the insertion
@@ -1753,8 +2757,42 @@ impl Element for EditorElement {
             self.paint_inline_suggestion(suggestion, window, cx);
         }
 
+        if let Some(ref prediction) = prepaint.edit_prediction {
+            self.paint_inline_suggestion(
+                &InlineSuggestionRenderData {
+                    shaped: prediction.shaped.clone(),
+                    origin: prediction.origin,
+                    line_height: prediction.line_height,
+                },
+                window,
+                cx,
+            );
+        }
+
+        for hint in &prepaint.inlay_hints {
+            if let Some(background_bounds) = hint.background_bounds {
+                window.paint_quad(quad(
+                    background_bounds,
+                    Corners::all(px(4.0)),
+                    cx.theme().colors.selection.opacity(0.16),
+                    Edges::all(px(1.0)),
+                    cx.theme().colors.border.opacity(0.35),
+                    BorderStyle::default(),
+                ));
+            }
+
+            _ = hint.shaped.paint(
+                hint.origin,
+                hint.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+
         // Paint error squiggles (diagnostics) using pre-calculated bounds
-        if !prepaint.diagnostics.is_empty() {
+        if self.editor.read(cx).show_inline_diagnostics() && !prepaint.diagnostics.is_empty() {
             for (_highlight, squiggle_bounds) in &prepaint.diagnostics {
                 let squiggle_color = cx.theme().colors.danger;
                 let squiggle_height = px(2.0);
@@ -1784,9 +2822,12 @@ impl Element for EditorElement {
             });
         }
 
-        // Paint hover tooltip if hovering
         if let Some(ref hover) = prepaint.hover_tooltip {
             self.paint_hover_tooltip(hover, window, cx);
+        }
+
+        if let Some(ref signature_help) = prepaint.signature_help_tooltip {
+            self.paint_signature_help_tooltip(signature_help, window, cx);
         }
 
         // Find/replace panel is now rendered as a GPUI component child of TextEditor's div,
@@ -1806,11 +2847,8 @@ impl Element for EditorElement {
         }
 
         // Paint reference highlights (feat-047) — semi-transparent amber tint
-        self.paint_reference_highlights(&prepaint.reference_highlights, window);
-
-        // Paint rename overlay (feat-048) — inline input box over the word
-        if let Some(ref overlay) = prepaint.rename_overlay {
-            self.paint_rename_overlay(overlay, window, cx);
+        if prepaint.selection_highlight_enabled {
+            self.paint_reference_highlights(&prepaint.reference_highlights, window);
         }
 
         // Paint context menu (feat-045) — floating popup
@@ -1893,26 +2931,7 @@ impl EditorElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        // Only show the first line so the suggestion stays on the cursor row.
-        let display_text = suggestion.text.lines().next().unwrap_or("").to_string();
-
-        if display_text.is_empty() {
-            return;
-        }
-
-        let text_system = window.text_system();
-        let font_size = suggestion.line_height * 0.9;
-        let text_run = TextRun {
-            len: display_text.len(),
-            font: Font::default(),
-            // Dimmed color to visually separate ghost text from real content.
-            color: cx.theme().colors.muted_foreground.opacity(0.5),
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let shaped = text_system.shape_line(display_text.into(), font_size, &[text_run], None);
-        _ = shaped.paint(
+        _ = suggestion.shaped.paint(
             suggestion.origin,
             suggestion.line_height,
             TextAlign::Left,
@@ -2180,15 +3199,83 @@ impl EditorElement {
         });
     }
 
-    /// Paint the hover tooltip.
-    ///
-    /// LSP hover responses use Markdown formatting that the text system cannot
-    /// render directly. We preprocess the documentation string to extract
-    /// structure (bold headings, inline code spans) and render each segment
-    /// with the appropriate color and font weight using low-level `shape_line`
-    /// calls stacked vertically inside a shared rounded background quad.
+    fn paint_signature_help_tooltip(
+        &self,
+        tooltip: &SignatureHelpTooltipData,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let pad_x = px(12.0);
+        let pad_y = px(10.0);
+        let font_size = px(12.0);
+        let line_height = px(17.0);
+        let max_width = px(420.0);
+        let lines: Vec<&str> = tooltip
+            .content
+            .lines()
+            .filter(|line| !line.is_empty())
+            .collect();
+        if lines.is_empty() {
+            return;
+        }
+
+        let text_system = window.text_system();
+        let rows: Vec<ShapedLine> = lines
+            .iter()
+            .map(|line| {
+                text_system.shape_line(
+                    (*line).to_string().into(),
+                    font_size,
+                    &[TextRun {
+                        len: line.len(),
+                        font: Font::default(),
+                        color: cx.theme().colors.popover_foreground,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    }],
+                    None,
+                )
+            })
+            .collect();
+
+        let content_width = rows
+            .iter()
+            .map(|row| row.width)
+            .fold(px(0.0), |acc, width| if width > acc { width } else { acc })
+            .min(max_width);
+        let content_height = line_height * (rows.len() as f32);
+        let panel_size = size(content_width + pad_x * 2.0, content_height + pad_y * 2.0);
+        let origin = point(
+            tooltip.anchor_bounds.origin.x,
+            tooltip.anchor_bounds.origin.y + tooltip.anchor_bounds.size.height + px(6.0),
+        );
+        let bounds = Bounds::new(origin, panel_size);
+
+        window.paint_quad(quad(
+            bounds,
+            Corners::all(px(6.0)),
+            cx.theme().colors.popover,
+            Edges::all(px(1.0)),
+            cx.theme().colors.border,
+            BorderStyle::default(),
+        ));
+
+        let mut y = origin.y + pad_y;
+        for row in rows {
+            _ = row.paint(
+                point(origin.x + pad_x, y),
+                line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+            y += line_height;
+        }
+    }
+
     fn paint_hover_tooltip(&self, hover: &HoverTooltipData, window: &mut Window, cx: &mut App) {
-        // ── Layout constants ─────────────────────────────────────────────────
         let pad_x = px(12.0);
         let pad_y = px(10.0);
         let max_content_width = px(420.0);
@@ -2198,16 +3285,16 @@ impl EditorElement {
         let title_line_height = px(20.0);
         let body_line_height = px(17.0);
         let blank_gap = px(5.0);
-        // Guard against enormous tooltips from verbose LSP responses.
         let max_lines = 15usize;
 
-        // ── Colors ───────────────────────────────────────────────────────────
         let bg_color = cx.theme().colors.popover;
         let border_color = cx.theme().colors.border;
         let title_color = cx.theme().colors.popover_foreground;
         let body_color = cx.theme().colors.muted_foreground;
-        // Cyan for backtick code spans — visually separates identifiers from prose.
+        let emphasis_color = cx.theme().colors.popover_foreground;
         let code_color: Hsla = rgb(0x7dcfff).into();
+        let code_block_color = cx.theme().colors.popover_foreground;
+        let mono_font_family = cx.theme().mono_font_family.clone();
 
         let lines = preprocess_hover_text(&hover.documentation);
         if lines.is_empty() {
@@ -2217,7 +3304,6 @@ impl EditorElement {
 
         let text_system = window.text_system();
 
-        // ── Shape each line; record its intrinsic height ─────────────────────
         struct ShapedRow {
             shaped: Option<ShapedLine>,
             height: Pixels,
@@ -2260,7 +3346,17 @@ impl EditorElement {
                     }
                 }
                 TooltipLine::Body(text) => {
-                    let (display_text, runs) = build_body_runs(text, body_color, code_color);
+                    let (display_text, runs) =
+                        build_body_runs(text, body_color, emphasis_color, code_color);
+                    let shaped = text_system.shape_line(display_text, body_font_size, &runs, None);
+                    ShapedRow {
+                        shaped: Some(shaped),
+                        height: body_line_height,
+                    }
+                }
+                TooltipLine::Code(text) => {
+                    let (display_text, runs) =
+                        build_code_block_runs(text, code_block_color, mono_font_family.clone());
                     let shaped = text_system.shape_line(display_text, body_font_size, &runs, None);
                     ShapedRow {
                         shaped: Some(shaped),
@@ -2274,21 +3370,17 @@ impl EditorElement {
             return;
         }
 
-        // ── Measure ─────────────────────────────────────────────────────────
         let content_width = rows
             .iter()
-            .filter_map(|r| r.shaped.as_ref())
-            .map(|sl| sl.width)
-            .fold(px(0.0), |acc, w| if w > acc { w } else { acc })
+            .filter_map(|row| row.shaped.as_ref())
+            .map(|row| row.width)
+            .fold(px(0.0), |acc, width| if width > acc { width } else { acc })
             .min(max_content_width);
-        let content_height = rows.iter().fold(px(0.0), |acc, r| acc + r.height);
+        let content_height = rows.iter().fold(px(0.0), |acc, row| acc + row.height);
 
         let tooltip_width = content_width + pad_x * 2.0;
         let tooltip_height = content_height + pad_y * 2.0;
 
-        // ── Position ─────────────────────────────────────────────────────────
-        // Prefer showing above the hovered word; fall back to below when
-        // there isn't enough vertical room between the word and the window top.
         let gap = px(6.0);
         let above_y = hover.anchor_bounds.origin.y - tooltip_height - gap;
         let below_y = hover.anchor_bounds.origin.y + hover.anchor_bounds.size.height + gap;
@@ -2296,7 +3388,6 @@ impl EditorElement {
         let tooltip_origin = point(hover.anchor_bounds.origin.x, origin_y);
         let tooltip_bounds = Bounds::new(tooltip_origin, size(tooltip_width, tooltip_height));
 
-        // ── Background (rounded, bordered) ────────────────────────────────────
         window.paint_quad(quad(
             tooltip_bounds,
             Corners::all(corner_radius),
@@ -2306,7 +3397,6 @@ impl EditorElement {
             BorderStyle::default(),
         ));
 
-        // ── Text rows ────────────────────────────────────────────────────────
         let text_x = tooltip_origin.x + pad_x;
         let mut current_y = tooltip_origin.y + pad_y;
 
@@ -2321,7 +3411,7 @@ impl EditorElement {
                     cx,
                 );
             }
-            current_y = current_y + row.height;
+            current_y += row.height;
         }
     }
 
@@ -2479,48 +3569,6 @@ impl EditorElement {
         }
     }
 
-    /// Paint the inline rename-symbol input box over the word being renamed (feat-048).
-    ///
-    /// The box is painted directly over the word with a solid background and
-    /// bright border so it is visually distinct from surrounding text. A blinking
-    /// `_` cursor is appended to the new name text.
-    fn paint_rename_overlay(&self, overlay: &RenameOverlayData, window: &mut Window, cx: &mut App) {
-        let padding = px(4.0);
-        let font_size = overlay.line_height * 0.82;
-        let box_bounds = Bounds::new(
-            point(
-                overlay.word_rect.origin.x - padding,
-                overlay.word_rect.origin.y,
-            ),
-            size(
-                overlay.word_rect.size.width + padding * 2.0,
-                overlay.line_height,
-            ),
-        );
-
-        // Dark background + primary-colored border signals "you are renaming".
-        // Rounded corners match the context menu and tooltip style.
-        window.paint_quad(quad(
-            box_bounds,
-            Corners::all(px(4.0)),
-            cx.theme().colors.popover,
-            Edges::all(px(1.0)),
-            cx.theme().colors.primary,
-            BorderStyle::default(),
-        ));
-
-        // Input text with a cursor indicator
-        let display = format!("{}_", overlay.new_name);
-        Self::paint_panel_text(
-            &display,
-            point(box_bounds.origin.x + padding, box_bounds.origin.y),
-            font_size,
-            cx.theme().colors.popover_foreground,
-            window,
-            cx,
-        );
-    }
-
     /// Paint the right-click context menu as a floating popup (feat-045).
     ///
     /// Each enabled item is painted as a clickable row; disabled items are
@@ -2529,15 +3577,9 @@ impl EditorElement {
         let item_height = menu.line_height * 1.2;
         let padding_x = px(12.0);
         let font_size = menu.line_height * 0.82;
-        let menu_width = px(180.0);
-
-        // Calculate total height
-        let total_height: Pixels = menu.items.iter().fold(px(0.0), |acc, (_, is_sep, _)| {
-            acc + if *is_sep { px(8.0) } else { item_height }
-        });
-
         let corner_radius = px(6.0);
-        let menu_bounds = Bounds::new(menu.origin, size(menu_width, total_height + px(8.0)));
+        let menu_bounds = menu.bounds;
+        let menu_width = menu_bounds.size.width;
 
         // Background + border + rounded corners — matches the hover tooltip style.
         window.paint_quad(quad(
@@ -2550,13 +3592,13 @@ impl EditorElement {
         ));
 
         // Items
-        let mut y = menu.origin.y + px(4.0);
+        let mut y = menu_bounds.origin.y + px(4.0);
         for (index, (label, is_separator, is_disabled)) in menu.items.iter().enumerate() {
             if *is_separator {
                 let sep_y = y + px(4.0);
                 window.paint_quad(fill(
                     Bounds::new(
-                        point(menu.origin.x + px(6.0), sep_y),
+                        point(menu_bounds.origin.x + px(6.0), sep_y),
                         size(menu_width - px(12.0), px(1.0)),
                     ),
                     cx.theme().colors.border,
@@ -2568,7 +3610,10 @@ impl EditorElement {
             // Highlight the hovered/keyboard-selected item
             if menu.highlighted == Some(index) {
                 window.paint_quad(fill(
-                    Bounds::new(point(menu.origin.x, y), size(menu_width, item_height)),
+                    Bounds::new(
+                        point(menu_bounds.origin.x, y),
+                        size(menu_width, item_height),
+                    ),
                     cx.theme().colors.list_hover,
                 ));
             }
@@ -2582,7 +3627,7 @@ impl EditorElement {
             Self::paint_panel_text(
                 label,
                 point(
-                    menu.origin.x + padding_x,
+                    menu_bounds.origin.x + padding_x,
                     y + (item_height - font_size) / 2.0,
                 ),
                 font_size,
@@ -2596,27 +3641,43 @@ impl EditorElement {
     }
 }
 
-/// Line classification produced by markdown preprocessing.
 enum TooltipLine {
-    /// A line fully wrapped in `**...**` — render bold and bright.
     Title(String),
-    /// A normal body line — may contain inline backtick code spans.
     Body(String),
-    /// A collapsed vertical gap between content sections.
+    Code(String),
     Blank,
 }
 
-/// Parse hover documentation into typed lines.
-///
-/// Strips markdown structure (bold headings) and collapses consecutive blank
-/// lines to a single gap so the tooltip stays compact regardless of how
-/// verbose the LSP response is.
 fn preprocess_hover_text(raw: &str) -> Vec<TooltipLine> {
     let mut result = Vec::new();
-    let mut last_was_blank = true; // suppress leading blanks
+    let mut last_was_blank = true;
+    let mut in_code_block = false;
 
     for raw_line in raw.trim_end_matches('\n').split('\n') {
         let line = raw_line.trim_end_matches('\r');
+
+        if line.trim_start().starts_with("```") {
+            if in_code_block {
+                if !last_was_blank {
+                    result.push(TooltipLine::Blank);
+                    last_was_blank = true;
+                }
+                in_code_block = false;
+            } else {
+                if !last_was_blank {
+                    result.push(TooltipLine::Blank);
+                }
+                in_code_block = true;
+                last_was_blank = true;
+            }
+            continue;
+        }
+
+        if in_code_block {
+            result.push(TooltipLine::Code(line.to_string()));
+            last_was_blank = false;
+            continue;
+        }
 
         if line.trim().is_empty() {
             if !last_was_blank {
@@ -2628,7 +3689,6 @@ fn preprocess_hover_text(raw: &str) -> Vec<TooltipLine> {
 
         last_was_blank = false;
 
-        // Detect fully-bolded heading: a line that is exactly `**text**`.
         let trimmed = line.trim();
         if trimmed.starts_with("**") && trimmed.ends_with("**") && trimmed.len() > 4 {
             let inner = &trimmed[2..trimmed.len() - 2];
@@ -2641,7 +3701,6 @@ fn preprocess_hover_text(raw: &str) -> Vec<TooltipLine> {
         result.push(TooltipLine::Body(line.to_string()));
     }
 
-    // Remove trailing blank separator.
     while matches!(result.last(), Some(TooltipLine::Blank)) {
         result.pop();
     }
@@ -2649,88 +3708,747 @@ fn preprocess_hover_text(raw: &str) -> Vec<TooltipLine> {
     result
 }
 
-/// Build display text and `TextRun` slices for a body line.
-///
-/// Backtick-delimited spans (`` `code` ``) are rendered in a distinct cyan
-/// color to visually separate identifiers and keywords from prose.
-fn build_body_runs(text: &str, body_color: Hsla, code_color: Hsla) -> (SharedString, Vec<TextRun>) {
+fn build_body_runs(
+    text: &str,
+    body_color: Hsla,
+    bold_color: Hsla,
+    code_color: Hsla,
+) -> (SharedString, Vec<TextRun>) {
     let mut display = String::new();
-    let mut runs: Vec<TextRun> = Vec::new();
+    let mut runs = Vec::new();
     let mut rest = text;
+    let default_font = Font::default();
+    let bold_font = Font {
+        weight: FontWeight::BOLD,
+        ..Font::default()
+    };
 
     while !rest.is_empty() {
-        match rest.find('`') {
-            Some(tick_pos) => {
-                if tick_pos > 0 {
-                    let pre = &rest[..tick_pos];
-                    runs.push(TextRun {
-                        len: pre.len(),
-                        font: Font::default(),
-                        color: body_color,
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    });
-                    display.push_str(pre);
+        let next_code = rest.find('`');
+        let next_bold = rest.find("**");
+        let next_marker = match (next_code, next_bold) {
+            (Some(code), Some(bold)) if code <= bold => Some((code, Marker::Code)),
+            (Some(_), Some(bold)) => Some((bold, Marker::Bold)),
+            (Some(code), None) => Some((code, Marker::Code)),
+            (None, Some(bold)) => Some((bold, Marker::Bold)),
+            (None, None) => None,
+        };
+
+        match next_marker {
+            Some((marker_start, marker_kind)) => {
+                if marker_start > 0 {
+                    push_tooltip_run(
+                        &mut display,
+                        &mut runs,
+                        &rest[..marker_start],
+                        default_font.clone(),
+                        body_color,
+                    );
                 }
-                let after = &rest[tick_pos + 1..];
-                match after.find('`') {
-                    Some(close_pos) => {
-                        let code = &after[..close_pos];
-                        if !code.is_empty() {
-                            runs.push(TextRun {
-                                len: code.len(),
-                                font: Font::default(),
-                                color: code_color,
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            });
-                            display.push_str(code);
+
+                match marker_kind {
+                    Marker::Code => {
+                        let after = &rest[marker_start + 1..];
+                        match after.find('`') {
+                            Some(close_pos) => {
+                                let code = &after[..close_pos];
+                                if !code.is_empty() {
+                                    push_tooltip_run(
+                                        &mut display,
+                                        &mut runs,
+                                        code,
+                                        default_font.clone(),
+                                        code_color,
+                                    );
+                                }
+                                rest = &after[close_pos + 1..];
+                            }
+                            None => {
+                                push_tooltip_run(
+                                    &mut display,
+                                    &mut runs,
+                                    &rest[marker_start..],
+                                    default_font.clone(),
+                                    body_color,
+                                );
+                                break;
+                            }
                         }
-                        rest = &after[close_pos + 1..];
                     }
-                    None => {
-                        // Unclosed backtick — treat rest as body text.
-                        runs.push(TextRun {
-                            len: rest.len(),
-                            font: Font::default(),
-                            color: body_color,
-                            background_color: None,
-                            underline: None,
-                            strikethrough: None,
-                        });
-                        display.push_str(rest);
-                        break;
+                    Marker::Bold => {
+                        let after = &rest[marker_start + 2..];
+                        match after.find("**") {
+                            Some(close_pos) => {
+                                let bold = &after[..close_pos];
+                                if !bold.is_empty() {
+                                    push_tooltip_run(
+                                        &mut display,
+                                        &mut runs,
+                                        bold,
+                                        bold_font.clone(),
+                                        bold_color,
+                                    );
+                                }
+                                rest = &after[close_pos + 2..];
+                            }
+                            None => {
+                                push_tooltip_run(
+                                    &mut display,
+                                    &mut runs,
+                                    &rest[marker_start..],
+                                    default_font.clone(),
+                                    body_color,
+                                );
+                                break;
+                            }
+                        }
                     }
                 }
             }
             None => {
-                runs.push(TextRun {
-                    len: rest.len(),
-                    font: Font::default(),
-                    color: body_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-                display.push_str(rest);
+                push_tooltip_run(
+                    &mut display,
+                    &mut runs,
+                    rest,
+                    default_font.clone(),
+                    body_color,
+                );
                 break;
             }
         }
     }
 
     if display.is_empty() {
-        display.push(' ');
-        runs.push(TextRun {
-            len: 1,
-            font: Font::default(),
-            color: body_color,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        });
+        push_tooltip_run(&mut display, &mut runs, " ", default_font, body_color);
     }
 
     (display.into(), runs)
+}
+
+fn build_code_block_runs(
+    text: &str,
+    color: Hsla,
+    font_family: SharedString,
+) -> (SharedString, Vec<TextRun>) {
+    let mut display = text.to_string();
+    if display.is_empty() {
+        display.push(' ');
+    }
+
+    (
+        display.clone().into(),
+        vec![TextRun {
+            len: display.len(),
+            font: Font {
+                family: font_family,
+                ..Font::default()
+            },
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }],
+    )
+}
+
+fn push_tooltip_run(
+    display: &mut String,
+    runs: &mut Vec<TextRun>,
+    text: &str,
+    font: Font,
+    color: Hsla,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    display.push_str(text);
+    runs.push(TextRun {
+        len: text.len(),
+        font,
+        color,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    });
+}
+
+#[derive(Clone, Copy)]
+enum Marker {
+    Code,
+    Bold,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CachedViewportLayout, EditorElement, TooltipLine, ViewportLayoutKeyInput,
+        ViewportTextStyleCacheKey, build_body_runs, preprocess_hover_text,
+    };
+    use crate::buffer::Position;
+    use crate::display_map::{ChunkHighlight, DisplayRowId, DisplayTextChunk};
+    use crate::{DisplayMap, HighlightKind, VisibleWrapLayout};
+    use gpui::{Font, FontWeight, SharedString, point, px, rgb};
+    use zqlz_ui::widgets::{
+        ThemeColor, ThemeMode,
+        highlighter::{HighlightTheme, HighlightThemeStyle, SyntaxColors, ThemeStyle},
+    };
+
+    fn test_viewport_text_style_key() -> ViewportTextStyleCacheKey {
+        ViewportTextStyleCacheKey {
+            font: Font::default(),
+            default_text_color: rgb(0xffffff).into(),
+            active_gutter_color: rgb(0xffffff).into(),
+            inactive_gutter_color: rgb(0x999999).into(),
+            keyword_color: rgb(0x569cd6).into(),
+            string_color: rgb(0xce9178).into(),
+            comment_color: rgb(0x6a9955).into(),
+            number_color: rgb(0xb5cea8).into(),
+            identifier_color: rgb(0xd4d4d4).into(),
+            operator_color: rgb(0xd4d4d4).into(),
+            function_color: rgb(0xdcdcaa).into(),
+            punctuation_color: rgb(0xd4d4d4).into(),
+            boolean_color: rgb(0x569cd6).into(),
+            null_color: rgb(0x569cd6).into(),
+            error_color: rgb(0xf44747).into(),
+        }
+    }
+
+    #[test]
+    fn visible_range_clamps_to_last_available_line() {
+        let visible = EditorElement::test_visible_range(5, px(20.0), px(45.0), 4.8);
+
+        assert_eq!(visible, 4..5);
+    }
+
+    #[test]
+    fn cursor_pixel_position_uses_gutter_and_visual_slot_offsets() {
+        let pixel_position = EditorElement::test_cursor_pixel_position(
+            Position::new(7, 4),
+            px(20.0),
+            px(10.0),
+            1.0,
+            px(32.0),
+            3,
+        );
+
+        assert_eq!(pixel_position, point(px(72.0), px(40.0)));
+    }
+
+    #[test]
+    fn preprocess_hover_text_collapses_blank_sections_and_titles() {
+        let lines = preprocess_hover_text("\n**SELECT**\n\nbody\n\n\n`sql`\n");
+
+        assert!(matches!(lines[0], TooltipLine::Title(ref title) if title == "SELECT"));
+        assert!(matches!(lines[1], TooltipLine::Blank));
+        assert!(matches!(lines[2], TooltipLine::Body(ref body) if body == "body"));
+        assert!(matches!(lines[3], TooltipLine::Blank));
+        assert!(matches!(lines[4], TooltipLine::Body(ref body) if body == "`sql`"));
+        assert_eq!(lines.len(), 5);
+    }
+
+    #[test]
+    fn preprocess_hover_text_treats_code_fences_as_code_block_lines() {
+        let lines = preprocess_hover_text("**Definition:**\n```sql\nSELECT *\nFROM users\n```\n");
+
+        assert!(matches!(lines[0], TooltipLine::Title(ref title) if title == "Definition:"));
+        assert!(matches!(lines[1], TooltipLine::Blank));
+        assert!(matches!(lines[2], TooltipLine::Code(ref line) if line == "SELECT *"));
+        assert!(matches!(lines[3], TooltipLine::Code(ref line) if line == "FROM users"));
+    }
+
+    #[test]
+    fn build_body_runs_splits_inline_code_and_bold_into_distinct_text_runs() {
+        let body_color = rgb(0xffffff).into();
+        let bold_color = rgb(0xffaa00).into();
+        let code_color = rgb(0x00ffff).into();
+        let (display, runs) = build_body_runs(
+            "before `code` **PK** after",
+            body_color,
+            bold_color,
+            code_color,
+        );
+
+        assert_eq!(display, SharedString::from("before code PK after"));
+        assert_eq!(runs.len(), 5);
+        assert_eq!(runs[0].len, 7);
+        assert_eq!(runs[0].color, body_color);
+        assert_eq!(runs[1].len, 4);
+        assert_eq!(runs[1].color, code_color);
+        assert_eq!(runs[2].len, 1);
+        assert_eq!(runs[2].color, body_color);
+        assert_eq!(runs[3].len, 2);
+        assert_eq!(runs[3].color, bold_color);
+        assert_eq!(runs[3].font.weight, FontWeight::BOLD);
+        assert_eq!(runs[4].len, 6);
+        assert_eq!(runs[4].color, body_color);
+    }
+
+    #[test]
+    fn resolve_highlight_color_falls_back_to_default_syntax_palette() {
+        let active_theme = HighlightTheme {
+            name: "Active".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle::default(),
+        };
+        let fallback_theme = HighlightTheme {
+            name: "Fallback".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                syntax: SyntaxColors {
+                    keyword: Some(ThemeStyle {
+                        color: Some(rgb(0x0433ff).into()),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+
+        assert_eq!(
+            EditorElement::resolve_highlight_color(
+                crate::HighlightKind::Keyword,
+                &active_theme,
+                &fallback_theme,
+                &ThemeColor::default(),
+                rgb(0x111111).into(),
+            ),
+            rgb(0x0433ff).into()
+        );
+    }
+
+    #[test]
+    fn generic_highlight_fallback_uses_palette_for_semantic_tokens() {
+        assert_eq!(
+            EditorElement::generic_highlight_fallback_color(
+                crate::HighlightKind::Keyword,
+                &ThemeColor::default(),
+                rgb(0x222222).into(),
+                rgb(0x333333).into(),
+            ),
+            rgb(0x333333).into()
+        );
+        assert_eq!(
+            EditorElement::generic_highlight_fallback_color(
+                crate::HighlightKind::Identifier,
+                &ThemeColor::default(),
+                rgb(0x222222).into(),
+                rgb(0x333333).into(),
+            ),
+            rgb(0x222222).into()
+        );
+    }
+
+    #[test]
+    fn resolve_highlight_color_avoids_monochrome_active_theme_slots() {
+        let foreground = rgb(0x111111).into();
+        let active_theme = HighlightTheme {
+            name: "Active".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                editor_foreground: Some(foreground),
+                syntax: SyntaxColors {
+                    keyword: Some(ThemeStyle {
+                        color: Some(foreground),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+        let fallback_theme = HighlightTheme {
+            name: "Fallback".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                syntax: SyntaxColors {
+                    keyword: Some(ThemeStyle {
+                        color: Some(rgb(0x0433ff).into()),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+
+        assert_eq!(
+            EditorElement::resolve_highlight_color(
+                crate::HighlightKind::Keyword,
+                &active_theme,
+                &fallback_theme,
+                &ThemeColor::default(),
+                foreground,
+            ),
+            rgb(0x0433ff).into()
+        );
+    }
+
+    #[test]
+    fn default_syntax_palette_colors_are_visibly_distinct() {
+        let theme = ThemeColor::light();
+        let colors = theme.as_ref();
+
+        assert_ne!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Keyword, colors),
+            colors.foreground
+        );
+        assert_ne!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Function, colors),
+            colors.foreground
+        );
+        assert_ne!(
+            EditorElement::default_syntax_palette_color(HighlightKind::String, colors),
+            colors.foreground
+        );
+        assert_ne!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Null, colors),
+            colors.foreground
+        );
+        assert_eq!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Comment, colors),
+            colors.muted_foreground
+        );
+        assert_eq!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Function, colors),
+            colors.cyan
+        );
+        assert_eq!(
+            EditorElement::default_syntax_palette_color(HighlightKind::Keyword, colors),
+            colors.blue
+        );
+    }
+
+    #[test]
+    fn editor_color_helpers_prefer_editor_theme_slots() {
+        let theme_colors = ThemeColor::default();
+        let highlight_theme = HighlightTheme {
+            name: "Active".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                editor_background: Some(rgb(0xf0f0f0).into()),
+                editor_foreground: Some(rgb(0x101010).into()),
+                editor_line_number: Some(rgb(0x777777).into()),
+                editor_active_line_number: Some(rgb(0x202020).into()),
+                editor_active_line: Some(rgb(0xe0e0e0).into()),
+                syntax: SyntaxColors::default(),
+                ..HighlightThemeStyle::default()
+            },
+        };
+
+        assert_eq!(
+            EditorElement::editor_background_color(&highlight_theme, &theme_colors),
+            rgb(0xf0f0f0).into()
+        );
+        assert_eq!(
+            EditorElement::editor_foreground_color(&highlight_theme, &theme_colors),
+            rgb(0x101010).into()
+        );
+        assert_eq!(
+            EditorElement::gutter_line_number_color(&highlight_theme, &theme_colors, false),
+            rgb(0x777777).into()
+        );
+        assert_eq!(
+            EditorElement::gutter_line_number_color(&highlight_theme, &theme_colors, true),
+            rgb(0x202020).into()
+        );
+        assert_eq!(
+            EditorElement::active_line_background_color(&highlight_theme, &theme_colors),
+            rgb(0xe0e0e0).into()
+        );
+    }
+
+    #[test]
+    fn chunk_text_runs_assigns_distinct_colors_for_sql_highlights() {
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: "SELECT * from web_html".to_string(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 8,
+                    kind: HighlightKind::Operator,
+                },
+                ChunkHighlight {
+                    start: 9,
+                    end: 13,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 14,
+                    end: 22,
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        let runs = EditorElement::chunk_text_runs(&chunk, &style);
+
+        assert!(runs.len() >= 4);
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            chunk.text.len()
+        );
+        assert_eq!(runs[0].color, style.keyword_color);
+        assert!(runs.iter().any(|run| run.color == style.operator_color));
+        assert!(runs.iter().any(|run| run.color == style.identifier_color));
+        assert!(runs.iter().any(|run| run.color != style.default_text_color));
+    }
+
+    #[test]
+    fn chunk_text_runs_clips_overlapping_highlights_to_valid_ranges() {
+        let text = "SELECT COUNT(*) FROM \"_database_functions\"".to_string();
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: text.clone(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Function,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 13,
+                    kind: HighlightKind::Identifier,
+                },
+                ChunkHighlight {
+                    start: 12,
+                    end: 15,
+                    kind: HighlightKind::Punctuation,
+                },
+                ChunkHighlight {
+                    start: 16,
+                    end: text.len(),
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 21,
+                    end: text.len(),
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        let runs = EditorElement::chunk_text_runs(&chunk, &style);
+
+        assert!(!runs.is_empty());
+        assert!(runs.iter().all(|run| run.len > 0));
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            chunk.text.len()
+        );
+        assert_eq!(runs[0].color, style.keyword_color);
+        assert!(runs.iter().any(|run| run.color == style.function_color));
+        assert!(runs.iter().any(|run| run.color == style.punctuation_color));
+        assert!(runs.iter().any(|run| run.color == style.identifier_color));
+    }
+
+    #[test]
+    fn viewport_layout_key_changes_only_when_layout_inputs_change() {
+        let bounds = gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(400.0), px(200.0)));
+        let style = test_viewport_text_style_key();
+        let base = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: style.clone(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+        let same = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: style.clone(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+        let resized = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: style,
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds: gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(500.0), px(200.0))),
+            soft_wrap: true,
+        });
+
+        assert_eq!(base, same);
+        assert_ne!(base, resized);
+    }
+
+    #[test]
+    fn viewport_layout_key_tracks_style_and_cursor_inputs() {
+        let bounds = gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(400.0), px(200.0)));
+        let base = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: test_viewport_text_style_key(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+        let relative = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: true,
+            cursor_line: 3,
+            text_style: test_viewport_text_style_key(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+        let moved_cursor = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 4,
+            text_style: test_viewport_text_style_key(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+
+        assert_ne!(base, relative);
+        assert_ne!(base, moved_cursor);
+    }
+
+    #[test]
+    fn viewport_layout_key_tracks_syntax_generation() {
+        let bounds = gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(400.0), px(200.0)));
+        let base = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 1,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: test_viewport_text_style_key(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+        let updated_syntax = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
+            revision: 7,
+            syntax_generation: 2,
+            visible_rows: 2..6,
+            relative_line_numbers: false,
+            cursor_line: 3,
+            text_style: test_viewport_text_style_key(),
+            scroll_offset: 1.5,
+            line_height: px(20.0),
+            font_size: px(14.0),
+            gutter_width: px(32.0),
+            char_width: px(10.0),
+            bounds,
+            soft_wrap: true,
+        });
+
+        assert_ne!(base, updated_syntax);
+    }
+
+    #[test]
+    fn cached_viewport_layout_can_carry_measured_wrap_layout() {
+        let viewport = DisplayMap::from_display_lines(vec![0])
+            .snapshot(
+                crate::buffer::TextBuffer::new("abcdefghij").snapshot(),
+                &[],
+                &std::collections::HashSet::new(),
+                true,
+                std::sync::Arc::new(Vec::new()),
+                &[],
+                std::sync::Arc::new(Vec::new()),
+                &[],
+            )
+            .viewport(0..1);
+        let cache = CachedViewportLayout {
+            shaped_lines: Vec::new(),
+            wrapped_shaped_lines: None,
+            gutter_lines: Vec::new(),
+            viewport,
+            wrap_layout: Some(VisibleWrapLayout::new(0..1, vec![3], 4, 0.0, px(20.0))),
+        };
+
+        assert_eq!(
+            cache
+                .wrap_layout
+                .expect("wrap layout")
+                .visual_rows()
+                .as_ref(),
+            &vec![3]
+        );
+    }
 }

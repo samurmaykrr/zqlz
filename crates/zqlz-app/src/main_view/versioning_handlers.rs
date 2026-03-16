@@ -322,49 +322,4 @@ impl MainView {
 
         name_input_focus.focus_handle(cx).focus(window, cx);
     }
-
-    /// Save the current content of a database object as a new version.
-    ///
-    /// This is called when saving a view, function, procedure, or trigger.
-    pub fn save_object_version(
-        &mut self,
-        connection_id: Uuid,
-        object_type: DatabaseObjectType,
-        object_schema: Option<String>,
-        object_name: String,
-        content: String,
-        message: String,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let repository = self.version_repository.clone();
-
-        match repository.commit(
-            connection_id,
-            object_type,
-            object_schema,
-            object_name.clone(),
-            content,
-            message,
-        ) {
-            Ok(version) => {
-                tracing::info!(
-                    "Saved version {} for {} ({})",
-                    version.short_id(),
-                    object_name,
-                    version.object_id
-                );
-
-                // Refresh the version history panel if it's open for this object
-                if let Some(panel) = &self.version_history_panel {
-                    panel.update(cx, |panel, cx| {
-                        panel.refresh(cx);
-                    });
-                }
-            }
-            Err(e) => {
-                tracing::error!("Failed to save version: {}", e);
-            }
-        }
-    }
 }

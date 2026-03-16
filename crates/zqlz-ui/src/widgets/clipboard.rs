@@ -10,13 +10,16 @@ use crate::widgets::{
     button::{Button, ButtonVariants as _},
 };
 
+type ClipboardValueFn = Rc<dyn Fn(&mut Window, &mut App) -> SharedString>;
+type ClipboardCopiedHandler = Rc<dyn Fn(SharedString, &mut Window, &mut App)>;
+
 /// An element that provides clipboard copy functionality.
 #[derive(IntoElement)]
 pub struct Clipboard {
     id: ElementId,
     value: SharedString,
-    value_fn: Option<Rc<dyn Fn(&mut Window, &mut App) -> SharedString>>,
-    on_copied: Option<Rc<dyn Fn(SharedString, &mut Window, &mut App)>>,
+    value_fn: Option<ClipboardValueFn>,
+    on_copied: Option<ClipboardCopiedHandler>,
 }
 
 impl Clipboard {
@@ -93,7 +96,7 @@ impl RenderOnce for Clipboard {
                         let state = state.clone();
                         cx.spawn(async move |cx| {
                             cx.background_executor().timer(Duration::from_secs(2)).await;
-                            _ = state.update(cx, |state, cx| {
+                            state.update(cx, |state, cx| {
                                 state.copied = false;
                                 cx.notify();
                             });

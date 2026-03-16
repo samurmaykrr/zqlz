@@ -4,7 +4,7 @@
 
 use crate::{
     AiProvider, CursorBlink, CursorShape, InlineSuggestionProvider, ScrollBeyondLastLine,
-    ScrollbarVisibility, SearchWrap, SqlDialect, ThemeModePreference, ZqlzSettings,
+    ScrollbarVisibility, SearchWrap, ThemeModePreference, ZqlzSettings,
 };
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -95,25 +95,6 @@ impl SelectItem for FontItem {
 
     fn value(&self) -> &Self::Value {
         &self.name
-    }
-}
-
-/// A custom select item for SQL dialect selection
-#[derive(Clone, Debug)]
-struct SqlDialectItem {
-    value: SqlDialect,
-    label: SharedString,
-}
-
-impl SelectItem for SqlDialectItem {
-    type Value = SqlDialect;
-
-    fn title(&self) -> SharedString {
-        self.label.clone()
-    }
-
-    fn value(&self) -> &Self::Value {
-        &self.value
     }
 }
 
@@ -321,9 +302,6 @@ pub struct SettingsPanel {
     // Search behavior settings
     search_wrap_state: Entity<SelectState<SearchableVec<SearchWrapItem>>>,
 
-    // Syntax highlighting settings
-    sql_dialect_state: Entity<SelectState<SearchableVec<SqlDialectItem>>>,
-
     // Inline suggestion settings
     inline_suggestions_provider_state:
         Entity<SelectState<SearchableVec<InlineSuggestionProviderItem>>>,
@@ -361,7 +339,6 @@ impl SettingsPanel {
             tab_size,
             ui_font_family,
             editor_font_family,
-            sql_dialect,
             inline_suggestions_provider,
             inline_suggestions_delay_ms,
             ai_provider,
@@ -395,7 +372,6 @@ impl SettingsPanel {
                 settings.editor.tab_size,
                 settings.fonts.ui_font_family.clone(),
                 settings.fonts.editor_font_family.clone(),
-                settings.editor.sql_dialect,
                 settings.editor.inline_suggestions_provider,
                 settings.editor.inline_suggestions_delay_ms,
                 settings.editor.ai_provider,
@@ -667,26 +643,6 @@ impl SettingsPanel {
             )
         });
 
-        // Create SQL dialect select
-        let sql_dialect_items: Vec<SqlDialectItem> = SqlDialect::all()
-            .iter()
-            .map(|d| SqlDialectItem {
-                value: *d,
-                label: d.display_name().into(),
-            })
-            .collect();
-        let sql_dialect_index = sql_dialect_items
-            .iter()
-            .position(|item| item.value == sql_dialect);
-        let sql_dialect_state = cx.new(|cx| {
-            SelectState::new(
-                SearchableVec::new(sql_dialect_items),
-                sql_dialect_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
-                window,
-                cx,
-            )
-        });
-
         // Create inline suggestions provider select
         let provider_items: Vec<InlineSuggestionProviderItem> = InlineSuggestionProvider::all()
             .iter()
@@ -913,18 +869,6 @@ impl SettingsPanel {
         ));
 
         subscriptions.push(cx.subscribe(
-            &sql_dialect_state,
-            |this, _, event: &SelectEvent<SearchableVec<SqlDialectItem>>, cx| {
-                if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.sql_dialect = *value;
-                    cx.notify();
-                    this.emit_changed(cx);
-                }
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
             &inline_suggestions_provider_state,
             |this, _, event: &SelectEvent<SearchableVec<InlineSuggestionProviderItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
@@ -970,11 +914,7 @@ impl SettingsPanel {
                         api_key.unmask_value()
                     };
                     let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.ai_api_key = if value.is_empty() {
-                        None
-                    } else {
-                        Some(value.into())
-                    };
+                    settings.editor.ai_api_key = if value.is_empty() { None } else { Some(value) };
                     cx.notify();
                     this.emit_changed(cx);
                 }
@@ -1090,7 +1030,6 @@ impl SettingsPanel {
             scroll_sensitivity_state,
             // Search behavior settings
             search_wrap_state,
-            sql_dialect_state,
             inline_suggestions_provider_state,
             inline_suggestions_delay_state,
             _ai_provider_state: ai_provider_state,
@@ -1404,17 +1343,6 @@ impl SettingsPanel {
                 cx,
             ))
             .child(self.render_toggle_row(
-                "vim-mode",
-                "Vim Mode",
-                Some("Enable Vim keybindings and editing mode"),
-                settings.editor.vim_mode_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.vim_mode_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
                 "highlight-enabled",
                 "Syntax Highlighting",
                 Some("Enable SQL syntax highlighting"),
@@ -1633,12 +1561,6 @@ impl SettingsPanel {
                 "API Key",
                 Some("API key for AI provider (leave empty to use default)"),
                 Input::new(&self.ai_api_key_state).mask_toggle().small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "SQL Dialect",
-                Some("SQL dialect for syntax highlighting"),
-                Select::new(&self.sql_dialect_state).small(),
                 cx,
             ))
             // Display settings subsection

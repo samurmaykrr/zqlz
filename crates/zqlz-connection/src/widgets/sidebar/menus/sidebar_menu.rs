@@ -27,46 +27,51 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.set_selected(None, cx);
+
         if self.sidebar_context_menu.is_none() {
             self.sidebar_context_menu = Some(ContextMenuState::new(window, cx));
         }
 
         let sidebar_weak = cx.entity().downgrade();
         let has_connected = self.connections.iter().any(|c| c.is_connected);
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.sidebar_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.item(PopupMenuItem::new("New Connection").on_click({
-                        let sidebar = sidebar_weak.clone();
-                        move |_event, _window, cx| {
-                            _ = sidebar.update(cx, |_sidebar, cx| {
-                                cx.emit(ConnectionSidebarEvent::AddConnection);
-                            });
-                        }
-                    }))
-                    .item(
-                        PopupMenuItem::new("Close All Connections")
-                            .disabled(!has_connected)
-                            .on_click({
-                                let sidebar = sidebar_weak.clone();
-                                move |_event, _window, cx| {
-                                    _ = sidebar.update(cx, |_sidebar, cx| {
-                                        cx.emit(ConnectionSidebarEvent::CloseAllConnections);
-                                    });
-                                }
-                            }),
-                    )
-                    .separator()
-                    .item(PopupMenuItem::new("Refresh").on_click({
-                        let sidebar = sidebar_weak.clone();
-                        move |_event, _window, cx| {
-                            _ = sidebar.update(cx, |_sidebar, cx| {
-                                cx.emit(ConnectionSidebarEvent::RefreshConnections);
-                            });
-                        }
-                    }))
+                    menu.action_context(action_context.clone())
+                        .item(PopupMenuItem::new("New Connection").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::AddConnection);
+                                });
+                            }
+                        }))
+                        .item(
+                            PopupMenuItem::new("Close All Connections")
+                                .disabled(!has_connected)
+                                .on_click({
+                                    let sidebar = sidebar_weak.clone();
+                                    move |_event, _window, cx| {
+                                        _ = sidebar.update(cx, |_sidebar, cx| {
+                                            cx.emit(ConnectionSidebarEvent::CloseAllConnections);
+                                        });
+                                    }
+                                }),
+                        )
+                        .separator()
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshConnections);
+                                });
+                            }
+                        }))
                 });
 
                 let menu_entity = new_menu.clone();
@@ -76,7 +81,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

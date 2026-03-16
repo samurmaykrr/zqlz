@@ -221,17 +221,22 @@ impl SchemaDetailsPanel {
                             .when(details.create_statement.is_some(), |this| {
                                 let create_statement =
                                     details.create_statement.clone().unwrap_or_default();
+                                let object_type = details.object_type.clone();
                                 this.child(
                                     Button::new("copy-create-statement")
                                         .secondary_primary()
                                         .small()
-                                        .label("Copy CREATE TABLE")
+                                        .label(format!(
+                                            "Copy CREATE {}",
+                                            object_type.to_uppercase()
+                                        ))
                                         .on_click(cx.listener(move |_this, _, _window, cx| {
                                             cx.write_to_clipboard(ClipboardItem::new_string(
                                                 create_statement.clone(),
                                             ));
                                             tracing::info!(
-                                                "Copied CREATE TABLE statement to clipboard"
+                                                object_type = %object_type,
+                                                "Copied CREATE statement to clipboard"
                                             );
                                         })),
                                 )

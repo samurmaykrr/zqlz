@@ -1,5 +1,6 @@
+use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_ui::widgets::v_flex;
+use zqlz_ui::widgets::{ActiveTheme, v_flex};
 
 use crate::panel::TableDesignerPanel;
 
@@ -10,6 +11,7 @@ pub(in crate::panel) fn render_fields_tab(
     cx: &mut Context<TableDesignerPanel>,
 ) -> impl IntoElement {
     let selected_column_index = this.selected_column_index;
+    let has_columns = !this.design.columns.is_empty();
 
     // First, collect all data we need - fully owned, no borrows of self remaining
     let column_data: Vec<_> = this
@@ -85,7 +87,28 @@ pub(in crate::panel) fn render_fields_tab(
                 .w_full()
                 .p_2()
                 .child(header)
-                .children(column_row_elements),
+                .children(column_row_elements)
+                .when(!has_columns, |this| {
+                    this.child(
+                        v_flex()
+                            .w_full()
+                            .py_10()
+                            .items_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("No columns yet. Click + to add your first column."),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child("Use Cmd/Ctrl+S to save once the table is valid."),
+                            ),
+                    )
+                }),
         ),
     )
 }

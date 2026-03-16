@@ -130,7 +130,7 @@ impl TableViewerDelegate {
         cx.notify();
     }
 
-    pub(super) fn apply_value_to_cells(
+    pub(crate) fn apply_value_to_cells(
         &mut self,
         cells: &[zqlz_ui::widgets::table::CellPosition],
         new_value_str: &str,

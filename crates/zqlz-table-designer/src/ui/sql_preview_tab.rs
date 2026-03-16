@@ -1,5 +1,9 @@
 use gpui::*;
-use zqlz_ui::widgets::{ActiveTheme, Sizable, button::Button, h_flex, v_flex};
+use zqlz_ui::widgets::{
+    ActiveTheme, Sizable,
+    button::{Button, ButtonVariants},
+    h_flex, v_flex,
+};
 
 use crate::panel::TableDesignerPanel;
 
@@ -190,6 +194,7 @@ pub(in crate::panel) fn render_sql_preview_tab(
         .child(
             h_flex().justify_end().pt_2().child(
                 Button::new("copy-ddl")
+                    .secondary()
                     .label("Copy to Clipboard")
                     .small()
                     .on_click(cx.listener(|this, _, _window, cx| {

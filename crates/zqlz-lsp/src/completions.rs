@@ -61,6 +61,12 @@ impl CompletionProvider for SqlCompletionProvider {
     ) -> bool {
         tracing::debug!("is_completion_trigger called with: '{}'", new_text);
 
+        if self.lsp.read().dialect == crate::SqlDialect::Redis
+            && (new_text == " " || new_text == "\n")
+        {
+            return true;
+        }
+
         // Single character handling
         if new_text.len() == 1 {
             let Some(ch) = new_text.chars().next() else {

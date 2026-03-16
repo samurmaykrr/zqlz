@@ -129,7 +129,7 @@ impl BookmarkStorage {
              FROM bookmarks WHERE id = ?1",
         )?;
 
-        let result = stmt.query_row(params![id.to_string()], |row| Self::row_to_bookmark(row));
+        let result = stmt.query_row(params![id.to_string()], Self::row_to_bookmark);
 
         match result {
             Ok(bookmark) => Ok(Some(bookmark)),
@@ -145,7 +145,7 @@ impl BookmarkStorage {
              FROM bookmarks ORDER BY updated_at DESC",
         )?;
 
-        let rows = stmt.query_map([], |row| Self::row_to_bookmark(row))?;
+        let rows = stmt.query_map([], Self::row_to_bookmark)?;
         rows.collect()
     }
 
@@ -157,7 +157,7 @@ impl BookmarkStorage {
              FROM bookmarks WHERE name LIKE ?1 OR query LIKE ?1 ORDER BY updated_at DESC",
         )?;
 
-        let rows = stmt.query_map(params![pattern], |row| Self::row_to_bookmark(row))?;
+        let rows = stmt.query_map(params![pattern], Self::row_to_bookmark)?;
         rows.collect()
     }
 

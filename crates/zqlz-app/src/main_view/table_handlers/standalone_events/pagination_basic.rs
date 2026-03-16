@@ -14,7 +14,10 @@ use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 
-use super::pagination_helpers::{reload_table_reversed, reload_table_with_pagination};
+use super::pagination_helpers::{
+    PaginationReloadRequest, ReversedPaginationRequest, reload_table_reversed,
+    reload_table_with_pagination,
+};
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| {
@@ -73,10 +76,8 @@ pub(in crate::main_view) fn handle_page_changed_event(
     // Determine whether this page is "near the end" and should use a reversed
     // query. Criteria: we know the total, offset is past the midpoint, and we
     // have PK columns to build a reversed ORDER BY.
-    let use_reversed = match cached_total {
-        Some(total) if !pk_columns.is_empty() && offset as u64 > total / 2 => true,
-        _ => false,
-    };
+    let use_reversed =
+        matches!(cached_total, Some(total) if !pk_columns.is_empty() && offset as u64 > total / 2);
 
     if use_reversed {
         let Some(total) = cached_total else {
@@ -87,12 +88,14 @@ pub(in crate::main_view) fn handle_page_changed_event(
                 limit
             );
             reload_table_with_pagination(
-                connection_id,
-                table_name,
-                Some(limit),
-                Some(offset),
-                cached_total,
-                None,
+                PaginationReloadRequest {
+                    connection_id,
+                    table_name: table_name.to_string(),
+                    limit: Some(limit),
+                    offset: Some(offset),
+                    cached_total,
+                    request_generation: None,
+                },
                 viewer_entity,
                 window,
                 cx,
@@ -101,26 +104,30 @@ pub(in crate::main_view) fn handle_page_changed_event(
         };
 
         reload_table_reversed(
-            connection_id,
-            table_name,
-            limit,
-            offset,
-            total,
-            cached_is_estimated,
-            pk_columns,
-            None,
+            ReversedPaginationRequest {
+                connection_id,
+                table_name: table_name.to_string(),
+                limit,
+                offset,
+                total_rows: total,
+                is_estimated: cached_is_estimated,
+                pk_columns,
+                request_generation: None,
+            },
             viewer_entity,
             window,
             cx,
         );
     } else {
         reload_table_with_pagination(
-            connection_id,
-            table_name,
-            Some(limit),
-            Some(offset),
-            cached_total,
-            None,
+            PaginationReloadRequest {
+                connection_id,
+                table_name: table_name.to_string(),
+                limit: Some(limit),
+                offset: Some(offset),
+                cached_total,
+                request_generation: None,
+            },
             viewer_entity,
             window,
             cx,
@@ -266,8 +273,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                     .await
                 {
                     Ok(total) => {
-                        let last_page =
-                            ((total as usize) + records_per_page - 1) / records_per_page;
+                        let last_page = (total as usize).div_ceil(records_per_page);
                         let last_page = last_page.max(1);
                         let offset = (last_page - 1) * records_per_page;
 
@@ -279,7 +285,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                         );
 
                         // Update pagination, then reload with the computed offset
-                        _ = viewer_entity.update(cx, |viewer, cx| {
+                        viewer_entity.update(cx, |viewer, cx| {
                             if !viewer.is_current_request(request_generation) {
                                 return;
                             }
@@ -295,12 +301,14 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
 
                         _ = cx.update(|window, cx| {
                             reload_table_with_pagination(
-                                connection_id,
-                                &table_name,
-                                Some(records_per_page),
-                                Some(offset),
-                                Some(total),
-                                Some(request_generation),
+                                PaginationReloadRequest {
+                                    connection_id,
+                                    table_name: table_name.clone(),
+                                    limit: Some(records_per_page),
+                                    offset: Some(offset),
+                                    cached_total: Some(total),
+                                    request_generation: Some(request_generation),
+                                },
                                 viewer_entity.clone(),
                                 window,
                                 cx,
@@ -309,7 +317,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                     }
                     Err(e) => {
                         tracing::error!("On-demand COUNT(*) failed: {}", e);
-                        _ = viewer_entity.update(cx, |viewer, cx| {
+                        viewer_entity.update(cx, |viewer, cx| {
                             if viewer.is_current_request(request_generation) {
                                 viewer.set_loading(false, cx);
                                 if let Some(pag_state) = &viewer.pagination_state {
@@ -342,19 +350,21 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                 match table_service
                     .browse_last_page(
                         connection,
-                        &table_name,
-                        schema_qualifier.as_deref(),
-                        where_clauses,
-                        order_by_clauses,
-                        visible_columns,
-                        records_per_page,
-                        pk_columns,
+                        zqlz_services::BrowseLastPageRequest {
+                            table_name: &table_name,
+                            schema: schema_qualifier.as_deref(),
+                            where_clauses,
+                            order_by_clauses,
+                            visible_columns,
+                            limit: records_per_page,
+                            pk_columns,
+                        },
                     )
                     .await
                 {
                     Ok(result) => {
                         let total = result.total_rows.unwrap_or(0);
-                        let last_page = ((total as usize) + records_per_page - 1) / records_per_page;
+                        let last_page = (total as usize).div_ceil(records_per_page);
                         let last_page = last_page.max(1);
                         let rows_loaded = result.rows.len();
                         let total_records = result.total_rows;
@@ -366,7 +376,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                             last_page
                         );
 
-                        _ = viewer_entity.update_in(cx, |viewer, window, cx| {
+                        if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                             if !viewer.is_current_request(request_generation) {
                                 tracing::debug!(
                                     "Discarding stale last-page result for '{}' (generation={}, current={})",
@@ -396,11 +406,13 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                                     state.update_after_load(rows_loaded, total_records, false, cx);
                                 });
                             }
-                        });
+                        }) {
+                            tracing::debug!(error = %error, "Last-page result arrived after viewer dropped");
+                        }
                     }
                     Err(e) => {
                         tracing::error!("Last-page concurrent fetch failed: {}", e);
-                        _ = viewer_entity.update(cx, |viewer, cx| {
+                        viewer_entity.update(cx, |viewer, cx| {
                             if viewer.is_current_request(request_generation) {
                                 viewer.set_loading(false, cx);
                                 if let Some(pag_state) = &viewer.pagination_state {
@@ -441,12 +453,14 @@ pub(in crate::main_view) fn handle_limit_changed_event(
 
     // When limit changes, reset to page 1 (offset 0)
     reload_table_with_pagination(
-        connection_id,
-        table_name,
-        Some(limit),
-        Some(0),
-        cached_total,
-        None,
+        PaginationReloadRequest {
+            connection_id,
+            table_name: table_name.to_string(),
+            limit: Some(limit),
+            offset: Some(0),
+            cached_total,
+            request_generation: None,
+        },
         viewer_entity,
         window,
         cx,
@@ -479,12 +493,14 @@ pub(in crate::main_view) fn handle_limit_enabled_changed_event(
     if enabled {
         // Re-enable pagination with default limit
         reload_table_with_pagination(
-            connection_id,
-            table_name,
-            Some(1000), // Default limit
-            Some(0),    // Start from beginning
-            cached_total,
-            None,
+            PaginationReloadRequest {
+                connection_id,
+                table_name: table_name.to_string(),
+                limit: Some(1000),
+                offset: Some(0),
+                cached_total,
+                request_generation: None,
+            },
             viewer_entity,
             window,
             cx,
@@ -492,12 +508,14 @@ pub(in crate::main_view) fn handle_limit_enabled_changed_event(
     } else {
         // Disable pagination - load all rows
         reload_table_with_pagination(
-            connection_id,
-            table_name,
-            None, // No limit
-            None, // No offset
-            cached_total,
-            None,
+            PaginationReloadRequest {
+                connection_id,
+                table_name: table_name.to_string(),
+                limit: None,
+                offset: None,
+                cached_total,
+                request_generation: None,
+            },
             viewer_entity,
             window,
             cx,

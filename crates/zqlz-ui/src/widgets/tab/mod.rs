@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 mod tab;
 mod tab_bar;
 

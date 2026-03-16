@@ -6,5 +6,6 @@ mod sidebar;
 
 pub use sidebar::{
     ActivateConnection, ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent,
-    DeleteSelectedConnection, SavedQueryInfo, ShowContextMenu,
+    DeleteSelectedConnection, SavedQueryInfo, SchemaObjects, ShowContextMenu,
+    SidebarObjectCapabilities,
 };

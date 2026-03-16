@@ -191,7 +191,7 @@ impl InputState {
             )
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        _ = menu.update(cx, |menu, _| {
+        menu.update(cx, |menu, _| {
             menu.update_query(start_offset, query.clone());
         });
 
@@ -204,7 +204,7 @@ impl InputState {
             provider.completions(&self.text, new_offset, completion_context, window, cx);
         self._context_menu_task = cx.spawn_in(window, async move |editor, cx| {
             let mut completions: Vec<CompletionItem> = vec![];
-            if let Some(provider_responses) = provider_responses.await.ok() {
+            if let Ok(provider_responses) = provider_responses.await {
                 match provider_responses {
                     CompletionResponse::Array(items) => completions.extend(items),
                     CompletionResponse::List(list) => completions.extend(list.items),
@@ -212,7 +212,7 @@ impl InputState {
             }
 
             if completions.is_empty() {
-                _ = menu.update(cx, |menu, cx| {
+                menu.update(cx, |menu, cx| {
                     menu.hide(cx);
                     cx.notify();
                 });
@@ -226,7 +226,7 @@ impl InputState {
                         return;
                     }
 
-                    _ = menu.update(cx, |menu, cx| {
+                    menu.update(cx, |menu, cx| {
                         menu.show(new_offset, completions, window, cx);
                     });
 

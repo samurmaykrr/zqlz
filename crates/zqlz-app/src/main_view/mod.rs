@@ -46,16 +46,14 @@ mod refresh;
 mod rename_window;
 mod saved_query_handlers;
 mod tab_menu;
-mod table_handlers;
+pub(crate) mod table_handlers;
 mod table_handlers_utils;
 mod ui_components;
 mod versioning_handlers;
 mod view_handlers;
 use gpui::*;
-use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::QueryCancelHandle;
 use zqlz_settings::{ThemeModePreference, WorkspaceId, ZqlzSettings, load_layout, save_layout};
 use zqlz_ui::widgets::{
     dock::{DockArea, DockAreaState, DockEvent, DockItem, DockPlacement, PanelStyle, PanelView},
@@ -71,8 +69,7 @@ use crate::components::{
     CellEditorPanel, CommandPalette, ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent,
     InspectorPanel, KeyValueEditorEvent, KeyValueEditorPanel, ObjectsPanel, ObjectsPanelEvent,
     ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryHistoryPanel,
-    QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent, SchemaDetailsPanel,
-    SettingsPanel,
+    ResultsPanel, ResultsPanelEvent, SchemaDetailsPanel, SettingsPanel,
 };
 use crate::workspace_state::{
     DiagnosticSeverity, EditorDiagnostic, WorkspaceState, WorkspaceStateEvent,
@@ -111,7 +108,6 @@ pub struct MainView {
     workspace_state: Entity<WorkspaceState>,
     dock_area: Entity<DockArea>,
     connection_sidebar: Entity<ConnectionSidebar>,
-    query_tabs_panel: Entity<QueryTabsPanel>,
     query_counter: usize,
     #[allow(dead_code)]
     results_panel: Entity<ResultsPanel>,
@@ -137,15 +133,6 @@ pub struct MainView {
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_closing: bool,
     _command_palette_subscription: Option<Subscription>,
-    /// DEPRECATED: Use workspace_state for query tracking instead
-    /// Running query tasks, keyed by editor index. Dropping a task cancels it.
-    /// NOTE: Kept for QueryTabsPanel editors until they're fully migrated to WorkspaceState.
-    running_query_tasks: HashMap<usize, Task<()>>,
-    /// DEPRECATED: Use workspace_state for cancel handles instead
-    /// Cancel handles for running queries, keyed by editor index.
-    /// Used to interrupt the actual database query (not just drop the task).
-    /// NOTE: Kept for QueryTabsPanel editors until they're fully migrated to WorkspaceState.
-    query_cancel_handles: HashMap<usize, Arc<dyn QueryCancelHandle>>,
     /// Version repository for database object version control
     version_repository: Arc<VersionRepository>,
     /// Version history panel (opened on demand)
@@ -190,20 +177,12 @@ impl MainView {
             }
             sidebar
         });
-        let query_tabs_panel = cx.new(|cx| {
-            let mut panel = QueryTabsPanel::new(cx);
-            // Set schema service from AppState
-            if let Some(app_state) = cx.try_global::<AppState>() {
-                panel.set_schema_service(app_state.schema_service.clone());
-            }
-            panel
-        });
-        let results_panel = cx.new(|cx| ResultsPanel::new(cx));
+        let results_panel = cx.new(ResultsPanel::new);
         let problems_panel = cx.new(|cx| ProblemsPanel::new(window, cx));
-        let schema_details_panel = cx.new(|cx| SchemaDetailsPanel::new(cx));
+        let schema_details_panel = cx.new(SchemaDetailsPanel::new);
         let cell_editor_panel = cx.new(|cx| CellEditorPanel::new(window, cx));
         let key_value_editor_panel = cx.new(|cx| KeyValueEditorPanel::new(window, cx));
-        let query_history_panel = cx.new(|cx| QueryHistoryPanel::new(cx));
+        let query_history_panel = cx.new(|cx| QueryHistoryPanel::new(window, cx));
         // TODO: Re-enable when ready
         // let template_library_panel = cx.new(|cx| TemplateLibraryPanel::new(window, cx));
         // let project_manager_panel = cx.new(|cx| ProjectManagerPanel::new(window, cx));
@@ -294,19 +273,6 @@ impl MainView {
             }
         });
 
-        let query_tabs_subscription = cx.subscribe_in(&query_tabs_panel, window, {
-            let results_panel = results_panel.clone();
-            move |this, panel, event: &QueryTabsPanelEvent, window, cx| {
-                this.handle_query_tabs_event(
-                    event.clone(),
-                    panel.clone(),
-                    results_panel.clone(),
-                    window,
-                    cx,
-                );
-            }
-        });
-
         let results_panel_subscription = cx.subscribe_in(&results_panel, window, {
             move |this, _panel, event: &ResultsPanelEvent, window, cx| {
                 this.handle_results_panel_event(event.clone(), window, cx);
@@ -315,14 +281,13 @@ impl MainView {
 
         let dock_subscription = cx.subscribe_in(&dock_area, window, {
             let dock_area = dock_area.downgrade();
-            move |this, _dock_area, event: &DockEvent, _window, cx| match event {
-                DockEvent::LayoutChanged => {
+            move |this, _dock_area, event: &DockEvent, _window, cx| {
+                if let DockEvent::LayoutChanged = event {
                     tracing::debug!("Dock layout changed, saving layout...");
                     if let Some(dock_area) = dock_area.upgrade() {
                         this.save_dock_layout(&dock_area, cx);
                     }
                 }
-                _ => {}
             }
         });
 
@@ -405,12 +370,11 @@ impl MainView {
             cx.notify();
         });
 
-        Self {
+        let main_view = Self {
             focus_handle: cx.focus_handle(),
             workspace_state,
             dock_area,
             connection_sidebar,
-            query_tabs_panel,
             query_counter: 0,
             results_panel,
             problems_panel,
@@ -428,15 +392,12 @@ impl MainView {
             command_palette: None,
             command_palette_closing: false,
             _command_palette_subscription: None,
-            running_query_tasks: HashMap::new(),
-            query_cancel_handles: HashMap::new(),
             version_repository,
             version_history_panel: None,
             diff_viewer_panel: None,
             active_table_load_task: None,
             _subscriptions: vec![
                 sidebar_subscription,
-                query_tabs_subscription,
                 results_panel_subscription,
                 dock_subscription,
                 cell_editor_subscription,
@@ -453,7 +414,11 @@ impl MainView {
             .into_iter()
             .chain(tab_menu_subscription)
             .collect(),
-        }
+        };
+
+        main_view.refresh_query_history(cx);
+
+        main_view
     }
 
     /// Save the current dock layout to disk
@@ -700,24 +665,19 @@ impl MainView {
                     end_column
                 );
 
-                // Navigate using the most recent query editor (the active one)
-                if let Some(editor_weak) = self.query_editors.last() {
-                    if let Some(editor) = editor_weak.upgrade() {
-                        // Focus the editor and navigate to the problem location
-                        let focus_handle = editor.read(cx).editor_focus_handle(cx);
-                        focus_handle.focus(window, cx);
+                if let Some(editor) = self.active_query_editor(cx) {
+                    let focus_handle = editor.read(cx).editor_focus_handle(cx);
+                    focus_handle.focus(window, cx);
 
-                        // Navigate to the problem position
-                        editor.update(cx, |editor, cx| {
-                            editor.navigate_to(*line, *column, *end_line, *end_column, window, cx);
-                        });
+                    editor.update(cx, |editor, cx| {
+                        editor.navigate_to(*line, *column, *end_line, *end_column, window, cx);
+                    });
 
-                        tracing::debug!(
-                            "MainView: navigated to problem at line {}, column {}",
-                            line,
-                            column
-                        );
-                    }
+                    tracing::debug!(
+                        "MainView: navigated to problem at line {}, column {}",
+                        line,
+                        column
+                    );
                 } else {
                     tracing::warn!("MainView: no query editor available for navigation");
                 }
@@ -751,14 +711,22 @@ impl Render for MainView {
             .on_action(cx.listener(Self::handle_quit))
             .on_action(cx.listener(Self::handle_new_query))
             .on_action(cx.listener(Self::handle_new_connection))
+            .on_action(cx.listener(Self::handle_refresh_connection))
             .on_action(cx.listener(Self::handle_refresh_connections_list))
             .on_action(cx.listener(Self::handle_execute_query))
             .on_action(cx.listener(Self::handle_execute_selection))
+            .on_action(cx.listener(Self::handle_execute_current_statement))
+            .on_action(cx.listener(Self::handle_explain_query))
+            .on_action(cx.listener(Self::handle_explain_selection))
             .on_action(cx.listener(Self::handle_stop_query))
+            .on_action(cx.listener(Self::handle_save_query_as))
             .on_action(cx.listener(Self::handle_refresh))
             .on_action(cx.listener(Self::handle_toggle_left_sidebar))
             .on_action(cx.listener(Self::handle_toggle_right_sidebar))
             .on_action(cx.listener(Self::handle_toggle_bottom_panel))
+            .on_action(cx.listener(Self::handle_focus_editor))
+            .on_action(cx.listener(Self::handle_focus_results))
+            .on_action(cx.listener(Self::handle_focus_sidebar))
             .on_action(cx.listener(Self::handle_toggle_problems_panel))
             .on_action(cx.listener(Self::handle_open_command_palette))
             // Tab navigation actions

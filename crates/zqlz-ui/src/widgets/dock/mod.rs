@@ -1,3 +1,4 @@
+#[allow(clippy::module_inception)]
 mod dock;
 mod invalid_panel;
 mod panel;
@@ -389,7 +390,7 @@ impl DockItem {
             Self::Tabs { items, .. } => items.iter().find(|item| *item == &panel).cloned(),
             Self::Panel { view, .. } => Some(view.clone()),
             Self::Tiles { items, .. } => items.iter().find_map(|item| {
-                if &item.panel == &panel {
+                if item.panel == panel.clone() {
                     Some(item.panel.clone())
                 } else {
                     None
@@ -416,7 +417,7 @@ impl DockItem {
             }
             Self::Split { view, items, .. } => {
                 // Iter items to add panel to the first tabs
-                for item in items.into_iter() {
+                for item in items.iter_mut() {
                     if let DockItem::Tabs { view, .. } = item {
                         view.update(cx, |tab_panel, cx| {
                             tab_panel.add_panel(panel.clone(), window, cx);
@@ -987,18 +988,112 @@ impl DockArea {
             }
             DockItem::Tiles { view, .. } => {
                 // For tiles, try to close the active panel
-                if let Some(panel) = view.read(cx).active_panel(cx) {
-                    if panel.closable(cx) {
-                        view.update(cx, |tiles, cx| {
-                            tiles.remove(panel, window, cx);
-                        });
-                        return true;
-                    }
+                if let Some(panel) = view.read(cx).active_panel(cx)
+                    && panel.closable(cx)
+                {
+                    view.update(cx, |tiles, cx| {
+                        tiles.remove(panel, window, cx);
+                    });
+                    return true;
                 }
                 false
             }
             DockItem::Panel { .. } => false,
         }
+    }
+
+    pub fn force_close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        match &self.items {
+            DockItem::Tabs { view, .. } => view.update(cx, |tab_panel, cx| {
+                let active_ix = tab_panel.active_ix;
+                tab_panel.force_close_panel_at(active_ix, window, cx);
+                true
+            }),
+            DockItem::Split { items, .. } => {
+                for item in items {
+                    if let DockItem::Tabs { view, .. } = item {
+                        return view.update(cx, |tab_panel, cx| {
+                            let active_ix = tab_panel.active_ix;
+                            tab_panel.force_close_panel_at(active_ix, window, cx);
+                            true
+                        });
+                    }
+                }
+                false
+            }
+            DockItem::Tiles { view, .. } => {
+                if let Some(panel) = view.read(cx).active_panel(cx)
+                    && panel.closable(cx)
+                {
+                    view.update(cx, |tiles, cx| {
+                        tiles.remove(panel, window, cx);
+                    });
+                    return true;
+                }
+                false
+            }
+            DockItem::Panel { .. } => false,
+        }
+    }
+
+    /// Switch to the next tab in the center dock area.
+    pub fn activate_next_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.activate_next_tab(window, cx));
+        }
+    }
+
+    /// Switch to the previous tab in the center dock area.
+    pub fn activate_prev_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.activate_prev_tab(window, cx));
+        }
+    }
+
+    /// Switch to a tab by its 1-based number in the center dock area.
+    pub fn activate_tab_by_number(
+        &mut self,
+        number: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.activate_tab_by_number(number, window, cx));
+        }
+    }
+
+    /// Close all tabs except the active one in the center dock area.
+    pub fn close_other_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                let active = tp.active_ix;
+                tp.close_other_tabs(active, window, cx);
+            });
+        }
+    }
+
+    /// Close all tabs to the right of the active one in the center dock area.
+    pub fn close_tabs_to_right(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                let active = tp.active_ix;
+                tp.close_tabs_to_right(active, window, cx);
+            });
+        }
+    }
+
+    /// Close all closable tabs in the center dock area.
+    pub fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.close_all_tabs(window, cx));
+        }
+    }
+
+    /// Returns the total number of tabs in the center dock area.
+    pub fn tab_count(&self, cx: &App) -> usize {
+        self.center_tab_panel()
+            .map(|tp| tp.read(cx).panel_count())
+            .unwrap_or(0)
     }
 
     /// Activate a tab by panel name in the specified dock placement.
@@ -1120,8 +1215,8 @@ impl DockArea {
                 self._subscriptions.push(cx.subscribe_in(
                     view,
                     window,
-                    move |_, _, event, window, cx| match event {
-                        PanelEvent::LayoutChanged => {
+                    move |_, _, event, window, cx| {
+                        if let PanelEvent::LayoutChanged = event {
                             cx.spawn_in(window, async move |view, window| {
                                 _ = view.update_in(window, |view, window, cx| {
                                     view.update_toggle_button_tab_panels(window, cx)
@@ -1130,7 +1225,6 @@ impl DockArea {
                             .detach();
                             cx.emit(DockEvent::LayoutChanged);
                         }
-                        _ => {}
                     },
                 ));
             }

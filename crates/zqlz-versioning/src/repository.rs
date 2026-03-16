@@ -151,6 +151,7 @@ impl VersionRepository {
     }
 
     /// Commit a new version with author information
+    #[allow(clippy::too_many_arguments)]
     pub fn commit_with_author(
         &self,
         connection_id: Uuid,

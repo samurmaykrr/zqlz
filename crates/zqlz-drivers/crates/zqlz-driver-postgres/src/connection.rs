@@ -1160,15 +1160,15 @@ fn postgres_to_value(row: &PgRow, idx: usize) -> Result<Value> {
             .map(Value::DateTimeUtc)
             .unwrap_or(Value::Null),
         "numeric" | "decimal" => row
-            .try_get::<_, Option<f64>>(idx)
+            .try_get::<_, Option<PgNumericString>>(idx)
             .ok()
             .flatten()
-            .map(Value::Float64)
+            .map(|value| Value::Decimal(value.0))
             .or_else(|| {
-                row.try_get::<_, Option<PgNumericString>>(idx)
+                row.try_get::<_, Option<f64>>(idx)
                     .ok()
                     .flatten()
-                    .map(|value| Value::Decimal(value.0))
+                    .map(Value::Float64)
             })
             .unwrap_or(Value::Null),
         // Array types - PostgreSQL prefixes array type names with underscore
@@ -1195,6 +1195,48 @@ fn postgres_to_value(row: &PgRow, idx: usize) -> Result<Value> {
             .ok()
             .flatten()
             .map(|arr| Value::Array(arr.into_iter().map(Value::Int64).collect()))
+            .unwrap_or(Value::Null),
+        "_bool" => row
+            .try_get::<_, Option<Vec<bool>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::Bool).collect()))
+            .unwrap_or(Value::Null),
+        "_float4" => row
+            .try_get::<_, Option<Vec<f32>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::Float32).collect()))
+            .unwrap_or(Value::Null),
+        "_float8" => row
+            .try_get::<_, Option<Vec<f64>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::Float64).collect()))
+            .unwrap_or(Value::Null),
+        "_uuid" => row
+            .try_get::<_, Option<Vec<uuid::Uuid>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::Uuid).collect()))
+            .unwrap_or(Value::Null),
+        "_date" => row
+            .try_get::<_, Option<Vec<chrono::NaiveDate>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::Date).collect()))
+            .unwrap_or(Value::Null),
+        "_timestamp" => row
+            .try_get::<_, Option<Vec<chrono::NaiveDateTime>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::DateTime).collect()))
+            .unwrap_or(Value::Null),
+        "_timestamptz" => row
+            .try_get::<_, Option<Vec<chrono::DateTime<chrono::Utc>>>>(idx)
+            .ok()
+            .flatten()
+            .map(|arr| Value::Array(arr.into_iter().map(Value::DateTimeUtc).collect()))
             .unwrap_or(Value::Null),
         _ => {
             // Fallback for custom PostgreSQL types (e.g., enums): decode raw UTF-8 payload.

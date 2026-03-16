@@ -47,6 +47,9 @@ pub use refresh_service::{
     RefreshService, RelationalConnectionRefresh,
 };
 pub use schema_service::SchemaService;
+pub use table_service::{
+    BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest,
+};
 pub use table_service::{CellUpdateData, RowDeleteData, RowInsertData, TableService};
 pub use view_models::{ColumnInfo, DatabaseSchema, TableDetails};
 

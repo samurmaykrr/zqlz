@@ -13,9 +13,9 @@ use std::{
 };
 
 const DEFAULT_THEME: &str = include_str!("./default-theme.json");
-pub(crate) static DEFAULT_THEME_COLORS: LazyLock<
-    HashMap<ThemeMode, (Arc<ThemeColor>, Arc<HighlightTheme>)>,
-> = LazyLock::new(|| {
+type DefaultThemeColorMap = HashMap<ThemeMode, (Arc<ThemeColor>, Arc<HighlightTheme>)>;
+
+pub(crate) static DEFAULT_THEME_COLORS: LazyLock<DefaultThemeColorMap> = LazyLock::new(|| {
     let mut colors = HashMap::new();
 
     let themes: Vec<ThemeConfig> = serde_json::from_str::<ThemeSet>(DEFAULT_THEME)
@@ -105,7 +105,7 @@ impl ThemeRegistry {
 
         // Load theme in the background.
         cx.spawn(async move |cx| {
-            _ = cx.update(|cx| {
+            cx.update(|cx| {
                 if let Err(err) = Self::_watch_themes_dir(themes_dir, cx) {
                     tracing::error!("Failed to watch themes directory: {}", err);
                 }
@@ -204,7 +204,7 @@ impl ThemeRegistry {
 
             while (rx.recv().await).is_ok() {
                 tracing::info!("Reloading themes...");
-                _ = cx.update(Self::reload_themes);
+                cx.update(Self::reload_themes);
             }
         })
         .detach();

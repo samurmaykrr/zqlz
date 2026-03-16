@@ -8,6 +8,9 @@ use zqlz_core::DriverCategory;
 use crate::MainView;
 use crate::app::AppState;
 use crate::components::{InspectorView, TableViewerEvent, TableViewerPanel};
+use crate::main_view::table_handlers::standalone_events::{
+    BecameActiveRequest, RedisKeyEditRequest,
+};
 use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
 
 use super::super::{
@@ -117,7 +120,7 @@ impl MainView {
         let connections = app_state.connections.clone();
         let event_db_name = db_name.clone();
 
-        let viewer_entity = cx.new(|cx| TableViewerPanel::new(cx));
+        let viewer_entity = cx.new(TableViewerPanel::new);
         let table_viewer: Arc<dyn zqlz_ui::widgets::dock::PanelView> =
             Arc::new(viewer_entity.clone());
 
@@ -139,10 +142,12 @@ impl MainView {
                     ..
                 } => {
                     handle_redis_key_edit_event(
-                        *connection_id,
-                        db_name.clone(),
-                        all_row_values,
-                        all_column_names,
+                        RedisKeyEditRequest {
+                            connection_id: *connection_id,
+                            database_name: db_name.clone(),
+                            all_row_values: all_row_values.clone(),
+                            all_column_names: all_column_names.clone(),
+                        },
                         &key_value_editor_panel,
                         &dock_area,
                         &inspector_panel,
@@ -205,9 +210,11 @@ impl MainView {
                     database_name,
                 } => {
                     handle_became_active_event(
-                        *connection_id,
-                        table_name,
-                        database_name.as_deref(),
+                        BecameActiveRequest {
+                            connection_id: *connection_id,
+                            table_name: table_name.clone(),
+                            database_name: database_name.clone(),
+                        },
                         schema_details_panel.clone(),
                         results_panel.clone(),
                         &dock_area,
@@ -228,27 +235,27 @@ impl MainView {
                     );
                 }
                 TableViewerEvent::HideColumn { column_name } => {
-                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                    viewer_entity_for_events.update(cx, |panel, cx| {
                         panel.hide_column(column_name, cx);
                     });
                 }
                 TableViewerEvent::FreezeColumn { col_ix } => {
-                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                    viewer_entity_for_events.update(cx, |panel, cx| {
                         panel.freeze_column(*col_ix, cx);
                     });
                 }
                 TableViewerEvent::UnfreezeColumn { col_ix } => {
-                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                    viewer_entity_for_events.update(cx, |panel, cx| {
                         panel.unfreeze_column(*col_ix, cx);
                     });
                 }
                 TableViewerEvent::SizeColumnToFit { col_ix } => {
-                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                    viewer_entity_for_events.update(cx, |panel, cx| {
                         panel.size_column_to_fit(*col_ix, cx);
                     });
                 }
                 TableViewerEvent::SizeAllColumnsToFit => {
-                    _ = viewer_entity_for_events.update(cx, |panel, cx| {
+                    viewer_entity_for_events.update(cx, |panel, cx| {
                         panel.size_all_columns_to_fit(cx);
                     });
                 }
@@ -259,8 +266,6 @@ impl MainView {
                 | TableViewerEvent::ValidationFailed { .. }
                 | TableViewerEvent::ColumnVisibilityChanged { .. }
                 | TableViewerEvent::DiscardChanges
-                | TableViewerEvent::SetToNull { .. }
-                | TableViewerEvent::SetToEmpty { .. }
                 | TableViewerEvent::MarkRowsForDeletion { .. } => {}
                 TableViewerEvent::EditRow { .. }
                 | TableViewerEvent::AddRowForm { .. }

@@ -258,7 +258,7 @@ mod tests {
         assert_eq!(state.center.children[1].panel_name, "TabPanel");
 
         let left_dock = state.left_dock.unwrap();
-        assert_eq!(left_dock.open, true);
+        assert!(left_dock.open);
         assert_eq!(left_dock.size, px(350.0));
         assert_eq!(left_dock.placement, DockPlacement::Left);
         assert_eq!(left_dock.panel.panel_name, "TabPanel");
@@ -266,14 +266,14 @@ mod tests {
         assert_eq!(left_dock.panel.children[0].panel_name, "StoryContainer");
 
         let bottom_dock = state.bottom_dock.unwrap();
-        assert_eq!(bottom_dock.open, true);
+        assert!(bottom_dock.open);
         assert_eq!(bottom_dock.size, px(200.0));
         assert_eq!(bottom_dock.panel.panel_name, "TabPanel");
         assert_eq!(bottom_dock.panel.children.len(), 2);
         assert_eq!(bottom_dock.panel.children[0].panel_name, "StoryContainer");
 
         let right_dock = state.right_dock.unwrap();
-        assert_eq!(right_dock.open, true);
+        assert!(right_dock.open);
         assert_eq!(right_dock.size, px(320.0));
         assert_eq!(right_dock.panel.panel_name, "TabPanel");
         assert_eq!(right_dock.panel.children.len(), 1);

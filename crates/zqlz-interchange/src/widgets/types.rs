@@ -1020,7 +1020,7 @@ impl ImportSource {
         // Try to extract name from URL
         let source_name = url
             .split('/')
-            .last()
+            .next_back()
             .and_then(|s| s.split('.').next())
             .unwrap_or("imported")
             .to_string();
@@ -1065,21 +1065,24 @@ impl ImportSource {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum DateOrder {
     #[default]
-    DMY, // Day/Month/Year
-    MDY, // Month/Day/Year
-    YMD, // Year/Month/Day
+    #[serde(rename = "DMY")]
+    Dmy, // Day/Month/Year
+    #[serde(rename = "MDY")]
+    Mdy, // Month/Day/Year
+    #[serde(rename = "YMD")]
+    Ymd, // Year/Month/Day
 }
 
 impl DateOrder {
     pub fn all() -> &'static [Self] {
-        &[Self::DMY, Self::MDY, Self::YMD]
+        &[Self::Dmy, Self::Mdy, Self::Ymd]
     }
 
     pub fn display_name(&self) -> &'static str {
         match self {
-            Self::DMY => "DMY",
-            Self::MDY => "MDY",
-            Self::YMD => "YMD",
+            Self::Dmy => "DMY",
+            Self::Mdy => "MDY",
+            Self::Ymd => "YMD",
         }
     }
 }
@@ -1724,17 +1727,17 @@ impl ImportWizardState {
 
         // Generate example date parts based on date order
         let (d1, d2, d3) = match fmt.date_order {
-            DateOrder::DMY => ("24", "8", "23"),
-            DateOrder::MDY => ("8", "24", "23"),
-            DateOrder::YMD => ("23", "8", "24"),
+            DateOrder::Dmy => ("24", "8", "23"),
+            DateOrder::Mdy => ("8", "24", "23"),
+            DateOrder::Ymd => ("23", "8", "24"),
         };
 
         let date_short = format!("{}{d}{}{d}{}", d1, d2, d3);
 
         let (d1_long, d2_long, d3_long) = match fmt.date_order {
-            DateOrder::DMY => ("24", "8", "2023"),
-            DateOrder::MDY => ("8", "24", "2023"),
-            DateOrder::YMD => ("2023", "8", "24"),
+            DateOrder::Dmy => ("24", "8", "2023"),
+            DateOrder::Mdy => ("8", "24", "2023"),
+            DateOrder::Ymd => ("2023", "8", "24"),
         };
         let date_long = format!("{}{d}{}{d}{}", d1_long, d2_long, d3_long);
 
@@ -1803,9 +1806,10 @@ mod tests {
     use super::*;
 
     fn default_state_with_mode(mode: ImportMode) -> ImportWizardState {
-        let mut state = ImportWizardState::default();
-        state.import_mode = mode;
-        state
+        ImportWizardState {
+            import_mode: mode,
+            ..Default::default()
+        }
     }
 
     // -------------------------------------------------------------------------
@@ -2051,8 +2055,10 @@ mod tests {
 
     #[test]
     fn to_export_options_schema_only_when_include_data_false() {
-        let mut state = ExportWizardState::default();
-        state.include_data = false;
+        let state = ExportWizardState {
+            include_data: false,
+            ..Default::default()
+        };
         let opts = state.to_export_options();
         assert!(
             !opts.include_data,
@@ -2063,8 +2069,10 @@ mod tests {
     #[test]
     fn to_export_options_include_schema_propagated() {
         // Disabling include_schema (data-only) must also be reflected
-        let mut state = ExportWizardState::default();
-        state.include_schema = false;
+        let state = ExportWizardState {
+            include_schema: false,
+            ..Default::default()
+        };
         let opts = state.to_export_options();
         assert!(!opts.include_schema);
         // include_data is still true (unrelated flag)
@@ -2310,8 +2318,10 @@ mod tests {
         // Verifies the #[serde(default)] attribute keeps existing documents
         // (which lack the field) deserialising to comma, while a document that
         // explicitly stores a pipe delimiter roundtrips correctly.
-        let mut options = SourceFormatOptions::default();
-        options.field_delimiter = '|';
+        let options = SourceFormatOptions {
+            field_delimiter: '|',
+            ..Default::default()
+        };
 
         let json = serde_json::to_string(&options).expect("serialise");
         let restored: SourceFormatOptions = serde_json::from_str(&json).expect("deserialise");
@@ -2337,11 +2347,13 @@ mod tests {
 
     #[test]
     fn output_path_udif_uses_correct_extension() {
-        let mut state = ExportWizardState::default();
-        state.output_folder = std::path::PathBuf::from("/tmp");
-        state.output_filename = "my_export".to_string();
-        state.export_format = ExportFormat::Udif;
-        state.add_timestamp = false;
+        let state = ExportWizardState {
+            output_folder: std::path::PathBuf::from("/tmp"),
+            output_filename: "my_export".to_string(),
+            export_format: ExportFormat::Udif,
+            add_timestamp: false,
+            ..Default::default()
+        };
 
         let path = state.output_path();
         assert_eq!(path, std::path::PathBuf::from("/tmp/my_export.udif.json"));
@@ -2349,11 +2361,13 @@ mod tests {
 
     #[test]
     fn output_path_udif_compressed_uses_correct_extension() {
-        let mut state = ExportWizardState::default();
-        state.output_folder = std::path::PathBuf::from("/tmp");
-        state.output_filename = "db_backup".to_string();
-        state.export_format = ExportFormat::UdifCompressed;
-        state.add_timestamp = false;
+        let state = ExportWizardState {
+            output_folder: std::path::PathBuf::from("/tmp"),
+            output_filename: "db_backup".to_string(),
+            export_format: ExportFormat::UdifCompressed,
+            add_timestamp: false,
+            ..Default::default()
+        };
 
         let path = state.output_path();
         assert!(
@@ -2365,11 +2379,13 @@ mod tests {
 
     #[test]
     fn output_path_with_timestamp_contains_datetime_component() {
-        let mut state = ExportWizardState::default();
-        state.output_folder = std::path::PathBuf::from("/tmp");
-        state.output_filename = "snap".to_string();
-        state.export_format = ExportFormat::Udif;
-        state.add_timestamp = true;
+        let state = ExportWizardState {
+            output_folder: std::path::PathBuf::from("/tmp"),
+            output_filename: "snap".to_string(),
+            export_format: ExportFormat::Udif,
+            add_timestamp: true,
+            ..Default::default()
+        };
 
         let path = state.output_path();
         let name = path.file_name().unwrap().to_string_lossy();

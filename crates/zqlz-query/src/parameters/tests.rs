@@ -505,7 +505,7 @@ fn test_bind_named_with_various_value_types() {
     params.insert("null_val".to_string(), Value::Null);
     params.insert("bool_val".to_string(), Value::Bool(true));
     params.insert("int_val".to_string(), Value::Int64(42));
-    params.insert("float_val".to_string(), Value::Float64(3.14));
+    params.insert("float_val".to_string(), Value::Float64(2.5));
     params.insert("str_val".to_string(), Value::String("hello".to_string()));
 
     let sql = "SELECT :null_val, :bool_val, :int_val, :float_val, :str_val";

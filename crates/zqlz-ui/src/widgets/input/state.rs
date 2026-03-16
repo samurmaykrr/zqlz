@@ -36,6 +36,8 @@ use crate::widgets::text::TextViewState;
 use crate::widgets::{Root, history::History};
 use crate::widgets::{highlighter::DiagnosticSet, input::text_wrapper::LineItem};
 
+type ValidateFn<T> = dyn Fn(&str, &mut Context<T>) -> bool + 'static;
+
 #[derive(Action, Clone, PartialEq, Eq, Deserialize)]
 #[action(namespace = input, no_json)]
 pub struct Enter {
@@ -336,7 +338,7 @@ pub struct InputState {
     pub(super) clean_on_escape: bool,
     pub(super) soft_wrap: bool,
     pub(super) pattern: Option<regex::Regex>,
-    pub(super) validate: Option<Box<dyn Fn(&str, &mut Context<Self>) -> bool + 'static>>,
+    pub(super) validate: Option<Box<ValidateFn<InputState>>>,
     pub(crate) scroll_handle: ScrollHandle,
     /// The deferred scroll offset to apply on next layout.
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
@@ -388,7 +390,7 @@ pub struct InputState {
     /// - Up/Down arrows are pressed in single-line mode (always)
     /// - Left arrow is pressed when cursor is at position 0
     /// - Right arrow is pressed when cursor is at end of text
-    /// Used by callers embedding Input as an inline cell editor to handle cell navigation.
+    ///   Used by callers embedding Input as an inline cell editor to handle cell navigation.
     pub(super) emit_arrow_event: bool,
 
     /// Fold state for code folding in code editor mode
@@ -552,8 +554,8 @@ impl InputState {
     /// - Up/Down always emit in single-line mode (cursor can't move vertically)
     /// - Left emits when cursor is at position 0
     /// - Right emits when cursor is at end of text
-    /// This is useful when the input is used as an inline cell editor (table)
-    /// so the table can commit and navigate to adjacent cells.
+    ///   This is useful when the input is used as an inline cell editor (table)
+    ///   so the table can commit and navigate to adjacent cells.
     pub fn emit_arrow_event(mut self, emit: bool) -> Self {
         self.emit_arrow_event = emit;
         self
@@ -618,26 +620,21 @@ impl InputState {
         new_language: impl Into<SharedString>,
         cx: &mut Context<Self>,
     ) {
-        match &mut self.mode {
-            InputMode::CodeEditor {
-                language,
-                highlighter,
-                ..
-            } => {
-                *language = new_language.into();
-                *highlighter.borrow_mut() = None;
-            }
-            _ => {}
+        if let InputMode::CodeEditor {
+            language,
+            highlighter,
+            ..
+        } = &mut self.mode
+        {
+            *language = new_language.into();
+            *highlighter.borrow_mut() = None;
         }
         cx.notify();
     }
 
     fn reset_highlighter(&mut self, cx: &mut Context<Self>) {
-        match &mut self.mode {
-            InputMode::CodeEditor { highlighter, .. } => {
-                *highlighter.borrow_mut() = None;
-            }
-            _ => {}
+        if let InputMode::CodeEditor { highlighter, .. } = &mut self.mode {
+            *highlighter.borrow_mut() = None;
         }
         cx.notify();
     }
@@ -1152,13 +1149,11 @@ impl InputState {
             offset += 1;
         }
 
-        let line = self
-            .text_for_range(self.range_to_utf16(&(0..offset + 1)), &mut None, window, cx)
+        self.text_for_range(self.range_to_utf16(&(0..offset + 1)), &mut None, window, cx)
             .unwrap_or_default()
             .rfind('\n')
             .map(|i| i + 1)
-            .unwrap_or(0);
-        line
+            .unwrap_or(0)
     }
 
     /// Get indent string of next line.
@@ -1194,9 +1189,9 @@ impl InputState {
         }
 
         if next_indent.len() > current_indent.len() {
-            return next_indent;
+            next_indent
         } else {
-            return current_indent;
+            current_indent
         }
     }
 
@@ -1455,10 +1450,10 @@ impl InputState {
 
         // If there have IME marked range and is empty (Means pressed Esc to abort IME typing)
         // Clear the marked range.
-        if let Some(ime_marked_range) = &self.ime_marked_range {
-            if ime_marked_range.len() == 0 {
-                self.ime_marked_range = None;
-            }
+        if let Some(ime_marked_range) = &self.ime_marked_range
+            && ime_marked_range.is_empty()
+        {
+            self.ime_marked_range = None;
         }
 
         self.selecting = true;
@@ -1893,10 +1888,10 @@ impl InputState {
 
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
         let mut offset = self.text.clip_offset(offset.saturating_sub(1), Bias::Left);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
-                offset -= 1;
-            }
+        if let Some(ch) = self.text.char_at(offset)
+            && ch == '\r'
+        {
+            offset -= 1;
         }
 
         offset
@@ -1904,10 +1899,10 @@ impl InputState {
 
     pub(super) fn next_boundary(&self, offset: usize) -> usize {
         let mut offset = self.text.clip_offset(offset + 1, Bias::Right);
-        if let Some(ch) = self.text.char_at(offset) {
-            if ch == '\r' {
-                offset += 1;
-            }
+        if let Some(ch) = self.text.char_at(offset)
+            && ch == '\r'
+        {
+            offset += 1;
         }
 
         offset
@@ -1989,10 +1984,10 @@ impl InputState {
             return true;
         }
 
-        if let Some(validate) = &self.validate {
-            if !validate(new_text, cx) {
-                return false;
-            }
+        if let Some(validate) = &self.validate
+            && !validate(new_text, cx)
+        {
+            return false;
         }
 
         if !self.mask_pattern.is_valid(new_text) {
@@ -2041,19 +2036,18 @@ impl InputState {
         self.input_bounds = new_bounds;
 
         // Update text_wrapper wrap_width if changed.
-        if let Some(last_layout) = self.last_layout.as_ref() {
-            if wrap_width_changed {
-                let wrap_width = if !self.soft_wrap {
-                    // None to disable wrapping (will use Pixels::MAX)
-                    None
-                } else {
-                    last_layout.wrap_width
-                };
+        if let Some(last_layout) = self.last_layout.as_ref()
+            && wrap_width_changed
+        {
+            let wrap_width = if !self.soft_wrap {
+                None
+            } else {
+                last_layout.wrap_width
+            };
 
-                self.text_wrapper.set_wrap_width(wrap_width, cx);
-                self.mode.update_auto_grow(&self.text_wrapper);
-                cx.notify();
-            }
+            self.text_wrapper.set_wrap_width(wrap_width, cx);
+            self.mode.update_auto_grow(&self.text_wrapper);
+            cx.notify();
         }
     }
 
@@ -2064,23 +2058,15 @@ impl InputState {
     }
 
     pub(crate) fn range_to_bounds(&self, range: &Range<usize>) -> Option<Bounds<Pixels>> {
-        let Some(last_layout) = self.last_layout.as_ref() else {
-            return None;
-        };
+        let last_layout = self.last_layout.as_ref()?;
 
-        let Some(last_bounds) = self.last_bounds else {
-            return None;
-        };
+        let last_bounds = self.last_bounds?;
 
         let (_, _, start_pos) = self.line_and_position_for_offset(range.start);
         let (_, _, end_pos) = self.line_and_position_for_offset(range.end);
 
-        let Some(start_pos) = start_pos else {
-            return None;
-        };
-        let Some(end_pos) = end_pos else {
-            return None;
-        };
+        let start_pos = start_pos?;
+        let end_pos = end_pos?;
 
         Some(Bounds::from_corners(
             last_bounds.origin + start_pos,
@@ -2280,7 +2266,7 @@ impl EntityInputHandler for InputState {
             }
         }
 
-        self.push_history(&old_text, &range, &new_text);
+        self.push_history(&old_text, &range, new_text);
         self.history.end_grouping();
         if let Some(diagnostics) = self.mode.diagnostics_mut() {
             diagnostics.reset(&self.text)
@@ -2289,7 +2275,7 @@ impl EntityInputHandler for InputState {
             .update(&self.text, &range, &Rope::from(new_text), cx);
         tracing::trace!(range = ?range, new_text_len = new_text.len(), "Updating highlighter after text replacement");
         self.mode
-            .update_highlighter(&range, &self.text, &new_text, true, cx);
+            .update_highlighter(&range, &self.text, new_text, true, cx);
         self.lsp.update(&self.text, window, cx);
         self.selected_range = (new_offset..new_offset).into();
         self.ime_marked_range.take();
@@ -2303,7 +2289,7 @@ impl EntityInputHandler for InputState {
         }
 
         if !self.silent_replace_text {
-            self.handle_completion_trigger(&range, &new_text, window, cx);
+            self.handle_completion_trigger(&range, new_text, window, cx);
         }
         cx.emit(InputEvent::Change);
         cx.notify();
@@ -2350,7 +2336,7 @@ impl EntityInputHandler for InputState {
         self.text_wrapper
             .update(&self.text, &range, &Rope::from(new_text), cx);
         self.mode
-            .update_highlighter(&range, &self.text, &new_text, true, cx);
+            .update_highlighter(&range, &self.text, new_text, true, cx);
         self.lsp.update(&self.text, window, cx);
         if new_text.is_empty() {
             // Cancel selection, when cancel IME input.
@@ -2395,20 +2381,18 @@ impl EntityInputHandler for InputState {
                 break;
             }
 
-            if start_origin.is_none() {
-                if let Some(p) =
+            if start_origin.is_none()
+                && let Some(p) =
                     line.position_for_index(range.start.saturating_sub(index_offset), line_height)
-                {
-                    start_origin = Some(p + point(px(0.), y_offset));
-                }
+            {
+                start_origin = Some(p + point(px(0.), y_offset));
             }
 
-            if end_origin.is_none() {
-                if let Some(p) =
+            if end_origin.is_none()
+                && let Some(p) =
                     line.position_for_index(range.end.saturating_sub(index_offset), line_height)
-                {
-                    end_origin = Some(p + point(px(0.), y_offset));
-                }
+            {
+                end_origin = Some(p + point(px(0.), y_offset));
             }
 
             index_offset += line.len() + 1;

@@ -30,7 +30,7 @@ impl Default for TabSize {
 }
 
 impl TabSize {
-    pub(super) fn to_string(&self) -> SharedString {
+    pub(super) fn to_string(self) -> SharedString {
         if self.hard_tabs {
             "\t".into()
         } else {
@@ -150,7 +150,7 @@ impl TextElement {
                     builder.line_to(point(pos.x, pos.y + line_height));
                     current_indents.push(pos.x);
                 }
-            } else if last_indents.len() > 0 {
+            } else if !last_indents.is_empty() {
                 for x in &last_indents {
                     let pos = point(*x, offset_y);
                     builder.move_to(pos);

@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, ConnectionConfig, Result, ZqlzError};
+use zqlz_core::{Connection, Result, ZqlzError};
 use zqlz_drivers::DriverRegistry;
 
 use crate::SavedConnection;
@@ -66,7 +66,7 @@ impl ConnectionManager {
             .get(&saved.driver)
             .ok_or_else(|| ZqlzError::Driver(format!("Unknown driver: {}", saved.driver)))?;
 
-        let mut config = ConnectionConfig::new(&saved.driver, &saved.name);
+        let config = saved.to_connection_config();
 
         // Debug: log which params are being set (without revealing password value)
         let has_password = saved.params.contains_key("password");
@@ -76,10 +76,6 @@ impl ConnectionManager {
             param_keys = ?param_keys,
             "building connection config from saved params"
         );
-
-        for (key, value) in &saved.params {
-            config = config.with_param(key, value.clone());
-        }
 
         let conn = driver.connect(&config).await.map_err(|e| {
             tracing::error!(error = %e, "failed to connect");
@@ -165,12 +161,12 @@ impl ConnectionManager {
         let key = (id, normalized_database_name.clone());
 
         // Check cache first
-        if let Some(cached) = self.database_connections.read().get(&key) {
-            if !cached.is_closed() {
-                return Ok(cached.clone());
-            }
-            // Connection is stale, will be replaced below
+        if let Some(cached) = self.database_connections.read().get(&key)
+            && !cached.is_closed()
+        {
+            return Ok(cached.clone());
         }
+        // Connection is stale, will be replaced below
 
         // Create a new connection to the target database
         let saved = self
@@ -182,10 +178,7 @@ impl ConnectionManager {
             .get(&saved.driver)
             .ok_or_else(|| ZqlzError::Driver(format!("Unknown driver: {}", saved.driver)))?;
 
-        let mut config = ConnectionConfig::new(&saved.driver, &saved.name);
-        for (param_key, value) in &saved.params {
-            config = config.with_param(param_key, value.clone());
-        }
+        let mut config = saved.to_connection_config();
         config = config.with_param("database", normalized_database_name.as_str());
 
         tracing::info!(
@@ -350,10 +343,7 @@ impl ConnectionManager {
             .get(&saved.driver)
             .ok_or_else(|| ZqlzError::Driver(format!("Unknown driver: {}", saved.driver)))?;
 
-        let mut config = ConnectionConfig::new(&saved.driver, &saved.name);
-        for (key, value) in &saved.params {
-            config = config.with_param(key, value.clone());
-        }
+        let config = saved.to_connection_config();
 
         driver.test_connection(&config).await
     }

@@ -1,5 +1,4 @@
 use super::*;
-
 impl TableViewerDelegate {
     pub fn context_menu(
         &mut self,
@@ -34,11 +33,7 @@ impl TableViewerDelegate {
         let viewer_panel = self.viewer_panel.clone();
         let table_name = self.table_name.clone();
         let connection_id = self.connection_id;
-        let all_row_values: Vec<String> = self
-            .rows
-            .get(actual_row_ix)
-            .map(|r| r.iter().map(|v| v.display_for_table()).collect())
-            .unwrap_or_default();
+        let all_row_values = self.rows.get(actual_row_ix).cloned().unwrap_or_default();
         let all_column_names: Vec<String> =
             self.column_meta.iter().map(|c| c.name.clone()).collect();
         let all_column_types: Vec<String> = self
@@ -46,6 +41,15 @@ impl TableViewerDelegate {
             .iter()
             .map(|c| c.data_type.clone())
             .collect();
+        let can_set_null = column_meta
+            .as_ref()
+            .map(|column| column.nullable)
+            .unwrap_or(false);
+        let can_set_empty_string = self.is_string_column(data_col_ix);
+        let can_cut = column_meta
+            .as_ref()
+            .map(|column| column.nullable || self.is_string_column(data_col_ix))
+            .unwrap_or(false);
 
         menu.item({
             let column_meta = column_meta.clone();
@@ -54,27 +58,27 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
+            let original_value = CellValue::from_value(current_value.as_ref().unwrap_or(&Value::Null));
             PopupMenuItem::new("Set to Empty String")
-                .disabled(column_meta.is_none())
+                .disabled(column_meta.is_none() || !can_set_empty_string)
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
-                    if let Some(col_meta) = &column_meta {
-                        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
+                    if let Some(col_meta) = &column_meta
+                        && let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
                                 connection_id,
                                 row: actual_row_ix,
                                 col: data_col_ix,
                                 column_name: col_meta.name.clone(),
-                                new_value: String::new(),
+                                new_value: CellValue::Value(Value::String(String::new())),
                                 original_value: original_value.clone(),
                                 all_row_values: all_row_values.clone(),
                                 all_column_names: all_column_names.clone(),
                                 all_column_types: all_column_types.clone(),
                             });
-                        }) {
-                            tracing::error!("Failed to emit SaveCell (Set to Empty String): {:?}", e);
-                        }
+                        })
+                    {
+                        tracing::error!("Failed to emit SaveCell (Set to Empty String): {:?}", e);
                     }
                 }))
         })
@@ -85,25 +89,27 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
+            let original_value = CellValue::from_value(current_value.as_ref().unwrap_or(&Value::Null));
             PopupMenuItem::new("Set to NULL")
-                .disabled(column_meta.is_none())
+                .disabled(column_meta.is_none() || !can_set_null)
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
-                    if let Some(col_meta) = &column_meta {
-                        _ = viewer_panel.update(cx, |_panel, cx| {
+                    if let Some(col_meta) = &column_meta
+                        && let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
                                 connection_id,
                                 row: actual_row_ix,
                                 col: data_col_ix,
                                 column_name: col_meta.name.clone(),
-                                new_value: "NULL".to_string(),
+                                new_value: CellValue::Null,
                                 original_value: original_value.clone(),
                                 all_row_values: all_row_values.clone(),
                                 all_column_names: all_column_names.clone(),
                                 all_column_types: all_column_types.clone(),
                             });
-                        });
+                        })
+                    {
+                        tracing::error!("Failed to emit SaveCell (Set to NULL): {:?}", error);
                     }
                 }))
         })
@@ -115,7 +121,7 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
+            let original_value = CellValue::from_value(current_value.as_ref().unwrap_or(&Value::Null));
             PopupMenuItem::new("Generate UUID")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
@@ -128,7 +134,7 @@ impl TableViewerDelegate {
                                 row: actual_row_ix,
                                 col: data_col_ix,
                                 column_name: col_meta.name.clone(),
-                                new_value: uuid,
+                                new_value: CellValue::Value(Value::String(uuid)),
                                 original_value: original_value.clone(),
                                 all_row_values: all_row_values.clone(),
                                 all_column_names: all_column_names.clone(),
@@ -154,26 +160,27 @@ impl TableViewerDelegate {
                     let raw_bytes = current_value.as_ref().and_then(|v| {
                         if let Value::Bytes(b) = v { Some(b.clone()) } else { None }
                     });
-                    let current_value_str = current_value.as_ref().map(|v| v.display_for_table());
+                    let current_value = current_value.clone().unwrap_or(Value::Null);
                     window.listener_for(&menu_entity, move |_this, _, _, cx| {
-                        if let Some(col_meta) = &column_meta {
-                            if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
+                        if let Some(col_meta) = &column_meta
+                            && let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                                 cx.emit(TableViewerEvent::EditCell {
                                     table_name: table_name.clone(),
                                     connection_id,
                                     row: actual_row_ix,
                                     col: data_col_ix,
+                                    column_meta: col_meta.clone(),
                                     column_name: col_meta.name.clone(),
                                     column_type: col_meta.data_type.clone(),
-                                    current_value: current_value_str.clone(),
+                                    current_value: current_value.clone(),
                                     all_row_values: all_row_values.clone(),
                                     all_column_names: all_column_names.clone(),
                                     all_column_types: all_column_types.clone(),
                                     raw_bytes: raw_bytes.clone(),
                                 });
-                            }) {
-                                tracing::error!("Failed to emit EditCell event: {:?}", e);
-                            }
+                            })
+                        {
+                            tracing::error!("Failed to emit EditCell event: {:?}", e);
                         }
                     })
                 }),
@@ -247,9 +254,9 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
+            let original_value = CellValue::from_value(current_value.as_ref().unwrap_or(&Value::Null));
             PopupMenuItem::new("Cut")
-                .disabled(column_meta.is_none())
+                .disabled(column_meta.is_none() || !can_cut)
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Some(ref val) = current_value {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(val.display_for_table()));
@@ -257,6 +264,11 @@ impl TableViewerDelegate {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(String::new()));
                     }
                     if let Some(col_meta) = &column_meta {
+                        let new_value = if col_meta.nullable {
+                            CellValue::Null
+                        } else {
+                            CellValue::Value(Value::String(String::new()))
+                        };
                         if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                             cx.emit(TableViewerEvent::SaveCell {
                                 table_name: table_name.clone(),
@@ -264,7 +276,7 @@ impl TableViewerDelegate {
                                 row: actual_row_ix,
                                 col: data_col_ix,
                                 column_name: col_meta.name.clone(),
-                                new_value: "NULL".to_string(),
+                                new_value,
                                 original_value: original_value.clone(),
                                 all_row_values: all_row_values.clone(),
                                 all_column_names: all_column_names.clone(),
@@ -303,8 +315,8 @@ impl TableViewerDelegate {
         })
         .item({
             let table_name = table_name.clone();
-            let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
+            let row_values = self.rows.get(actual_row_ix).cloned().unwrap_or_default();
             PopupMenuItem::new("Copy Row as SQL INSERT").on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
@@ -314,13 +326,12 @@ impl TableViewerDelegate {
                         .collect::<Vec<_>>()
                         .join(", ");
 
-                    let values: Vec<String> = all_row_values
+                    let values: Vec<String> = row_values
                         .iter()
-                        .map(|v| {
-                            if v.is_empty() || v == "NULL" {
-                                "NULL".to_string()
-                            } else {
-                                format!("'{}'", v.replace('\'', "''"))
+                        .map(|value| match CellValue::from_value(value) {
+                            CellValue::Null => "NULL".to_string(),
+                            CellValue::Value(value) => {
+                                format!("'{}'", value.display_for_editor().replace('\'', "''"))
                             }
                         })
                         .collect();
@@ -343,31 +354,29 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let all_column_types = all_column_types.clone();
-            let original_value = current_value.as_ref().map(|v| v.display_for_table()).unwrap_or_default();
+            let original_value = CellValue::from_value(current_value.as_ref().unwrap_or(&Value::Null));
             PopupMenuItem::new("Paste")
                 .disabled(column_meta.is_none())
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
-                    if let Some(clipboard_item) = cx.read_from_clipboard() {
-                        if let Some(text) = clipboard_item.text() {
-                            if let Some(col_meta) = &column_meta {
-                                if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
-                                    cx.emit(TableViewerEvent::SaveCell {
-                                        table_name: table_name.clone(),
-                                        connection_id,
-                                        row: actual_row_ix,
-                                        col: data_col_ix,
-                                        column_name: col_meta.name.clone(),
-                                        new_value: text.to_string(),
-                                        original_value: original_value.clone(),
-                                        all_row_values: all_row_values.clone(),
-                                        all_column_names: all_column_names.clone(),
-                                        all_column_types: all_column_types.clone(),
-                                    });
-                                }) {
-                                    tracing::error!("Failed to emit SaveCell (Paste): {:?}", e);
-                                }
-                            }
-                        }
+                    if let Some(clipboard_item) = cx.read_from_clipboard()
+                        && let Some(text) = clipboard_item.text()
+                        && let Some(col_meta) = &column_meta
+                        && let Err(e) = viewer_panel.update(cx, |_panel, cx| {
+                            cx.emit(TableViewerEvent::SaveCell {
+                                table_name: table_name.clone(),
+                                connection_id,
+                                row: actual_row_ix,
+                                col: data_col_ix,
+                                column_name: col_meta.name.clone(),
+                                new_value: CellValue::Value(Value::String(text.to_string())),
+                                original_value: original_value.clone(),
+                                all_row_values: all_row_values.clone(),
+                                all_column_names: all_column_names.clone(),
+                                all_column_types: all_column_types.clone(),
+                            });
+                        })
+                    {
+                        tracing::error!("Failed to emit SaveCell (Paste): {:?}", e);
                     }
                 }))
         })
@@ -389,15 +398,14 @@ impl TableViewerDelegate {
 
             PopupMenuItem::new(label).on_click(window.listener_for(
                 &menu_entity,
-                move |_this, _, _, cx| {
+                move |_this, _, window, cx| {
                     let rows = rows_to_delete.clone();
-                    if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
-                        cx.emit(TableViewerEvent::MarkRowsForDeletion {
-                            rows_to_delete: rows,
-                        });
-                    }) {
-                        tracing::error!("Failed to emit MarkRowsForDeletion: {:?}", e);
-                    }
+                    TableViewerPanel::show_delete_confirmation_for_rows(
+                        viewer_panel.clone(),
+                        rows,
+                        window,
+                        cx,
+                    );
                 },
             ))
         })

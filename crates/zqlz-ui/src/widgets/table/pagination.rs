@@ -106,10 +106,8 @@ impl PaginationState {
     /// Calculate total number of pages
     pub fn total_pages(&self) -> Option<usize> {
         self.total_records.map(|total| {
-            let total = total as u64;
             let records_per_page = self.records_per_page as u64;
-            // Use saturating_add to prevent overflow when total is very large
-            let pages = total.saturating_add(records_per_page - 1) / records_per_page;
+            let pages = total.div_ceil(records_per_page);
             pages.min(usize::MAX as u64).max(1) as usize
         })
     }
@@ -166,10 +164,10 @@ impl PaginationState {
         if self.is_loading {
             return;
         }
-        if let Some(total_pages) = self.total_pages() {
-            if self.current_page == total_pages {
-                return;
-            }
+        if let Some(total_pages) = self.total_pages()
+            && self.current_page == total_pages
+        {
+            return;
         }
         cx.emit(PaginationEvent::LastPageRequested);
     }
@@ -468,10 +466,10 @@ pub fn render_pagination_controls(
                         .xsmall()
                         .disabled(!limit_enabled || is_loading || !can_decrease)
                         .on_click(move |_event, _window, cx| {
-                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page) {
-                                if idx > 0 {
-                                    state_prev.update(cx, |s, cx| s.set_limit(sizes[idx - 1], cx));
-                                }
+                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page)
+                                && idx > 0
+                            {
+                                state_prev.update(cx, |s, cx| s.set_limit(sizes[idx - 1], cx));
                             }
                         })
                 })
@@ -502,10 +500,10 @@ pub fn render_pagination_controls(
                         .xsmall()
                         .disabled(!limit_enabled || is_loading || !can_increase)
                         .on_click(move |_event, _window, cx| {
-                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page) {
-                                if idx < sizes.len() - 1 {
-                                    state_next.update(cx, |s, cx| s.set_limit(sizes[idx + 1], cx));
-                                }
+                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page)
+                                && idx < sizes.len() - 1
+                            {
+                                state_next.update(cx, |s, cx| s.set_limit(sizes[idx + 1], cx));
                             }
                         })
                 }),
@@ -696,10 +694,10 @@ pub fn render_pagination_footer(
                         .xsmall()
                         .disabled(!limit_enabled || is_loading || !can_decrease)
                         .on_click(move |_event, _window, cx| {
-                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page) {
-                                if idx > 0 {
-                                    state_prev.update(cx, |s, cx| s.set_limit(sizes[idx - 1], cx));
-                                }
+                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page)
+                                && idx > 0
+                            {
+                                state_prev.update(cx, |s, cx| s.set_limit(sizes[idx - 1], cx));
                             }
                         })
                 })
@@ -730,10 +728,10 @@ pub fn render_pagination_footer(
                         .xsmall()
                         .disabled(!limit_enabled || is_loading || !can_increase)
                         .on_click(move |_event, _window, cx| {
-                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page) {
-                                if idx < sizes.len() - 1 {
-                                    state_next.update(cx, |s, cx| s.set_limit(sizes[idx + 1], cx));
-                                }
+                            if let Some(idx) = sizes.iter().position(|&s| s == records_per_page)
+                                && idx < sizes.len() - 1
+                            {
+                                state_next.update(cx, |s, cx| s.set_limit(sizes[idx + 1], cx));
                             }
                         })
                 }),

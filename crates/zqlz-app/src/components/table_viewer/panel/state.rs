@@ -1,4 +1,5 @@
 use super::*;
+use zqlz_core::Value;
 
 impl TableViewerPanel {
     #[allow(dead_code)]
@@ -51,7 +52,7 @@ impl TableViewerPanel {
         &mut self,
         row: usize,
         col: usize,
-        new_value: Option<String>,
+        new_value: Value,
         cx: &mut Context<Self>,
     ) {
         tracing::info!(
@@ -71,17 +72,7 @@ impl TableViewerPanel {
             if let Some(row_data) = delegate.rows.get_mut(row) {
                 if let Some(cell) = row_data.get_mut(col) {
                     let old_value = cell.display_for_table();
-                    *cell = match new_value {
-                        Some(s) => {
-                            let data_type = delegate
-                                .column_meta
-                                .get(col)
-                                .map(|c| c.data_type.as_str())
-                                .unwrap_or("text");
-                            zqlz_core::Value::parse_from_string(&s, data_type)
-                        }
-                        None => zqlz_core::Value::Null,
-                    };
+                    *cell = new_value.clone();
                     tracing::info!(
                         "Cell updated: '{}' -> '{}'",
                         old_value,
@@ -154,25 +145,35 @@ impl TableViewerPanel {
         schema_columns: &[SchemaColumnInfo],
         cx: &mut Context<Self>,
     ) {
+        let merge_column = |column: &mut zqlz_core::ColumnMeta, schema_col: &SchemaColumnInfo| {
+            column.data_type = schema_col.data_type.clone();
+            column.nullable = schema_col.nullable;
+            column.max_length = schema_col.max_length;
+            column.precision = schema_col.precision;
+            column.scale = schema_col.scale;
+            column.auto_increment = schema_col.is_auto_increment;
+            column.default_value = schema_col.default_value.clone();
+            column.comment = schema_col.comment.clone();
+            if let Some(enum_values) = &schema_col.enum_values {
+                column.enum_values = Some(enum_values.clone());
+            }
+        };
+
         for col in &mut self.column_meta {
             if let Some(schema_col) = schema_columns.iter().find(|sc| sc.name == col.name) {
-                if col.data_type != schema_col.data_type {
-                    tracing::debug!(
-                        "Updating column '{}' type from '{}' to '{}' (from schema)",
-                        col.name,
-                        col.data_type,
-                        schema_col.data_type
-                    );
-                    col.data_type = schema_col.data_type.clone();
-                }
+                tracing::debug!(
+                    "Updating column '{}' type from '{}' to '{}' (from schema)",
+                    col.name,
+                    col.data_type,
+                    schema_col.data_type
+                );
+                merge_column(col, schema_col);
             }
         }
 
         for col in &mut self.original_column_meta {
             if let Some(schema_col) = schema_columns.iter().find(|sc| sc.name == col.name) {
-                if col.data_type != schema_col.data_type {
-                    col.data_type = schema_col.data_type.clone();
-                }
+                merge_column(col, schema_col);
             }
         }
 
@@ -181,9 +182,7 @@ impl TableViewerPanel {
                 let delegate = table.delegate_mut();
                 for col in &mut delegate.column_meta {
                     if let Some(schema_col) = schema_columns.iter().find(|sc| sc.name == col.name) {
-                        if col.data_type != schema_col.data_type {
-                            col.data_type = schema_col.data_type.clone();
-                        }
+                        merge_column(col, schema_col);
                     }
                 }
             });
@@ -201,7 +200,7 @@ impl TableViewerPanel {
             table_state.update(cx, |table, cx| {
                 table
                     .delegate_mut()
-                    .set_fk_values(table_name, values, window, &mut **cx);
+                    .set_fk_values(table_name, values, window, cx);
             });
         }
     }

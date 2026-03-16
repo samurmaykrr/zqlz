@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use zqlz_core::{Connection, QueryResult, Result, StatementResult, Transaction, Value, ZqlzError};
 
 use super::config::PoolConfig;
-use super::pool::{ConnectionFactory, ConnectionPool};
+use super::connection_pool::{ConnectionFactory, ConnectionPool};
 use super::stats::PoolStats;
 
 /// Mock connection for testing

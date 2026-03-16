@@ -207,7 +207,10 @@ mod tests {
 
     #[test]
     fn test_prev_next() {
-        let mut row_cache = RowsCache::default();
+        let row_cache = RowsCache {
+            sections: Rc::new(vec![2, 4, 3]),
+            ..Default::default()
+        };
         // section 0
         //  row 0
         //  row 1
@@ -220,8 +223,6 @@ mod tests {
         //  row 0
         //  row 1
         //  row 2
-        row_cache.sections = Rc::new(vec![2, 4, 3]);
-
         assert_eq!(
             row_cache.next(Some(IndexPath::new(0).section(0))),
             IndexPath::new(1).section(0)

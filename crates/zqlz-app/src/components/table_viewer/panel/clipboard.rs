@@ -1,6 +1,61 @@
 use super::*;
+use crate::components::CellValue;
+use zqlz_core::Value;
 
 impl TableViewerPanel {
+    pub fn cut_selection(&mut self, cx: &mut Context<Self>) {
+        let Some(table_state) = self.table_state.clone() else {
+            return;
+        };
+
+        self.copy_selection(cx);
+
+        table_state.update(cx, |table, cx| {
+            let selected_cells = table.cell_selection().selected_cells();
+            if selected_cells.is_empty() {
+                return;
+            }
+
+            let rows = if table.delegate().is_filtering {
+                table.delegate().filtered_row_indices.len()
+            } else {
+                table.delegate().rows.len()
+            };
+            let cols = table.delegate().columns.len();
+
+            if selected_cells.len() == rows.saturating_mul(cols.saturating_sub(1)) {
+                return;
+            }
+
+            let cells_to_update = selected_cells
+                .into_iter()
+                .filter(|cell| cell.col > 0)
+                .collect::<Vec<_>>();
+
+            if cells_to_update.is_empty() {
+                return;
+            }
+
+            table
+                .delegate_mut()
+                .apply_value_to_cells(&cells_to_update, "", cx);
+        });
+
+        cx.notify();
+    }
+
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        let Some(table_state) = &self.table_state else {
+            return;
+        };
+
+        table_state.update(cx, |table, cx| {
+            table.select_all_cells(cx);
+        });
+
+        cx.notify();
+    }
+
     pub fn copy_selection(&mut self, cx: &mut Context<Self>) {
         let Some(table_state) = &self.table_state else {
             return;
@@ -71,21 +126,19 @@ impl TableViewerPanel {
                     .filter_map(|actual_idx| delegate.rows.get(actual_idx))
                     .map(|row| row.iter().map(|value| value.display_for_table()).collect())
                     .collect()
+            } else if delegate.is_filtering {
+                delegate
+                    .filtered_row_indices
+                    .iter()
+                    .filter_map(|&idx| delegate.rows.get(idx))
+                    .map(|row| row.iter().map(|v| v.display_for_table()).collect())
+                    .collect()
             } else {
-                if delegate.is_filtering {
-                    delegate
-                        .filtered_row_indices
-                        .iter()
-                        .filter_map(|&idx| delegate.rows.get(idx))
-                        .map(|row| row.iter().map(|v| v.display_for_table()).collect())
-                        .collect()
-                } else {
-                    delegate
-                        .rows
-                        .iter()
-                        .map(|row| row.iter().map(|v| v.display_for_table()).collect())
-                        .collect()
-                }
+                delegate
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(|v| v.display_for_table()).collect())
+                    .collect()
             };
 
             (true, rows_to_copy)
@@ -179,45 +232,54 @@ impl TableViewerPanel {
             return;
         }
 
-        let start_row = self
-            .selected_display_cell_anchor(cx)
-            .map(|(display_row, _display_col)| {
-                table_state.read_with(cx, |table, _cx| {
-                    table.delegate().get_actual_row_index(display_row)
-                })
-            });
+        let start_anchor =
+            self.selected_display_cell_anchor(cx)
+                .map(|(display_row, display_col)| {
+                    table_state.read_with(cx, |table, _cx| {
+                        (
+                            table.delegate().get_actual_row_index(display_row),
+                            display_col,
+                        )
+                    })
+                });
 
         let current_row_count = table_state.read_with(cx, |table, _cx| table.delegate().rows.len());
 
         for (line_idx, line) in data_lines.iter().enumerate() {
             let cells: Vec<&str> = line.split('\t').collect();
 
-            let target_row = match start_row {
-                Some(row) => row + line_idx,
-                None => current_row_count + line_idx,
+            let (target_row, start_col) = match start_anchor {
+                Some((row, col)) => (row + line_idx, col.saturating_sub(1)),
+                None => (current_row_count + line_idx, 0),
             };
 
             let row_exists =
                 table_state.read_with(cx, |table, _cx| target_row < table.delegate().rows.len());
 
             if row_exists {
-                let all_row_values: Vec<String> = table_state.read_with(cx, |table, _cx| {
-                    table
-                        .delegate()
-                        .rows
-                        .get(target_row)
-                        .map(|r| r.iter().map(|v| v.display_for_table()).collect())
-                        .unwrap_or_default()
-                });
+                let (all_row_values, original_row): (Vec<Value>, Vec<Value>) = table_state
+                    .read_with(cx, |table, _cx| {
+                        table
+                            .delegate()
+                            .rows
+                            .get(target_row)
+                            .map(|row| (row.clone(), row.clone()))
+                            .unwrap_or_default()
+                    });
 
-                for (col_idx, cell_value) in cells.iter().enumerate() {
+                for (cell_offset, cell_value) in cells.iter().enumerate() {
+                    let col_idx = start_col + cell_offset;
                     if col_idx >= column_names.len() {
                         break;
                     }
 
                     let column_name = column_names[col_idx].clone();
-                    let new_value = cell_value.trim().to_string();
-                    let original_value = all_row_values.get(col_idx).cloned().unwrap_or_default();
+                    let new_value = CellValue::Value(Value::String(cell_value.trim().to_string()));
+                    let original_value = original_row
+                        .get(col_idx)
+                        .cloned()
+                        .map(|value| CellValue::from_value(&value))
+                        .unwrap_or(CellValue::Null);
 
                     cx.emit(TableViewerEvent::SaveCell {
                         table_name: table_name.clone(),

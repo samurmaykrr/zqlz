@@ -1,12 +1,11 @@
 //! Tests for find references functionality
 
 use crate::tests::test_helpers::create_test_lsp;
-use lsp_types::Location;
 use zqlz_ui::widgets::Rope;
 
 #[test]
 fn test_references_for_table_name() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test finding references to a table name used multiple times
     let text = Rope::from("SELECT * FROM users WHERE user_id IN (SELECT user_id FROM users)");
@@ -24,7 +23,7 @@ fn test_references_for_table_name() {
 
 #[test]
 fn test_references_for_column_name() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test finding references to a column name
     let text = Rope::from("SELECT username, username as user FROM users WHERE username = 'test'");
@@ -42,7 +41,7 @@ fn test_references_for_column_name() {
 
 #[test]
 fn test_references_for_keyword_returns_empty() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test that finding references for SQL keywords returns empty
     let text = Rope::from("SELECT * FROM users WHERE id = 1");
@@ -60,7 +59,7 @@ fn test_references_for_keyword_returns_empty() {
 
 #[test]
 fn test_references_at_empty_position() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test finding references at an empty position
     let text = Rope::from("SELECT * FROM users");
@@ -78,7 +77,7 @@ fn test_references_at_empty_position() {
 
 #[test]
 fn test_references_for_qualified_column() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test finding references for a qualified column (table.column)
     let text = Rope::from(
@@ -98,7 +97,7 @@ fn test_references_for_qualified_column() {
 
 #[test]
 fn test_references_for_unknown_symbol() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test finding references for an unknown symbol
     let text = Rope::from("SELECT unknown_field FROM users");
@@ -109,14 +108,14 @@ fn test_references_for_unknown_symbol() {
     // Unknown symbols in text should still be found (they exist in the query)
     // This tests text-based references, not schema references
     assert!(
-        result.len() >= 1,
+        !result.is_empty(),
         "Should find at least 1 reference to 'unknown_field' in the query itself"
     );
 }
 
 #[test]
 fn test_references_excludes_partial_matches() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test that partial matches are excluded
     // "user" should not match inside "username" or "user_id"

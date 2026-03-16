@@ -6,6 +6,9 @@ use gpui::{
 };
 use smallvec::SmallVec;
 
+type MenuItemClickHandler = Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
+type MenuItemHoverHandler = Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+
 #[derive(IntoElement)]
 pub(crate) struct MenuItemElement {
     id: ElementId,
@@ -13,8 +16,8 @@ pub(crate) struct MenuItemElement {
     style: StyleRefinement,
     disabled: bool,
     selected: bool,
-    on_click: Option<Box<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>>,
-    on_hover: Option<Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+    on_click: Option<MenuItemClickHandler>,
+    on_hover: Option<MenuItemHoverHandler>,
     children: SmallVec<[AnyElement; 2]>,
 }
 

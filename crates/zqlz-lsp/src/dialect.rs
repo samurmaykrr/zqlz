@@ -107,7 +107,19 @@ impl SqlDialect {
         let info = self.dialect_info();
         info.functions
             .iter()
-            .filter(|f| f.category != FunctionCategory::Aggregate)
+            .filter(|f| {
+                matches!(
+                    f.category,
+                    FunctionCategory::String
+                        | FunctionCategory::Numeric
+                        | FunctionCategory::DateTime
+                        | FunctionCategory::Conversion
+                        | FunctionCategory::Conditional
+                        | FunctionCategory::Json
+                        | FunctionCategory::Array
+                        | FunctionCategory::DatabaseSpecific
+                )
+            })
             .map(|f| f.name.to_string())
             .collect()
     }

@@ -84,7 +84,22 @@ impl AppMenuBar {
         self.set_selected_index(None, window, cx);
     }
 
-    fn set_selected_index(&mut self, ix: Option<usize>, _: &mut Window, cx: &mut Context<Self>) {
+    fn set_selected_index(
+        &mut self,
+        ix: Option<usize>,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let previous_index = self.selected_index;
+        if previous_index != ix
+            && let Some(previous_index) = previous_index
+            && let Some(previous_menu) = self.menus.get(previous_index)
+        {
+            previous_menu.update(cx, |menu, _| {
+                menu.clear_popup_menu();
+            });
+        }
+
         self.selected_index = ix;
         cx.notify();
     }
@@ -153,6 +168,7 @@ impl AppMenu {
                     })
                     .with_menu_items(items, window, cx)
                 });
+                popup_menu.update(cx, |menu, cx| menu.select_first_clickable(cx));
                 popup_menu.read(cx).focus_handle(cx).focus(window, cx);
                 self._subscription =
                     Some(cx.subscribe_in(&popup_menu, window, Self::handle_dismiss));
@@ -185,6 +201,11 @@ impl AppMenu {
         });
     }
 
+    fn clear_popup_menu(&mut self) {
+        self._subscription.take();
+        self.popup_menu.take();
+    }
+
     fn handle_trigger_click(
         &mut self,
         _: &ClickEvent,
@@ -193,7 +214,7 @@ impl AppMenu {
     ) {
         let is_selected = self.menu_bar.read(cx).selected_index == Some(self.ix);
 
-        _ = self.menu_bar.update(cx, |state, cx| {
+        self.menu_bar.update(cx, |state, cx| {
             let new_ix = if is_selected { None } else { Some(self.ix) };
             state.set_selected_index(new_ix, window, cx);
         });
@@ -209,7 +230,7 @@ impl AppMenu {
             return;
         }
 
-        _ = self.menu_bar.update(cx, |state, cx| {
+        self.menu_bar.update(cx, |state, cx| {
             state.set_selected_index(Some(self.ix), window, cx);
         });
     }

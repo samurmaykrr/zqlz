@@ -6,15 +6,20 @@
 use anyhow::Result;
 use lsp_types::{
     CodeAction, CompletionItem, CompletionItemKind, Diagnostic, GotoDefinitionResponse, Hover,
-    HoverContents, Location, MarkedString, ParameterInformation, ParameterLabel, Position, Range,
-    SignatureHelp, SignatureInformation, TextEdit, Uri, WorkspaceEdit,
+    HoverContents, Location, MarkupContent, MarkupKind, ParameterInformation, ParameterLabel,
+    Position, Range, SignatureHelp, SignatureInformation, TextEdit, Uri, WorkspaceEdit,
 };
 use serde::{Deserialize, Serialize};
+use sqlparser::ast::{
+    Expr, Query, Select, SelectItem, SetExpr, Statement, TableAlias, TableFactor,
+};
 use sqlparser::dialect::{Dialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect};
+use sqlparser::parser::Parser;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::Connection;
+use zqlz_core::ForeignKeyInfo;
 use zqlz_services::{DatabaseSchema, SchemaService};
 use zqlz_ui::widgets::Rope;
 use zqlz_ui::widgets::input::RopeExt;
@@ -66,6 +71,7 @@ pub struct TableInfo {
     pub schema: Option<String>,
     pub comment: Option<String>,
     pub row_count: Option<i64>,
+    pub table_type: zqlz_core::TableType,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -73,6 +79,7 @@ pub struct ViewInfo {
     pub name: String,
     pub schema: Option<String>,
     pub definition: Option<String>,
+    pub is_materialized: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -186,6 +193,15 @@ pub struct SqlLsp {
     fetch_epoch: u64,
 }
 
+#[derive(Clone)]
+struct ScoredCompletionItem {
+    item: CompletionItem,
+    fuzzy_score: i32,
+    context_bucket: i32,
+    exact_prefix: bool,
+    original_index: usize,
+}
+
 #[derive(Default, Serialize, Deserialize)]
 pub struct SchemaCache {
     /// All database objects
@@ -213,6 +229,103 @@ pub struct SchemaCache {
 
 #[allow(dead_code)]
 impl SqlLsp {
+    fn completion_sql_dialects(&self) -> Vec<SqlDialect> {
+        match self.dialect {
+            SqlDialect::Generic => vec![
+                SqlDialect::SQLite,
+                SqlDialect::MySQL,
+                SqlDialect::PostgreSQL,
+                SqlDialect::SQLServer,
+            ],
+            SqlDialect::Redis => Vec::new(),
+            dialect => vec![dialect],
+        }
+    }
+
+    fn aggregate_function_sort_text(&self, func_name: &str) -> String {
+        let priority = match func_name.to_ascii_uppercase().as_str() {
+            "COUNT" => 0,
+            "SUM" => 1,
+            "AVG" => 2,
+            "MIN" => 3,
+            "MAX" => 4,
+            _ => 50,
+        };
+        format!("3_{priority:02}_{}", func_name.to_ascii_uppercase())
+    }
+
+    fn scalar_function_sort_text(&self, func_name: &str) -> String {
+        let priority = match func_name.to_ascii_uppercase().as_str() {
+            "UPPER" => 0,
+            "LOWER" => 1,
+            "TRIM" => 2,
+            "SUBSTRING" | "SUBSTR" => 3,
+            "COALESCE" => 4,
+            "CONCAT" | "CONCAT_WS" => 5,
+            _ => 50,
+        };
+        format!("4_{priority:02}_{}", func_name.to_ascii_uppercase())
+    }
+
+    fn is_after_create_table_type(&self, text_before_cursor: &str) -> bool {
+        if !text_before_cursor.ends_with(char::is_whitespace) {
+            return false;
+        }
+
+        let trimmed = text_before_cursor.trim_end();
+        self.completion_sql_dialects().into_iter().any(|dialect| {
+            dialect.data_types().into_iter().any(|data_type| {
+                trimmed
+                    .to_ascii_uppercase()
+                    .ends_with(&data_type.to_ascii_uppercase())
+            })
+        })
+    }
+
+    fn prefer_create_table_constraints(&self, text_before_cursor: &str) -> bool {
+        self.is_after_create_table_type(text_before_cursor)
+            || text_before_cursor.trim_end().ends_with(',')
+    }
+
+    fn is_inside_create_table_column_list(&self, text_before_cursor: &str) -> bool {
+        let upper = text_before_cursor.to_uppercase();
+        let Some(create_pos) = upper.rfind("CREATE") else {
+            return false;
+        };
+
+        let after_create = &upper[create_pos..];
+        let rest = if let Some(stripped) = after_create
+            .strip_prefix("CREATE TEMPORARY TABLE")
+            .or_else(|| after_create.strip_prefix("CREATE TEMP TABLE"))
+        {
+            stripped
+        } else if let Some(stripped) = after_create.strip_prefix("CREATE TABLE") {
+            stripped
+        } else {
+            return false;
+        };
+
+        let Some(paren_pos) = rest.find('(') else {
+            return false;
+        };
+
+        let mut depth = 1i32;
+        for ch in rest[paren_pos + 1..].chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        true
+    }
+
     #[allow(dead_code)]
     pub fn new(schema_service: Arc<SchemaService>) -> Self {
         Self {
@@ -325,14 +438,15 @@ impl SqlLsp {
 
         let mut cache = SchemaCache::default();
 
-        for table_name in &db_schema.tables {
+        for table in &db_schema.table_infos {
             let table_info = TableInfo {
-                name: table_name.clone(),
-                schema: None,
-                comment: None,
-                row_count: None,
+                name: table.name.clone(),
+                schema: table.schema.clone(),
+                comment: table.comment.clone(),
+                row_count: table.row_count,
+                table_type: table.table_type,
             };
-            cache.tables.insert(table_name.clone(), table_info.clone());
+            cache.tables.insert(table.name.clone(), table_info.clone());
             cache.objects.push(DatabaseObject::Table(table_info));
         }
 
@@ -341,6 +455,18 @@ impl SqlLsp {
                 name: view_name.clone(),
                 schema: None,
                 definition: None,
+                is_materialized: false,
+            };
+            cache.views.insert(view_name.clone(), view_info.clone());
+            cache.objects.push(DatabaseObject::View(view_info));
+        }
+
+        for view_name in &db_schema.materialized_views {
+            let view_info = ViewInfo {
+                name: view_name.clone(),
+                schema: None,
+                definition: None,
+                is_materialized: true,
             };
             cache.views.insert(view_name.clone(), view_info.clone());
             cache.objects.push(DatabaseObject::View(view_info));
@@ -540,6 +666,7 @@ impl SqlLsp {
                     schema: None,
                     comment: None,
                     row_count: None,
+                    table_type: zqlz_core::TableType::Table,
                 });
         }
     }
@@ -900,6 +1027,10 @@ impl SqlLsp {
         let sql = text.to_string();
         let lines_before_cursor = sql[..offset.min(sql.len())].to_string();
 
+        if self.dialect == SqlDialect::Redis {
+            return self.get_redis_completions(text, offset, is_manual_trigger);
+        }
+
         tracing::debug!(
             "Text before cursor (last 50 chars): '{}'",
             lines_before_cursor
@@ -998,6 +1129,23 @@ impl SqlLsp {
             }
         }
 
+        if let Some(table_or_alias) = Self::qualified_reference_prefix(&lines_before_cursor) {
+            let available_tables = match &context {
+                AstSqlContext::SelectList { available_tables }
+                | AstSqlContext::ConditionClause { available_tables }
+                | AstSqlContext::AfterDot {
+                    available_tables, ..
+                } => available_tables.clone(),
+                AstSqlContext::Subquery { parent_tables } => parent_tables.clone(),
+                _ => Vec::new(),
+            };
+
+            context = AstSqlContext::AfterDot {
+                table_or_alias,
+                available_tables,
+            };
+        }
+
         tracing::debug!("Detected context: {:?}", context);
 
         #[cfg(test)]
@@ -1014,13 +1162,11 @@ impl SqlLsp {
                 tracing::debug!("In SELECT list, available tables: {:?}", available_tables);
 
                 if available_tables.is_empty() {
-                    // No FROM clause yet — DataGrip-style: show functions and keywords only.
-                    // Showing unqualified column names here would be misleading noise because
-                    // we don't yet know which table the user intends to select from.
+                    self.add_filtered_columns(&current_word_lower, &mut completions);
                 } else {
                     // Show columns from available tables only (higher priority)
                     self.add_columns_from_tables(
-                        &available_tables,
+                        available_tables,
                         &current_word_lower,
                         &mut completions,
                     );
@@ -1029,17 +1175,22 @@ impl SqlLsp {
                 // Show SQL functions (sort_text "3_" / "4_" ranks them below columns "1_")
                 self.add_filtered_functions(&current_word_lower, &mut completions);
                 // Show only the most relevant keywords for SELECT expressions
-                self.add_specific_keywords(
-                    &["DISTINCT", "AS", "FROM", "CASE", "CAST"],
-                    &current_word_lower,
-                    &mut completions,
-                );
+                let mut select_keywords = vec![
+                    "DISTINCT", "AS", "FROM", "CASE", "CAST", "WHEN", "THEN", "ELSE", "END",
+                ];
+                if self.dialect == SqlDialect::SQLServer {
+                    select_keywords.push("TOP");
+                }
+                self.add_specific_keywords(&select_keywords, &current_word_lower, &mut completions);
             }
             AstSqlContext::FromClause => {
                 tracing::debug!("In FROM clause");
                 // Show tables, views, and CTEs
                 self.add_filtered_tables(&current_word_lower, &mut completions);
                 self.add_filtered_views(&current_word_lower, &mut completions);
+                if !current_word_lower.is_empty() {
+                    self.add_filtered_functions(&current_word_lower, &mut completions);
+                }
 
                 // If schema is still loading and no completions are available yet,
                 // surface a single informational item so the user knows to wait.
@@ -1113,7 +1264,7 @@ impl SqlLsp {
                 tracing::debug!("In JOIN clause, existing tables: {:?}", existing_tables);
                 // Show tables with suggested JOINs based on foreign keys
                 self.add_tables_with_fk_suggestions(
-                    &existing_tables,
+                    existing_tables,
                     &current_word_lower,
                     &mut completions,
                 );
@@ -1156,7 +1307,7 @@ impl SqlLsp {
                     self.add_filtered_columns(&current_word_lower, &mut completions);
                 } else {
                     self.add_columns_from_tables(
-                        &available_tables,
+                        available_tables,
                         &current_word_lower,
                         &mut completions,
                     );
@@ -1195,8 +1346,13 @@ impl SqlLsp {
                 tracing::debug!("After dot for table/alias: {}", table_or_alias);
 
                 // Resolve alias to actual table name using available_tables from context
-                let table_name =
-                    self.resolve_alias_from_context(&table_or_alias, &available_tables);
+                let table_name = self.resolve_alias_from_context(table_or_alias, available_tables);
+                let table_name = if table_name == *table_or_alias {
+                    self.resolve_alias_to_table(&table_name, text, offset)
+                        .unwrap_or(table_name)
+                } else {
+                    table_name
+                };
 
                 tracing::debug!("Resolved '{}' to table '{}'", table_or_alias, table_name);
 
@@ -1219,29 +1375,45 @@ impl SqlLsp {
                 if let Some(columns) = columns {
                     tracing::debug!("Found {} columns for table '{}'", columns.len(), table_name);
                     for column in columns {
-                        if current_word.is_empty()
-                            || column.name.to_lowercase().starts_with(&current_word_lower)
-                        {
-                            completions.push(CompletionItem {
-                                label: column.name.clone(),
-                                kind: Some(CompletionItemKind::FIELD),
-                                detail: Some(format!(
-                                    "{}.{}: {} ({})",
-                                    table_name,
-                                    column.name,
-                                    column.data_type,
-                                    if column.nullable { "NULL" } else { "NOT NULL" }
-                                )),
-                                insert_text: Some(column.name.clone()), // Column name without trailing space
-                                sort_text: Some(format!("0_{}", column.name)), // Highest priority
-                                documentation: column
-                                    .comment
-                                    .as_ref()
-                                    .map(|c| lsp_types::Documentation::String(c.clone())),
-                                ..Default::default()
-                            });
+                        let matches_filter = current_word_lower.is_empty()
+                            || self
+                                .fuzzy_matcher
+                                .fuzzy_match(&current_word_lower, &column.name.to_lowercase())
+                                .is_some_and(|result| result.is_match());
+
+                        if !matches_filter {
+                            continue;
                         }
+
+                        completions.push(CompletionItem {
+                            label: column.name.clone(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(format!(
+                                "{}.{}: {} ({})",
+                                table_name,
+                                column.name,
+                                column.data_type,
+                                if column.nullable { "NULL" } else { "NOT NULL" }
+                            )),
+                            insert_text: Some(column.name.clone()), // Column name without trailing space
+                            filter_text: Some(column.name.clone()),
+                            sort_text: Some(format!("0_{}", column.name)), // Highest priority
+                            documentation: column
+                                .comment
+                                .as_ref()
+                                .map(|c| lsp_types::Documentation::String(c.clone())),
+                            ..Default::default()
+                        });
                     }
+                } else if let Some(derived_columns) = self
+                    .derived_columns_for_identifier(&table_name, text)
+                    .or_else(|| self.derived_columns_from_text_fallback(&table_name, text))
+                {
+                    self.add_columns_from_names(
+                        &derived_columns,
+                        &current_word_lower,
+                        &mut completions,
+                    );
                 } else {
                     tracing::debug!("No columns found for table/alias '{}'", table_name);
                 }
@@ -1258,14 +1430,18 @@ impl SqlLsp {
             AstSqlContext::Subquery { ref parent_tables } => {
                 tracing::debug!("In subquery, parent tables: {:?}", parent_tables);
                 // Inside subquery - can reference parent tables
-                self.add_columns_from_tables(&parent_tables, &current_word_lower, &mut completions);
+                self.add_columns_from_tables(parent_tables, &current_word_lower, &mut completions);
             }
             AstSqlContext::CreateTable => {
                 tracing::debug!("In CREATE TABLE context");
-                // Data types come first – they're the primary completion when naming a column type.
-                self.add_filtered_data_types(&current_word_lower, &mut completions);
-                // Then column/table constraints.
-                self.add_create_table_constraints(&current_word_lower, &mut completions);
+                if self.prefer_create_table_constraints(&lines_before_cursor) {
+                    self.add_create_table_constraints(&current_word_lower, &mut completions);
+                    self.add_filtered_data_types(&current_word_lower, &mut completions);
+                } else {
+                    // Data types come first while naming a column type.
+                    self.add_filtered_data_types(&current_word_lower, &mut completions);
+                    self.add_create_table_constraints(&current_word_lower, &mut completions);
+                }
             }
             AstSqlContext::General => {
                 tracing::debug!("In general context");
@@ -1312,10 +1488,15 @@ impl SqlLsp {
             );
         }
 
-        // Use fuzzy matching to improve results
-        if !current_word.is_empty() && current_word.len() >= 2 {
-            completions = self.apply_fuzzy_matching(&current_word, completions);
-        }
+        let prefer_create_table_constraints = matches!(context, AstSqlContext::CreateTable)
+            && self.prefer_create_table_constraints(&lines_before_cursor);
+
+        completions = self.rank_and_dedup_completions(
+            &context,
+            &current_word,
+            completions,
+            prefer_create_table_constraints,
+        );
 
         // Limit results to top 20 for JetBrains-style focused completions
         completions.truncate(20);
@@ -1367,6 +1548,7 @@ impl SqlLsp {
                 .schema_cache
                 .columns_by_table
                 .get(&table_ref.table_name)
+                .or_else(|| self.columns_for_table(&table_ref.table_name))
             {
                 for column in columns {
                     // Add column - fuzzy matching will filter if needed
@@ -1384,6 +1566,7 @@ impl SqlLsp {
                             table_ref.table_name, column.name, column.data_type
                         )),
                         insert_text: Some(label), // Use label as insert_text to handle qualified names
+                        filter_text: Some(column.name.clone()),
                         sort_text: Some(format!("1_{}_{}", table_ref.table_name, column.name)),
                         documentation: column
                             .comment
@@ -1398,6 +1581,25 @@ impl SqlLsp {
                     "add_columns_from_tables: no columns found in schema cache"
                 );
             }
+        }
+    }
+
+    fn add_columns_from_names(
+        &self,
+        column_names: &[String],
+        _filter: &str,
+        completions: &mut Vec<CompletionItem>,
+    ) {
+        for column_name in column_names {
+            completions.push(CompletionItem {
+                label: column_name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some("Derived column".to_string()),
+                insert_text: Some(column_name.clone()),
+                filter_text: Some(column_name.clone()),
+                sort_text: Some(format!("0_derived_{column_name}")),
+                ..Default::default()
+            });
         }
     }
 
@@ -1488,14 +1690,11 @@ impl SqlLsp {
         let words: Vec<&str> = text_lower.split_whitespace().collect();
 
         // Check for table.column pattern (e.g., "users.")
-        if text_before.ends_with('.') {
-            if let Some(last_word) = text_before.trim_end_matches('.').split_whitespace().last() {
-                let table_name = last_word.trim_end_matches('.');
-                return AstSqlContext::AfterDot {
-                    table_or_alias: table_name.to_string(),
-                    available_tables: Vec::new(), // Fallback context - no AST info available
-                };
-            }
+        if let Some(table_or_alias) = Self::qualified_reference_prefix(text_before) {
+            return AstSqlContext::AfterDot {
+                table_or_alias,
+                available_tables: Vec::new(),
+            };
         }
 
         // The SQL clause keywords we recognise
@@ -1547,11 +1746,9 @@ impl SqlLsp {
                             && (words[i - 1] == "temporary" || words[i - 1] == "temp")
                             && words[i - 2] == "create");
                     if is_create_table {
-                        // If anything follows the table-name token we're in column definitions.
-                        if words[i + 1..].iter().any(|w| !clause_keywords.contains(w)) {
+                        if self.is_inside_create_table_column_list(text_before) {
                             return AstSqlContext::CreateTable;
                         }
-                        // Still at the table name itself – no column list yet.
                         return AstSqlContext::General;
                     }
                     // Plain TABLE keyword (e.g. DROP TABLE, TRUNCATE TABLE …)
@@ -1579,7 +1776,7 @@ impl SqlLsp {
                 }
                 "join" => {
                     return AstSqlContext::JoinClause {
-                        existing_tables: vec![],
+                        existing_tables: Vec::new(),
                     };
                 }
                 "select" | "," => {
@@ -1599,6 +1796,28 @@ impl SqlLsp {
         AstSqlContext::General
     }
 
+    fn qualified_reference_prefix(text_before: &str) -> Option<String> {
+        let trimmed = text_before.trim_end();
+        if trimmed.is_empty() {
+            return None;
+        }
+
+        let token_start = trimmed
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .map_or(0, |idx| idx + 1);
+        let token = &trimmed[token_start..];
+
+        let (qualifier, _) = token.rsplit_once('.')?;
+        if qualifier.is_empty() {
+            return None;
+        }
+
+        qualifier
+            .split('.')
+            .rfind(|segment| !segment.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     fn add_filtered_keywords(
         &self,
         _filter: &str,
@@ -1615,39 +1834,46 @@ impl SqlLsp {
             _filter, context
         );
 
+        let context_lower = context.to_lowercase();
+
+        if self.dialect == SqlDialect::SQLite && context_lower.contains("without ") {
+            completions.push(CompletionItem {
+                label: "ROWID".to_string(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("SQLite table option suffix for WITHOUT ROWID".to_string()),
+                insert_text: Some("ROWID ".to_string()),
+                sort_text: Some("2_ROWID".to_string()),
+                ..Default::default()
+            });
+        }
+
         // Context-specific keywords (max 5 per context)
         let mut relevant_keywords = if context.trim().is_empty()
-            || context.trim().len() <= 10 && !context.to_lowercase().contains("select")
+            || context.trim().len() <= 10 && !context_lower.contains("select")
         {
             // At start of query or very short query without SELECT: show primary statement keywords
             vec![
                 "SELECT", "INSERT", "UPDATE", "DELETE", "WITH", "CREATE", "DROP",
             ]
-        } else if context.to_lowercase().contains("with")
-            && !context.to_lowercase().contains("select")
-        {
+        } else if context_lower.contains("with") && !context_lower.contains("select") {
             // After WITH: show RECURSIVE
             vec!["RECURSIVE", "AS", "SELECT"]
-        } else if context.to_lowercase().contains("select")
-            && !context.to_lowercase().contains("from")
-        {
+        } else if context_lower.contains("select") && !context_lower.contains("from") {
             // After SELECT, before FROM: show column-related keywords
             vec!["DISTINCT", "AS", "FROM", "CASE", "CAST"]
-        } else if context.to_lowercase().contains("from")
-            && !context.to_lowercase().contains("where")
-        {
+        } else if context_lower.contains("from") && !context_lower.contains("where") {
             // After FROM: show join and filter keywords
             vec!["JOIN", "LEFT", "INNER", "WHERE", "GROUP", "UNION"]
-        } else if context.to_lowercase().contains("where")
-            || context.to_lowercase().contains("and")
-            || context.to_lowercase().contains("or")
+        } else if context_lower.contains("where")
+            || context_lower.contains("and")
+            || context_lower.contains("or")
         {
             // In WHERE clause: show condition keywords
             vec!["AND", "OR", "IN", "LIKE", "BETWEEN", "EXISTS", "NOT"]
-        } else if context.to_lowercase().contains("group") {
+        } else if context_lower.contains("group") {
             // After GROUP BY: show aggregation keywords
             vec!["HAVING", "ORDER", "LIMIT"]
-        } else if context.to_lowercase().contains("order") {
+        } else if context_lower.contains("order") {
             // After ORDER BY: show ordering keywords
             vec!["ASC", "DESC", "LIMIT", "OFFSET"]
         } else {
@@ -1857,6 +2083,11 @@ impl SqlLsp {
                 "AUTOINCREMENT",
             ),
             (
+                "IDENTITY",
+                "Value increments automatically on insert (SQL Server)",
+                "IDENTITY(1,1)",
+            ),
+            (
                 "GENERATED ALWAYS AS",
                 "Computed column derived from an expression",
                 "GENERATED ALWAYS AS (",
@@ -1929,38 +2160,39 @@ impl SqlLsp {
     }
 
     fn add_filtered_data_types(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
-        // Add SQL data types from dialect - let fuzzy matching filter them
-        for data_type in self.dialect.data_types() {
-            // Skip if already in completions
-            if completions
-                .iter()
-                .any(|c| c.label.to_uppercase() == *data_type)
-            {
-                continue;
+        for dialect in self.completion_sql_dialects() {
+            for data_type in dialect.data_types() {
+                if completions
+                    .iter()
+                    .any(|c| c.label.eq_ignore_ascii_case(&data_type))
+                {
+                    continue;
+                }
+
+                #[cfg(test)]
+                println!("DEBUG: Adding data type: {}", data_type);
+
+                completions.push(CompletionItem {
+                    label: data_type.clone(),
+                    kind: Some(CompletionItemKind::STRUCT),
+                    detail: Some(format!("Data Type ({dialect:?})")),
+                    insert_text: Some(data_type.clone()),
+                    sort_text: Some(format!("4_{}", data_type)),
+                    ..Default::default()
+                });
             }
-
-            #[cfg(test)]
-            println!("DEBUG: Adding data type: {}", data_type);
-
-            completions.push(CompletionItem {
-                label: data_type.to_string(),
-                kind: Some(CompletionItemKind::STRUCT),
-                detail: Some(format!("Data Type ({})", self.get_dialect_name())),
-                insert_text: Some(data_type.to_string()),
-                sort_text: Some(format!("4_{}", data_type)), // Same priority as dialect keywords
-                ..Default::default()
-            });
         }
     }
 
     fn add_filtered_tables(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
-        for (_, table) in &self.schema_cache.tables {
+        for table in self.schema_cache.tables.values() {
             // Add table - fuzzy matching will filter
             completions.push(CompletionItem {
                 label: table.name.clone(),
                 kind: Some(CompletionItemKind::CLASS),
                 detail: Some("Table".to_string()),
                 insert_text: Some(format!("{} ", table.name)), // Add space after table name
+                filter_text: Some(table.name.clone()),
                 sort_text: Some(format!("0_{}", table.name)),
                 documentation: table
                     .comment
@@ -1972,13 +2204,14 @@ impl SqlLsp {
     }
 
     fn add_filtered_views(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
-        for (_, view) in &self.schema_cache.views {
+        for view in self.schema_cache.views.values() {
             // Add view - fuzzy matching will filter
             completions.push(CompletionItem {
                 label: view.name.clone(),
                 kind: Some(CompletionItemKind::INTERFACE),
                 detail: Some("View".to_string()),
                 insert_text: Some(format!("{} ", view.name)), // Add space after view name
+                filter_text: Some(view.name.clone()),
                 sort_text: Some(format!("1_{}", view.name)),
                 ..Default::default()
             });
@@ -2014,6 +2247,7 @@ impl SqlLsp {
                     kind: Some(CompletionItemKind::FIELD),
                     detail: Some(format!("{}.{}: {}", table, column.name, column.data_type)),
                     insert_text: Some(column.name.clone()), // Use column name without trailing space
+                    filter_text: Some(column.name.clone()),
                     sort_text: Some(format!("2_{}_{}", table, column.name)),
                     documentation: column
                         .comment
@@ -2027,19 +2261,24 @@ impl SqlLsp {
 
     fn add_filtered_functions(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         // Add user-defined functions from schema cache
-        for (_, func) in &self.schema_cache.functions {
+        for func in self.schema_cache.functions.values() {
             // Add user function - fuzzy matching will filter
             let detail = if func.is_aggregate {
                 "Aggregate Function"
             } else {
                 "Function"
             };
+            let sort_text = if func.is_aggregate {
+                self.aggregate_function_sort_text(&func.name)
+            } else {
+                self.scalar_function_sort_text(&func.name)
+            };
 
             completions.push(CompletionItem {
                 label: format!("{}()", func.name),
                 kind: Some(CompletionItemKind::FUNCTION),
                 detail: Some(format!("{} → {}", detail, func.return_type)),
-                sort_text: Some(format!("3_{}", func.name)),
+                sort_text: Some(sort_text),
                 documentation: func
                     .comment
                     .as_ref()
@@ -2050,18 +2289,32 @@ impl SqlLsp {
             });
         }
 
-        // Add built-in functions from dialect
-        for func_name in self.dialect.functions() {
-            // Add built-in function - fuzzy matching will filter
-            completions.push(CompletionItem {
-                label: format!("{}()", func_name),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("Built-in Function ({})", self.get_dialect_name())),
-                sort_text: Some(format!("4_{}", func_name)), // Lower priority than user functions
-                insert_text: Some(format!("{}()", func_name)),
-                filter_text: Some(func_name.to_string()),
-                ..Default::default()
-            });
+        for dialect in self.completion_sql_dialects() {
+            for func_name in dialect.functions() {
+                let sort_text = if dialect.is_aggregate_function(&func_name) {
+                    self.aggregate_function_sort_text(&func_name)
+                } else {
+                    self.scalar_function_sort_text(&func_name)
+                };
+                if completions.iter().any(|c| {
+                    c.kind == Some(CompletionItemKind::FUNCTION)
+                        && c.filter_text
+                            .as_deref()
+                            .is_some_and(|existing| existing.eq_ignore_ascii_case(&func_name))
+                }) {
+                    continue;
+                }
+
+                completions.push(CompletionItem {
+                    label: format!("{}()", func_name),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("Built-in Function ({dialect:?})")),
+                    sort_text: Some(sort_text),
+                    insert_text: Some(format!("{}()", func_name)),
+                    filter_text: Some(func_name),
+                    ..Default::default()
+                });
+            }
         }
     }
 
@@ -2069,7 +2322,7 @@ impl SqlLsp {
     /// These can be used in WHERE clauses, unlike aggregate functions like COUNT, SUM, etc.
     fn add_scalar_functions(&self, _filter: &str, completions: &mut Vec<CompletionItem>) {
         // Add user-defined SCALAR functions only from schema cache
-        for (_, func) in &self.schema_cache.functions {
+        for func in self.schema_cache.functions.values() {
             // Skip aggregate functions
             if func.is_aggregate {
                 continue;
@@ -2090,22 +2343,29 @@ impl SqlLsp {
             });
         }
 
-        // Add built-in SCALAR functions from dialect
-        for func_name in self.dialect.scalar_functions() {
-            // Skip if it's an aggregate function
-            if self.dialect.is_aggregate_function(&func_name) {
-                continue;
-            }
+        for dialect in self.completion_sql_dialects() {
+            for func_name in dialect.scalar_functions() {
+                if dialect.is_aggregate_function(&func_name)
+                    || completions.iter().any(|c| {
+                        c.kind == Some(CompletionItemKind::FUNCTION)
+                            && c.filter_text
+                                .as_deref()
+                                .is_some_and(|existing| existing.eq_ignore_ascii_case(&func_name))
+                    })
+                {
+                    continue;
+                }
 
-            completions.push(CompletionItem {
-                label: format!("{}()", func_name),
-                kind: Some(CompletionItemKind::FUNCTION),
-                detail: Some(format!("Scalar Function ({})", self.get_dialect_name())),
-                sort_text: Some(format!("4_{}", func_name)), // Lower priority than user functions
-                insert_text: Some(format!("{}()", func_name)),
-                filter_text: Some(func_name.to_string()),
-                ..Default::default()
-            });
+                completions.push(CompletionItem {
+                    label: format!("{}()", func_name),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("Scalar Function ({dialect:?})")),
+                    sort_text: Some(self.scalar_function_sort_text(&func_name)),
+                    insert_text: Some(format!("{}()", func_name)),
+                    filter_text: Some(func_name),
+                    ..Default::default()
+                });
+            }
         }
     }
 
@@ -2156,97 +2416,36 @@ impl SqlLsp {
             }
         }
 
-        // Check if it's a qualified column reference (table.column)
-        let sql = text.to_string();
-        let before_cursor = &sql[..offset.min(sql.len())];
-        if let Some(dot_pos) = before_cursor.rfind('.') {
-            let table_part = &before_cursor[..dot_pos];
-            if let Some(table_start) = table_part.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            {
-                let table_name = &table_part[table_start + 1..];
-
-                // Show column info for qualified reference
-                if let Some(columns) = self.schema_cache.columns_by_table.get(table_name) {
-                    for col in columns {
-                        if col.name.to_lowercase() == word_lower {
-                            tracing::trace!(table = table_name, column = %col.name, "Found qualified column");
-                            return Some(self.create_column_hover(col, Some(table_name)));
-                        }
-                    }
+        // Check if it's a qualified column reference (table.column or alias.column)
+        if let Some((qualifier, _)) = self.qualified_reference_at_offset(text, offset)
+            && let Some(table_name) = self.resolve_table_identifier(&qualifier, text, offset)
+            && let Some(columns) = self.columns_for_table(&table_name)
+        {
+            for col in columns {
+                if col.name.to_lowercase() == word_lower {
+                    tracing::trace!(qualifier = qualifier, table = table_name, column = %col.name, "Found qualified column");
+                    return Some(self.create_column_hover(col, Some(&table_name)));
                 }
             }
         }
 
         // Check tables
-        if let Some(table) = self.schema_cache.tables.get(&word) {
-            let mut hover_text = format!("**Table: {}**\n\n", table.name);
-
-            if let Some(schema) = &table.schema {
-                hover_text.push_str(&format!("Schema: `{}`\n", schema));
+        if let Some(table_name) = self.resolve_table_identifier(&word, text, offset) {
+            if let Some(table) = self.table_info(&table_name) {
+                return Some(self.create_table_hover(table));
             }
 
-            if let Some(comment) = &table.comment {
-                hover_text.push_str(&format!("\n{}\n\n", comment));
+            if let Some(columns) = self
+                .derived_columns_for_identifier(&table_name, text)
+                .or_else(|| self.derived_columns_from_text_fallback(&table_name, text))
+            {
+                let kind = if word.eq_ignore_ascii_case(&table_name) {
+                    "Derived table"
+                } else {
+                    "CTE"
+                };
+                return Some(self.create_derived_table_hover(&table_name, &columns, kind));
             }
-
-            if let Some(row_count) = table.row_count {
-                hover_text.push_str(&format!("Rows: ~{}\n\n", row_count));
-            }
-
-            if let Some(columns) = self.schema_cache.columns_by_table.get(&word) {
-                hover_text.push_str("**Columns:**\n");
-                for col in columns {
-                    let mut col_line = format!("- `{}`: {}", col.name, col.data_type);
-
-                    if col.is_primary_key {
-                        col_line.push_str(" **PK**");
-                    }
-                    if col.is_foreign_key {
-                        col_line.push_str(" **FK**");
-                    }
-                    if !col.nullable {
-                        col_line.push_str(" NOT NULL");
-                    }
-
-                    hover_text.push_str(&col_line);
-                    hover_text.push('\n');
-                }
-            }
-
-            // Show foreign key relationships
-            if let Some(fks) = self.schema_cache.foreign_keys_by_table.get(&word) {
-                if !fks.is_empty() {
-                    hover_text.push_str("\n**Foreign Keys:**\n");
-                    for fk in fks {
-                        hover_text.push_str(&format!(
-                            "- `{}` → `{}.{}`\n",
-                            fk.columns.join(", "),
-                            fk.referenced_table,
-                            fk.referenced_columns.join(", ")
-                        ));
-                    }
-                }
-            }
-
-            // Show reverse foreign keys (tables that reference this table)
-            if let Some(reverse_fks) = self.schema_cache.reverse_foreign_keys.get(&word) {
-                if !reverse_fks.is_empty() {
-                    hover_text.push_str("\n**Referenced By:**\n");
-                    for (source_table, fk) in reverse_fks {
-                        hover_text.push_str(&format!(
-                            "- `{}.{}` → `{}`\n",
-                            source_table,
-                            fk.columns.join(", "),
-                            fk.referenced_columns.join(", ")
-                        ));
-                    }
-                }
-            }
-
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
         }
 
         // Check columns (unqualified - search all tables)
@@ -2272,10 +2471,7 @@ impl SqlLsp {
                 hover_text.push_str("\n```\n");
             }
 
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
+            return Some(self.markdown_hover(hover_text));
         }
 
         // Check procedures
@@ -2316,10 +2512,7 @@ impl SqlLsp {
                 hover_text.push_str("\n```\n");
             }
 
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
+            return Some(self.markdown_hover(hover_text));
         }
 
         // Check functions
@@ -2358,10 +2551,7 @@ impl SqlLsp {
                 hover_text.push_str("\n```\n");
             }
 
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
+            return Some(self.markdown_hover(hover_text));
         }
 
         // Check indexes
@@ -2382,10 +2572,7 @@ impl SqlLsp {
                 hover_text.push_str(&format!("Columns: `{}`\n", index.columns.join(", ")));
             }
 
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
+            return Some(self.markdown_hover(hover_text));
         }
 
         // Check triggers
@@ -2401,10 +2588,7 @@ impl SqlLsp {
                 hover_text.push_str("\n```\n");
             }
 
-            return Some(Hover {
-                contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-                range: None,
-            });
+            return Some(self.markdown_hover(hover_text));
         }
 
         // Check built-in SQL keywords and functions
@@ -2800,59 +2984,28 @@ impl SqlLsp {
         }
 
         let word_lower = word.to_lowercase();
-        let sql = text.to_string();
-        let before_cursor = &sql[..offset.min(sql.len())];
-
         // Check if it's a qualified reference (table.column or alias.column)
-        if let Some(dot_pos) = before_cursor.rfind('.') {
-            let table_part = &before_cursor[..dot_pos];
-            if let Some(table_start) = table_part.rfind(|c: char| !c.is_alphanumeric() && c != '_')
-            {
-                let table_name = &table_part[table_start + 1..];
-                tracing::debug!("qualified column reference: {}.{}", table_name, word);
+        if let Some((qualifier, _)) = self.qualified_reference_at_offset(text, offset)
+            && let Some(table_name) = self.resolve_table_identifier(&qualifier, text, offset)
+        {
+            tracing::debug!("qualified column reference: {}.{}", qualifier, word);
 
-                // For qualified column references, find the column in the specified table
-                if let Some(columns) = self.schema_cache.columns_by_table.get(table_name) {
-                    for col in columns {
-                        if col.name.to_lowercase() == word_lower {
-                            // Found the column - return definition info
-                            // For SQL, we return info about where this column comes from
-                            tracing::debug!(table = table_name, column = %col.name, "Found column definition");
-                            return Some(GotoDefinitionResponse::Scalar(Location {
-                                uri: "sql://internal".parse::<Uri>().unwrap(),
-                                range: Range {
-                                    start: Position {
-                                        line: 0,
-                                        character: 0,
-                                    },
-                                    end: Position {
-                                        line: 0,
-                                        character: 0,
-                                    },
-                                },
-                            }));
-                        }
+            if let Some(columns) = self.columns_for_table(&table_name) {
+                for col in columns {
+                    if col.name.to_lowercase() == word_lower {
+                        tracing::debug!(table = table_name, column = %col.name, "Found column definition");
+                        return Some(Self::internal_definition_location());
                     }
                 }
             }
         }
 
         // Check tables (unqualified table reference)
-        if let Some(table) = self.schema_cache.tables.get(&word) {
+        if let Some(table_name) = self.resolve_table_identifier(&word, text, offset)
+            && let Some(table) = self.table_info(&table_name)
+        {
             tracing::debug!(table = %table.name, "Found table definition");
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: "sql://internal".parse::<Uri>().unwrap(),
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-            }));
+            return Some(Self::internal_definition_location());
         }
 
         // Check columns (unqualified - search all tables)
@@ -2861,19 +3014,7 @@ impl SqlLsp {
                 if col.name.to_lowercase() == word_lower {
                     tracing::debug!(column = %col.name, table = table_name, "Found column definition");
                     // Return definition pointing to the table containing this column
-                    return Some(GotoDefinitionResponse::Scalar(Location {
-                        uri: "sql://internal".parse::<Uri>().unwrap(),
-                        range: Range {
-                            start: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                            end: Position {
-                                line: 0,
-                                character: 0,
-                            },
-                        },
-                    }));
+                    return Some(Self::internal_definition_location());
                 }
             }
         }
@@ -2881,73 +3022,25 @@ impl SqlLsp {
         // Check views
         if let Some(view) = self.schema_cache.views.get(&word) {
             tracing::debug!(view = %view.name, "Found view definition");
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: "sql://internal".parse::<Uri>().unwrap(),
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-            }));
+            return Some(Self::internal_definition_location());
         }
 
         // Check functions
         if let Some(func) = self.schema_cache.functions.get(&word) {
             tracing::debug!(function = %func.name, "Found function definition");
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: "sql://internal".parse::<Uri>().unwrap(),
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-            }));
+            return Some(Self::internal_definition_location());
         }
 
         // Check procedures
         if let Some(proc) = self.schema_cache.procedures.get(&word) {
             tracing::debug!(procedure = %proc.name, "Found procedure definition");
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: "sql://internal".parse::<Uri>().unwrap(),
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-            }));
+            return Some(Self::internal_definition_location());
         }
 
         // Check triggers
         if let Some(trigger) = self.schema_cache.triggers.get(&word) {
             tracing::debug!(trigger = %trigger.name, "Found trigger definition");
-            return Some(GotoDefinitionResponse::Scalar(Location {
-                uri: "sql://internal".parse::<Uri>().unwrap(),
-                range: Range {
-                    start: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                    end: Position {
-                        line: 0,
-                        character: 0,
-                    },
-                },
-            }));
+            return Some(Self::internal_definition_location());
         }
 
         // Check indexes
@@ -3026,7 +3119,7 @@ impl SqlLsp {
     fn is_sql_keyword(&self, word: &str) -> bool {
         // Import the keywords
         use crate::keywords::SQL_KEYWORDS;
-        SQL_KEYWORDS.iter().any(|&kw| kw == word)
+        SQL_KEYWORDS.contains(&word)
     }
 
     /// Find all occurrences of a word in text as an identifier (not part of another word)
@@ -3114,7 +3207,7 @@ impl SqlLsp {
         // Check if this is a table name and find views/other objects that reference it
         if self.schema_cache.tables.contains_key(word_lower) {
             // Find views that join with this table
-            for (view_name, _view) in &self.schema_cache.views {
+            for view_name in self.schema_cache.views.keys() {
                 // Simplified - could check actual JOINs in view definitions
                 let Ok(uri) = format!("sql://internal/view/{}", view_name).parse::<Uri>() else {
                     continue;
@@ -3352,29 +3445,61 @@ impl SqlLsp {
         let message_lower = message.to_lowercase();
 
         // Action: Add missing semicolon
-        if message_lower.contains("expecting") && message_lower.contains(";") {
-            if let Some(semi_pos) =
+        if message_lower.contains("expecting")
+            && message_lower.contains(";")
+            && let Some(semi_pos) =
                 self.find_semicolon_insertion_point(text, Some(&diagnostic.range))
-            {
+        {
+            actions.push(CodeAction {
+                title: "Add missing semicolon".to_string(),
+                kind: Some(lsp_types::CodeActionKind::QUICKFIX),
+                diagnostics: None,
+                edit: Some(WorkspaceEdit {
+                    changes: Some(HashMap::from([(
+                        "sql://internal".parse::<Uri>().unwrap(),
+                        vec![TextEdit {
+                            range: Range {
+                                start: Position {
+                                    line: semi_pos.0,
+                                    character: semi_pos.1,
+                                },
+                                end: Position {
+                                    line: semi_pos.0,
+                                    character: semi_pos.1,
+                                },
+                            },
+                            new_text: ";".to_string(),
+                        }],
+                    )])),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                command: None,
+                is_preferred: Some(true),
+                disabled: None,
+                data: None,
+            });
+        }
+
+        // Action: Quote identifier that's a reserved word
+        if (message_lower.contains("exposing")
+            || message_lower.contains("reserved")
+            || message_lower.contains("keyword"))
+            && let Some(word_range) = self.find_unquoted_identifier(text, Some(&diagnostic.range))
+        {
+            let identifier = self.extract_identifier(text, &word_range);
+            if !identifier.is_empty() {
+                let quoted = format!("\"{}\"", identifier);
                 actions.push(CodeAction {
-                    title: "Add missing semicolon".to_string(),
+                    title: format!("Quote identifier '{}'", identifier),
                     kind: Some(lsp_types::CodeActionKind::QUICKFIX),
                     diagnostics: None,
                     edit: Some(WorkspaceEdit {
                         changes: Some(HashMap::from([(
                             "sql://internal".parse::<Uri>().unwrap(),
                             vec![TextEdit {
-                                range: Range {
-                                    start: Position {
-                                        line: semi_pos.0,
-                                        character: semi_pos.1,
-                                    },
-                                    end: Position {
-                                        line: semi_pos.0,
-                                        character: semi_pos.1,
-                                    },
-                                },
-                                new_text: ";".to_string(),
+                                range: word_range,
+                                new_text: quoted,
                             }],
                         )])),
                         document_changes: None,
@@ -3385,39 +3510,6 @@ impl SqlLsp {
                     disabled: None,
                     data: None,
                 });
-            }
-        }
-
-        // Action: Quote identifier that's a reserved word
-        if message_lower.contains("exposing")
-            || message_lower.contains("reserved")
-            || message_lower.contains("keyword")
-        {
-            if let Some(word_range) = self.find_unquoted_identifier(text, Some(&diagnostic.range)) {
-                let identifier = self.extract_identifier(text, &word_range);
-                if !identifier.is_empty() {
-                    let quoted = format!("\"{}\"", identifier);
-                    actions.push(CodeAction {
-                        title: format!("Quote identifier '{}'", identifier),
-                        kind: Some(lsp_types::CodeActionKind::QUICKFIX),
-                        diagnostics: None,
-                        edit: Some(WorkspaceEdit {
-                            changes: Some(HashMap::from([(
-                                "sql://internal".parse::<Uri>().unwrap(),
-                                vec![TextEdit {
-                                    range: word_range,
-                                    new_text: quoted,
-                                }],
-                            )])),
-                            document_changes: None,
-                            change_annotations: None,
-                        }),
-                        command: None,
-                        is_preferred: Some(true),
-                        disabled: None,
-                        data: None,
-                    });
-                }
             }
         }
 
@@ -3435,7 +3527,7 @@ impl SqlLsp {
                         changes: Some(HashMap::from([(
                             "sql://internal".parse::<Uri>().unwrap(),
                             vec![TextEdit {
-                                range: range.clone(),
+                                range: *range,
                                 new_text: quoted,
                             }],
                         )])),
@@ -3537,7 +3629,7 @@ impl SqlLsp {
 
     /// Find an unquoted identifier that might need quoting
     fn find_unquoted_identifier(&self, _text: &str, range: Option<&Range>) -> Option<Range> {
-        range.map(|r| r.clone())
+        range.copied()
     }
 
     /// Extract identifier from text at the given range
@@ -3590,17 +3682,405 @@ impl SqlLsp {
             hover_text.push_str(&format!("\n{}\n", comment));
         }
 
-        Hover {
-            contents: HoverContents::Scalar(MarkedString::String(hover_text)),
-            range: None,
+        self.markdown_hover(hover_text)
+    }
+
+    fn create_table_hover(&self, table: &TableInfo) -> Hover {
+        let mut hover_text = format!("**Table: {}**\n\n", table.name);
+
+        if let Some(schema) = &table.schema {
+            hover_text.push_str(&format!("Schema: `{}`\n", schema));
         }
+
+        if let Some(comment) = &table.comment {
+            hover_text.push_str(&format!("\n{}\n\n", comment));
+        }
+
+        if let Some(row_count) = table.row_count {
+            hover_text.push_str(&format!("Rows: ~{}\n\n", row_count));
+        }
+
+        if let Some(columns) = self.columns_for_table(&table.name) {
+            hover_text.push_str("**Columns:**\n");
+            for col in columns {
+                let mut col_line = format!("- `{}`: {}", col.name, col.data_type);
+
+                if col.is_primary_key {
+                    col_line.push_str(" **PK**");
+                }
+                if col.is_foreign_key {
+                    col_line.push_str(" **FK**");
+                }
+                if !col.nullable {
+                    col_line.push_str(" NOT NULL");
+                }
+
+                hover_text.push_str(&col_line);
+                hover_text.push('\n');
+            }
+        }
+
+        if let Some(fks) = self.foreign_keys_for_table(&table.name)
+            && !fks.is_empty()
+        {
+            hover_text.push_str("\n**Foreign Keys:**\n");
+            for fk in fks {
+                hover_text.push_str(&format!(
+                    "- `{}` → `{}.{}`\n",
+                    fk.columns.join(", "),
+                    fk.referenced_table,
+                    fk.referenced_columns.join(", ")
+                ));
+            }
+        }
+
+        if let Some(reverse_fks) = self.reverse_foreign_keys_for_table(&table.name)
+            && !reverse_fks.is_empty()
+        {
+            hover_text.push_str("\n**Referenced By:**\n");
+            for (source_table, fk) in reverse_fks {
+                hover_text.push_str(&format!(
+                    "- `{}.{}` → `{}`\n",
+                    source_table,
+                    fk.columns.join(", "),
+                    fk.referenced_columns.join(", ")
+                ));
+            }
+        }
+
+        self.markdown_hover(hover_text)
+    }
+
+    fn create_derived_table_hover(&self, name: &str, columns: &[String], kind: &str) -> Hover {
+        let mut hover_text = format!("**{kind}: {name}**\n\n");
+
+        if columns.is_empty() {
+            hover_text.push_str("Projected columns are not available.\n");
+        } else {
+            hover_text.push_str("**Columns:**\n");
+            for column in columns {
+                hover_text.push_str(&format!("- `{column}`\n"));
+            }
+        }
+
+        self.markdown_hover(hover_text)
+    }
+
+    fn internal_definition_location() -> GotoDefinitionResponse {
+        GotoDefinitionResponse::Scalar(Location {
+            uri: "sql://internal".parse::<Uri>().unwrap(),
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 0,
+                },
+            },
+        })
+    }
+
+    fn qualified_reference_at_offset(
+        &self,
+        text: &Rope,
+        offset: usize,
+    ) -> Option<(String, String)> {
+        let sql = text.to_string();
+        let prefix = &sql[..offset.min(sql.len())];
+        let token_start = prefix
+            .rfind(|c: char| !(c.is_alphanumeric() || c == '_' || c == '.'))
+            .map_or(0, |idx| idx + 1);
+        let token = &prefix[token_start..];
+        let (qualifier, partial) = token.rsplit_once('.')?;
+        if qualifier.is_empty() {
+            return None;
+        }
+
+        Some((qualifier.to_string(), partial.to_string()))
+    }
+
+    fn resolve_table_identifier(
+        &self,
+        identifier: &str,
+        text: &Rope,
+        offset: usize,
+    ) -> Option<String> {
+        self.table_info(identifier)
+            .map(|table| table.name.clone())
+            .or_else(|| self.resolve_alias_to_table(identifier, text, offset))
+    }
+
+    fn table_info(&self, table_name: &str) -> Option<&TableInfo> {
+        self.schema_cache
+            .tables
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table_name))
+            .map(|(_, table)| table)
+    }
+
+    fn columns_for_table(&self, table_name: &str) -> Option<&Vec<ColumnInfo>> {
+        self.schema_cache
+            .columns_by_table
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table_name))
+            .map(|(_, columns)| columns)
+    }
+
+    fn foreign_keys_for_table(&self, table_name: &str) -> Option<&Vec<ForeignKeyInfo>> {
+        self.schema_cache
+            .foreign_keys_by_table
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table_name))
+            .map(|(_, foreign_keys)| foreign_keys)
+    }
+
+    fn reverse_foreign_keys_for_table(
+        &self,
+        table_name: &str,
+    ) -> Option<&Vec<(String, ForeignKeyInfo)>> {
+        self.schema_cache
+            .reverse_foreign_keys
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(table_name))
+            .map(|(_, reverse_foreign_keys)| reverse_foreign_keys)
     }
 
     fn create_keyword_hover(&self, keyword: &str, description: &str) -> Hover {
         let hover_text = format!("**{}**\n\n{}", keyword, description);
+        self.markdown_hover(hover_text)
+    }
+
+    fn markdown_hover(&self, hover_text: String) -> Hover {
         Hover {
-            contents: HoverContents::Scalar(MarkedString::String(hover_text)),
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: hover_text,
+            }),
             range: None,
+        }
+    }
+
+    fn derived_columns_for_identifier(&self, identifier: &str, text: &Rope) -> Option<Vec<String>> {
+        let sql = text.to_string();
+        let statements = Parser::parse_sql(&SQLiteDialect {}, &sql).ok()?;
+        let mut derived_tables = HashMap::new();
+
+        for statement in &statements {
+            self.collect_derived_sources_from_statement(statement, &mut derived_tables);
+        }
+
+        derived_tables.remove(&identifier.to_lowercase())
+    }
+
+    fn derived_columns_from_text_fallback(
+        &self,
+        identifier: &str,
+        text: &Rope,
+    ) -> Option<Vec<String>> {
+        let sql = text.to_string();
+        let identifier_lower = identifier.to_lowercase();
+
+        if let Some(with_index) = sql.to_lowercase().find("with ") {
+            let after_with = &sql[with_index + 5..];
+            let after_with_lower = after_with.to_lowercase();
+            let pattern = format!("{} as (select ", identifier_lower);
+            if let Some(pattern_index) = after_with_lower.find(&pattern) {
+                let select_start = pattern_index + pattern.len();
+                if let Some(from_index) = after_with_lower[select_start..].find(" from ") {
+                    let projection = &after_with[select_start..select_start + from_index];
+                    let columns = self.parse_projection_column_names(projection);
+                    if !columns.is_empty() {
+                        return Some(columns);
+                    }
+                }
+            }
+        }
+
+        let alias_pattern = format!(") {}", identifier_lower);
+        let sql_lower = sql.to_lowercase();
+        if let Some(alias_index) = sql_lower.find(&alias_pattern) {
+            let before_alias = &sql[..alias_index];
+            if let Some(select_index) = before_alias.to_lowercase().rfind("select ") {
+                let projection = &before_alias[select_index + 7..];
+                let columns = self.parse_projection_column_names(projection);
+                if !columns.is_empty() {
+                    return Some(columns);
+                }
+            }
+        }
+
+        None
+    }
+
+    fn parse_projection_column_names(&self, projection: &str) -> Vec<String> {
+        projection
+            .split(',')
+            .filter_map(|part| {
+                let trimmed = part.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+
+                let lower = trimmed.to_lowercase();
+                if let Some((_, alias)) = lower.rsplit_once(" as ") {
+                    return Some(alias.trim().to_string());
+                }
+
+                trimmed
+                    .split('.')
+                    .next_back()
+                    .map(str::trim)
+                    .filter(|name| !name.is_empty())
+                    .map(ToOwned::to_owned)
+            })
+            .collect()
+    }
+
+    fn collect_derived_sources_from_statement(
+        &self,
+        statement: &Statement,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        if let Statement::Query(query) = statement {
+            self.collect_derived_sources_from_query(query, derived_tables);
+        }
+    }
+
+    fn collect_derived_sources_from_query(
+        &self,
+        query: &Query,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        if let Some(with) = &query.with {
+            for cte in &with.cte_tables {
+                let columns = self.projected_columns_from_query(&cte.query);
+                self.insert_derived_source(&cte.alias, columns, derived_tables);
+                self.collect_derived_sources_from_query(&cte.query, derived_tables);
+            }
+        }
+
+        self.collect_derived_sources_from_set_expr(query.body.as_ref(), derived_tables);
+    }
+
+    fn collect_derived_sources_from_set_expr(
+        &self,
+        set_expr: &SetExpr,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        match set_expr {
+            SetExpr::Select(select) => {
+                self.collect_derived_sources_from_select(select, derived_tables)
+            }
+            SetExpr::Query(query) => self.collect_derived_sources_from_query(query, derived_tables),
+            SetExpr::SetOperation { left, right, .. } => {
+                self.collect_derived_sources_from_set_expr(left, derived_tables);
+                self.collect_derived_sources_from_set_expr(right, derived_tables);
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_derived_sources_from_select(
+        &self,
+        select: &Select,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        for table_with_joins in &select.from {
+            self.collect_derived_sources_from_table_factor(
+                &table_with_joins.relation,
+                derived_tables,
+            );
+            for join in &table_with_joins.joins {
+                self.collect_derived_sources_from_table_factor(&join.relation, derived_tables);
+            }
+        }
+    }
+
+    fn collect_derived_sources_from_table_factor(
+        &self,
+        table_factor: &TableFactor,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        match table_factor {
+            TableFactor::Derived {
+                subquery, alias, ..
+            } => {
+                if let Some(alias) = alias {
+                    let columns = self.projected_columns_from_query(subquery);
+                    self.insert_derived_source(alias, columns, derived_tables);
+                }
+                self.collect_derived_sources_from_query(subquery, derived_tables);
+            }
+            TableFactor::NestedJoin {
+                table_with_joins, ..
+            } => {
+                self.collect_derived_sources_from_table_factor(
+                    &table_with_joins.relation,
+                    derived_tables,
+                );
+                for join in &table_with_joins.joins {
+                    self.collect_derived_sources_from_table_factor(&join.relation, derived_tables);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn projected_columns_from_query(&self, query: &Query) -> Vec<String> {
+        match query.body.as_ref() {
+            SetExpr::Select(select) => self.projected_columns_from_select(select),
+            SetExpr::Query(query) => self.projected_columns_from_query(query),
+            SetExpr::SetOperation { left, .. } => self.projected_columns_from_set_expr(left),
+            _ => Vec::new(),
+        }
+    }
+
+    fn projected_columns_from_set_expr(&self, set_expr: &SetExpr) -> Vec<String> {
+        match set_expr {
+            SetExpr::Select(select) => self.projected_columns_from_select(select),
+            SetExpr::Query(query) => self.projected_columns_from_query(query),
+            SetExpr::SetOperation { left, .. } => self.projected_columns_from_set_expr(left),
+            _ => Vec::new(),
+        }
+    }
+
+    fn projected_columns_from_select(&self, select: &Select) -> Vec<String> {
+        let mut columns = Vec::new();
+
+        for item in &select.projection {
+            match item {
+                SelectItem::ExprWithAlias { alias, .. } => columns.push(alias.value.clone()),
+                SelectItem::UnnamedExpr(expr) => {
+                    if let Some(column_name) = self.column_name_from_expr(expr) {
+                        columns.push(column_name);
+                    }
+                }
+                SelectItem::QualifiedWildcard(_, _) | SelectItem::Wildcard(_) => {}
+            }
+        }
+
+        columns
+    }
+
+    fn column_name_from_expr(&self, expr: &Expr) -> Option<String> {
+        match expr {
+            Expr::Identifier(identifier) => Some(identifier.value.clone()),
+            Expr::CompoundIdentifier(parts) => parts.last().map(|part| part.value.clone()),
+            _ => None,
+        }
+    }
+
+    fn insert_derived_source(
+        &self,
+        alias: &TableAlias,
+        columns: Vec<String>,
+        derived_tables: &mut HashMap<String, Vec<String>>,
+    ) {
+        let key = alias.name.value.to_lowercase();
+        if !key.is_empty() {
+            derived_tables.insert(key, columns);
         }
     }
 
@@ -3740,9 +4220,10 @@ impl SqlLsp {
     ) -> String {
         // Build alias map from available tables
         let alias_map = context_analyzer::build_alias_map(available_tables);
+        let identifier_lower = identifier.to_lowercase();
 
         // Try to resolve the identifier using the alias map
-        if let Some(table_name) = alias_map.get(identifier) {
+        if let Some(table_name) = alias_map.get(&identifier_lower) {
             tracing::debug!(
                 "Resolved identifier '{}' to table '{}' using context",
                 identifier,
@@ -3762,7 +4243,15 @@ impl SqlLsp {
     /// Resolve a table alias to the actual table name
     fn resolve_alias_to_table(&self, alias: &str, text: &Rope, _offset: usize) -> Option<String> {
         // First check if it's already a known table name
-        if self.schema_cache.tables.contains_key(alias) {
+        if let Some(table) = self.table_info(alias) {
+            return Some(table.name.clone());
+        }
+
+        if self
+            .derived_columns_for_identifier(alias, text)
+            .or_else(|| self.derived_columns_from_text_fallback(alias, text))
+            .is_some()
+        {
             return Some(alias.to_string());
         }
 
@@ -3780,7 +4269,7 @@ impl SqlLsp {
             format!(" as {} ", alias.to_lowercase()),
         ];
 
-        for (table_name, _) in &self.schema_cache.tables {
+        for table_name in self.schema_cache.tables.keys() {
             let table_lower = table_name.to_lowercase();
 
             // Check for "table_name alias" pattern
@@ -3832,6 +4321,238 @@ impl SqlLsp {
             .collect()
     }
 
+    fn rank_and_dedup_completions(
+        &self,
+        context: &AstSqlContext,
+        filter: &str,
+        completions: Vec<CompletionItem>,
+        prefer_create_table_constraints: bool,
+    ) -> Vec<CompletionItem> {
+        let filter_lower = filter.to_lowercase();
+        let mut best_by_key: std::collections::HashMap<String, ScoredCompletionItem> =
+            std::collections::HashMap::new();
+
+        for (original_index, item) in completions.into_iter().enumerate() {
+            let match_target = item
+                .filter_text
+                .as_ref()
+                .unwrap_or(&item.label)
+                .to_lowercase();
+            let exact_prefix = !filter_lower.is_empty() && match_target.starts_with(&filter_lower);
+            let fuzzy_score = if filter_lower.is_empty() {
+                0
+            } else {
+                self.fuzzy_matcher
+                    .fuzzy_match(filter, &match_target)
+                    .filter(|result| result.is_match())
+                    .map(|result| result.score)
+                    .unwrap_or(i32::MIN / 4)
+            };
+
+            if !filter_lower.is_empty() && fuzzy_score <= i32::MIN / 8 {
+                continue;
+            }
+
+            let scored = ScoredCompletionItem {
+                context_bucket: self.completion_context_bucket(
+                    context,
+                    &item,
+                    prefer_create_table_constraints,
+                ),
+                exact_prefix,
+                fuzzy_score,
+                original_index,
+                item,
+            };
+            let key = self.completion_dedup_key(&scored.item);
+
+            let replace = best_by_key
+                .get(&key)
+                .map(|existing| self.compare_scored_completions(&scored, existing).is_gt())
+                .unwrap_or(true);
+            if replace {
+                best_by_key.insert(key, scored);
+            }
+        }
+
+        let mut scored: Vec<_> = best_by_key.into_values().collect();
+        scored.sort_by(|left, right| self.compare_scored_completions(right, left));
+        scored.into_iter().map(|entry| entry.item).collect()
+    }
+
+    fn compare_scored_completions(
+        &self,
+        left: &ScoredCompletionItem,
+        right: &ScoredCompletionItem,
+    ) -> std::cmp::Ordering {
+        left.context_bucket
+            .cmp(&right.context_bucket)
+            .then_with(|| (left.exact_prefix as u8).cmp(&(right.exact_prefix as u8)))
+            .then_with(|| left.fuzzy_score.cmp(&right.fuzzy_score))
+            .then_with(|| self.compare_completion_sort_texts(left, right))
+            .then_with(|| right.original_index.cmp(&left.original_index))
+            .then_with(|| right.item.label.cmp(&left.item.label))
+    }
+
+    fn compare_completion_sort_texts(
+        &self,
+        left: &ScoredCompletionItem,
+        right: &ScoredCompletionItem,
+    ) -> std::cmp::Ordering {
+        let left_sort_text = left.item.sort_text.as_deref().unwrap_or(&left.item.label);
+        let right_sort_text = right.item.sort_text.as_deref().unwrap_or(&right.item.label);
+
+        right_sort_text.cmp(left_sort_text)
+    }
+
+    fn completion_context_bucket(
+        &self,
+        context: &AstSqlContext,
+        item: &CompletionItem,
+        prefer_create_table_constraints: bool,
+    ) -> i32 {
+        let kind = item.kind.unwrap_or(CompletionItemKind::TEXT);
+        match context {
+            AstSqlContext::AfterDot { .. } => match kind {
+                CompletionItemKind::FIELD => 100,
+                _ => 0,
+            },
+            AstSqlContext::SelectList { .. } => match kind {
+                CompletionItemKind::FIELD => 90,
+                CompletionItemKind::FUNCTION => 45,
+                CompletionItemKind::KEYWORD => 30,
+                _ => 20,
+            },
+            AstSqlContext::ConditionClause { .. } => match kind {
+                CompletionItemKind::FIELD => 90,
+                CompletionItemKind::FUNCTION => 50,
+                CompletionItemKind::KEYWORD | CompletionItemKind::OPERATOR => 30,
+                _ => 20,
+            },
+            AstSqlContext::FromClause => match kind {
+                CompletionItemKind::CLASS | CompletionItemKind::INTERFACE => 60,
+                CompletionItemKind::KEYWORD => 25,
+                _ => 10,
+            },
+            AstSqlContext::JoinClause { .. } => match kind {
+                CompletionItemKind::CLASS | CompletionItemKind::INTERFACE => 70,
+                CompletionItemKind::KEYWORD => 25,
+                _ => 10,
+            },
+            AstSqlContext::CreateTable => match kind {
+                CompletionItemKind::KEYWORD if prefer_create_table_constraints => 85,
+                CompletionItemKind::STRUCT if prefer_create_table_constraints => 60,
+                CompletionItemKind::STRUCT => 75,
+                CompletionItemKind::KEYWORD => 55,
+                _ => 15,
+            },
+            AstSqlContext::Subquery { .. } => match kind {
+                CompletionItemKind::FIELD => 85,
+                CompletionItemKind::FUNCTION => 45,
+                CompletionItemKind::KEYWORD => 30,
+                _ => 15,
+            },
+            AstSqlContext::CommonTableExpression { .. } => match kind {
+                CompletionItemKind::KEYWORD => 30,
+                _ => 15,
+            },
+            AstSqlContext::General => match kind {
+                CompletionItemKind::CLASS | CompletionItemKind::INTERFACE => 60,
+                CompletionItemKind::FIELD => 55,
+                CompletionItemKind::KEYWORD => 35,
+                CompletionItemKind::FUNCTION => 30,
+                _ => 10,
+            },
+        }
+    }
+
+    fn completion_dedup_key(&self, item: &CompletionItem) -> String {
+        let kind = item
+            .kind
+            .map(|kind| format!("{kind:?}"))
+            .unwrap_or_else(|| "TEXT".to_string());
+        let identifier = item
+            .filter_text
+            .as_ref()
+            .unwrap_or(&item.label)
+            .to_lowercase();
+        format!("{kind}:{identifier}")
+    }
+
+    fn get_redis_completions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        is_manual_trigger: bool,
+    ) -> Vec<CompletionItem> {
+        let prefix = text.to_string();
+        let before_cursor = &prefix[..offset.min(prefix.len())];
+        let trimmed_prefix = before_cursor.trim_end_matches([' ', '\t']);
+
+        if !is_manual_trigger && trimmed_prefix.is_empty() {
+            return Vec::new();
+        }
+
+        let current_line = before_cursor.rsplit('\n').next().unwrap_or_default();
+        let current_tokens: Vec<&str> = current_line.split_whitespace().collect();
+        let trailing_space = before_cursor.ends_with(' ');
+        let validator = crate::redis_validator::RedisValidator::new();
+
+        if current_tokens.is_empty() {
+            return validator
+                .top_level_commands(None)
+                .into_iter()
+                .map(|command| CompletionItem {
+                    label: command.clone(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("Redis command".to_string()),
+                    insert_text: Some(format!("{} ", command)),
+                    filter_text: Some(command.clone()),
+                    ..Default::default()
+                })
+                .collect();
+        }
+
+        if current_tokens.len() == 1 && !trailing_space {
+            return validator
+                .top_level_commands(Some(current_tokens[0]))
+                .into_iter()
+                .map(|command| CompletionItem {
+                    label: command.clone(),
+                    kind: Some(CompletionItemKind::KEYWORD),
+                    detail: Some("Redis command".to_string()),
+                    insert_text: Some(format!("{} ", command)),
+                    filter_text: Some(command.clone()),
+                    ..Default::default()
+                })
+                .collect();
+        }
+
+        let subcommand_prefix = if trailing_space {
+            None
+        } else {
+            current_tokens.last().copied()
+        };
+        let command_path = if trailing_space {
+            current_tokens.clone()
+        } else {
+            current_tokens[..current_tokens.len().saturating_sub(1)].to_vec()
+        };
+
+        validator
+            .subcommands_for_path(&command_path, subcommand_prefix)
+            .into_iter()
+            .map(|subcommand| CompletionItem {
+                label: subcommand.clone(),
+                kind: Some(CompletionItemKind::KEYWORD),
+                detail: Some("Redis subcommand".to_string()),
+                insert_text: Some(format!("{} ", subcommand)),
+                filter_text: Some(subcommand.clone()),
+                ..Default::default()
+            })
+            .collect()
+    }
+
     /// Get the word at a given byte offset
     fn get_word_at_offset(&self, text: &Rope, offset: usize) -> Option<String> {
         let pos = text.offset_to_position(offset);
@@ -3849,7 +4570,7 @@ impl SqlLsp {
         while start > 0
             && chars
                 .get(start - 1)
-                .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
         {
             start -= 1;
         }
@@ -3857,7 +4578,7 @@ impl SqlLsp {
         while end < chars.len()
             && chars
                 .get(end)
-                .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
         {
             end += 1;
         }
@@ -3888,7 +4609,7 @@ impl SqlLsp {
         while start > 0
             && chars
                 .get(start - 1)
-                .map_or(false, |c| c.is_alphanumeric() || *c == '_')
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
         {
             start -= 1;
         }
@@ -3920,13 +4641,25 @@ impl SqlLsp {
     /// by the schema metadata overlay to show table/column information.
     pub fn get_schema_for_metadata(&self) -> DatabaseSchema {
         let tables: Vec<String> = self.schema_cache.tables.keys().cloned().collect();
-        let views: Vec<String> = self.schema_cache.views.keys().cloned().collect();
 
         // Collect materialized views, functions, procedures, triggers
-        let materialized_views: Vec<String> = vec![]; // SchemaCache doesn't track this separately
+        let materialized_views: Vec<String> = self
+            .schema_cache
+            .views
+            .values()
+            .filter(|view| view.is_materialized)
+            .map(|view| view.name.clone())
+            .collect();
         let functions: Vec<String> = self.schema_cache.functions.keys().cloned().collect();
         let procedures: Vec<String> = self.schema_cache.procedures.keys().cloned().collect();
         let triggers: Vec<String> = self.schema_cache.triggers.keys().cloned().collect();
+        let views: Vec<String> = self
+            .schema_cache
+            .views
+            .values()
+            .filter(|view| !view.is_materialized)
+            .map(|view| view.name.clone())
+            .collect();
 
         // Convert table_infos to the expected format
         let table_infos: Vec<zqlz_core::TableInfo> = self
@@ -3936,7 +4669,7 @@ impl SqlLsp {
             .map(|t| zqlz_core::TableInfo {
                 name: t.name.clone(),
                 schema: t.schema.clone(),
-                table_type: zqlz_core::TableType::Table,
+                table_type: t.table_type,
                 owner: None,
                 row_count: t.row_count,
                 size_bytes: None,

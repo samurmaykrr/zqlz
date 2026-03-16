@@ -5,9 +5,11 @@ use gpui::{
 
 use crate::widgets::{ActiveTheme, StyledExt, h_flex, kbd::Kbd, text::Text};
 
+type TooltipElementBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
+
 enum TooltipContext {
     Text(Text),
-    Element(Box<dyn Fn(&mut Window, &mut App) -> AnyElement>),
+    Element(TooltipElementBuilder),
 }
 
 /// A Tooltip element that can display text or custom content,
@@ -74,16 +76,14 @@ impl Render for Tooltip {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let key_binding = if let Some(key_binding) = &self.key_binding {
             Some(key_binding.clone())
+        } else if let Some((action, context)) = &self.action {
+            Kbd::binding_for_action(
+                action.as_ref(),
+                context.as_ref().map(|s| s.as_ref()),
+                window,
+            )
         } else {
-            if let Some((action, context)) = &self.action {
-                Kbd::binding_for_action(
-                    action.as_ref(),
-                    context.as_ref().map(|s| s.as_ref()),
-                    window,
-                )
-            } else {
-                None
-            }
+            None
         };
 
         div().child(

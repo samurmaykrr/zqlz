@@ -39,6 +39,18 @@ pub struct FuzzyMatcher {
     case_sensitive: bool,
 }
 
+struct FuzzySearchFrame {
+    pattern_idx: usize,
+    candidate_idx: usize,
+    current_score: i32,
+    current_indices: Vec<usize>,
+}
+
+struct FuzzySearchState {
+    best_score: Option<i32>,
+    best_indices: Vec<usize>,
+}
+
 impl FuzzyMatcher {
     pub fn new(case_sensitive: bool) -> Self {
         Self { case_sensitive }
@@ -75,7 +87,7 @@ impl FuzzyMatcher {
             let indices: Vec<usize> = (0..pattern_chars.len()).collect();
             return Some(FuzzyMatch {
                 quality: MatchQuality::Prefix,
-                score: 1000 + (candidate.len() - pattern.len()) as i32, // Prefer shorter matches
+                score: 1000 - (candidate.len() - pattern.len()) as i32,
                 matched_indices: indices,
             });
         }
@@ -139,19 +151,20 @@ impl FuzzyMatcher {
         candidate: &[char],
         original_candidate: &str,
     ) -> Option<Vec<usize>> {
-        // Find word boundaries in candidate
-        let word_starts: Vec<usize> = original_candidate
-            .char_indices()
+        let original_chars: Vec<char> = original_candidate.chars().collect();
+        let word_starts: Vec<usize> = original_chars
+            .iter()
             .enumerate()
-            .filter_map(|(idx, (byte_pos, ch))| {
-                if idx == 0 || ch.is_uppercase() || {
-                    // Check if previous char was non-alphanumeric (word boundary)
-                    byte_pos > 0 && {
-                        let prev_char =
-                            original_candidate[..byte_pos].chars().last().unwrap_or(' ');
-                        !prev_char.is_alphanumeric()
-                    }
-                } {
+            .filter_map(|(idx, ch)| {
+                if idx == 0 {
+                    return Some(idx);
+                }
+
+                let prev_char = original_chars[idx - 1];
+                let starts_after_separator = !prev_char.is_alphanumeric();
+                let starts_camel_case = ch.is_uppercase() && !prev_char.is_uppercase();
+
+                if starts_after_separator || starts_camel_case {
                     Some(idx)
                 } else {
                     None
@@ -198,60 +211,62 @@ impl FuzzyMatcher {
             return None;
         }
 
-        let mut best_score = None;
-        let mut best_indices = Vec::new();
+        let mut state = FuzzySearchState {
+            best_score: None,
+            best_indices: Vec::new(),
+        };
 
         // Try to find the best fuzzy match
         self.fuzzy_match_recursive(
             pattern,
             candidate,
-            0,
-            0,
-            0,
-            Vec::new(),
-            &mut best_score,
-            &mut best_indices,
+            FuzzySearchFrame {
+                pattern_idx: 0,
+                candidate_idx: 0,
+                current_score: 0,
+                current_indices: Vec::new(),
+            },
+            &mut state,
         );
 
-        best_score.map(|score| (score, best_indices))
+        state.best_score.map(|score| (score, state.best_indices))
     }
 
     fn fuzzy_match_recursive(
         &self,
         pattern: &[char],
         candidate: &[char],
-        pattern_idx: usize,
-        candidate_idx: usize,
-        current_score: i32,
-        current_indices: Vec<usize>,
-        best_score: &mut Option<i32>,
-        best_indices: &mut Vec<usize>,
+        frame: FuzzySearchFrame,
+        state: &mut FuzzySearchState,
     ) {
         // All pattern characters matched
-        if pattern_idx >= pattern.len() {
-            if best_score.map_or(true, |s| current_score > s) {
-                *best_score = Some(current_score);
-                *best_indices = current_indices;
+        if frame.pattern_idx >= pattern.len() {
+            if state
+                .best_score
+                .is_none_or(|score| frame.current_score > score)
+            {
+                state.best_score = Some(frame.current_score);
+                state.best_indices = frame.current_indices;
             }
             return;
         }
 
         // Ran out of candidate characters
-        if candidate_idx >= candidate.len() {
+        if frame.candidate_idx >= candidate.len() {
             return;
         }
 
-        let pattern_char = pattern[pattern_idx];
+        let pattern_char = pattern[frame.pattern_idx];
 
         // Try matching current candidate character
-        if candidate[candidate_idx] == pattern_char {
-            let mut new_indices = current_indices.clone();
-            new_indices.push(candidate_idx);
+        if candidate[frame.candidate_idx] == pattern_char {
+            let mut new_indices = frame.current_indices.clone();
+            new_indices.push(frame.candidate_idx);
 
             // Calculate score based on consecutive matches
-            let score_bonus = if pattern_idx > 0
-                && candidate_idx > 0
-                && current_indices.last() == Some(&(candidate_idx - 1))
+            let score_bonus = if frame.pattern_idx > 0
+                && frame.candidate_idx > 0
+                && frame.current_indices.last() == Some(&(frame.candidate_idx - 1))
             {
                 10 // Bonus for consecutive matches
             } else {
@@ -261,26 +276,28 @@ impl FuzzyMatcher {
             self.fuzzy_match_recursive(
                 pattern,
                 candidate,
-                pattern_idx + 1,
-                candidate_idx + 1,
-                current_score + score_bonus + 1,
-                new_indices,
-                best_score,
-                best_indices,
+                FuzzySearchFrame {
+                    pattern_idx: frame.pattern_idx + 1,
+                    candidate_idx: frame.candidate_idx + 1,
+                    current_score: frame.current_score + score_bonus + 1,
+                    current_indices: new_indices,
+                },
+                state,
             );
         }
 
         // Try skipping current candidate character (with penalty)
-        if candidate_idx < candidate.len() - 1 {
+        if frame.candidate_idx < candidate.len() - 1 {
             self.fuzzy_match_recursive(
                 pattern,
                 candidate,
-                pattern_idx,
-                candidate_idx + 1,
-                current_score - 1, // Penalty for skipping
-                current_indices,
-                best_score,
-                best_indices,
+                FuzzySearchFrame {
+                    pattern_idx: frame.pattern_idx,
+                    candidate_idx: frame.candidate_idx + 1,
+                    current_score: frame.current_score - 1,
+                    current_indices: frame.current_indices,
+                },
+                state,
             );
         }
     }

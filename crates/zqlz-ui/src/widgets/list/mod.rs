@@ -1,3 +1,5 @@
+#![allow(clippy::module_inception)]
+
 pub(crate) mod cache;
 mod delegate;
 mod list;

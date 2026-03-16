@@ -121,6 +121,7 @@ impl FilterOperator {
     /// Returns (sql_fragment, needs_value, is_pattern)
     /// If needs_value is true, the value should be bound as a parameter
     /// If is_pattern is true, the value should be wrapped with % for LIKE
+    #[allow(clippy::wrong_self_convention)]
     pub fn to_sql_fragment(&self, column: &str, value: &str, value2: Option<&str>) -> String {
         let escaped_col = format!("\"{}\"", column.replace("\"", "\"\""));
         let escaped_val = escape_sql_value(value);
@@ -248,10 +249,10 @@ impl FilterCondition {
         }
 
         // If custom SQL is set, use it directly
-        if let Some(ref custom) = self.custom_sql {
-            if !custom.trim().is_empty() {
-                return Some(custom.clone());
-            }
+        if let Some(ref custom) = self.custom_sql
+            && !custom.trim().is_empty()
+        {
+            return Some(custom.clone());
         }
 
         // For Custom operator, use the value as raw SQL

@@ -262,10 +262,10 @@ impl GenericExporter {
 
         let include_cols = options.include_columns.get(table_name);
         for col in columns {
-            if let Some(cols) = include_cols {
-                if !cols.iter().any(|c| c == &col.name) {
-                    continue;
-                }
+            if let Some(cols) = include_cols
+                && !cols.iter().any(|c| c == &col.name)
+            {
+                continue;
             }
             let col_def = self.column_info_to_definition(&col);
             table_def.add_column(col_def);
@@ -281,27 +281,25 @@ impl GenericExporter {
             });
         }
 
-        if options.include_indexes {
-            if let Ok(indexes) = introspection
+        if options.include_indexes
+            && let Ok(indexes) = introspection
                 .get_indexes(options.schema.as_deref(), table_name)
                 .await
-            {
-                for idx in indexes {
-                    if !idx.is_primary {
-                        table_def.indexes.push(self.index_info_to_definition(&idx));
-                    }
+        {
+            for idx in indexes {
+                if !idx.is_primary {
+                    table_def.indexes.push(self.index_info_to_definition(&idx));
                 }
             }
         }
 
-        if options.include_foreign_keys {
-            if let Ok(fks) = introspection
+        if options.include_foreign_keys
+            && let Ok(fks) = introspection
                 .get_foreign_keys(options.schema.as_deref(), table_name)
                 .await
-            {
-                for fk in fks {
-                    table_def.foreign_keys.push(self.fk_info_to_definition(&fk));
-                }
+        {
+            for fk in fks {
+                table_def.foreign_keys.push(self.fk_info_to_definition(&fk));
             }
         }
 
@@ -313,13 +311,13 @@ impl GenericExporter {
             .await
         {
             for constraint in constraints {
-                if constraint.constraint_type == ConstraintType::Check {
-                    if let Some(expression) = constraint.definition {
-                        table_def.check_constraints.push(CheckConstraint {
-                            name: Some(constraint.name),
-                            expression,
-                        });
-                    }
+                if constraint.constraint_type == ConstraintType::Check
+                    && let Some(expression) = constraint.definition
+                {
+                    table_def.check_constraints.push(CheckConstraint {
+                        name: Some(constraint.name),
+                        expression,
+                    });
                 }
             }
         }
@@ -513,10 +511,10 @@ impl GenericExporter {
         }
 
         // Mark the export as partial when a row_limit truncated the result.
-        if let Some(limit) = options.row_limit {
-            if total_rows_exported >= limit {
-                table_data.partial = true;
-            }
+        if let Some(limit) = options.row_limit
+            && total_rows_exported >= limit
+        {
+            table_data.partial = true;
         }
 
         Ok(table_data)
@@ -571,11 +569,9 @@ impl GenericExporter {
                         // `pg_get_serial_sequence` is the canonical way to look up
                         // the actual sequence name even if it was renamed.
                         let seq_name_sql = format!(
-                            "SELECT pg_get_serial_sequence({}, {})",
-                            // Two string literals passed as SQL parameters are safer, but
-                            // pg_get_serial_sequence takes regclass/text — use literals.
-                            format!("'{}'", table_name.replace('\'', "''")),
-                            format!("'{}'", column_name.replace('\'', "''"))
+                            "SELECT pg_get_serial_sequence('{}', '{}')",
+                            table_name.replace('\'', "''"),
+                            column_name.replace('\'', "''")
                         );
 
                         let seq_name_result = self
@@ -846,13 +842,12 @@ impl GenericExporter {
                 if let crate::CanonicalType::Custom {
                     ref source_type, ..
                 } = col.canonical_type
+                    && let Some(enum_def) = doc.schema.enums.get(source_type)
                 {
-                    if let Some(enum_def) = doc.schema.enums.get(source_type) {
-                        col.canonical_type = crate::CanonicalType::Enum {
-                            name: Some(enum_def.name.clone()),
-                            values: enum_def.values.clone(),
-                        };
-                    }
+                    col.canonical_type = crate::CanonicalType::Enum {
+                        name: Some(enum_def.name.clone()),
+                        values: enum_def.values.clone(),
+                    };
                 }
             }
         }

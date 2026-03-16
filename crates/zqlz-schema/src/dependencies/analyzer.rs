@@ -317,7 +317,7 @@ fn extract_table_after_keyword(sql: &str, keyword_pos: usize) -> Option<ObjectRe
         return None;
     }
 
-    let table_part = parts[1].trim_end_matches(|c| c == ',' || c == ';' || c == ')');
+    let table_part = parts[1].trim_end_matches([',', ';', ')']);
 
     if table_part.is_empty() || table_part.starts_with('(') {
         return None;

@@ -6,7 +6,7 @@
 //! # Example
 //!
 //! ```
-//! use zqlz_editor::formatter::FormatterConfig;
+//! use zqlz_text_editor::formatter::FormatterConfig;
 //!
 //! let config = FormatterConfig::default()
 //!     .with_indent_size(4)

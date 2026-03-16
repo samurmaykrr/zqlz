@@ -64,6 +64,38 @@ impl SavedConnection {
         self.params.insert(key.to_string(), value.to_string());
         self
     }
+
+    /// Build a driver `ConnectionConfig` from the persisted params.
+    ///
+    /// Mirrors `zqlz_connection::SavedConnection::to_connection_config` so the
+    /// CLI produces identical configs without pulling in the GPUI dependency.
+    pub fn to_connection_config(&self) -> ConnectionConfig {
+        let mut config = ConnectionConfig::new(&self.driver, &self.name);
+
+        for (key, value) in &self.params {
+            config = config.with_param(key, value.clone());
+        }
+
+        config.host = self.params.get("host").cloned().unwrap_or_default();
+        config.port = self
+            .params
+            .get("port")
+            .and_then(|value| value.parse::<u16>().ok())
+            .unwrap_or(0);
+        config.database = self
+            .params
+            .get("database")
+            .cloned()
+            .or_else(|| self.params.get("path").cloned());
+        config.username = self
+            .params
+            .get("username")
+            .cloned()
+            .or_else(|| self.params.get("user").cloned());
+        config.password = self.params.get("password").cloned();
+
+        config
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -787,10 +819,7 @@ async fn open_connection(
         .get(&saved.driver)
         .ok_or_else(|| anyhow::anyhow!("unknown driver '{}'", saved.driver))?;
 
-    let mut config = ConnectionConfig::new(&saved.driver, &saved.name);
-    for (key, value) in &saved.params {
-        config = config.with_param(key, value.clone());
-    }
+    let mut config = saved.to_connection_config();
     if let Some(db) = database {
         config = config.with_param("database", db);
     }

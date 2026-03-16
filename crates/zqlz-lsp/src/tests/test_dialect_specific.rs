@@ -1,3 +1,5 @@
+#![allow(unused_mut)]
+
 //! Tests for database dialect-specific features
 //!
 //! Tests SQL completions and syntax support for different database dialects:

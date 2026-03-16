@@ -135,7 +135,7 @@ impl ListDelegate for MenuDelegate {
         };
 
         self.menu.update(cx, |this, cx| {
-            this.select_item(&item, window, cx);
+            this.select_item(item, window, cx);
         });
     }
 }
@@ -172,11 +172,8 @@ impl CodeActionMenu {
             let _subscriptions =
                 vec![
                     cx.subscribe(&list, |this: &mut Self, _, ev: &ListEvent, cx| {
-                        match ev {
-                            ListEvent::Confirm(_) => {
-                                this.hide(cx);
-                            }
-                            _ => {}
+                        if let ListEvent::Confirm(_) = ev {
+                            this.hide(cx);
                         }
                         cx.notify();
                     }),
@@ -287,12 +284,8 @@ impl CodeActionMenu {
 
     fn origin(&self, cx: &App) -> Option<Point<Pixels>> {
         let state = self.state.read(cx);
-        let Some(last_layout) = state.last_layout.as_ref() else {
-            return None;
-        };
-        let Some(cursor_origin) = last_layout.cursor_bounds.map(|b| b.origin) else {
-            return None;
-        };
+        let last_layout = state.last_layout.as_ref()?;
+        let cursor_origin = last_layout.cursor_bounds.map(|b| b.origin)?;
 
         let scroll_origin = self.state.read(cx).scroll_handle.offset();
 

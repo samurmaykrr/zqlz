@@ -1,3 +1,5 @@
+#![allow(unused_mut)]
+
 //! Tests for Common Table Expression (CTE) completions
 //!
 //! Tests the SQL LSP's ability to provide completions for WITH clauses,

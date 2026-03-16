@@ -13,6 +13,8 @@ use crate::widgets::{AxisExt, ElementExt, h_flex, resizable::PANEL_MIN_SIZE, v_f
 
 use super::{ResizableState, resizable_panel, resize_handle};
 
+type ResizeCallback = Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>;
+
 pub enum ResizablePanelEvent {
     Resized,
 }
@@ -33,7 +35,7 @@ pub struct ResizablePanelGroup {
     axis: Axis,
     size: Option<Pixels>,
     children: Vec<ResizablePanel>,
-    on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
+    on_resize: ResizeCallback,
 }
 
 impl ResizablePanelGroup {
@@ -304,7 +306,7 @@ impl RenderOnce for ResizablePanel {
 
 struct ResizePanelGroupElement {
     state: Entity<ResizableState>,
-    on_resize: Rc<dyn Fn(&Entity<ResizableState>, &mut Window, &mut App)>,
+    on_resize: ResizeCallback,
     axis: Axis,
 }
 

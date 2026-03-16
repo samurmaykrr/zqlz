@@ -59,7 +59,7 @@ impl BlinkCursor {
         self._task = cx.spawn(async move |this, cx| {
             smol::Timer::after(INTERVAL).await;
             if let Some(this) = this.upgrade() {
-                let _ = this.update(cx, |this, cx| this.blink(epoch, cx));
+                this.update(cx, |this, cx| this.blink(epoch, cx));
             }
         });
     }
@@ -81,7 +81,7 @@ impl BlinkCursor {
             smol::Timer::after(PAUSE_DELAY).await;
 
             if let Some(this) = this.upgrade() {
-                let _ = this.update(cx, |this, cx| {
+                this.update(cx, |this, cx| {
                     this.paused = false;
                     this.blink(epoch, cx);
                 });

@@ -11,6 +11,8 @@ use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{DropdownMenu as _, PopupMenuItem};
 use crate::widgets::{ActiveTheme, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
 
+type TabBarClickHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
+
 /// A TabBar element that contains multiple [`Tab`] items.
 #[derive(IntoElement)]
 pub struct TabBar {
@@ -25,7 +27,7 @@ pub struct TabBar {
     variant: TabVariant,
     size: Size,
     menu: bool,
-    on_click: Option<Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>>,
+    on_click: Option<TabBarClickHandler>,
     /// Special for internal TabPanel to remove the top border.
     tab_item_top_offset: Pixels,
 }

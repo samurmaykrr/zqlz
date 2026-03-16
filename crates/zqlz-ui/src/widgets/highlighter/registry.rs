@@ -69,6 +69,7 @@ pub struct LanguageConfig {
 }
 
 impl LanguageConfig {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         name: impl Into<SharedString>,
         language: tree_sitter::Language,

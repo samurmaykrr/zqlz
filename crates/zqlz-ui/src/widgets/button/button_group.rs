@@ -174,7 +174,7 @@ impl RenderOnce for ButtonGroup {
                     .enumerate()
                     .map(|(child_index, child)| {
                         let state = Rc::clone(&state);
-                        let child = if children_len == 1 {
+                        if children_len == 1 {
                             child
                         } else if child_index == 0 {
                             // First
@@ -225,9 +225,7 @@ impl RenderOnce for ButtonGroup {
                             this.on_click(move |_, _, _| {
                                 state.set(Some(child_index));
                             })
-                        });
-
-                        child
+                        })
                     }),
             )
             .when_some(

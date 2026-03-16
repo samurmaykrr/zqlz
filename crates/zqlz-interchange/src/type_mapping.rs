@@ -17,7 +17,7 @@ pub trait TypeMapper: Send + Sync {
     fn to_canonical(&self, native_type: &str) -> CanonicalType;
 
     /// Convert a canonical type to the native database type string
-    fn from_canonical(&self, canonical: &CanonicalType) -> String;
+    fn native_type_for(&self, canonical: &CanonicalType) -> String;
 
     /// Check if this database fully supports the canonical type
     /// Returns false if the type needs to be converted/degraded
@@ -66,13 +66,13 @@ impl TypeMapper for SqliteTypeMapper {
             "DATETIME" | "TIMESTAMP" => CanonicalType::DateTime { precision: None },
             _ => {
                 if upper.starts_with("VARCHAR") || upper.starts_with("CHAR") {
-                    let max_length = parse_length(&upper);
+                    let max_length = parse_length(upper);
                     CanonicalType::String {
                         max_length,
                         fixed_length: upper.starts_with("CHAR("),
                     }
                 } else if upper.starts_with("DECIMAL") || upper.starts_with("NUMERIC") {
-                    let (precision, scale) = parse_precision_scale(&upper);
+                    let (precision, scale) = parse_precision_scale(upper);
                     CanonicalType::Decimal { precision, scale }
                 } else {
                     CanonicalType::Custom {
@@ -84,7 +84,7 @@ impl TypeMapper for SqliteTypeMapper {
         }
     }
 
-    fn from_canonical(&self, canonical: &CanonicalType) -> String {
+    fn native_type_for(&self, canonical: &CanonicalType) -> String {
         match canonical {
             CanonicalType::Null => "NULL".into(),
             CanonicalType::Boolean => "INTEGER".into(),
@@ -164,14 +164,13 @@ impl TypeMapper for PostgresTypeMapper {
         let lower = native_type.to_lowercase();
         let lower = lower.trim();
 
-        if lower.ends_with("[]") {
-            let element_type = &lower[..lower.len() - 2];
+        if let Some(element_type) = lower.strip_suffix("[]") {
             return CanonicalType::Array {
                 element_type: Box::new(self.to_canonical(element_type)),
             };
         }
 
-        match &*lower {
+        match lower {
             "boolean" | "bool" => CanonicalType::Boolean,
             "smallint" | "int2" => CanonicalType::SmallInt,
             "integer" | "int" | "int4" => CanonicalType::Integer,
@@ -224,25 +223,25 @@ impl TypeMapper for PostgresTypeMapper {
             "hstore" => CanonicalType::KeyValue,
             _ => {
                 if lower.starts_with("character varying") || lower.starts_with("varchar") {
-                    let max_length = parse_length(&lower);
+                    let max_length = parse_length(lower);
                     CanonicalType::String {
                         max_length,
                         fixed_length: false,
                     }
                 } else if lower.starts_with("character") || lower.starts_with("char") {
-                    let max_length = parse_length(&lower);
+                    let max_length = parse_length(lower);
                     CanonicalType::String {
                         max_length,
                         fixed_length: true,
                     }
                 } else if lower.starts_with("numeric") || lower.starts_with("decimal") {
-                    let (precision, scale) = parse_precision_scale(&lower);
+                    let (precision, scale) = parse_precision_scale(lower);
                     CanonicalType::Decimal { precision, scale }
                 } else if lower.starts_with("bit varying") || lower.starts_with("varbit") {
-                    let max_length = parse_length(&lower);
+                    let max_length = parse_length(lower);
                     CanonicalType::BitVarying { max_length }
                 } else if lower.starts_with("bit") {
-                    let length = parse_length(&lower);
+                    let length = parse_length(lower);
                     CanonicalType::Bit { length }
                 } else {
                     CanonicalType::Custom {
@@ -254,7 +253,7 @@ impl TypeMapper for PostgresTypeMapper {
         }
     }
 
-    fn from_canonical(&self, canonical: &CanonicalType) -> String {
+    fn native_type_for(&self, canonical: &CanonicalType) -> String {
         match canonical {
             CanonicalType::Null => "NULL".into(),
             CanonicalType::Boolean => "boolean".into(),
@@ -318,7 +317,7 @@ impl TypeMapper for PostgresTypeMapper {
             CanonicalType::Json { binary } => if *binary { "jsonb" } else { "json" }.into(),
             CanonicalType::Xml => "xml".into(),
             CanonicalType::Array { element_type } => {
-                format!("{}[]", self.from_canonical(element_type))
+                format!("{}[]", self.native_type_for(element_type))
             }
             CanonicalType::Enum { name, values } => name.clone().unwrap_or_else(|| {
                 let quoted = values
@@ -417,25 +416,25 @@ impl TypeMapper for MySqlTypeMapper {
             "GEOMETRY" => CanonicalType::Geometry { srid: None },
             _ => {
                 if upper.starts_with("VARCHAR") || upper.starts_with("CHAR") {
-                    let max_length = parse_length(&upper);
+                    let max_length = parse_length(upper);
                     CanonicalType::String {
                         max_length,
                         fixed_length: upper.starts_with("CHAR("),
                     }
                 } else if upper.starts_with("DECIMAL") || upper.starts_with("NUMERIC") {
-                    let (precision, scale) = parse_precision_scale(&upper);
+                    let (precision, scale) = parse_precision_scale(upper);
                     CanonicalType::Decimal { precision, scale }
                 } else if upper.starts_with("ENUM") {
-                    let values = parse_enum_values(&upper);
+                    let values = parse_enum_values(upper);
                     CanonicalType::Enum { name: None, values }
                 } else if upper.starts_with("SET") {
-                    let values = parse_enum_values(&upper);
+                    let values = parse_enum_values(upper);
                     CanonicalType::Set { values }
                 } else if upper.starts_with("VARBINARY") {
-                    let max_length = parse_length(&upper);
+                    let max_length = parse_length(upper);
                     CanonicalType::Binary { max_length }
                 } else if upper.starts_with("BIT") {
-                    let length = parse_length(&upper);
+                    let length = parse_length(upper);
                     CanonicalType::Bit { length }
                 } else if upper.contains("UNSIGNED") {
                     if upper.contains("BIGINT") {
@@ -453,7 +452,7 @@ impl TypeMapper for MySqlTypeMapper {
         }
     }
 
-    fn from_canonical(&self, canonical: &CanonicalType) -> String {
+    fn native_type_for(&self, canonical: &CanonicalType) -> String {
         match canonical {
             CanonicalType::Null => "NULL".into(),
             CanonicalType::Boolean => "TINYINT(1)".into(),
@@ -579,40 +578,40 @@ impl TypeMapper for MySqlTypeMapper {
 }
 
 fn parse_length(type_str: &str) -> Option<u32> {
-    if let Some(start) = type_str.find('(') {
-        if let Some(end) = type_str.find(')') {
-            let inner = &type_str[start + 1..end];
-            if let Some(comma) = inner.find(',') {
-                return inner[..comma].trim().parse().ok();
-            }
-            return inner.trim().parse().ok();
+    if let Some(start) = type_str.find('(')
+        && let Some(end) = type_str.find(')')
+    {
+        let inner = &type_str[start + 1..end];
+        if let Some(comma) = inner.find(',') {
+            return inner[..comma].trim().parse().ok();
         }
+        return inner.trim().parse().ok();
     }
     None
 }
 
 fn parse_precision_scale(type_str: &str) -> (Option<u8>, Option<u8>) {
-    if let Some(start) = type_str.find('(') {
-        if let Some(end) = type_str.find(')') {
-            let inner = &type_str[start + 1..end];
-            let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
-            let precision = parts.first().and_then(|p| p.parse().ok());
-            let scale = parts.get(1).and_then(|s| s.parse().ok());
-            return (precision, scale);
-        }
+    if let Some(start) = type_str.find('(')
+        && let Some(end) = type_str.find(')')
+    {
+        let inner = &type_str[start + 1..end];
+        let parts: Vec<&str> = inner.split(',').map(|s| s.trim()).collect();
+        let precision = parts.first().and_then(|p| p.parse().ok());
+        let scale = parts.get(1).and_then(|s| s.parse().ok());
+        return (precision, scale);
     }
     (None, None)
 }
 
 fn parse_enum_values(type_str: &str) -> Vec<String> {
-    if let Some(start) = type_str.find('(') {
-        if let Some(end) = type_str.rfind(')') {
-            let inner = &type_str[start + 1..end];
-            return inner
-                .split(',')
-                .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_string())
-                .collect();
-        }
+    if let Some(start) = type_str.find('(')
+        && let Some(end) = type_str.rfind(')')
+    {
+        let inner = &type_str[start + 1..end];
+        return inner
+            .split(',')
+            .map(|s| s.trim().trim_matches('\'').trim_matches('"').to_string())
+            .collect();
     }
     Vec::new()
 }
@@ -664,9 +663,9 @@ mod tests {
         assert_eq!(mapper.to_canonical("REAL"), CanonicalType::Double);
         assert_eq!(mapper.to_canonical("BLOB"), CanonicalType::Blob);
 
-        assert_eq!(mapper.from_canonical(&CanonicalType::Integer), "INTEGER");
-        assert_eq!(mapper.from_canonical(&CanonicalType::Text), "TEXT");
-        assert_eq!(mapper.from_canonical(&CanonicalType::Uuid), "TEXT");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Integer), "INTEGER");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Text), "TEXT");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Uuid), "TEXT");
     }
 
     #[test]
@@ -687,10 +686,10 @@ mod tests {
             }
         );
 
-        assert_eq!(mapper.from_canonical(&CanonicalType::Integer), "integer");
-        assert_eq!(mapper.from_canonical(&CanonicalType::Uuid), "uuid");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Integer), "integer");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Uuid), "uuid");
         assert_eq!(
-            mapper.from_canonical(&CanonicalType::Array {
+            mapper.native_type_for(&CanonicalType::Array {
                 element_type: Box::new(CanonicalType::Integer)
             }),
             "integer[]"
@@ -714,8 +713,8 @@ mod tests {
             CanonicalType::Json { binary: false }
         );
 
-        assert_eq!(mapper.from_canonical(&CanonicalType::Integer), "INT");
-        assert_eq!(mapper.from_canonical(&CanonicalType::Uuid), "CHAR(36)");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Integer), "INT");
+        assert_eq!(mapper.native_type_for(&CanonicalType::Uuid), "CHAR(36)");
     }
 
     #[test]
@@ -769,7 +768,7 @@ mod tests {
         for alias in &["postgres", "postgresql", "pg"] {
             let mapper = get_type_mapper(alias);
             assert_eq!(
-                mapper.from_canonical(&CanonicalType::Uuid),
+                mapper.native_type_for(&CanonicalType::Uuid),
                 "uuid",
                 "alias '{}' should return PostgresTypeMapper",
                 alias
@@ -783,7 +782,7 @@ mod tests {
         for alias in &["mysql", "mariadb"] {
             let mapper = get_type_mapper(alias);
             assert_eq!(
-                mapper.from_canonical(&CanonicalType::Uuid),
+                mapper.native_type_for(&CanonicalType::Uuid),
                 "CHAR(36)",
                 "alias '{}' should return MySqlTypeMapper",
                 alias
@@ -797,7 +796,7 @@ mod tests {
         // mapping for a well-known type so callers do not panic on the return value.
         let mapper = get_type_mapper("mssql");
         assert_eq!(
-            mapper.from_canonical(&CanonicalType::Uuid),
+            mapper.native_type_for(&CanonicalType::Uuid),
             "TEXT",
             "unknown driver should fall back to SqliteTypeMapper"
         );

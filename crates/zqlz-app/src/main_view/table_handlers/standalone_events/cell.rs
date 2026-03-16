@@ -2,11 +2,13 @@
 
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::Value;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
 
 use crate::app::AppState;
+use crate::components::table_viewer::delegate::SaveCellRequest;
 use crate::components::{
     CellData, CellEditorPanel, InspectorPanel, InspectorView, KeyValueData, KeyValueEditorPanel,
     RedisValueType, TableViewerPanel,
@@ -15,20 +17,17 @@ use crate::components::{
 use crate::main_view::table_handlers_utils::{
     conversion::resolve_schema_qualifier,
     redis::{fetch_redis_key_value, parse_human_readable_ttl},
-    validation::parse_inline_value,
 };
 
+pub(in crate::main_view) struct RedisKeyEditRequest {
+    pub connection_id: Uuid,
+    pub database_name: String,
+    pub all_row_values: Vec<Value>,
+    pub all_column_names: Vec<String>,
+}
+
 pub(in crate::main_view) fn handle_save_cell_event(
-    table_name: &str,
-    connection_id: Uuid,
-    row: usize,
-    col: usize,
-    column_name: &str,
-    new_value: &str,
-    original_value: &str,
-    all_row_values: &[String],
-    all_column_names: &[String],
-    all_column_types: &[String],
+    request: SaveCellRequest,
     viewer_weak: WeakEntity<TableViewerPanel>,
     database_name: Option<String>,
     window: &mut Window,
@@ -36,10 +35,14 @@ pub(in crate::main_view) fn handle_save_cell_event(
 ) {
     tracing::info!(
         "SaveCell event: table={}, column={}, new_value={}",
-        table_name,
-        column_name,
-        new_value
+        request.table_name,
+        request.column_name,
+        request.new_value.display_for_table()
     );
+
+    if update_pending_new_row_cell(&viewer_weak, &request, cx) {
+        return;
+    }
 
     let Some(app_state) = cx.try_global::<AppState>() else {
         tracing::error!("No AppState available");
@@ -48,32 +51,30 @@ pub(in crate::main_view) fn handle_save_cell_event(
 
     let Some(connection) = app_state
         .connections
-        .get_for_database_cached(connection_id, database_name.as_deref())
+        .get_for_database_cached(request.connection_id, database_name.as_deref())
     else {
-        tracing::error!("Connection not found: {}", connection_id);
+        tracing::error!("Connection not found: {}", request.connection_id);
         return;
     };
 
     let table_service = app_state.table_service.clone();
-    let table_name = table_name.to_string();
-    let column_name = column_name.to_string();
-    let original_value = original_value.to_string();
-    let new_value_display = new_value.to_string();
+    let table_name = request.table_name;
+    let column_name = request.column_name;
+    let original_value = request.original_value;
+    let new_value_for_update = request.new_value.clone();
     let connection = connection.clone();
 
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
 
-    if update_pending_new_row_cell(&viewer_weak, row, col, &new_value_display, cx) {
-        return;
-    }
-
     let cell_update_data = zqlz_services::CellUpdateData {
         column_name: column_name.clone(),
-        new_value: parse_inline_value(&new_value_display),
-        all_column_names: all_column_names.to_vec(),
-        all_row_values: all_row_values.to_vec(),
-        all_column_types: all_column_types.to_vec(),
+        new_value: Some(request.new_value.as_value()).filter(|value| !value.is_null()),
+        all_column_names: request.all_column_names,
+        all_row_values: request.all_row_values,
+        all_column_types: request.all_column_types,
     };
+    let row = request.row;
+    let col = request.data_col;
 
     window.spawn(cx, async move |cx| {
         match table_service
@@ -86,7 +87,7 @@ pub(in crate::main_view) fn handle_save_cell_event(
                     viewer.update_cell_value(
                         row,
                         col,
-                        Some(new_value_display.clone()),
+                        new_value_for_update.as_value(),
                         cx,
                     );
                 });
@@ -101,7 +102,7 @@ pub(in crate::main_view) fn handle_save_cell_event(
                     .replace("Failed to execute statement: ", "");
 
                 _ = viewer_weak.update(cx, |viewer, cx| {
-                    viewer.update_cell_value(row, col, Some(original_value.clone()), cx);
+                    viewer.update_cell_value(row, col, original_value.as_value(), cx);
                 });
 
                 _ = cx.update(|window, cx| {
@@ -133,6 +134,8 @@ pub(in crate::main_view) fn handle_save_cell_event(
                             .button_props(
                                 DialogButtonProps::default()
                                     .ok_text("OK")
+                                    // This is a dialog-level default for the eventual OK button,
+                                    // so Primary stays expressed as a ButtonVariant.
                                     .ok_variant(ButtonVariant::Primary),
                             )
                             .alert()
@@ -147,22 +150,20 @@ pub(in crate::main_view) fn handle_save_cell_event(
 
 pub(in crate::main_view) fn update_pending_new_row_cell(
     viewer: &WeakEntity<TableViewerPanel>,
-    row: usize,
-    col: usize,
-    new_value: &str,
+    request: &SaveCellRequest,
     cx: &mut App,
 ) -> bool {
-    let table_state = match viewer.read_with(cx, |panel, _cx| panel.table_state.clone()) {
-        Ok(state) => state,
-        Err(_) => None,
-    };
+    let table_state = viewer
+        .read_with(cx, |panel, _cx| panel.table_state.clone())
+        .unwrap_or_default();
 
     let Some(table_state) = table_state else {
         return false;
     };
 
-    let actual_row =
-        table_state.read_with(cx, |table, _cx| table.delegate().get_actual_row_index(row));
+    let actual_row = table_state.read_with(cx, |table, _cx| {
+        table.delegate().get_actual_row_index(request.row)
+    });
 
     let new_row_index = table_state.read_with(cx, |table, _cx| {
         let delegate = table.delegate();
@@ -177,13 +178,21 @@ pub(in crate::main_view) fn update_pending_new_row_cell(
 
     table_state.update(cx, |table, cx| {
         let delegate = table.delegate_mut();
-        delegate
-            .pending_changes
-            .update_new_row_cell(new_row_index, col, new_value.to_string());
-        if let Some(row_data) = delegate.rows.get_mut(actual_row) {
-            if let Some(cell) = row_data.get_mut(col) {
-                *cell = new_value.to_string().into();
-            }
+        let data_type = delegate
+            .column_meta
+            .get(request.data_col)
+            .map(|column| column.data_type.as_str())
+            .unwrap_or("text");
+        let typed_value = request.new_value.to_value(data_type);
+        delegate.pending_changes.update_new_row_cell(
+            new_row_index,
+            request.data_col,
+            typed_value.clone(),
+        );
+        if let Some(row_data) = delegate.rows.get_mut(actual_row)
+            && let Some(cell) = row_data.get_mut(request.data_col)
+        {
+            *cell = typed_value;
         }
         cx.notify();
     });
@@ -192,17 +201,7 @@ pub(in crate::main_view) fn update_pending_new_row_cell(
 }
 
 pub(in crate::main_view) fn handle_edit_cell_event(
-    table_name: &str,
-    connection_id: Uuid,
-    row: usize,
-    col: usize,
-    column_name: &str,
-    column_type: &str,
-    current_value: &Option<String>,
-    all_row_values: &[String],
-    all_column_names: &[String],
-    all_column_types: &[String],
-    raw_bytes: Option<Vec<u8>>,
+    cell_data: CellData,
     viewer_weak: WeakEntity<TableViewerPanel>,
     cell_editor_panel: &Entity<CellEditorPanel>,
     dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
@@ -212,36 +211,21 @@ pub(in crate::main_view) fn handle_edit_cell_event(
 ) {
     tracing::info!(
         "EditCell event: row={}, col={}, column={}, type={}",
-        row,
-        col,
-        column_name,
-        column_type
+        cell_data.row_index,
+        cell_data.col_index,
+        cell_data.column_name,
+        cell_data.column_type
     );
 
-    let cell_data = CellData {
-        table_name: table_name.to_string(),
-        column_name: column_name.to_string(),
-        column_type: column_type.to_string(),
-        row_id: None,
-        current_value: current_value.clone(),
-        row_index: row,
-        col_index: col,
-        connection_id,
-        all_row_values: all_row_values.to_vec(),
-        all_column_names: all_column_names.to_vec(),
-        all_column_types: all_column_types.to_vec(),
-        raw_bytes,
-    };
-
-    _ = cell_editor_panel.update(cx, |editor, cx| {
+    cell_editor_panel.update(cx, |editor, cx| {
         editor.edit_cell(cell_data, Some(viewer_weak), window, cx);
     });
 
-    _ = inspector_panel.update(cx, |panel, cx| {
+    inspector_panel.update(cx, |panel, cx| {
         panel.set_active_view(InspectorView::CellEditor, cx);
     });
 
-    _ = dock_area.update(cx, |area, cx| {
+    dock_area.update(cx, |area, cx| {
         area.activate_panel(
             "InspectorPanel",
             zqlz_ui::widgets::dock::DockPlacement::Right,
@@ -252,32 +236,44 @@ pub(in crate::main_view) fn handle_edit_cell_event(
 }
 
 pub(in crate::main_view) fn handle_redis_key_edit_event(
-    connection_id: Uuid,
-    database_name: String,
-    all_row_values: &[String],
-    all_column_names: &[String],
+    request: RedisKeyEditRequest,
     key_value_editor_panel: &Entity<KeyValueEditorPanel>,
     dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
     inspector_panel: &Entity<InspectorPanel>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    let key_idx = all_column_names
+    let key_idx = request
+        .all_column_names
         .iter()
         .position(|c| c == "Key")
         .unwrap_or(0);
-    let type_idx = all_column_names
+    let type_idx = request
+        .all_column_names
         .iter()
         .position(|c| c == "Type")
         .unwrap_or(1);
-    let ttl_idx = all_column_names
+    let ttl_idx = request
+        .all_column_names
         .iter()
         .position(|c| c == "TTL")
         .unwrap_or(4);
 
-    let key = all_row_values.get(key_idx).cloned().unwrap_or_default();
-    let value_type_str = all_row_values.get(type_idx).cloned().unwrap_or_default();
-    let ttl_str = all_row_values.get(ttl_idx).cloned().unwrap_or_default();
+    let key = request
+        .all_row_values
+        .get(key_idx)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default();
+    let value_type_str = request
+        .all_row_values
+        .get(type_idx)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default();
+    let ttl_str = request
+        .all_row_values
+        .get(ttl_idx)
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
+        .unwrap_or_default();
 
     let ttl: i64 = if ttl_str.is_empty() || ttl_str == "No TTL" {
         -1
@@ -300,14 +296,16 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
 
     let Some(connection) = app_state
         .connections
-        .get_for_database_cached(connection_id, Some(&database_name))
+        .get_for_database_cached(request.connection_id, Some(&request.database_name))
     else {
-        tracing::error!("Connection not found: {}", connection_id);
+        tracing::error!("Connection not found: {}", request.connection_id);
         return;
     };
 
     let connection = connection.clone();
     let key_clone = key.clone();
+    let connection_id = request.connection_id;
+    let database_name = request.database_name;
     let key_value_editor_panel = key_value_editor_panel.clone();
     let dock_area = dock_area.clone();
     let inspector_panel = inspector_panel.clone();
@@ -328,15 +326,15 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
                     is_new: false,
                 };
 
-                _ = key_value_editor_panel.update(cx, |editor, cx| {
+                key_value_editor_panel.update(cx, |editor, cx| {
                     editor.edit_key(kv_data, window, cx);
                 });
 
-                _ = inspector_panel.update(cx, |panel, cx| {
+                inspector_panel.update(cx, |panel, cx| {
                     panel.set_active_view(InspectorView::KeyEditor, cx);
                 });
 
-                _ = dock_area.update(cx, |area, cx| {
+                dock_area.update(cx, |area, cx| {
                     area.activate_panel(
                         "InspectorPanel",
                         zqlz_ui::widgets::dock::DockPlacement::Right,

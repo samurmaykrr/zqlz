@@ -1077,7 +1077,7 @@ fn validate_color(color: &str) -> Result<()> {
 }
 
 /// Check whether the ZQLZ GUI IPC socket is alive and responsive.
-async fn handle_status(socket_path: &PathBuf) -> Result<()> {
+async fn handle_status(socket_path: &Path) -> Result<()> {
     if !socket_path.exists() {
         println!("GUI: not running (no socket at {})", socket_path.display());
         return Ok(());

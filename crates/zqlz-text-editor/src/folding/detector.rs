@@ -8,6 +8,8 @@
 
 use std::ops::Range;
 
+use crate::TextBuffer;
+
 /// Type of foldable region.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FoldKind {
@@ -145,6 +147,37 @@ impl FoldingDetector {
         }
     }
 
+    fn detect_multiline_comments_in_lines(&self, lines: &[String], regions: &mut Vec<FoldRegion>) {
+        let mut in_comment = false;
+        let mut comment_start_line = 0;
+
+        for (line_num, line) in lines.iter().enumerate() {
+            let mut chars = line.chars().peekable();
+            let mut prev_char = None;
+
+            while let Some(character) = chars.next() {
+                if !in_comment && character == '/' && chars.peek() == Some(&'*') {
+                    in_comment = true;
+                    comment_start_line = line_num;
+                    chars.next();
+                    prev_char = Some('*');
+                    continue;
+                }
+
+                if in_comment && prev_char == Some('*') && character == '/' {
+                    in_comment = false;
+                    regions.push(FoldRegion::new(
+                        comment_start_line,
+                        line_num,
+                        FoldKind::Comment,
+                    ));
+                }
+
+                prev_char = Some(character);
+            }
+        }
+    }
+
     /// Detect BEGIN...END blocks.
     fn detect_begin_end_blocks(&self, lines: &[&str], regions: &mut Vec<FoldRegion>) {
         let mut stack: Vec<usize> = Vec::new();
@@ -156,11 +189,12 @@ impl FoldingDetector {
             for token in &tokens {
                 if *token == "BEGIN" {
                     stack.push(line_num);
-                } else if *token == "END" || token.starts_with("END;") || token.starts_with("END ")
+                } else if (*token == "END"
+                    || token.starts_with("END;")
+                    || token.starts_with("END "))
+                    && let Some(start) = stack.pop()
                 {
-                    if let Some(start) = stack.pop() {
-                        regions.push(FoldRegion::new(start, line_num, FoldKind::Block));
-                    }
+                    regions.push(FoldRegion::new(start, line_num, FoldKind::Block));
                 }
             }
         }
@@ -176,12 +210,12 @@ impl FoldingDetector {
             for word in upper.split(|c: char| !c.is_alphanumeric()) {
                 if word == "CASE" {
                     stack.push(line_num);
-                } else if word == "END" && !stack.is_empty() {
-                    if let Some(start) = stack.pop() {
-                        if start != line_num {
-                            regions.push(FoldRegion::new(start, line_num, FoldKind::Case));
-                        }
-                    }
+                } else if word == "END"
+                    && !stack.is_empty()
+                    && let Some(start) = stack.pop()
+                    && start != line_num
+                {
+                    regions.push(FoldRegion::new(start, line_num, FoldKind::Case));
                 }
             }
         }
@@ -216,20 +250,21 @@ impl FoldingDetector {
                         if depth > 0 {
                             depth -= 1;
                         }
-                        if depth == 0 {
-                            if let Some(start) = func_start.take() {
-                                regions.push(FoldRegion::new(start, line_num, FoldKind::Function));
-                                in_function = false;
-                            }
+                        if depth == 0
+                            && let Some(start) = func_start.take()
+                        {
+                            regions.push(FoldRegion::new(start, line_num, FoldKind::Function));
+                            in_function = false;
                         }
                     }
                 }
 
-                if trimmed.ends_with(";") && depth == 0 {
-                    if let Some(start) = func_start.take() {
-                        regions.push(FoldRegion::new(start, line_num, FoldKind::Function));
-                        in_function = false;
-                    }
+                if trimmed.ends_with(";")
+                    && depth == 0
+                    && let Some(start) = func_start.take()
+                {
+                    regions.push(FoldRegion::new(start, line_num, FoldKind::Function));
+                    in_function = false;
                 }
             }
         }
@@ -243,21 +278,46 @@ impl FoldingDetector {
             for c in line.chars() {
                 if c == '(' {
                     stack.push(line_num);
-                } else if c == ')' {
-                    if let Some(start) = stack.pop() {
-                        if start != line_num {
-                            regions.push(FoldRegion::new(start, line_num, FoldKind::Parenthesis));
-                        }
-                    }
+                } else if c == ')'
+                    && let Some(start) = stack.pop()
+                    && start != line_num
+                {
+                    regions.push(FoldRegion::new(start, line_num, FoldKind::Parenthesis));
                 }
             }
         }
     }
 }
 
-/// Convenience function to detect fold regions with default settings.
-pub fn detect_folds(text: &str) -> Vec<FoldRegion> {
-    FoldingDetector::new().detect(text)
+pub fn detect_folds_in_buffer(buffer: &TextBuffer) -> Vec<FoldRegion> {
+    let detector = FoldingDetector::new();
+    let mut regions = Vec::new();
+    let line_count = buffer.line_count();
+    let lines = (0..line_count)
+        .map(|line_index| buffer.line(line_index).unwrap_or_default())
+        .collect::<Vec<_>>();
+    let line_slices = lines.iter().map(|line| line.as_str()).collect::<Vec<_>>();
+
+    detector.detect_multiline_comments_in_lines(&lines, &mut regions);
+    detector.detect_begin_end_blocks(&line_slices, &mut regions);
+    detector.detect_case_blocks(&line_slices, &mut regions);
+    detector.detect_function_definitions(&line_slices, &mut regions);
+    detector.detect_parenthesis_blocks(&line_slices, &mut regions);
+
+    regions.retain(|region| region.line_count() >= detector.min_lines);
+    regions.sort_by_key(|region| (region.start_line, std::cmp::Reverse(region.end_line)));
+    regions
+}
+
+pub fn detect_folds_in_range(buffer: &TextBuffer, line_range: Range<usize>) -> Vec<FoldRegion> {
+    detect_folds_in_buffer(buffer)
+        .into_iter()
+        .filter(|region| region.end_line >= line_range.start && region.start_line < line_range.end)
+        .collect()
+}
+
+pub fn detect_folds(buffer: &TextBuffer) -> Vec<FoldRegion> {
+    detect_folds_in_buffer(buffer)
 }
 
 #[cfg(test)]
@@ -270,7 +330,7 @@ mod tests {
     SELECT 1;
     SELECT 2;
 END;"#;
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         assert_eq!(regions.len(), 1);
         assert_eq!(regions[0].kind, FoldKind::Block);
@@ -285,7 +345,7 @@ END;"#;
    multi-line
    comment */
 FROM users;"#;
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         let comments: Vec<_> = regions
             .iter()
@@ -297,13 +357,30 @@ FROM users;"#;
     }
 
     #[test]
+    fn test_detect_multiline_comments_in_lines_matches_text_detector() {
+        let sql = "SELECT 1\n/* comment\nstill comment */\nSELECT 2";
+        let detector = FoldingDetector::new();
+        let mut from_text = Vec::new();
+        detector.detect_multiline_comments(sql, &mut from_text);
+        let mut from_lines = Vec::new();
+        let lines = sql
+            .lines()
+            .map(|line| format!("{line}\n"))
+            .collect::<Vec<_>>();
+
+        detector.detect_multiline_comments_in_lines(&lines, &mut from_lines);
+
+        assert_eq!(from_lines, from_text);
+    }
+
+    #[test]
     fn test_detect_nested_blocks() {
         let sql = r#"BEGIN
     BEGIN
         SELECT 1;
     END;
 END;"#;
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         let blocks: Vec<_> = regions
             .iter()
@@ -327,7 +404,7 @@ END;"#;
         ELSE 'zero'
     END as sign
 FROM numbers;"#;
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         let cases: Vec<_> = regions
             .iter()
@@ -336,6 +413,30 @@ FROM numbers;"#;
         assert_eq!(cases.len(), 1);
         assert_eq!(cases[0].start_line, 1);
         assert_eq!(cases[0].end_line, 5);
+    }
+
+    #[test]
+    fn test_detect_folds_in_range_limits_results() {
+        let sql = r#"BEGIN
+    SELECT 1;
+END;
+
+SELECT (
+    1 + 2
+);"#;
+
+        let regions = detect_folds_in_range(&TextBuffer::new(sql), 3..6);
+        assert!(
+            regions
+                .iter()
+                .all(|region| region.end_line >= 3 && region.start_line < 6)
+        );
+        assert!(
+            regions
+                .iter()
+                .any(|region| region.kind == FoldKind::Parenthesis)
+        );
+        assert!(regions.iter().all(|region| region.kind != FoldKind::Block));
     }
 
     #[test]
@@ -364,7 +465,7 @@ $$ LANGUAGE plpgsql;"#;
     FROM users
     WHERE active = true
 ) AS active_users;"#;
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         let parens: Vec<_> = regions
             .iter()
@@ -392,7 +493,7 @@ $$ LANGUAGE plpgsql;"#;
     #[test]
     fn test_single_line_not_foldable() {
         let sql = "SELECT * FROM users;";
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
         assert!(regions.is_empty());
     }
 
@@ -435,7 +536,7 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;"#;
 
-        let regions = detect_folds(sql);
+        let regions = detect_folds(&TextBuffer::new(sql));
 
         assert!(regions.iter().any(|r| r.kind == FoldKind::Comment));
         assert!(

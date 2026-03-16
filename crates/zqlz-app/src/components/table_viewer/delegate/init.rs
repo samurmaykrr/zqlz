@@ -132,12 +132,8 @@ impl TableViewerDelegate {
     ) {
         let column_meta = self.column_meta.get(data_col);
         let cell_value = self.rows.get(row).and_then(|r| r.get(data_col));
-        let current_value = cell_value.map(|v| v.display_for_table());
-        let all_row_values: Vec<String> = self
-            .rows
-            .get(row)
-            .map(|r| r.iter().map(|v| v.display_for_table()).collect())
-            .unwrap_or_default();
+        let current_value = cell_value.cloned().unwrap_or(Value::Null);
+        let all_row_values = self.rows.get(row).cloned().unwrap_or_default();
         let all_column_names: Vec<String> =
             self.column_meta.iter().map(|c| c.name.clone()).collect();
         let all_column_types: Vec<String> = self
@@ -165,6 +161,7 @@ impl TableViewerDelegate {
                         connection_id,
                         row,
                         col: data_col,
+                        column_meta: col_meta.clone(),
                         column_name: col_meta.name.clone(),
                         column_type: col_meta.data_type.clone(),
                         current_value,

@@ -67,6 +67,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Empty Table")
+                        // Emptying a table is destructive, and dialog button props are variant-
+                        // based because the actual Button is created later by the dialog widget.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {
@@ -199,6 +201,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Empty")
+                        // Batch empty uses the dialog's deferred button configuration, so Danger is
+                        // expressed as a ButtonVariant instead of a direct button helper.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .on_ok(move |_, _window, cx| {

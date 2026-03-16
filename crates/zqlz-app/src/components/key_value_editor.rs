@@ -9,7 +9,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::ColumnMeta;
+use zqlz_core::{ColumnMeta, Value};
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, IndexPath, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
@@ -108,6 +108,26 @@ impl SelectItem for RedisValueType {
 
     fn value(&self) -> &Self::Value {
         self
+    }
+}
+
+impl RedisValueType {
+    fn empty_collection_error(&self) -> Option<&'static str> {
+        match self {
+            RedisValueType::List => Some(
+                "Redis lists cannot be empty. Add at least one element or delete the key explicitly.",
+            ),
+            RedisValueType::Set => Some(
+                "Redis sets cannot be empty. Add at least one element or delete the key explicitly.",
+            ),
+            RedisValueType::ZSet => Some(
+                "Redis sorted sets cannot be empty. Add at least one member or delete the key explicitly.",
+            ),
+            RedisValueType::Hash => Some(
+                "Redis hashes cannot be empty. Add at least one field or delete the key explicitly.",
+            ),
+            _ => None,
+        }
     }
 }
 
@@ -264,8 +284,8 @@ pub struct RowData {
     pub table_name: String,
     pub connection_id: Uuid,
     pub column_meta: Vec<ColumnMeta>,
-    /// Current values for each column (empty string for unset)
-    pub row_values: Vec<String>,
+    /// Current values for each column as typed database values
+    pub row_values: Vec<Value>,
     /// Row index in the table viewer (None = new row being inserted)
     pub row_index: Option<usize>,
     pub is_new: bool,
@@ -280,6 +300,102 @@ pub struct RowData {
 pub struct RowField {
     pub input: Entity<InputState>,
     pub is_null: bool,
+}
+
+fn parse_row_field_value(input: Option<String>, column_type: &str) -> Value {
+    match input {
+        None => Value::Null,
+        Some(value) => Value::parse_from_string(&value, column_type),
+    }
+}
+
+fn strip_column_type_modifiers(column_type: &str) -> &str {
+    match column_type.find('(') {
+        Some(index) => column_type[..index].trim(),
+        None => column_type.trim(),
+    }
+}
+
+fn is_string_column_type(column_type: &str) -> bool {
+    matches!(
+        strip_column_type_modifiers(column_type),
+        "text"
+            | "varchar"
+            | "char"
+            | "bpchar"
+            | "name"
+            | "citext"
+            | "character varying"
+            | "character"
+            | "nvarchar"
+            | "nchar"
+            | "longtext"
+            | "mediumtext"
+            | "tinytext"
+            | "enum"
+            | "set"
+    )
+}
+
+fn is_valid_typed_row_value(input: &str, typed_value: &Value, column_type: &str) -> bool {
+    if input.is_empty() || typed_value.is_null() {
+        return true;
+    }
+
+    let normalized_type = column_type.trim().to_lowercase();
+    if is_string_column_type(&normalized_type) {
+        return true;
+    }
+
+    if normalized_type.ends_with("[]") {
+        return matches!(typed_value, Value::Array(_));
+    }
+
+    match strip_column_type_modifiers(&normalized_type) {
+        "boolean" | "bool" | "bit" => matches!(typed_value, Value::Bool(_)),
+        "tinyint" if normalized_type == "tinyint(1)" => matches!(typed_value, Value::Bool(_)),
+        "int2" | "smallint" | "smallserial" => matches!(typed_value, Value::Int16(_)),
+        "int4" | "integer" | "int" | "mediumint" | "serial" => {
+            matches!(typed_value, Value::Int32(_))
+        }
+        "int8" | "bigint" | "bigserial" => matches!(typed_value, Value::Int64(_)),
+        "tinyint" => matches!(typed_value, Value::Int8(_)),
+        "float4" | "real" | "float" => matches!(typed_value, Value::Float32(_)),
+        "float8" | "double precision" | "double" => matches!(typed_value, Value::Float64(_)),
+        "numeric" | "decimal" | "money" => matches!(typed_value, Value::Decimal(_)),
+        "json" | "jsonb" => matches!(typed_value, Value::Json(_)),
+        "uuid" => matches!(typed_value, Value::Uuid(_)),
+        "date" => matches!(typed_value, Value::Date(_)),
+        "time" | "timetz" | "time without time zone" | "time with time zone" => {
+            matches!(typed_value, Value::Time(_))
+        }
+        "timestamp" | "datetime" | "timestamp without time zone" | "smalldatetime" => {
+            matches!(typed_value, Value::DateTime(_))
+        }
+        "timestamptz" | "timestamp with time zone" => {
+            matches!(typed_value, Value::DateTimeUtc(_))
+        }
+        "bytea" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
+            matches!(typed_value, Value::Bytes(_))
+        }
+        _ => true,
+    }
+}
+
+fn initial_new_row_value(column: &ColumnMeta) -> Value {
+    if column.auto_increment {
+        return Value::Null;
+    }
+
+    if column.default_value.is_some() {
+        return Value::Null;
+    }
+
+    if column.nullable {
+        Value::Null
+    } else {
+        Value::String(String::new())
+    }
 }
 
 /// Events emitted by the KeyValueEditor
@@ -310,13 +426,15 @@ pub enum KeyValueEditorEvent {
         column_types: Vec<String>,
         /// Values for each column (None = NULL)
         values: Vec<Option<String>>,
+        /// Parsed values using the known database column types.
+        typed_values: Vec<Value>,
         is_new: bool,
         /// Original row index if editing existing row
         row_index: Option<usize>,
         /// Source viewer to update after save
         source_viewer: Option<WeakEntity<TableViewerPanel>>,
         /// Original row values for building WHERE clause on updates
-        original_row_values: Vec<String>,
+        original_row_values: Vec<Value>,
     },
     /// A field in the SQL row editor was changed by the user
     ///
@@ -325,6 +443,7 @@ pub enum KeyValueEditorEvent {
     FieldChanged {
         col_index: usize,
         new_value: String,
+        typed_value: Value,
         is_null: bool,
         row_index: Option<usize>,
         source_viewer: Option<WeakEntity<TableViewerPanel>>,
@@ -584,45 +703,45 @@ impl KeyValueEditorPanel {
 
     /// Parse hash value (JSON object)
     fn parse_hash_value(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(value) {
-            if let Some(map) = obj.as_object() {
-                for (field, val) in map {
-                    let val_str = match val {
-                        serde_json::Value::String(s) => s.clone(),
-                        _ => val.to_string(),
-                    };
+        if let Ok(obj) = serde_json::from_str::<serde_json::Value>(value)
+            && let Some(map) = obj.as_object()
+        {
+            for (field, val) in map {
+                let val_str = match val {
+                    serde_json::Value::String(s) => s.clone(),
+                    _ => val.to_string(),
+                };
 
-                    let field_input = cx.new(|cx| {
-                        let mut state = InputState::new(window, cx).placeholder("Field...");
-                        state.set_value(field, window, cx);
-                        state
-                    });
-                    let value_input = cx.new(|cx| {
-                        let mut state = InputState::new(window, cx).placeholder("Value...");
-                        state.set_value(&val_str, window, cx);
-                        state
-                    });
-                    let _field_subscription = cx.subscribe(&field_input, |this, _, event, cx| {
-                        use zqlz_ui::widgets::input::InputEvent;
-                        if matches!(event, InputEvent::Change) {
-                            this.is_modified = true;
-                            cx.notify();
-                        }
-                    });
-                    let _value_subscription = cx.subscribe(&value_input, |this, _, event, cx| {
-                        use zqlz_ui::widgets::input::InputEvent;
-                        if matches!(event, InputEvent::Change) {
-                            this.is_modified = true;
-                            cx.notify();
-                        }
-                    });
-                    self.hash_fields.push(HashField {
-                        field_input,
-                        value_input,
-                        _field_subscription,
-                        _value_subscription,
-                    });
-                }
+                let field_input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx).placeholder("Field...");
+                    state.set_value(field, window, cx);
+                    state
+                });
+                let value_input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx).placeholder("Value...");
+                    state.set_value(&val_str, window, cx);
+                    state
+                });
+                let _field_subscription = cx.subscribe(&field_input, |this, _, event, cx| {
+                    use zqlz_ui::widgets::input::InputEvent;
+                    if matches!(event, InputEvent::Change) {
+                        this.is_modified = true;
+                        cx.notify();
+                    }
+                });
+                let _value_subscription = cx.subscribe(&value_input, |this, _, event, cx| {
+                    use zqlz_ui::widgets::input::InputEvent;
+                    if matches!(event, InputEvent::Change) {
+                        this.is_modified = true;
+                        cx.notify();
+                    }
+                });
+                self.hash_fields.push(HashField {
+                    field_input,
+                    value_input,
+                    _field_subscription,
+                    _value_subscription,
+                });
             }
         }
     }
@@ -633,7 +752,10 @@ impl KeyValueEditorPanel {
             if let Some(map) = obj.as_object() {
                 // Format: {"member": score, ...}
                 for (member, score_val) in map {
-                    let score = score_val.as_f64().unwrap_or(0.0);
+                    let score = score_val
+                        .as_f64()
+                        .map(|value| value.to_string())
+                        .unwrap_or_else(|| score_val.to_string());
 
                     let member_input = cx.new(|cx| {
                         let mut state = InputState::new(window, cx).placeholder("Element...");
@@ -642,7 +764,7 @@ impl KeyValueEditorPanel {
                     });
                     let score_input = cx.new(|cx| {
                         let mut state = InputState::new(window, cx).placeholder("Score...");
-                        state.set_value(&score.to_string(), window, cx);
+                        state.set_value(&score, window, cx);
                         state
                     });
                     let _member_subscription = cx.subscribe(&member_input, |this, _, event, cx| {
@@ -670,7 +792,10 @@ impl KeyValueEditorPanel {
                 // Format: [score1, member1, score2, member2, ...]
                 for chunk in arr.chunks(2) {
                     if chunk.len() == 2 {
-                        let score = chunk[0].as_f64().unwrap_or(0.0);
+                        let score = chunk[0]
+                            .as_f64()
+                            .map(|value| value.to_string())
+                            .unwrap_or_else(|| chunk[0].to_string());
                         let member = chunk[1].as_str().unwrap_or("").to_string();
 
                         let member_input = cx.new(|cx| {
@@ -680,7 +805,7 @@ impl KeyValueEditorPanel {
                         });
                         let score_input = cx.new(|cx| {
                             let mut state = InputState::new(window, cx).placeholder("Score...");
-                            state.set_value(&score.to_string(), window, cx);
+                            state.set_value(&score, window, cx);
                             state
                         });
                         let _member_subscription =
@@ -781,12 +906,24 @@ impl KeyValueEditorPanel {
             .iter()
             .zip(data.row_values.iter())
             .map(|(col, value)| {
-                let is_null = value == "NULL" || value.is_empty() && col.nullable;
+                let uses_default_placeholder = data.is_new
+                    && col.default_value.is_some()
+                    && value.is_null()
+                    && !col.auto_increment;
+                let display_value = if uses_default_placeholder {
+                    String::new()
+                } else {
+                    value.display_for_editor()
+                };
+                let is_null = value.is_null() && !uses_default_placeholder;
                 let placeholder = format!("{} ({})", col.name, col.data_type);
                 let input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder(placeholder);
+                    let mut state = InputState::new(window, cx)
+                        .multi_line(true)
+                        .soft_wrap(true)
+                        .placeholder(placeholder);
                     if !is_null {
-                        state.set_value(value, window, cx);
+                        state.set_value(display_value, window, cx);
                     }
                     state
                 });
@@ -805,9 +942,25 @@ impl KeyValueEditorPanel {
                     InputEvent::Change => {
                         this.is_modified = true;
                         let new_value = input_entity.read(cx).text().to_string();
-                        let is_null = this.row_fields.get(col_index).map_or(false, |f| f.is_null);
+                        let is_null = this
+                            .row_fields
+                            .get(col_index)
+                            .is_some_and(|field| field.is_null);
+                        let typed_value = if is_null {
+                            Value::Null
+                        } else {
+                            parse_row_field_value(
+                                Some(new_value.clone()),
+                                this.row_data
+                                    .as_ref()
+                                    .and_then(|data| data.column_meta.get(col_index))
+                                    .map(|column| column.data_type.as_str())
+                                    .unwrap_or("text"),
+                            )
+                        };
                         cx.emit(KeyValueEditorEvent::FieldChanged {
                             col_index,
+                            typed_value,
                             new_value,
                             is_null,
                             row_index,
@@ -828,15 +981,14 @@ impl KeyValueEditorPanel {
         self.row_data = Some(data);
 
         // Determine the initial modification state without reading any input entities.
-        // For new rows: the Insert button should be enabled if any non-auto column already has
-        // a pre-filled default value, indicated by a non-empty entry in row_values.
-        // For existing rows: no field has been changed yet, so start as unmodified.
-        self.is_modified = self.row_data.as_ref().map_or(false, |d| {
+        // Existing rows start clean. New rows only start dirty when a concrete typed value was
+        // preloaded into a non-auto field; database defaults stay implicit until the user edits.
+        self.is_modified = self.row_data.as_ref().is_some_and(|d| {
             d.is_new
                 && d.column_meta
                     .iter()
                     .zip(d.row_values.iter())
-                    .any(|(col, value)| !col.auto_increment && !value.is_empty())
+                    .any(|(col, value)| !col.auto_increment && !value.is_null())
         });
         self.validation_error = None;
         cx.notify();
@@ -853,10 +1005,7 @@ impl KeyValueEditorPanel {
         cx: &mut Context<Self>,
     ) {
         let all_column_names: Vec<String> = column_meta.iter().map(|c| c.name.clone()).collect();
-        let row_values: Vec<String> = column_meta
-            .iter()
-            .map(|col| col.default_value.clone().unwrap_or_default())
-            .collect();
+        let row_values: Vec<Value> = column_meta.iter().map(initial_new_row_value).collect();
 
         let data = RowData {
             table_name,
@@ -876,12 +1025,11 @@ impl KeyValueEditorPanel {
             .row_data
             .as_ref()
             .and_then(|d| d.column_meta.iter().position(|c| !c.auto_increment))
+            && let Some(field) = self.row_fields.get(first_field_index)
         {
-            if let Some(field) = self.row_fields.get(first_field_index) {
-                field.input.update(cx, |input, cx| {
-                    input.focus(window, cx);
-                });
-            }
+            field.input.update(cx, |input, cx| {
+                input.focus(window, cx);
+            });
         }
     }
 
@@ -922,12 +1070,14 @@ impl KeyValueEditorPanel {
     ) {
         if let Some(field) = self.row_fields.get_mut(col_index) {
             field.is_null = is_null;
-            if !is_null {
-                let owned_value = new_value.to_string();
-                field.input.update(cx, |input, cx| {
-                    input.set_value(owned_value, window, cx);
-                });
-            }
+            let owned_value = if is_null {
+                String::new()
+            } else {
+                new_value.to_string()
+            };
+            field.input.update(cx, |input, cx| {
+                input.set_value(owned_value, window, cx);
+            });
             cx.notify();
         }
     }
@@ -977,12 +1127,7 @@ impl KeyValueEditorPanel {
         }
 
         // For string/JSON types, compare the textarea value (single entity read).
-        let value_type = self
-            .type_selector
-            .read(cx)
-            .selected_value()
-            .copied()
-            .unwrap_or(RedisValueType::String);
+        let value_type = self.selected_redis_value_type(cx);
         if !value_type.is_collection() {
             let current_value = self.value_input.read(cx).text().to_string();
             let original_value = data.value.clone().unwrap_or_default();
@@ -1004,6 +1149,14 @@ impl KeyValueEditorPanel {
         }
 
         false
+    }
+
+    fn selected_redis_value_type(&self, cx: &App) -> RedisValueType {
+        self.type_selector
+            .read(cx)
+            .selected_value()
+            .copied()
+            .unwrap_or(RedisValueType::String)
     }
 
     fn format_json(&self, value: &str) -> Option<String> {
@@ -1044,9 +1197,11 @@ impl KeyValueEditorPanel {
     }
 
     fn validate_redis(&mut self, cx: &Context<Self>) -> bool {
-        let Some(data) = &self.data else {
+        let Some(_data) = &self.data else {
             return true;
         };
+
+        let value_type = self.selected_redis_value_type(cx);
 
         let key = self.key_input.read(cx).text().to_string();
         if key.trim().is_empty() {
@@ -1054,16 +1209,77 @@ impl KeyValueEditorPanel {
             return false;
         }
 
-        if matches!(data.value_type, RedisValueType::Json) {
-            let value = self.value_input.read(cx).text().to_string();
-            if !value.trim().is_empty() {
-                if let Err(e) = serde_json::from_str::<serde_json::Value>(&value) {
+        match value_type {
+            RedisValueType::Json => {
+                let value = self.value_input.read(cx).text().to_string();
+                if !value.trim().is_empty()
+                    && let Err(e) = serde_json::from_str::<serde_json::Value>(&value)
+                {
                     self.validation_error = Some(format!("Invalid JSON: {}", e));
                     return false;
                 }
             }
-        }
+            RedisValueType::List | RedisValueType::Set => {
+                let has_non_empty_item = self
+                    .list_items
+                    .iter()
+                    .any(|item| !item.input.read(cx).text().to_string().trim().is_empty());
+                if !has_non_empty_item {
+                    self.validation_error =
+                        value_type.empty_collection_error().map(ToString::to_string);
+                    return false;
+                }
+            }
+            RedisValueType::Hash => {
+                let has_non_empty_field = self.hash_fields.iter().any(|field| {
+                    !field
+                        .field_input
+                        .read(cx)
+                        .text()
+                        .to_string()
+                        .trim()
+                        .is_empty()
+                });
+                if !has_non_empty_field {
+                    self.validation_error =
+                        value_type.empty_collection_error().map(ToString::to_string);
+                    return false;
+                }
+            }
+            RedisValueType::ZSet => {
+                let mut has_member = false;
 
+                for member in &self.zset_members {
+                    let element = member.member_input.read(cx).text().to_string();
+                    let element = element.trim().to_string();
+                    if element.is_empty() {
+                        continue;
+                    }
+
+                    has_member = true;
+
+                    let score = member.score_input.read(cx).text().to_string();
+                    let score = score.trim().to_string();
+                    match score.parse::<f64>() {
+                        Ok(parsed_score) if parsed_score.is_finite() => {}
+                        _ => {
+                            self.validation_error = Some(format!(
+                                "Invalid sorted set score for '{}': '{}'",
+                                element, score
+                            ));
+                            return false;
+                        }
+                    }
+                }
+
+                if !has_member {
+                    self.validation_error =
+                        value_type.empty_collection_error().map(ToString::to_string);
+                    return false;
+                }
+            }
+            _ => {}
+        }
         true
     }
 
@@ -1072,39 +1288,64 @@ impl KeyValueEditorPanel {
             return true;
         };
 
-        // Check required (non-nullable, no default) columns have values
         for (index, col) in data.column_meta.iter().enumerate() {
             if col.auto_increment {
                 continue;
             }
-            if !col.nullable && col.default_value.is_none() {
-                if let Some(field) = self.row_fields.get(index) {
-                    if field.is_null {
-                        self.validation_error =
-                            Some(format!("Column '{}' cannot be NULL", col.name));
-                        return false;
-                    }
-                    let value = field.input.read(cx).text().to_string();
-                    if value.trim().is_empty() && data.is_new {
-                        self.validation_error =
-                            Some(format!("Column '{}' requires a value", col.name));
-                        return false;
-                    }
+
+            let Some(field) = self.row_fields.get(index) else {
+                continue;
+            };
+
+            if field.is_null {
+                if !col.nullable {
+                    self.validation_error = Some(format!("Column '{}' cannot be NULL", col.name));
+                    return false;
                 }
+
+                continue;
+            }
+
+            let value = field.input.read(cx).text().to_string();
+            let typed_value = parse_row_field_value(Some(value.clone()), &col.data_type);
+            let uses_default_on_insert = data.is_new
+                && col.default_value.is_some()
+                && value.is_empty()
+                && data.row_values.get(index).is_some_and(Value::is_null);
+
+            if !col.nullable
+                && col.default_value.is_none()
+                && value.trim().is_empty()
+                && data.is_new
+            {
+                self.validation_error = Some(format!("Column '{}' requires a value", col.name));
+                return false;
+            }
+
+            if typed_value.is_null() {
+                if !col.nullable && !uses_default_on_insert {
+                    self.validation_error = Some(format!("Column '{}' cannot be NULL", col.name));
+                    return false;
+                }
+
+                continue;
+            }
+
+            if !is_valid_typed_row_value(&value, &typed_value, &col.data_type) {
+                self.validation_error = Some(format!(
+                    "Column '{}' expects a valid {} value",
+                    col.name, col.data_type
+                ));
+                return false;
             }
         }
 
         true
     }
 
-    /// Get the serialized value based on current type and editor state
-    fn get_serialized_value(&self, cx: &App) -> String {
-        let value_type = self
-            .type_selector
-            .read(cx)
-            .selected_value()
-            .copied()
-            .unwrap_or(RedisValueType::String);
+    /// Get the serialized Redis value based on current type and editor state.
+    fn get_serialized_redis_value(&self, cx: &App) -> Result<String, String> {
+        let value_type = self.selected_redis_value_type(cx);
 
         match value_type {
             RedisValueType::List | RedisValueType::Set => {
@@ -1112,9 +1353,9 @@ impl KeyValueEditorPanel {
                     .list_items
                     .iter()
                     .map(|item| item.input.read(cx).text().to_string())
-                    .filter(|s| !s.is_empty())
+                    .filter(|value| !value.is_empty())
                     .collect();
-                serde_json::to_string(&items).unwrap_or_default()
+                serde_json::to_string(&items).map_err(|error| error.to_string())
             }
             RedisValueType::Hash => {
                 let mut map = serde_json::Map::new();
@@ -1125,27 +1366,32 @@ impl KeyValueEditorPanel {
                         map.insert(key, serde_json::Value::String(value));
                     }
                 }
-                serde_json::to_string(&map).unwrap_or_default()
+                serde_json::to_string(&map).map_err(|error| error.to_string())
             }
             RedisValueType::ZSet => {
                 let mut map = serde_json::Map::new();
                 for member in &self.zset_members {
                     let element = member.member_input.read(cx).text().to_string();
-                    let score_str = member.score_input.read(cx).text().to_string();
-                    let score: f64 = score_str.parse().unwrap_or(0.0);
-                    if !element.is_empty() {
-                        map.insert(
-                            element,
-                            serde_json::Value::Number(
-                                serde_json::Number::from_f64(score)
-                                    .unwrap_or(serde_json::Number::from(0)),
-                            ),
-                        );
+                    if element.is_empty() {
+                        continue;
                     }
+
+                    let score = member.score_input.read(cx).text().to_string();
+                    let score = score
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("Invalid sorted set score for '{}'.", element))?;
+                    if !score.is_finite() {
+                        return Err(format!("Invalid sorted set score for '{}'.", element));
+                    }
+
+                    let number = serde_json::Number::from_f64(score)
+                        .ok_or_else(|| format!("Invalid sorted set score for '{}'.", element))?;
+                    map.insert(element, serde_json::Value::Number(number));
                 }
-                serde_json::to_string(&map).unwrap_or_default()
+                serde_json::to_string(&map).map_err(|error| error.to_string())
             }
-            _ => self.value_input.read(cx).text().to_string(),
+            _ => Ok(self.value_input.read(cx).text().to_string()),
         }
     }
 
@@ -1166,14 +1412,15 @@ impl KeyValueEditorPanel {
             return;
         };
 
-        let value_type = self
-            .type_selector
-            .read(cx)
-            .selected_value()
-            .copied()
-            .unwrap_or(data.value_type);
-
-        let new_value = self.get_serialized_value(cx);
+        let value_type = self.selected_redis_value_type(cx);
+        let new_value = match self.get_serialized_redis_value(cx) {
+            Ok(value) => value,
+            Err(error) => {
+                self.validation_error = Some(error);
+                cx.notify();
+                return;
+            }
+        };
         let ttl_value = self.ttl_selector.read(cx).selected_value();
         let new_ttl = ttl_value.and_then(|t| t.to_seconds());
         let new_key = self.key_input.read(cx).text().to_string();
@@ -1205,13 +1452,30 @@ impl KeyValueEditorPanel {
         let values: Vec<Option<String>> = self
             .row_fields
             .iter()
+            .zip(data.column_meta.iter())
+            .zip(data.row_values.iter())
             .map(|field| {
-                if field.is_null {
+                let ((field, column), original_value) = field;
+                if column.auto_increment || field.is_null {
                     None
                 } else {
-                    Some(field.input.read(cx).text().to_string())
+                    let value = field.input.read(cx).text().to_string();
+                    if data.is_new
+                        && column.default_value.is_some()
+                        && value.is_empty()
+                        && original_value.is_null()
+                    {
+                        None
+                    } else {
+                        Some(value)
+                    }
                 }
             })
+            .collect();
+        let typed_values: Vec<Value> = values
+            .iter()
+            .zip(column_types.iter())
+            .map(|(value, column_type)| parse_row_field_value(value.clone(), column_type))
             .collect();
 
         cx.emit(KeyValueEditorEvent::RowSaved {
@@ -1220,6 +1484,7 @@ impl KeyValueEditorPanel {
             column_names: data.all_column_names.clone(),
             column_types,
             values,
+            typed_values,
             is_new: data.is_new,
             row_index: data.row_index,
             source_viewer: data.source_viewer.clone(),
@@ -1776,8 +2041,7 @@ impl KeyValueEditorPanel {
     /// Render the string/JSON value editor (textarea)
     fn render_string_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let data = self.data.as_ref();
-        let is_json = data.map_or(false, |d| matches!(d.value_type, RedisValueType::Json));
+        let is_json = matches!(self.selected_redis_value_type(cx), RedisValueType::Json);
         let word_wrap = self.word_wrap;
 
         v_flex()
@@ -1800,7 +2064,7 @@ impl KeyValueEditorPanel {
                                 this.child(
                                     Button::new("format-json")
                                         .icon(Icon::new(ZqlzIcon::BracketsCurly).size_3())
-                                        .with_variant(ButtonVariant::Ghost)
+                                        .ghost()
                                         .xsmall()
                                         .tooltip("Format JSON")
                                         .on_click(cx.listener(|this, _, window, cx| {
@@ -1811,8 +2075,10 @@ impl KeyValueEditorPanel {
                             .child(
                                 Button::new("word-wrap")
                                     .icon(Icon::new(ZqlzIcon::TextWrap).size_3())
+                                    // This toggle chooses its variant from state, so a dynamic
+                                    // ButtonVariant is clearer than forcing one fixed helper.
                                     .with_variant(if word_wrap {
-                                        ButtonVariant::Secondary
+                                        ButtonVariant::SecondaryPrimary
                                     } else {
                                         ButtonVariant::Ghost
                                     })
@@ -1842,12 +2108,7 @@ impl KeyValueEditorPanel {
 
     /// Render the appropriate value editor based on type
     fn render_value_field(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let value_type = self
-            .type_selector
-            .read(cx)
-            .selected_value()
-            .copied()
-            .unwrap_or(RedisValueType::String);
+        let value_type = self.selected_redis_value_type(cx);
 
         match value_type {
             RedisValueType::List | RedisValueType::Set => {
@@ -1865,7 +2126,7 @@ impl KeyValueEditorPanel {
 
     fn render_action_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let has_modifications = self.has_modifications(cx);
-        let is_new = self.data.as_ref().map_or(true, |d| d.is_new);
+        let is_new = self.data.as_ref().is_none_or(|d| d.is_new);
 
         h_flex()
             .gap_1p5()
@@ -1874,9 +2135,9 @@ impl KeyValueEditorPanel {
             .child(h_flex().gap_1p5().when(!is_new, |this| {
                 this.child(
                     Button::new("delete-key")
+                        .danger()
                         .label("Delete")
                         .small()
-                        .with_variant(ButtonVariant::Danger)
                         .on_click(cx.listener(|this, _, _window, cx| {
                             this.delete(cx);
                         })),
@@ -1887,6 +2148,7 @@ impl KeyValueEditorPanel {
                     .gap_1p5()
                     .child(
                         Button::new("cancel-edit")
+                            .secondary()
                             .label("Discard")
                             .small()
                             .on_click(cx.listener(|this, _, _window, cx| {
@@ -1897,7 +2159,7 @@ impl KeyValueEditorPanel {
                         Button::new("save-edit")
                             .label("Apply")
                             .small()
-                            .with_variant(ButtonVariant::Primary)
+                            .primary()
                             .disabled(!has_modifications)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save(window, cx);
@@ -2000,15 +2262,56 @@ impl KeyValueEditorPanel {
                             h_flex()
                                 .gap_0p5()
                                 .items_center()
-                                .child(Checkbox::new("null-checkbox").checked(is_null).on_click(
-                                    cx.listener(move |this, _, _window, cx| {
-                                        if let Some(field) = this.row_fields.get_mut(field_index) {
-                                            field.is_null = !field.is_null;
-                                            this.is_modified = true;
-                                            cx.notify();
-                                        }
-                                    }),
-                                ))
+                                .child(
+                                    Checkbox::new(("null-checkbox", field_index))
+                                        .checked(is_null)
+                                        .animated(false)
+                                        .on_click(cx.listener(move |this, _, _window, cx| {
+                                            if let Some(field) =
+                                                this.row_fields.get_mut(field_index)
+                                            {
+                                                field.is_null = !field.is_null;
+                                                this.is_modified = true;
+                                            }
+
+                                            if let Some(field) = this.row_fields.get(field_index) {
+                                                let new_value =
+                                                    field.input.read(cx).text().to_string();
+                                                let is_null = field.is_null;
+                                                let typed_value = if is_null {
+                                                    Value::Null
+                                                } else {
+                                                    parse_row_field_value(
+                                                        Some(new_value.clone()),
+                                                        this.row_data
+                                                            .as_ref()
+                                                            .and_then(|data| {
+                                                                data.column_meta.get(field_index)
+                                                            })
+                                                            .map(|column| column.data_type.as_str())
+                                                            .unwrap_or("text"),
+                                                    )
+                                                };
+                                                let row_index = this
+                                                    .row_data
+                                                    .as_ref()
+                                                    .and_then(|data| data.row_index);
+                                                let source_viewer = this
+                                                    .row_data
+                                                    .as_ref()
+                                                    .and_then(|data| data.source_viewer.clone());
+                                                cx.emit(KeyValueEditorEvent::FieldChanged {
+                                                    col_index: field_index,
+                                                    new_value,
+                                                    typed_value,
+                                                    is_null,
+                                                    row_index,
+                                                    source_viewer,
+                                                });
+                                                cx.notify();
+                                            }
+                                        })),
+                                )
                                 .child(
                                     div()
                                         .text_xs()
@@ -2079,16 +2382,20 @@ impl KeyValueEditorPanel {
                     .px_2()
                     .py_2()
                     .justify_end()
-                    .child(Button::new("cancel-row").label("Discard").small().on_click(
-                        cx.listener(|this, _, _window, cx| {
-                            this.cancel(cx);
-                        }),
-                    ))
+                    .child(
+                        Button::new("cancel-row")
+                            .secondary()
+                            .label("Discard")
+                            .small()
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                this.cancel(cx);
+                            })),
+                    )
                     .child(
                         Button::new("save-row")
                             .label(if data.is_new { "Insert" } else { "Update" })
                             .small()
-                            .with_variant(ButtonVariant::Primary)
+                            .primary()
                             .disabled(!has_modifications)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.save(window, cx);

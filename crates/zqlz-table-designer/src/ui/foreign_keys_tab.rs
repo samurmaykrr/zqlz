@@ -1,9 +1,26 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_ui::widgets::{ActiveTheme, v_flex};
+use zqlz_ui::widgets::{ActiveTheme, input::InputState, select::SelectState, v_flex};
 
 use crate::panel::TableDesignerPanel;
-use crate::service::fk_action_to_sql;
+
+type ForeignKeySelect = Option<Entity<SelectState<Vec<&'static str>>>>;
+type ForeignKeyInput = Option<Entity<InputState>>;
+
+struct ForeignKeyRowData {
+    index: usize,
+    is_selected: bool,
+    name: String,
+    columns: String,
+    referenced_table: String,
+    referenced_columns: String,
+    on_delete_select: ForeignKeySelect,
+    on_update_select: ForeignKeySelect,
+    name_input: ForeignKeyInput,
+    columns_input: ForeignKeyInput,
+    ref_table_input: ForeignKeyInput,
+    ref_columns_input: ForeignKeyInput,
+}
 
 /// Render the foreign keys tab content
 pub(in crate::panel) fn render_foreign_keys_tab(
@@ -15,30 +32,28 @@ pub(in crate::panel) fn render_foreign_keys_tab(
     let muted_fg = theme.muted_foreground;
 
     // Collect FK data to avoid borrow issues
-    let fk_data: Vec<_> = this
+    let fk_data: Vec<ForeignKeyRowData> = this
         .design
         .foreign_keys
         .iter()
         .enumerate()
-        .map(|(idx, fk)| {
-            (
-                idx,
-                selected_fk_index == Some(idx),
-                fk.name.clone().unwrap_or_else(|| "(unnamed)".to_string()),
-                fk.columns.join(", "),
-                if fk.referenced_table.is_empty() {
-                    "(select table)".to_string()
-                } else {
-                    fk.referenced_table.clone()
-                },
-                fk.referenced_columns.join(", "),
-                fk_action_to_sql(&fk.on_delete),
-                fk_action_to_sql(&fk.on_update),
-                this.fk_name_inputs.get(idx).cloned(),
-                this.fk_columns_inputs.get(idx).cloned(),
-                this.fk_ref_table_inputs.get(idx).cloned(),
-                this.fk_ref_columns_inputs.get(idx).cloned(),
-            )
+        .map(|(idx, fk)| ForeignKeyRowData {
+            index: idx,
+            is_selected: selected_fk_index == Some(idx),
+            name: fk.name.clone().unwrap_or_else(|| "(unnamed)".to_string()),
+            columns: fk.columns.join(", "),
+            referenced_table: if fk.referenced_table.is_empty() {
+                "(select table)".to_string()
+            } else {
+                fk.referenced_table.clone()
+            },
+            referenced_columns: fk.referenced_columns.join(", "),
+            on_delete_select: this.fk_on_delete_selects.get(idx).cloned(),
+            on_update_select: this.fk_on_update_selects.get(idx).cloned(),
+            name_input: this.fk_name_inputs.get(idx).cloned(),
+            columns_input: this.fk_columns_inputs.get(idx).cloned(),
+            ref_table_input: this.fk_ref_table_inputs.get(idx).cloned(),
+            ref_columns_input: this.fk_ref_columns_inputs.get(idx).cloned(),
         })
         .collect();
 
@@ -46,35 +61,21 @@ pub(in crate::panel) fn render_foreign_keys_tab(
 
     // Build row elements using a for loop - convert to AnyElement to avoid lifetime capture issues
     let mut fk_row_elements: Vec<AnyElement> = Vec::with_capacity(fk_data.len());
-    for (
-        idx,
-        is_selected,
-        name,
-        columns,
-        referenced_table,
-        referenced_columns,
-        on_delete,
-        on_update,
-        name_input,
-        columns_input,
-        ref_table_input,
-        ref_columns_input,
-    ) in fk_data
-    {
+    for row in fk_data {
         let element = this
             .render_fk_row_inner(
-                idx,
-                is_selected,
-                name,
-                columns,
-                referenced_table,
-                referenced_columns,
-                on_delete,
-                on_update,
-                name_input,
-                columns_input,
-                ref_table_input,
-                ref_columns_input,
+                row.index,
+                row.is_selected,
+                row.name,
+                row.columns,
+                row.referenced_table,
+                row.referenced_columns,
+                row.on_delete_select,
+                row.on_update_select,
+                row.name_input,
+                row.columns_input,
+                row.ref_table_input,
+                row.ref_columns_input,
                 cx,
             )
             .into_any_element();

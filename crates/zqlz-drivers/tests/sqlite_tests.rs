@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 /// Integration tests for SQLite driver
-use zqlz_core::{Connection, DatabaseDriver, SchemaIntrospection, Value};
+use zqlz_core::{Connection, DatabaseDriver, SchemaIntrospection, TableType, Value};
 use zqlz_drivers::sqlite::{ExecuteMultiResult, SqliteConnection, SqliteDriver};
 
 /// Helper to create a test database with sample data
@@ -76,6 +76,22 @@ async fn setup_test_database() -> (PathBuf, SqliteConnection) {
             .await
             .expect("Failed to setup schema");
     }
+
+    (db_path, conn)
+}
+
+async fn setup_virtual_table_database() -> (PathBuf, SqliteConnection) {
+    let temp_dir = std::env::temp_dir();
+    let db_path = temp_dir.join(format!("zqlz_virtual_test_{}.db", uuid::Uuid::new_v4()));
+    let conn =
+        SqliteConnection::open(db_path.to_str().unwrap()).expect("Failed to create test database");
+
+    conn.execute(
+        "CREATE VIRTUAL TABLE items_fts USING fts5(title, body, tokenize = 'porter')",
+        &[],
+    )
+    .await
+    .expect("Failed to create virtual table");
 
     (db_path, conn)
 }
@@ -471,6 +487,37 @@ async fn test_schema_introspection_table_details() {
 
     let pk = details.primary_key.unwrap();
     assert_eq!(pk.columns, vec!["id"]);
+
+    cleanup_test_database(db_path);
+}
+
+#[tokio::test]
+async fn test_schema_introspection_marks_virtual_tables() {
+    let (db_path, conn) = setup_virtual_table_database().await;
+
+    let tables = conn.list_tables(None).await.expect("Failed to list tables");
+    let virtual_table = tables
+        .iter()
+        .find(|table| table.name == "items_fts")
+        .expect("virtual table should be listed");
+
+    assert_eq!(virtual_table.table_type, TableType::VirtualTable);
+
+    cleanup_test_database(db_path);
+}
+
+#[tokio::test]
+async fn test_schema_introspection_loads_virtual_table_columns() {
+    let (db_path, conn) = setup_virtual_table_database().await;
+
+    let columns = conn
+        .get_columns(None, "items_fts")
+        .await
+        .expect("Failed to get virtual table columns");
+
+    let column_names: Vec<&str> = columns.iter().map(|column| column.name.as_str()).collect();
+    assert!(column_names.contains(&"title"));
+    assert!(column_names.contains(&"body"));
 
     cleanup_test_database(db_path);
 }

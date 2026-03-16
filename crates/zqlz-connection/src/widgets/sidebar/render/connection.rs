@@ -5,6 +5,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 
+use super::{RedisSchemaTreeProps, SqlSchemaTreeProps};
 use crate::widgets::sidebar::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent};
 use zqlz_ui::widgets::{
     ActiveTheme, Colorize as _, Icon, IconName, Sizable, ZqlzIcon, caption, h_flex,
@@ -57,6 +58,7 @@ impl ConnectionSidebar {
         let is_connecting = conn.is_connecting;
         let is_expanded = conn.is_expanded;
         let is_redis = conn.is_redis();
+        let object_capabilities = conn.object_capabilities;
         let tables = conn.tables.clone();
         let views = conn.views.clone();
         let materialized_views = conn.materialized_views.clone();
@@ -114,6 +116,7 @@ impl ConnectionSidebar {
                         MouseButton::Right,
                         cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
+                            this.select_connection(conn_id, cx);
                             this.show_connection_context_menu(conn_id, event.position, window, cx);
                         }),
                     )
@@ -276,42 +279,46 @@ impl ConnectionSidebar {
             )
             .when(is_expanded && is_connected && is_redis, |this| {
                 this.child(self.render_redis_schema_tree(
-                    conn_id,
-                    &redis_databases,
-                    redis_databases_expanded,
-                    &queries,
-                    queries_expanded,
-                    window,
+                    RedisSchemaTreeProps {
+                        conn_id,
+                        databases: &redis_databases,
+                        databases_expanded: redis_databases_expanded,
+                        queries: &queries,
+                        queries_expanded,
+                    },
                     cx,
                 ))
             })
             .when(is_expanded && is_connected && !is_redis, |this| {
+                let _ = window;
                 this.child(self.render_schema_tree(
-                    conn_id,
-                    &tables,
-                    &views,
-                    &materialized_views,
-                    &triggers,
-                    &functions,
-                    &procedures,
-                    &queries,
-                    tables_expanded,
-                    views_expanded,
-                    materialized_views_expanded,
-                    triggers_expanded,
-                    functions_expanded,
-                    procedures_expanded,
-                    queries_expanded,
-                    tables_loading,
-                    views_loading,
-                    materialized_views_loading,
-                    triggers_loading,
-                    functions_loading,
-                    procedures_loading,
-                    &databases,
-                    schema_name.as_deref(),
-                    schema_expanded,
-                    window,
+                    SqlSchemaTreeProps {
+                        conn_id,
+                        object_capabilities,
+                        tables: &tables,
+                        views: &views,
+                        materialized_views: &materialized_views,
+                        triggers: &triggers,
+                        functions: &functions,
+                        procedures: &procedures,
+                        queries: &queries,
+                        tables_expanded,
+                        views_expanded,
+                        materialized_views_expanded,
+                        triggers_expanded,
+                        functions_expanded,
+                        procedures_expanded,
+                        queries_expanded,
+                        tables_loading,
+                        views_loading,
+                        materialized_views_loading,
+                        triggers_loading,
+                        functions_loading,
+                        procedures_loading,
+                        databases: &databases,
+                        schema_name: schema_name.as_deref(),
+                        schema_expanded,
+                    },
                     cx,
                 ))
             })

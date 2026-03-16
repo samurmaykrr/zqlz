@@ -8,6 +8,11 @@ use std::time::Duration;
 
 use crate::widgets::{Anchor, ElementExt, StyledExt as _, popover::Popover};
 
+type HoverCardTrigger = Box<dyn FnOnce(&mut Window, &App) -> AnyElement + 'static>;
+type HoverCardContent =
+    Rc<dyn Fn(&mut HoverCardState, &mut Window, &mut Context<HoverCardState>) -> AnyElement>;
+type HoverCardOpenChange = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+
 /// A hover card element that displays content when hovering over a trigger element.
 ///
 /// Similar to Popover but triggered by mouse hover instead of click, with configurable delays
@@ -17,18 +22,13 @@ pub struct HoverCard {
     id: ElementId,
     style: StyleRefinement,
     anchor: Anchor,
-    trigger: Option<Box<dyn FnOnce(&mut Window, &App) -> AnyElement + 'static>>,
-    content: Option<
-        Rc<
-            dyn Fn(&mut HoverCardState, &mut Window, &mut Context<HoverCardState>) -> AnyElement
-                + 'static,
-        >,
-    >,
+    trigger: Option<HoverCardTrigger>,
+    content: Option<HoverCardContent>,
     children: Vec<AnyElement>,
     open_delay: Duration,
     close_delay: Duration,
     appearance: bool,
-    on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_open_change: Option<HoverCardOpenChange>,
 }
 
 impl HoverCard {
@@ -131,7 +131,7 @@ pub struct HoverCardState {
     is_hovering_trigger: bool,
     is_hovering_content: bool,
 
-    on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_open_change: Option<HoverCardOpenChange>,
 }
 
 impl HoverCardState {
@@ -255,10 +255,10 @@ impl RenderOnce for HoverCard {
         let open = state.read(cx).open;
         let trigger_bounds = state.read(cx).trigger_bounds;
 
-        if previous_open != open {
-            if let Some(ref callback) = self.on_open_change {
-                callback(&open, window, cx);
-            }
+        if previous_open != open
+            && let Some(callback) = self.on_open_change.as_ref()
+        {
+            callback(&open, window, cx);
         }
 
         let Some(trigger) = self.trigger else {

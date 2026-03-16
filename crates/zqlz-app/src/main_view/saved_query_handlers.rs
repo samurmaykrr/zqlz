@@ -4,7 +4,6 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
@@ -21,6 +20,7 @@ use crate::app::AppState;
 use crate::components::{ConnectionSidebar, QueryEditor};
 use crate::storage::SavedQuery;
 use zqlz_connection::SavedQueryInfo;
+use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
 use super::MainView;
 
@@ -45,6 +45,127 @@ fn validate_query_name(name: &str) -> Option<&'static str> {
     }
 
     None
+}
+
+fn rename_open_saved_query_editors(
+    query_editors: &[WeakEntity<QueryEditor>],
+    query_id: Uuid,
+    new_name: &str,
+    cx: &mut App,
+) {
+    for query_editor in query_editors {
+        let Some(query_editor) = query_editor.upgrade() else {
+            continue;
+        };
+
+        let is_matching_saved_query = query_editor.read(cx).saved_query_id() == Some(query_id);
+        if !is_matching_saved_query {
+            continue;
+        }
+
+        _ = query_editor.update(cx, |query_editor, cx| {
+            query_editor.set_name(new_name, cx);
+        });
+    }
+}
+
+pub(super) fn save_query_for_editor(
+    editor: WeakEntity<QueryEditor>,
+    sql: String,
+    connection_id: Uuid,
+    query_name: String,
+    sidebar_weak: WeakEntity<ConnectionSidebar>,
+    window: &mut Window,
+    cx: &mut App,
+) -> Result<Uuid, String> {
+    let query_name = query_name.trim().to_string();
+
+    if let Some(err) = validate_query_name(&query_name) {
+        return Err(err.to_string());
+    }
+
+    let Some(app_state) = cx.try_global::<AppState>() else {
+        return Err("Application state not available".to_string());
+    };
+
+    let storage = &app_state.storage;
+    match storage.query_name_exists(connection_id, &query_name) {
+        Ok(true) => {
+            return Err("A query with this name already exists".to_string());
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, "Failed to check query name");
+            return Err("Failed to check query name".to_string());
+        }
+    }
+
+    let saved_query = SavedQuery::new(query_name.clone(), connection_id, sql);
+    let query_id = saved_query.id;
+
+    match storage.save_query(&saved_query) {
+        Ok(()) => {
+            _ = editor.update(cx, |editor, cx| {
+                editor.set_saved_query_id(Some(query_id), cx);
+                editor.set_name(&query_name, cx);
+                editor.mark_clean(cx);
+            });
+
+            _ = sidebar_weak.update(cx, |sidebar, cx| {
+                sidebar.add_saved_query(
+                    connection_id,
+                    SavedQueryInfo {
+                        id: query_id,
+                        name: query_name.clone(),
+                    },
+                    cx,
+                );
+            });
+
+            window.push_notification(
+                Notification::success(format!("Query '{}' saved", query_name)),
+                cx,
+            );
+
+            Ok(query_id)
+        }
+        Err(error) => {
+            tracing::error!(%error, "Failed to save query");
+            Err(format!("Failed to save: {}", error))
+        }
+    }
+}
+
+pub(super) fn update_saved_query_for_editor(
+    query_id: Uuid,
+    sql: String,
+    editor: WeakEntity<QueryEditor>,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    let Some(app_state) = cx.try_global::<AppState>() else {
+        window.push_notification(Notification::error("Application state not available"), cx);
+        return;
+    };
+
+    match app_state.storage.update_query_sql(query_id, &sql) {
+        Ok(()) => {
+            tracing::info!("Query updated successfully");
+
+            _ = editor.update(cx, |editor, cx| {
+                editor.mark_clean(cx);
+            });
+
+            window.push_notification(Notification::success("Query saved"), cx);
+        }
+        Err(error) => {
+            tracing::error!(%error, "Failed to update query");
+            window.push_notification(
+                Notification::error(format!("Failed to save: {}", error)),
+                cx,
+            );
+        }
+    }
 }
 
 impl MainView {
@@ -158,72 +279,19 @@ impl MainView {
                             return false;
                         }
 
-                        // Get storage and check for duplicate names
-                        let Some(app_state) = cx.try_global::<AppState>() else {
-                            error_message_for_ok.update(cx, |msg, cx| {
-                                *msg = Some("Application state not available".to_string());
-                                cx.notify();
-                            });
-                            return false;
-                        };
-
-                        let storage = &app_state.storage;
-
-                        // Check if query name already exists
-                        match storage.query_name_exists(connection_id, &query_name) {
-                            Ok(true) => {
+                        match save_query_for_editor(
+                            editor_weak.clone(),
+                            sql.clone(),
+                            connection_id,
+                            query_name,
+                            sidebar_weak.clone(),
+                            _window,
+                            cx,
+                        ) {
+                            Ok(_) => true,
+                            Err(error) => {
                                 error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg =
-                                        Some("A query with this name already exists".to_string());
-                                    cx.notify();
-                                });
-                                return false;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::error!("Failed to check query name: {}", e);
-                                error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg = Some("Failed to check query name".to_string());
-                                    cx.notify();
-                                });
-                                return false;
-                            }
-                        }
-
-                        // Create and save the query
-                        let saved_query =
-                            SavedQuery::new(query_name.clone(), connection_id, sql.clone());
-                        let query_id = saved_query.id;
-
-                        match storage.save_query(&saved_query) {
-                            Ok(()) => {
-                                tracing::info!("Query '{}' saved successfully", query_name);
-
-                                // Update the editor to mark it as saved
-                                _ = editor_weak.update(cx, |editor, cx| {
-                                    editor.set_saved_query_id(Some(query_id), cx);
-                                    editor.set_name(&query_name, cx);
-                                    editor.mark_clean(cx);
-                                });
-
-                                // Update sidebar to show the new saved query
-                                _ = sidebar_weak.update(cx, |sidebar, cx| {
-                                    sidebar.add_saved_query(
-                                        connection_id,
-                                        SavedQueryInfo {
-                                            id: query_id,
-                                            name: query_name.clone(),
-                                        },
-                                        cx,
-                                    );
-                                });
-
-                                true
-                            }
-                            Err(e) => {
-                                tracing::error!("Failed to save query: {}", e);
-                                error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg = Some(format!("Failed to save: {}", e));
+                                    *msg = Some(error);
                                     cx.notify();
                                 });
                                 false
@@ -233,6 +301,8 @@ impl MainView {
                     .button_props(
                         DialogButtonProps::default()
                             .ok_text("Save")
+                            // Save is the dialog's primary commit action, and dialog props use
+                            // ButtonVariant because the button instance is created later.
                             .ok_variant(ButtonVariant::Primary),
                     )
                     .confirm()
@@ -251,27 +321,7 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(app_state) = cx.try_global::<AppState>() else {
-            window.push_notification(Notification::error("Application state not available"), cx);
-            return;
-        };
-
-        match app_state.storage.update_query_sql(query_id, &sql) {
-            Ok(()) => {
-                tracing::info!("Query updated successfully");
-
-                // Mark editor as clean
-                _ = editor.update(cx, |editor, cx| {
-                    editor.mark_clean(cx);
-                });
-
-                window.push_notification(Notification::success("Query saved"), cx);
-            }
-            Err(e) => {
-                tracing::error!("Failed to update query: {}", e);
-                window.push_notification(Notification::error(format!("Failed to save: {}", e)), cx);
-            }
-        }
+        update_saved_query_for_editor(query_id, sql, editor, window, cx);
     }
 
     /// Open a saved query in the query editor
@@ -328,11 +378,11 @@ impl MainView {
         sql: String,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> Option<Entity<QueryEditor>> {
         // Get schema service and connection from AppState
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("AppState not initialized");
-            return;
+            return None;
         };
 
         let schema_service = app_state.schema_service.clone();
@@ -345,14 +395,19 @@ impl MainView {
             .unwrap_or((String::new(), String::from("Unknown")));
 
         // Create an EditorId in WorkspaceState to track this editor
-        let editor_id = self.workspace_state.update(cx, |state, cx| {
-            state.create_editor(Some(connection_id), name.clone(), cx)
-        });
+        let editor_id = self.create_workspace_editor(Some(connection_id), name.clone(), cx);
+
+        let mut document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            &sql,
+        );
+        document.mark_buffer_saved();
 
         let query_editor = cx.new(|cx| {
-            let mut editor = QueryEditor::new(
+            let mut editor = QueryEditor::new_with_document(
                 name.clone(),
                 Some(connection_id),
+                document,
                 schema_service.clone(),
                 window,
                 cx,
@@ -372,32 +427,10 @@ impl MainView {
             // Set saved query metadata
             editor.set_saved_query_id(Some(query_id), cx);
 
-            // Set the SQL content
-            editor.set_text(&sql, window, cx);
-            editor.mark_clean(cx);
-
             editor
         });
 
-        // Subscribe to editor events so execution, save, explain, etc. all work
-        let subscription = self.subscribe_query_editor(&query_editor, name, editor_id, window, cx);
-
-        std::mem::forget(subscription);
-
-        // Track this query editor
-        self.query_editors.push(query_editor.downgrade());
-
-        // Add to dock
-        let query_editor_panel: Arc<dyn zqlz_ui::widgets::dock::PanelView> = Arc::new(query_editor);
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(
-                query_editor_panel,
-                zqlz_ui::widgets::dock::DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
-        });
+        Some(self.finalize_query_editor_open(query_editor, name, editor_id, window, cx))
     }
 
     /// Delete a saved query
@@ -470,6 +503,8 @@ impl MainView {
                 .button_props(
                     DialogButtonProps::default()
                         .ok_text("Delete")
+                        // Saved-query deletion is destructive, so the shared dialog OK action is
+                        // explicitly marked Danger through ButtonVariant metadata.
                         .ok_variant(ButtonVariant::Danger),
                 )
                 .confirm()
@@ -495,6 +530,7 @@ impl MainView {
 
         // Get weak reference to sidebar for updating after rename
         let sidebar_weak: WeakEntity<ConnectionSidebar> = self.connection_sidebar.downgrade();
+        let open_query_editors = self.query_editors.clone();
 
         // Observe input changes to clear error message
         cx.observe(&name_input, {
@@ -514,6 +550,7 @@ impl MainView {
             let name_input = name_input.clone();
             let error_message = error_message.clone();
             let sidebar_weak = sidebar_weak.clone();
+            let open_query_editors = open_query_editors.clone();
 
             move |dialog, _window, cx| {
                 let current_name = current_name.clone();
@@ -521,6 +558,7 @@ impl MainView {
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
                 let sidebar_weak = sidebar_weak.clone();
+                let open_query_editors = open_query_editors.clone();
 
                 dialog
                     .title("Rename Query")
@@ -604,6 +642,13 @@ impl MainView {
                                         cx,
                                     );
                                 });
+
+                                rename_open_saved_query_editors(
+                                    &open_query_editors,
+                                    query_id,
+                                    &new_name,
+                                    cx,
+                                );
 
                                 true
                             }

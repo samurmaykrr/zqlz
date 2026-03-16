@@ -1,6 +1,72 @@
 //! Type definitions for sidebar data structures
 
+use std::sync::OnceLock;
+
 use uuid::Uuid;
+use zqlz_drivers::DriverRegistry;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SidebarObjectCapabilities {
+    pub supports_views: bool,
+    pub supports_materialized_views: bool,
+    pub supports_triggers: bool,
+    pub supports_functions: bool,
+    pub supports_procedures: bool,
+}
+
+impl SidebarObjectCapabilities {
+    pub fn for_driver(driver_name: &str) -> Self {
+        let normalized_driver = Self::normalized_driver_name(driver_name);
+        let driver_capabilities = sidebar_driver_registry()
+            .get(&normalized_driver)
+            .map(|driver| driver.capabilities());
+
+        Self {
+            supports_views: driver_capabilities
+                .as_ref()
+                .map_or(true, |capabilities| capabilities.supports_views),
+            supports_materialized_views: matches!(
+                normalized_driver.as_str(),
+                "postgres" | "mssql" | "clickhouse"
+            ),
+            supports_triggers: driver_capabilities.as_ref().map_or(false, |capabilities| {
+                capabilities.supports_triggers && normalized_driver != "postgres"
+            }),
+            supports_functions: matches!(
+                normalized_driver.as_str(),
+                "postgres" | "mysql" | "mariadb" | "mssql"
+            ),
+            supports_procedures: driver_capabilities.as_ref().map_or(false, |capabilities| {
+                capabilities.supports_stored_procedures
+            }),
+        }
+    }
+
+    fn normalized_driver_name(driver_name: &str) -> String {
+        match driver_name.to_ascii_lowercase().as_str() {
+            "postgresql" => "postgres".to_string(),
+            "mariadb" => "mysql".to_string(),
+            other => other.to_string(),
+        }
+    }
+}
+
+impl Default for SidebarObjectCapabilities {
+    fn default() -> Self {
+        Self {
+            supports_views: true,
+            supports_materialized_views: false,
+            supports_triggers: false,
+            supports_functions: false,
+            supports_procedures: false,
+        }
+    }
+}
+
+fn sidebar_driver_registry() -> &'static DriverRegistry {
+    static DRIVER_REGISTRY: OnceLock<DriverRegistry> = OnceLock::new();
+    DRIVER_REGISTRY.get_or_init(DriverRegistry::with_defaults)
+}
 
 /// Information about a saved query for display in the sidebar
 #[derive(Clone, Debug)]
@@ -51,6 +117,17 @@ pub struct SidebarDatabaseInfo {
     pub schema: Option<DatabaseSchemaData>,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct SchemaObjects {
+    pub tables: Vec<String>,
+    pub views: Vec<String>,
+    pub materialized_views: Vec<String>,
+    pub triggers: Vec<String>,
+    pub functions: Vec<String>,
+    pub procedures: Vec<String>,
+    pub schema_name: Option<String>,
+}
+
 /// Schema objects for a single database, used in the sidebar tree
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseSchemaData {
@@ -88,6 +165,7 @@ pub struct ConnectionEntry {
     pub id: Uuid,
     pub name: String,
     pub db_type: String,
+    pub object_capabilities: SidebarObjectCapabilities,
     pub is_connected: bool,
     pub is_connecting: bool,
     pub is_expanded: bool,
@@ -131,10 +209,12 @@ pub struct ConnectionEntry {
 
 impl ConnectionEntry {
     pub fn new(id: Uuid, name: String, db_type: String) -> Self {
+        let object_capabilities = SidebarObjectCapabilities::for_driver(&db_type);
         Self {
             id,
             name,
             db_type,
+            object_capabilities,
             is_connected: false,
             is_connecting: false,
             is_expanded: false,
@@ -169,5 +249,48 @@ impl ConnectionEntry {
     /// Check if this is a Redis connection
     pub fn is_redis(&self) -> bool {
         self.db_type == "redis"
+    }
+
+    pub fn set_db_type(&mut self, db_type: String) {
+        self.object_capabilities = SidebarObjectCapabilities::for_driver(&db_type);
+        self.db_type = db_type;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SidebarObjectCapabilities;
+
+    #[test]
+    fn sqlite_hides_unsupported_sidebar_sections() {
+        let capabilities = SidebarObjectCapabilities::for_driver("sqlite");
+
+        assert!(capabilities.supports_views);
+        assert!(!capabilities.supports_materialized_views);
+        assert!(capabilities.supports_triggers);
+        assert!(!capabilities.supports_functions);
+        assert!(!capabilities.supports_procedures);
+    }
+
+    #[test]
+    fn postgres_hides_top_level_triggers_but_keeps_other_objects() {
+        let capabilities = SidebarObjectCapabilities::for_driver("postgres");
+
+        assert!(capabilities.supports_views);
+        assert!(capabilities.supports_materialized_views);
+        assert!(!capabilities.supports_triggers);
+        assert!(capabilities.supports_functions);
+        assert!(capabilities.supports_procedures);
+    }
+
+    #[test]
+    fn redis_only_keeps_saved_queries_tree() {
+        let capabilities = SidebarObjectCapabilities::for_driver("redis");
+
+        assert!(!capabilities.supports_views);
+        assert!(!capabilities.supports_materialized_views);
+        assert!(!capabilities.supports_triggers);
+        assert!(!capabilities.supports_functions);
+        assert!(!capabilities.supports_procedures);
     }
 }

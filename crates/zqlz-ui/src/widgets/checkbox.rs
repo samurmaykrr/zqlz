@@ -10,6 +10,8 @@ use gpui::{
     prelude::FluentBuilder as _, px, relative, rems, svg,
 };
 
+type CheckboxClickHandler = Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
+
 /// A Checkbox element.
 #[derive(IntoElement)]
 pub struct Checkbox {
@@ -20,10 +22,11 @@ pub struct Checkbox {
     children: Vec<AnyElement>,
     checked: bool,
     disabled: bool,
+    animated: bool,
     size: Size,
     tab_stop: bool,
     tab_index: isize,
-    on_click: Option<Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+    on_click: Option<CheckboxClickHandler>,
 }
 
 impl Checkbox {
@@ -37,6 +40,7 @@ impl Checkbox {
             children: Vec::new(),
             checked: false,
             disabled: false,
+            animated: true,
             size: Size::default(),
             on_click: None,
             tab_stop: true,
@@ -53,6 +57,11 @@ impl Checkbox {
     /// Set the checked state for the checkbox.
     pub fn checked(mut self, checked: bool) -> Self {
         self.checked = checked;
+        self
+    }
+
+    pub fn animated(mut self, animated: bool) -> Self {
+        self.animated = animated;
         self
     }
 
@@ -77,7 +86,7 @@ impl Checkbox {
     }
 
     fn handle_click(
-        on_click: &Option<Rc<dyn Fn(&bool, &mut Window, &mut App) + 'static>>,
+        on_click: &Option<CheckboxClickHandler>,
         checked: bool,
         window: &mut Window,
         cx: &mut App,
@@ -137,6 +146,7 @@ pub(crate) fn checkbox_check_icon(
     size: Size,
     checked: bool,
     disabled: bool,
+    animated: bool,
     window: &mut Window,
     cx: &mut App,
 ) -> impl IntoElement {
@@ -164,13 +174,13 @@ pub(crate) fn checkbox_check_icon(
             _ => this,
         })
         .map(|this| {
-            if !disabled && checked != *toggle_state.read(cx) {
+            if animated && !disabled && checked != *toggle_state.read(cx) {
                 let duration = Duration::from_secs_f64(0.25);
                 cx.spawn({
                     let toggle_state = toggle_state.clone();
                     async move |cx| {
                         cx.background_executor().timer(duration).await;
-                        _ = toggle_state.update(cx, |this, _| *this = checked);
+                        toggle_state.update(cx, |this, _| *this = checked);
                     }
                 })
                 .detach();
@@ -263,6 +273,7 @@ impl RenderOnce for Checkbox {
                             self.size,
                             checked,
                             self.disabled,
+                            self.animated,
                             window,
                             cx,
                         )),

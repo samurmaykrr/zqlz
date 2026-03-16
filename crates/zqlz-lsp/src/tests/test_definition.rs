@@ -8,7 +8,7 @@ use zqlz_ui::widgets::Rope;
 
 #[test]
 fn test_definition_for_table_name() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition for a table name
     let text = Rope::from("SELECT * FROM users WHERE user_id = 1");
@@ -28,7 +28,7 @@ fn test_definition_for_table_name() {
 
 #[test]
 fn test_definition_for_column_name() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition for a column name
     let text = Rope::from("SELECT username, email FROM users");
@@ -44,7 +44,7 @@ fn test_definition_for_column_name() {
 
 #[test]
 fn test_definition_for_qualified_column() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition for a qualified column (table.column)
     let text = Rope::from(
@@ -61,8 +61,38 @@ fn test_definition_for_qualified_column() {
 }
 
 #[test]
+fn test_definition_for_alias_qualified_column() {
+    let lsp = create_test_lsp();
+
+    let text = Rope::from("SELECT u.username FROM users u");
+    let offset = text.to_string().find("username").unwrap() + 3;
+
+    let result = lsp.get_definition(&text, offset);
+
+    assert!(
+        result.is_some(),
+        "Should find definition for alias-qualified column 'u.username'"
+    );
+}
+
+#[test]
+fn test_definition_for_table_alias() {
+    let lsp = create_test_lsp();
+
+    let text = Rope::from("SELECT u.username FROM users u");
+    let offset = text.to_string().rfind('u').unwrap();
+
+    let result = lsp.get_definition(&text, offset);
+
+    assert!(
+        result.is_some(),
+        "Should resolve a table alias to its table definition"
+    );
+}
+
+#[test]
 fn test_definition_for_unknown_symbol() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition for an unknown symbol
     let text = Rope::from("SELECT unknown_field FROM users");
@@ -78,7 +108,7 @@ fn test_definition_for_unknown_symbol() {
 
 #[test]
 fn test_definition_at_empty_position() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition at an empty position
     let text = Rope::from("SELECT * FROM users");
@@ -92,7 +122,7 @@ fn test_definition_at_empty_position() {
 
 #[test]
 fn test_definition_for_keyword() {
-    let mut lsp = create_test_lsp();
+    let lsp = create_test_lsp();
 
     // Test going to definition for a SQL keyword (should not find definition)
     let text = Rope::from("SELECT * FROM users WHERE user_id = 1");

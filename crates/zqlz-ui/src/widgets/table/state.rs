@@ -532,8 +532,9 @@ where
         row_ix: usize,
         col_ix: Option<usize>,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        cx.stop_propagation();
         self.right_clicked_row = Some(row_ix);
         self.right_clicked_col = col_ix;
         self.right_clicked_header_col = None;
@@ -544,11 +545,19 @@ where
         _: &MouseDownEvent,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
+        cx.stop_propagation();
         self.right_clicked_header_col = Some(col_ix);
         self.right_clicked_row = None;
         self.right_clicked_col = None;
+    }
+
+    fn clear_context_menu_target(&mut self) {
+        self.right_clicked_row = None;
+        self.right_clicked_col = None;
+        self.right_clicked_header_col = None;
+        self.context_menu_selected_rows.clear();
     }
 
     fn on_row_left_click(
@@ -562,13 +571,13 @@ where
 
         if e.click_count() == 2 {
             // Emit cell-level double-click if we resolved a column
-            if let Some(col_ix) = col_ix {
-                if col_ix > 0 {
-                    cx.emit(TableEvent::DoubleClickedCell {
-                        row: row_ix,
-                        col: col_ix,
-                    });
-                }
+            if let Some(col_ix) = col_ix
+                && col_ix > 0
+            {
+                cx.emit(TableEvent::DoubleClickedCell {
+                    row: row_ix,
+                    col: col_ix,
+                });
             }
             cx.emit(TableEvent::DoubleClickedRow(row_ix));
             self.cell_was_clicked = false;
@@ -672,10 +681,8 @@ where
         let mut selected_row = self.selected_row.unwrap_or(0);
         if selected_row > 0 {
             selected_row = selected_row.saturating_sub(1);
-        } else {
-            if self.loop_selection {
-                selected_row = rows_count.saturating_sub(1);
-            }
+        } else if self.loop_selection {
+            selected_row = rows_count.saturating_sub(1);
         }
 
         self.set_selected_row(selected_row, cx);
@@ -717,10 +724,8 @@ where
         let columns_count = self.delegate.columns_count(cx);
         if selected_col > 0 {
             selected_col = selected_col.saturating_sub(1);
-        } else {
-            if self.loop_selection {
-                selected_col = columns_count.saturating_sub(1);
-            }
+        } else if self.loop_selection {
+            selected_col = columns_count.saturating_sub(1);
         }
         self.set_selected_col(selected_col, cx);
     }
@@ -734,10 +739,8 @@ where
         let mut selected_col = self.selected_col.unwrap_or(0);
         if selected_col < self.delegate.columns_count(cx).saturating_sub(1) {
             selected_col += 1;
-        } else {
-            if self.loop_selection {
-                selected_col = 0;
-            }
+        } else if self.loop_selection {
+            selected_col = 0;
         }
 
         self.set_selected_col(selected_col, cx);
@@ -865,16 +868,15 @@ where
         // The key_char field contains the character that would be inserted
         if let Some(key_char) = &event.keystroke.key_char {
             // Only trigger for single printable characters
-            if key_char.len() == 1 {
-                if let Some(c) = key_char.chars().next() {
-                    // Must be a printable, non-control character
-                    if !c.is_control() && !c.is_whitespace() {
-                        tracing::info!("Starting bulk edit with initial char: {:?}", key_char);
-                        cx.emit(TableEvent::StartBulkEdit {
-                            initial_char: Some(key_char.clone()),
-                        });
-                    }
-                }
+            if key_char.len() == 1
+                && let Some(c) = key_char.chars().next()
+                && !c.is_control()
+                && !c.is_whitespace()
+            {
+                tracing::info!("Starting bulk edit with initial char: {:?}", key_char);
+                cx.emit(TableEvent::StartBulkEdit {
+                    initial_char: Some(key_char.clone()),
+                });
             }
         }
     }
@@ -1261,18 +1263,16 @@ where
         };
 
         let sort = match sort {
-            ColumnSort::Ascending => ColumnSort::Default,
+            ColumnSort::Ascending => ColumnSort::Descending,
             ColumnSort::Descending => ColumnSort::Ascending,
-            ColumnSort::Default => ColumnSort::Descending,
+            ColumnSort::Default => ColumnSort::Ascending,
         };
 
         for (ix, col_group) in self.col_groups.iter_mut().enumerate() {
             if ix == col_ix {
                 col_group.column.sort = Some(sort);
-            } else {
-                if col_group.column.sort.is_some() {
-                    col_group.column.sort = Some(ColumnSort::Default);
-                }
+            } else if col_group.column.sort.is_some() {
+                col_group.column.sort = Some(ColumnSort::Default);
             }
         }
 
@@ -1726,35 +1726,35 @@ where
             return None;
         }
 
-        let Some(sort) = col_group.column.sort else {
-            return None;
-        };
+        let sort = col_group.column.sort?;
 
-        let (icon, is_on) = match sort {
+        let (icon, is_sorted) = match sort {
             ColumnSort::Ascending => (IconName::SortAscending, true),
             ColumnSort::Descending => (IconName::SortDescending, true),
             ColumnSort::Default => (IconName::ChevronsUpDown, false),
         };
 
+        let icon_color = if is_sorted {
+            cx.theme().table_head_foreground
+        } else {
+            cx.theme().muted_foreground
+        };
+
         Some(
             div()
                 .id(("icon-sort", col_ix))
+                .flex()
+                .items_center()
+                .justify_center()
                 .p(px(2.))
                 .rounded(cx.theme().radius / 2.)
-                .map(|this| match is_on {
-                    true => this,
-                    false => this.opacity(0.5),
-                })
-                .hover(|this| this.bg(cx.theme().secondary).opacity(7.))
+                .when(is_sorted, |this| this.bg(cx.theme().secondary.opacity(0.7)))
+                .hover(|this| this.bg(cx.theme().secondary))
                 .active(|this| this.bg(cx.theme().secondary_active).opacity(1.))
                 .on_click(
                     cx.listener(move |table, _, window, cx| table.perform_sort(col_ix, window, cx)),
                 )
-                .child(
-                    Icon::new(icon)
-                        .size_3()
-                        .text_color(cx.theme().secondary_foreground),
-                ),
+                .child(Icon::new(icon).size_3().text_color(icon_color)),
         )
     }
 
@@ -2006,7 +2006,7 @@ where
     ) -> Stateful<Div> {
         let horizontal_scroll_handle = self.horizontal_scroll_handle.clone();
         let left_columns_count = fixed_col_indices.len();
-        let is_stripe_row = self.options.stripe && row_ix % 2 != 0;
+        let is_stripe_row = self.options.stripe && !row_ix.is_multiple_of(2);
         let is_selected = self.selected_row == Some(row_ix);
         let view = cx.entity().clone();
         let row_height = self.options.size.table_row_height();
@@ -2159,21 +2159,20 @@ where
                     cx.listener(move |this, e: &MouseDownEvent, _window, _cx| {
                         // Track potential drag start for multi-select mode
                         let modifiers = e.modifiers;
-                        if modifiers.platform || modifiers.control {
-                            if let Some(col_ix) = this.resolve_col_from_x(e.position.x) {
-                                this.cell_selection.begin_potential_drag(row_ix, col_ix);
-                            }
+                        if (modifiers.platform || modifiers.control)
+                            && let Some(col_ix) = this.resolve_col_from_x(e.position.x)
+                        {
+                            this.cell_selection.begin_potential_drag(row_ix, col_ix);
                         }
                     }),
                 )
                 .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _window, cx| {
                     let modifiers = e.modifiers;
-                    if modifiers.platform || modifiers.control {
-                        if let Some(col_ix) = this.resolve_col_from_x(e.position.x) {
-                            if this.cell_selection.should_drag_select(row_ix, col_ix) {
-                                this.extend_cell_selection(row_ix, col_ix, cx);
-                            }
-                        }
+                    if (modifiers.platform || modifiers.control)
+                        && let Some(col_ix) = this.resolve_col_from_x(e.position.x)
+                        && this.cell_selection.should_drag_select(row_ix, col_ix)
+                    {
+                        this.extend_cell_selection(row_ix, col_ix, cx);
                     }
                 }))
                 .on_mouse_up(
@@ -2276,7 +2275,7 @@ where
         }
 
         // Print avg measure time of each td
-        if self._measure.len() > 0 {
+        if !self._measure.is_empty() {
             let total = self
                 ._measure
                 .iter()
@@ -2543,12 +2542,15 @@ where
                         Axis::Horizontal,
                         &self.horizontal_scroll_handle,
                     ))
-                    .when(right_clicked_row.is_some(), |this| {
-                        this.on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                            this.right_clicked_row = None;
-                            cx.notify();
-                        }))
-                    })
+                    .when(
+                        right_clicked_row.is_some() || self.right_clicked_header_col.is_some(),
+                        |this| {
+                            this.on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                                this.clear_context_menu_target();
+                                cx.notify();
+                            }))
+                        },
+                    )
             })
             .on_prepaint({
                 let state = cx.entity();

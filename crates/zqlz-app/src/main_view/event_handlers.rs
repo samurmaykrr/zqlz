@@ -1,23 +1,121 @@
 // Event handlers for MainView
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use crate::actions::*;
 use crate::app::AppState;
 use crate::components::{
     Command, CommandCategory, CommandPalette, CommandPaletteEvent, CommandUsagePersistence,
-    ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent, ResultsPanelEvent,
+    ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent, QueryEditor, ResultsPanelEvent,
     SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
 };
 use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
-use zqlz_ui::widgets::{WindowExt, button::Button, dialog::DialogButtonProps};
+use crate::main_view::table_handlers::table_ops::design::TableDesignSaveRequest;
+use zqlz_connection::SidebarObjectCapabilities;
+use zqlz_ui::widgets::{
+    ActiveTheme as _, WindowExt,
+    button::{Button, ButtonVariants},
+    dialog::DialogButtonProps,
+    input::{Input, InputState},
+    notification::Notification,
+    typography::body_small,
+    v_flex,
+};
 use zqlz_versioning::DatabaseObjectType;
 
-use super::MainView;
+use super::{
+    MainView,
+    saved_query_handlers::{save_query_for_editor, update_saved_query_for_editor},
+};
 
 impl MainView {
+    /// Find the active query editor from the dock, falling back to the most
+    /// recently created editor in `self.query_editors`.
+    pub(super) fn active_query_editor(&self, cx: &App) -> Option<Entity<QueryEditor>> {
+        if let Some(panel) = self.dock_area.read(cx).active_panel(cx)
+            && let Ok(editor) = panel.view().downcast::<QueryEditor>()
+        {
+            return Some(editor);
+        }
+        self.query_editors
+            .iter()
+            .rev()
+            .find_map(|weak| weak.upgrade())
+    }
+
+    pub(crate) fn open_external_path(
+        &mut self,
+        path: &Path,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(|value| value.to_ascii_lowercase());
+
+        match extension.as_deref() {
+            Some("sql") => {
+                let path = path.to_path_buf();
+                cx.spawn_in(window, async move |this, cx| {
+                    let path_for_read = path.clone();
+                    let read_result = cx
+                        .background_spawn(async move { std::fs::read_to_string(&path_for_read) })
+                        .await;
+
+                    match read_result {
+                        Ok(content) => {
+                            if let Err(error) = this.update_in(cx, |this, window, cx| {
+                                this.open_sql_file_in_query_editor(&path, content, window, cx);
+                            }) {
+                                tracing::warn!(%error, "failed to open SQL file in window");
+                            }
+                        }
+                        Err(error) => {
+                            if let Err(update_error) = this.update_in(cx, |_, window, cx| {
+                                window.push_notification(
+                                    zqlz_ui::widgets::notification::Notification::error(format!(
+                                        "Failed to open SQL file: {error}"
+                                    )),
+                                    cx,
+                                );
+                            }) {
+                                tracing::warn!(%update_error, "failed to surface SQL open error");
+                            }
+                        }
+                    }
+                })
+                .detach();
+            }
+            Some("db") | Some("sqlite") | Some("sqlite3") | Some("duckdb") => {
+                self.import_database_file_and_open_query(path, window, cx);
+            }
+            _ => {
+                window.push_notification(
+                    zqlz_ui::widgets::notification::Notification::warning(
+                        "Unsupported file type for direct open",
+                    ),
+                    cx,
+                );
+            }
+        }
+    }
+
+    fn open_dropped_paths(
+        &mut self,
+        paths: Vec<PathBuf>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        for path in paths {
+            self.open_external_path(&path, window, cx);
+        }
+    }
+
     /// Handles events emitted by the left sidebar (ConnectionSidebar).
     pub(super) fn handle_sidebar_event(
         &mut self,
@@ -140,6 +238,9 @@ impl MainView {
             ConnectionSidebarEvent::OpenConnectionSettings(id) => {
                 self.open_connection_settings(id, window, cx);
             }
+            ConnectionSidebarEvent::OpenDroppedPaths(paths) => {
+                self.open_dropped_paths(paths, window, cx);
+            }
 
             // Table-specific events
             ConnectionSidebarEvent::DesignTable {
@@ -217,6 +318,9 @@ impl MainView {
                 query_name,
             } => {
                 tracing::info!(query_id = %query_id, query_name = %query_name, connection_id = %connection_id, "Opening saved query from sidebar");
+                self.workspace_state.update(cx, |state, cx| {
+                    state.set_active_connection(Some(connection_id), cx);
+                });
                 self.open_saved_query(query_id, connection_id, window, cx);
             }
             ConnectionSidebarEvent::DeleteSavedQuery {
@@ -418,6 +522,7 @@ impl MainView {
 
         if let Some(menu_state) = &self.tab_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 state.tab_index = tab_index;
                 state.menu = new_menu.clone();
@@ -429,7 +534,7 @@ impl MainView {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });
@@ -485,7 +590,10 @@ impl MainView {
             .try_global::<AppState>()
             .map(|state| Arc::clone(&state.storage) as Arc<dyn CommandUsagePersistence>);
 
-        let palette = cx.new(|cx| CommandPalette::new(commands, persistence, window, cx));
+        let action_context = window.focused(cx).map(|handle| handle.downgrade());
+
+        let palette =
+            cx.new(|cx| CommandPalette::new(commands, persistence, action_context, window, cx));
 
         self.load_schema_commands_into_palette_for(&palette, cx);
 
@@ -548,12 +656,6 @@ impl MainView {
                 "Open Settings",
                 CommandCategory::Application,
                 OpenSettings,
-            ),
-            Command::new_static(
-                "command-palette",
-                "Command Palette",
-                CommandCategory::Application,
-                OpenCommandPalette,
             ),
             Command::new_static("refresh", "Refresh", CommandCategory::Application, Refresh),
             Command::new_static("quit", "Quit", CommandCategory::Application, Quit),
@@ -618,7 +720,7 @@ impl MainView {
                 "format-query",
                 "Format Query",
                 CommandCategory::Query,
-                FormatQuery,
+                zqlz_text_editor::actions::FormatSQL,
             ),
             Command::new_static(
                 "save-query",
@@ -643,38 +745,37 @@ impl MainView {
                 "toggle-line-comment",
                 "Toggle Line Comment",
                 CommandCategory::Editor,
-                ToggleLineComment,
-            ),
-            Command::new_static(
-                "duplicate-line",
-                "Duplicate Line",
-                CommandCategory::Editor,
-                DuplicateLine,
+                zqlz_text_editor::actions::ToggleLineComment,
             ),
             Command::new_static(
                 "delete-line",
                 "Delete Line",
                 CommandCategory::Editor,
-                DeleteLine,
+                zqlz_text_editor::actions::DeleteLine,
             ),
             Command::new_static(
                 "move-line-up",
                 "Move Line Up",
                 CommandCategory::Editor,
-                MoveLineUp,
+                zqlz_text_editor::actions::MoveLineUp,
             ),
             Command::new_static(
                 "move-line-down",
                 "Move Line Down",
                 CommandCategory::Editor,
-                MoveLineDown,
+                zqlz_text_editor::actions::MoveLineDown,
             ),
-            Command::new_static("find-next", "Find Next", CommandCategory::Editor, FindNext),
+            Command::new_static(
+                "find-next",
+                "Find Next",
+                CommandCategory::Editor,
+                zqlz_text_editor::actions::FindNext,
+            ),
             Command::new_static(
                 "find-previous",
                 "Find Previous",
                 CommandCategory::Editor,
-                FindPrevious,
+                zqlz_text_editor::actions::FindPrevious,
             ),
             // ── Layout ──────────────────────────────────────────────
             Command::new_static(
@@ -771,6 +872,12 @@ impl MainView {
         };
 
         let schema_service = app_state.schema_service.clone();
+        let object_capabilities = app_state
+            .saved_connections()
+            .iter()
+            .find(|connection| connection.id == connection_id)
+            .map(|connection| SidebarObjectCapabilities::for_driver(&connection.driver))
+            .unwrap_or_default();
         let connection_name = app_state
             .saved_connections()
             .iter()
@@ -789,7 +896,14 @@ impl MainView {
             .unwrap_or_default();
 
         palette.update(cx, |palette, cx| {
-            palette.add_schema_commands(connection_id, &connection_name, &tables, &views, cx);
+            palette.add_schema_commands(
+                connection_id,
+                &connection_name,
+                &tables,
+                &views,
+                object_capabilities,
+                cx,
+            );
         });
     }
 
@@ -917,28 +1031,75 @@ impl MainView {
     pub(super) fn handle_execute_query(
         &mut self,
         _action: &crate::actions::ExecuteQuery,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::debug!("ExecuteQuery action triggered");
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.execute_query(window, cx);
-        });
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_execute_query(cx);
+            });
+        }
     }
 
     /// Handle ExecuteSelection action - executes selected text or entire query
     pub(super) fn handle_execute_selection(
         &mut self,
         _action: &crate::actions::ExecuteSelection,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::debug!("ExecuteSelection action triggered");
-        // Emit ExecuteSelection event from the active query editor
-        // This will be handled by the query tabs panel
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.execute_selection(window, cx);
-        });
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_execute_selection(cx);
+            });
+        }
+    }
+
+    /// Handle ExecuteCurrentStatement action - executes the current statement in the active editor.
+    pub(super) fn handle_execute_current_statement(
+        &mut self,
+        _action: &crate::actions::ExecuteCurrentStatement,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!("ExecuteCurrentStatement action triggered");
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_execute_selection(cx);
+            });
+        }
+    }
+
+    /// Handle ExplainQuery action - explains the entire query in the active editor.
+    pub(super) fn handle_explain_query(
+        &mut self,
+        _action: &crate::actions::ExplainQuery,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!("ExplainQuery action triggered");
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_query(cx);
+            });
+        }
+    }
+
+    /// Handle ExplainSelection action - explains the current selection or statement.
+    pub(super) fn handle_explain_selection(
+        &mut self,
+        _action: &crate::actions::ExplainSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!("ExplainSelection action triggered");
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_selection(cx);
+            });
+        }
     }
 
     /// Handle StopQuery action - stops the currently executing query
@@ -950,28 +1111,23 @@ impl MainView {
     ) {
         tracing::debug!("StopQuery action triggered");
 
-        // Get the active editor index from the query tabs panel
-        let active_index = self.query_tabs_panel.read(cx).active_editor_index();
+        let active_editor_id = self.workspace_state.read(cx).active_editor_id();
 
-        if let Some(editor_index) = active_index {
-            // Check if there's a running query for this editor
-            if let Some(task) = self.running_query_tasks.remove(&editor_index) {
-                tracing::info!("Cancelling query for editor {}", editor_index);
+        if let Some(editor_id) = active_editor_id {
+            let is_running = self.workspace_state.read(cx).is_query_running(editor_id);
+            if is_running {
+                tracing::info!("Cancelling query for editor {:?}", editor_id);
 
-                // First, call the cancel handle to interrupt the actual database query
-                // This sends an interrupt signal to the database (SQLite) or cancel request (PostgreSQL)
-                if let Some(cancel_handle) = self.query_cancel_handles.remove(&editor_index) {
-                    tracing::debug!("Calling cancel handle for editor {}", editor_index);
-                    cancel_handle.cancel();
-                }
-
-                // Then drop the task to stop waiting for the result
-                drop(task);
-
-                // Update the editor to show it's no longer executing
-                self.query_tabs_panel.update(cx, |panel, cx| {
-                    panel.set_editor_executing(editor_index, false, cx);
+                self.workspace_state.update(cx, |state, cx| {
+                    state.cancel_query(editor_id, cx);
                 });
+
+                // Update the active query editor to show it's no longer executing
+                if let Some(editor) = self.active_query_editor(cx) {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_executing(false, cx);
+                    });
+                }
 
                 // Update results panel to show cancellation message
                 let results_panel = self.results_panel.clone();
@@ -996,7 +1152,6 @@ impl MainView {
                     panel.set_loading(false, cx);
                 });
 
-                // Need to spawn to get window context for set_execution
                 let results_panel = results_panel.downgrade();
                 cx.spawn_in(window, async move |_this, cx| {
                     _ = results_panel.update_in(cx, |panel, window, cx| {
@@ -1006,19 +1161,104 @@ impl MainView {
                 })
                 .detach();
 
-                // Show notification
                 window.push_notification(
                     zqlz_ui::widgets::notification::Notification::warning("Query cancelled"),
                     cx,
                 );
             } else {
-                tracing::debug!("No running query to cancel for editor {}", editor_index);
+                tracing::debug!("No running query to cancel for editor {:?}", editor_id);
             }
         } else {
             tracing::debug!("No active editor to stop query for");
         }
 
         cx.notify();
+    }
+
+    /// Focus the active editor area.
+    pub(super) fn handle_focus_editor(
+        &mut self,
+        _action: &crate::actions::FocusEditor,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(editor) = self.active_query_editor(cx) {
+            let focus_handle = editor.read(cx).editor_focus_handle(cx);
+            window.focus(&focus_handle, cx);
+        }
+    }
+
+    /// Focus the results panel.
+    pub(super) fn handle_focus_results(
+        &mut self,
+        _action: &crate::actions::FocusResults,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus_handle = self.results_panel.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
+
+    /// Focus the connection sidebar.
+    pub(super) fn handle_focus_sidebar(
+        &mut self,
+        _action: &crate::actions::FocusSidebar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let focus_handle = self.connection_sidebar.read(cx).focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
+
+    /// Refresh the currently active connection surfaces.
+    pub(super) fn handle_refresh_connection(
+        &mut self,
+        _action: &crate::actions::RefreshConnection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!("RefreshConnection action received - refreshing active connection");
+        self.refresh_connection_surfaces(
+            RefreshTarget::ActiveConnection,
+            SurfaceRefreshOptions::MANUAL,
+            cx,
+        );
+    }
+
+    /// Save the active query through the save dialog, regardless of whether it already has an id.
+    pub(super) fn handle_save_query_as(
+        &mut self,
+        _action: &crate::actions::SaveQueryAs,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(editor) = self.active_query_editor(cx) else {
+            tracing::debug!("SaveQueryAs ignored because there is no active editor");
+            return;
+        };
+
+        let (sql, connection_id) = {
+            let editor = editor.read(cx);
+            (
+                editor.content(cx).to_string(),
+                editor
+                    .connection_id()
+                    .or_else(|| self.active_connection_id(cx)),
+            )
+        };
+
+        let Some(connection_id) = connection_id else {
+            use zqlz_ui::widgets::{WindowExt, notification::Notification};
+            window.push_notification(
+                Notification::warning(
+                    "No connection selected. Please connect to a database first.",
+                ),
+                cx,
+            );
+            return;
+        };
+
+        self.show_save_query_dialog(editor.downgrade(), sql, connection_id, window, cx);
     }
 
     // ====================
@@ -1028,23 +1268,21 @@ impl MainView {
     pub(super) fn handle_activate_next_tab(
         &mut self,
         _action: &crate::actions::ActivateNextTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.activate_next_tab(cx);
-        });
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_next_tab(window, cx));
     }
 
     pub(super) fn handle_activate_prev_tab(
         &mut self,
         _action: &crate::actions::ActivatePrevTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.activate_prev_tab(cx);
-        });
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_prev_tab(window, cx));
     }
 
     pub(super) fn handle_close_active_tab(
@@ -1065,13 +1303,242 @@ impl MainView {
             .unwrap_or(false);
 
         if has_unsaved {
-            // Show confirmation dialog
+            if let Some(panel) = active_panel
+                && let Ok(editor) = panel.view().downcast::<QueryEditor>()
+            {
+                let saved_query_id = editor.read(cx).saved_query_id();
+                let connection_id = editor.read(cx).connection_id();
+                let sql = editor.read(cx).content(cx).to_string();
+                let current_name = editor.read(cx).name();
+
+                if let Some(query_id) = saved_query_id {
+                    let dock_area = self.dock_area.clone();
+                    let editor_weak = editor.downgrade();
+
+                    window.open_dialog(cx, move |dialog, _window, _cx| {
+                        let dock_area = dock_area.clone();
+                        let editor_weak = editor_weak.clone();
+                        let sql = sql.clone();
+
+                        dialog
+                            .title("Unsaved Changes")
+                            .w(px(420.0))
+                            .child(
+                                v_flex()
+                                    .gap_3()
+                                    .child(body_small("This tab has unsaved changes."))
+                                    .child(body_small("Do you want to save before closing?")),
+                            )
+                            .footer(move |_ok, cancel, _window, _cx| {
+                                let save_sql = sql.clone();
+                                vec![
+                                    cancel(_window, _cx),
+                                    Button::new("dont-save")
+                                        .label("Don't Save")
+                                        .ghost()
+                                        .on_click({
+                                            let dock_area = dock_area.clone();
+                                            move |_, window, cx| {
+                                                dock_area.update(cx, |dock_area, cx| {
+                                                    dock_area.force_close_active_tab(window, cx);
+                                                });
+                                                window.close_dialog(cx);
+                                            }
+                                        })
+                                        .into_any_element(),
+                                    Button::new("save")
+                                        .label("Save")
+                                        .primary()
+                                        .on_click({
+                                            let editor_weak = editor_weak.clone();
+                                            let dock_area = dock_area.clone();
+                                            let save_sql = save_sql.clone();
+                                            move |_, window, cx| {
+                                                update_saved_query_for_editor(
+                                                    query_id,
+                                                    save_sql.clone(),
+                                                    editor_weak.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                                dock_area.update(cx, |dock_area, cx| {
+                                                    dock_area.force_close_active_tab(window, cx);
+                                                });
+                                                window.close_dialog(cx);
+                                            }
+                                        })
+                                        .into_any_element(),
+                                ]
+                            })
+                            .on_cancel(move |_, _, _| true)
+                    });
+                    return;
+                }
+
+                let Some(connection_id) = connection_id else {
+                    window.push_notification(
+                        Notification::warning(
+                            "No connection selected. Please connect to a database first.",
+                        ),
+                        cx,
+                    );
+                    return;
+                };
+
+                let connection_name = cx
+                    .try_global::<AppState>()
+                    .and_then(|state| {
+                        state
+                            .saved_connections()
+                            .into_iter()
+                            .find(|connection| connection.id == connection_id)
+                            .map(|connection| connection.name.clone())
+                    })
+                    .unwrap_or_else(|| "Unknown".to_string());
+
+                let name_input = cx.new(|cx| {
+                    let mut state = InputState::new(window, cx).placeholder("Enter query name...");
+                    state.set_value(current_name, window, cx);
+                    state
+                });
+                let error_message: Entity<Option<String>> = cx.new(|_| None);
+                let dock_area = self.dock_area.clone();
+                let editor_weak = editor.downgrade();
+                let sidebar_weak = self.connection_sidebar.downgrade();
+                let focus_name_input = name_input.clone();
+
+                cx.observe(&name_input, {
+                    let error_message = error_message.clone();
+                    move |_, _, cx| {
+                        error_message.update(cx, |msg, cx| {
+                            if msg.is_some() {
+                                *msg = None;
+                                cx.notify();
+                            }
+                        });
+                    }
+                })
+                .detach();
+
+                window.open_dialog(cx, move |dialog, _window, cx| {
+                    let dock_area = dock_area.clone();
+                    let editor_weak = editor_weak.clone();
+                    let sidebar_weak = sidebar_weak.clone();
+                    let connection_name = connection_name.clone();
+                    let name_input = name_input.clone();
+                    let error_message = error_message.clone();
+                    let error_message_for_save = error_message.clone();
+                    let sql = sql.clone();
+
+                    dialog
+                        .title("Unsaved Changes")
+                        .w(px(440.0))
+                        .child(
+                            v_flex()
+                                .gap_3()
+                                .child(body_small("This tab has unsaved changes."))
+                                .child(body_small("Save it before closing?"))
+                                .child(
+                                    v_flex()
+                                        .gap_1()
+                                        .child(body_small("Query Name:"))
+                                        .child(Input::new(&name_input)),
+                                )
+                                .child(
+                                    v_flex().gap_1().child(body_small("Save Location:")).child(
+                                        v_flex().child(
+                                            div()
+                                                .px_3()
+                                                .py_2()
+                                                .border_1()
+                                                .border_color(cx.theme().border)
+                                                .bg(cx.theme().muted)
+                                                .rounded_md()
+                                                .child(connection_name.clone()),
+                                        ),
+                                    ),
+                                )
+                                .child({
+                                    let error = error_message.read(cx).clone();
+                                    div().text_xs().h(px(16.0)).when_some(error, |this, err| {
+                                        this.text_color(cx.theme().danger_text).child(err)
+                                    })
+                                }),
+                        )
+                        .footer(move |_ok, cancel, _window, _cx| {
+                            let save_sql = sql.clone();
+                            vec![
+                                cancel(_window, _cx),
+                                Button::new("dont-save")
+                                    .label("Don't Save")
+                                    .ghost()
+                                    .on_click({
+                                        let dock_area = dock_area.clone();
+                                        move |_, window, cx| {
+                                            dock_area.update(cx, |dock_area, cx| {
+                                                dock_area.force_close_active_tab(window, cx);
+                                            });
+                                            window.close_dialog(cx);
+                                        }
+                                    })
+                                    .into_any_element(),
+                                Button::new("save")
+                                    .label("Save")
+                                    .primary()
+                                    .on_click({
+                                        let dock_area = dock_area.clone();
+                                        let editor_weak = editor_weak.clone();
+                                        let sidebar_weak = sidebar_weak.clone();
+                                        let name_input = name_input.clone();
+                                        let error_message_for_save = error_message_for_save.clone();
+                                        let save_sql = save_sql.clone();
+                                        move |_, window, cx| {
+                                            let query_name = name_input
+                                                .read(cx)
+                                                .text()
+                                                .to_string()
+                                                .trim()
+                                                .to_string();
+
+                                            match save_query_for_editor(
+                                                editor_weak.clone(),
+                                                save_sql.clone(),
+                                                connection_id,
+                                                query_name,
+                                                sidebar_weak.clone(),
+                                                window,
+                                                cx,
+                                            ) {
+                                                Ok(_) => {
+                                                    dock_area.update(cx, |dock_area, cx| {
+                                                        dock_area
+                                                            .force_close_active_tab(window, cx);
+                                                    });
+                                                    window.close_dialog(cx);
+                                                }
+                                                Err(error) => {
+                                                    error_message_for_save.update(cx, |msg, cx| {
+                                                        *msg = Some(error);
+                                                        cx.notify();
+                                                    });
+                                                }
+                                            }
+                                        }
+                                    })
+                                    .into_any_element(),
+                            ]
+                        })
+                        .on_cancel(move |_, _, _| true)
+                });
+
+                focus_name_input.focus_handle(cx).focus(window, cx);
+                return;
+            }
+
             let dock_area = self.dock_area.clone();
-            let query_tabs_panel = self.query_tabs_panel.clone();
 
             window.open_dialog(cx, move |dialog, _window, _cx| {
                 let dock_area = dock_area.clone();
-                let query_tabs_panel = query_tabs_panel.clone();
 
                 dialog
                     .title("Unsaved Changes")
@@ -1083,164 +1550,143 @@ impl MainView {
                             .cancel_text("Cancel"),
                     )
                     .on_ok(move |_, window, cx| {
-                        // User chose to close without saving
-                        let closed = dock_area
-                            .update(cx, |dock_area, cx| dock_area.close_active_tab(window, cx));
-                        if !closed {
-                            query_tabs_panel.update(cx, |panel, cx| {
-                                panel.close_active_tab(cx);
-                            });
-                        }
-                        true // Close the dialog
+                        dock_area.update(cx, |dock_area, cx| {
+                            dock_area.force_close_active_tab(window, cx)
+                        });
+                        true
                     })
             });
         } else {
             // No unsaved changes, close directly
-            let closed_in_dock = self
-                .dock_area
+            self.dock_area
                 .update(cx, |dock_area, cx| dock_area.close_active_tab(window, cx));
-
-            if closed_in_dock {
-                tracing::debug!("Closed tab in dock_area");
-            } else {
-                // Fallback: try the query tabs panel
-                tracing::debug!("No tab closed in dock_area, trying query_tabs_panel");
-                self.query_tabs_panel.update(cx, |panel, cx| {
-                    panel.close_active_tab(cx);
-                });
-            }
         }
     }
 
     pub(super) fn handle_close_other_tabs(
         &mut self,
         _action: &crate::actions::CloseOtherTabs,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.close_other_tabs(cx);
-        });
+        self.dock_area
+            .update(cx, |dock, cx| dock.close_other_tabs(window, cx));
     }
 
     pub(super) fn handle_close_tabs_to_right(
         &mut self,
         _action: &crate::actions::CloseTabsToRight,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            panel.close_tabs_to_right(cx);
-        });
+        self.dock_area
+            .update(cx, |dock, cx| dock.close_tabs_to_right(window, cx));
     }
 
     pub(super) fn handle_close_all_tabs(
         &mut self,
         _action: &crate::actions::CloseAllTabs,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("CloseAllTabs action handler triggered!");
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            tracing::debug!("Calling query_tabs_panel.close_all_tabs()");
-            panel.close_all_tabs(cx);
-        });
+        self.dock_area
+            .update(cx, |dock, cx| dock.close_all_tabs(window, cx));
     }
 
     pub(super) fn handle_activate_tab_1(
         &mut self,
         _action: &crate::actions::ActivateTab1,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(1, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(1, window, cx));
     }
     pub(super) fn handle_activate_tab_2(
         &mut self,
         _action: &crate::actions::ActivateTab2,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(2, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(2, window, cx));
     }
     pub(super) fn handle_activate_tab_3(
         &mut self,
         _action: &crate::actions::ActivateTab3,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(3, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(3, window, cx));
     }
     pub(super) fn handle_activate_tab_4(
         &mut self,
         _action: &crate::actions::ActivateTab4,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(4, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(4, window, cx));
     }
     pub(super) fn handle_activate_tab_5(
         &mut self,
         _action: &crate::actions::ActivateTab5,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(5, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(5, window, cx));
     }
     pub(super) fn handle_activate_tab_6(
         &mut self,
         _action: &crate::actions::ActivateTab6,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(6, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(6, window, cx));
     }
     pub(super) fn handle_activate_tab_7(
         &mut self,
         _action: &crate::actions::ActivateTab7,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(7, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(7, window, cx));
     }
     pub(super) fn handle_activate_tab_8(
         &mut self,
         _action: &crate::actions::ActivateTab8,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(8, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(8, window, cx));
     }
     pub(super) fn handle_activate_tab_9(
         &mut self,
         _action: &crate::actions::ActivateTab9,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel
-            .update(cx, |panel, cx| panel.activate_tab_by_number(9, cx));
+        self.dock_area
+            .update(cx, |dock, cx| dock.activate_tab_by_number(9, window, cx));
     }
 
     pub(super) fn handle_activate_last_tab(
         &mut self,
         _action: &crate::actions::ActivateLastTab,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.query_tabs_panel.update(cx, |panel, cx| {
-            let count = panel.tab_count();
-            if count > 0 {
-                panel.activate_tab_by_number(count, cx);
-            }
-        });
+        let count = self.dock_area.read(cx).tab_count(cx);
+        if count > 0 {
+            self.dock_area.update(cx, |dock, cx| {
+                dock.activate_tab_by_number(count, window, cx)
+            });
+        }
     }
 
     // ====================
@@ -1569,11 +2015,13 @@ impl MainView {
                 original_design,
             } => {
                 self.save_table_design(
-                    connection_id,
-                    design,
-                    is_new,
-                    original_design,
-                    panel,
+                    TableDesignSaveRequest {
+                        connection_id,
+                        design,
+                        is_new,
+                        original_design,
+                        panel,
+                    },
                     window,
                     cx,
                 );
@@ -1622,11 +2070,7 @@ impl MainView {
                 tracing::info!("Using template from library");
 
                 // Try to find an existing query editor that we can insert into
-                let existing_editor = self
-                    .query_editors
-                    .iter()
-                    .rev()
-                    .find_map(|weak| weak.upgrade());
+                let existing_editor = self.active_query_editor(cx);
 
                 if let Some(editor) = existing_editor {
                     // Insert template into the existing editor
@@ -1635,16 +2079,10 @@ impl MainView {
                     });
                 } else {
                     // Create a new query editor first
-                    self.handle_new_query(&NewQuery, window, cx);
-
-                    // Then set its content to the template
-                    if let Some(editor_weak) = self.query_editors.last() {
-                        if let Some(editor) = editor_weak.upgrade() {
-                            editor.update(cx, |editor, cx| {
-                                editor.set_content(template_sql.clone(), window, cx);
-                            });
-                        }
-                    }
+                    let editor = self.create_new_query_editor(window, cx);
+                    editor.update(cx, |editor, cx| {
+                        editor.set_content(template_sql.clone(), window, cx);
+                    });
                 }
             }
             TemplateLibraryEvent::EditTemplate(_id) => {
@@ -1679,25 +2117,21 @@ impl MainView {
                 tracing::info!("Opening model {} from project {}", model_id, project_id);
                 // TODO: Load model SQL and open in query editor
                 // For now, create a new query editor
-                self.handle_new_query(&NewQuery, window, cx);
+                let editor = self.create_new_query_editor(window, cx);
 
                 // Load the model from storage and populate the editor
-                if let Some(app_state) = cx.try_global::<AppState>() {
-                    if let Ok(Some(model)) = app_state.storage.load_model(*model_id) {
-                        if let Some(editor_weak) = self.query_editors.last() {
-                            if let Some(editor) = editor_weak.upgrade() {
-                                editor.update(cx, |editor, cx| {
-                                    editor.set_content(model.sql.clone(), window, cx);
-                                });
-                            }
-                        }
-                    }
+                if let Some(app_state) = cx.try_global::<AppState>()
+                    && let Ok(Some(model)) = app_state.storage.load_model(*model_id)
+                {
+                    editor.update(cx, |editor, cx| {
+                        editor.set_content(model.sql.clone(), window, cx);
+                    });
                 }
             }
             ProjectManagerEvent::CreateModel(project_id) => {
                 tracing::info!("Creating new model in project {}", project_id);
                 // Create a new query editor for the model
-                self.handle_new_query(&NewQuery, window, cx);
+                let _ = self.create_new_query_editor(window, cx);
             }
             ProjectManagerEvent::CompileModel {
                 project_id,
@@ -1726,20 +2160,16 @@ impl MainView {
                 // Note: line and column are 1-indexed for display
                 tracing::debug!("GoToLine event: line={}, column={}", line, column);
 
-                // Try to find the most recently used query editor
-                for editor_weak in self.query_editors.iter().rev() {
-                    if let Some(editor) = editor_weak.upgrade() {
-                        editor.update(cx, |editor, cx| {
-                            // Convert from 1-indexed (display) to 0-indexed (internal)
-                            editor.go_to_line(
-                                line.saturating_sub(1),
-                                column.saturating_sub(1),
-                                window,
-                                cx,
-                            );
-                        });
-                        return;
-                    }
+                if let Some(editor) = self.active_query_editor(cx) {
+                    editor.update(cx, |editor, cx| {
+                        editor.go_to_line(
+                            line.saturating_sub(1),
+                            column.saturating_sub(1),
+                            window,
+                            cx,
+                        );
+                    });
+                    return;
                 }
 
                 tracing::debug!("No active query editor found to navigate to line");
@@ -1751,34 +2181,15 @@ impl MainView {
                     panel.set_diagnostics_loading(true, cx);
                 });
 
-                // Re-run diagnostics on the active editor. QueryTabsPanel's active
-                // editor is tried first; if none exists (e.g. the common dock-based
-                // "Query N" editors), fall back to the most recently opened dock
-                // editor. The editor re-validates, emits DiagnosticsChanged, and
-                // set_problems clears the loading state when results arrive.
-                let editor_found =
-                    if let Some(editor) = self.query_tabs_panel.read(cx).active_editor() {
-                        editor.update(cx, |editor, cx| {
-                            editor.reload_diagnostics(cx);
-                        });
-                        true
-                    } else {
-                        // query_editors are pushed in open order; the last live one
-                        // is the most recently opened dock-based editor.
-                        let editor = self
-                            .query_editors
-                            .iter()
-                            .rev()
-                            .find_map(|weak| weak.upgrade());
-                        if let Some(editor) = editor {
-                            editor.update(cx, |editor, cx| {
-                                editor.reload_diagnostics(cx);
-                            });
-                            true
-                        } else {
-                            false
-                        }
-                    };
+                // Re-run diagnostics on the active editor.
+                let editor_found = if let Some(editor) = self.active_query_editor(cx) {
+                    editor.update(cx, |editor, cx| {
+                        editor.reload_diagnostics(cx);
+                    });
+                    true
+                } else {
+                    false
+                };
 
                 if !editor_found {
                     tracing::debug!("ReloadDiagnostics: no active editor found");
@@ -1834,25 +2245,17 @@ impl MainView {
             crate::components::InspectorPanelEvent::OpenQuery { sql } => {
                 tracing::info!("Opening query from history");
 
-                let active_editor = self
-                    .query_editors
-                    .iter()
-                    .rev()
-                    .find_map(|weak| weak.upgrade());
+                let active_editor = self.active_query_editor(cx);
 
                 // When no editor exists at all, open a new tab immediately without a dialog.
                 let Some(editor) = active_editor else {
                     tracing::info!("No active query editor found, creating new one");
-                    self.handle_new_query(&NewQuery, window, cx);
-                    if let Some(editor_weak) = self.query_editors.last() {
-                        if let Some(editor) = editor_weak.upgrade() {
-                            editor.update(cx, |editor, cx| {
-                                editor.set_text(&sql, window, cx);
-                            });
-                            let focus_handle = editor.read(cx).focus_handle(cx);
-                            window.focus(&focus_handle, cx);
-                        }
-                    }
+                    let editor = self.create_new_query_editor(window, cx);
+                    editor.update(cx, |editor, cx| {
+                        editor.set_text(&sql, window, cx);
+                    });
+                    let focus_handle = editor.read(cx).focus_handle(cx);
+                    window.focus(&focus_handle, cx);
                     return;
                 };
 
@@ -1894,20 +2297,17 @@ impl MainView {
                             let sql = sql_for_new.clone();
 
                             let new_tab_button = Button::new("new-tab")
+                                .secondary()
                                 .label("New Tab")
                                 .on_click(move |_, window, cx| {
                                     window.close_dialog(cx);
                                     _ = this_weak.update(cx, |this, cx| {
-                                        this.handle_new_query(&NewQuery, window, cx);
-                                        if let Some(editor_weak) = this.query_editors.last() {
-                                            if let Some(editor) = editor_weak.upgrade() {
-                                                editor.update(cx, |editor, cx| {
-                                                    editor.set_text(&sql, window, cx);
-                                                });
-                                                let focus_handle = editor.read(cx).focus_handle(cx);
-                                                window.focus(&focus_handle, cx);
-                                            }
-                                        }
+                                        let editor = this.create_new_query_editor(window, cx);
+                                        editor.update(cx, |editor, cx| {
+                                            editor.set_text(&sql, window, cx);
+                                        });
+                                        let focus_handle = editor.read(cx).focus_handle(cx);
+                                        window.focus(&focus_handle, cx);
                                     });
                                 })
                                 .into_any_element();
@@ -1929,6 +2329,8 @@ impl MainView {
                         history_panel.update_entries(Vec::new(), cx);
                     });
                 });
+
+                self.refresh_query_history(cx);
             }
         }
     }

@@ -113,6 +113,7 @@
         "warning": "#7a5700",
         "warning.background": "#7a570011",
         "warning.border": "#7a5700",
+        "syntax": {
           "boolean": { "color": "#d79921" },
           "comment": { "color": "#928374", "font_style": "italic" },
           "comment.doc": { "color": "#928374", "font_style": "italic" },

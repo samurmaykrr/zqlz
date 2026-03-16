@@ -8,6 +8,14 @@ use zqlz_ui::widgets::WindowExt;
 use crate::app::AppState;
 use crate::main_view::MainView;
 
+pub(in crate::main_view) struct TableDesignSaveRequest {
+    pub connection_id: Uuid,
+    pub design: zqlz_table_designer::TableDesign,
+    pub is_new: bool,
+    pub original_design: Option<zqlz_table_designer::TableDesign>,
+    pub panel: Entity<zqlz_table_designer::TableDesignerPanel>,
+}
+
 impl MainView {
     pub(in crate::main_view) fn design_table(
         &mut self,
@@ -121,14 +129,17 @@ impl MainView {
 
     pub(in crate::main_view) fn save_table_design(
         &mut self,
-        connection_id: Uuid,
-        design: zqlz_table_designer::TableDesign,
-        is_new: bool,
-        original_design: Option<zqlz_table_designer::TableDesign>,
-        panel: Entity<zqlz_table_designer::TableDesignerPanel>,
+        request: TableDesignSaveRequest,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let TableDesignSaveRequest {
+            connection_id,
+            design,
+            is_new,
+            original_design,
+            panel,
+        } = request;
         tracing::info!(
             "Saving table design: {} (is_new={})",
             design.table_name,

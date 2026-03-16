@@ -60,15 +60,18 @@ impl TableService {
     pub async fn browse_table_with_filters(
         &self,
         connection: Arc<dyn Connection>,
-        table_name: &str,
-        schema: Option<&str>,
-        where_clauses: Vec<String>,
-        order_by_clauses: Vec<String>,
-        visible_columns: Vec<String>,
-        limit: Option<usize>,
-        offset: Option<usize>,
-        cached_total: Option<u64>,
+        request: BrowseTableWithFiltersRequest<'_>,
     ) -> ServiceResult<QueryResult> {
+        let BrowseTableWithFiltersRequest {
+            table_name,
+            schema,
+            where_clauses,
+            order_by_clauses,
+            visible_columns,
+            limit,
+            offset,
+            cached_total,
+        } = request;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
         let driver = connection.driver_name();
@@ -165,18 +168,27 @@ impl TableService {
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
             (result, None, false)
         } else {
-            // Slow-count driver, no filters: return data immediately without
-            // waiting for the estimated row count. The count will be fetched as
-            // a separate background task by the UI layer so the user sees rows
-            // as fast as possible.
-            tracing::debug!("Driver '{}': skipping row count in browse_table_with_filters, will be fetched in background", driver);
+            let estimate_conn = connection.clone();
+            let data_future = connection.query(&data_sql, &[]);
+            let estimate_future = self.estimate_row_count(estimate_conn, table_name, schema);
 
-            let result = connection
-                .query(&data_sql, &[])
-                .await
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let (data_result, estimate_result) = tokio::join!(data_future, estimate_future);
 
-            (result, None, false)
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+
+            let (total_rows, is_estimated) = match estimate_result {
+                Ok((total, estimated)) => (Some(total), estimated),
+                Err(error) => {
+                    tracing::warn!(
+                        "Estimated row count query failed, pagination total unavailable: {}",
+                        error
+                    );
+                    (None, false)
+                }
+            };
+
+            (result, total_rows, is_estimated)
         };
 
         result.total_rows = total_rows;
@@ -257,14 +269,17 @@ impl TableService {
     pub async fn browse_last_page(
         &self,
         connection: Arc<dyn Connection>,
-        table_name: &str,
-        schema: Option<&str>,
-        where_clauses: Vec<String>,
-        order_by_clauses: Vec<String>,
-        visible_columns: Vec<String>,
-        limit: usize,
-        pk_columns: Vec<String>,
+        request: BrowseLastPageRequest<'_>,
     ) -> ServiceResult<QueryResult> {
+        let BrowseLastPageRequest {
+            table_name,
+            schema,
+            where_clauses,
+            order_by_clauses,
+            visible_columns,
+            limit,
+            pk_columns,
+        } = request;
         let driver = connection.driver_name();
         let qualified = Self::qualified_table_name(table_name, schema, driver);
 
@@ -370,16 +385,19 @@ impl TableService {
     pub async fn browse_near_end_page(
         &self,
         connection: Arc<dyn Connection>,
-        table_name: &str,
-        schema: Option<&str>,
-        where_clauses: Vec<String>,
-        order_by_clauses: Vec<String>,
-        visible_columns: Vec<String>,
-        limit: usize,
-        offset: usize,
-        total_rows: u64,
-        pk_columns: Vec<String>,
+        request: BrowseNearEndPageRequest<'_>,
     ) -> ServiceResult<QueryResult> {
+        let BrowseNearEndPageRequest {
+            table_name,
+            schema,
+            where_clauses,
+            order_by_clauses,
+            visible_columns,
+            limit,
+            offset,
+            total_rows,
+            pk_columns,
+        } = request;
         let driver = connection.driver_name();
         let qualified = Self::qualified_table_name(table_name, schema, driver);
 
@@ -688,21 +706,27 @@ impl TableService {
 
             (result, total_rows, false)
         } else {
-            // MySQL/PostgreSQL/MSSQL/ClickHouse: return data immediately without
-            // waiting for the row count. The count will be fetched as a separate
-            // background task by the UI layer (via `estimate_row_count`) so the
-            // user sees rows as fast as possible.
-            tracing::debug!(
-                "Driver '{}': skipping row count in browse_table, will be fetched in background",
-                driver
-            );
+            let estimate_conn = connection.clone();
+            let data_future = connection.query(&data_sql, &[]);
+            let estimate_future = self.estimate_row_count(estimate_conn, table_name, schema);
 
-            let result = connection
-                .query(&data_sql, &[])
-                .await
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+            let (data_result, estimate_result) = tokio::join!(data_future, estimate_future);
 
-            (result, None, false)
+            let result =
+                data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+
+            let (total_rows, is_estimated) = match estimate_result {
+                Ok((total, estimated)) => (Some(total), estimated),
+                Err(error) => {
+                    tracing::warn!(
+                        "Estimated row count query failed, pagination total unavailable: {}",
+                        error
+                    );
+                    (None, false)
+                }
+            };
+
+            (result, total_rows, is_estimated)
         };
 
         result.total_rows = total_rows;
@@ -757,7 +781,8 @@ impl TableService {
 
         let new_value = match &cell_data.new_value {
             None => None,
-            Some(val) => Some(self.parse_value(val, target_col_type)?),
+            Some(Value::String(val)) => Some(self.parse_value(val, target_col_type)?),
+            Some(other) => Some(other.clone()),
         };
 
         // Pass raw identifiers to the driver - each driver will handle escaping appropriately
@@ -817,9 +842,12 @@ impl TableService {
                         .iter()
                         .position(|col| col == pk_col)?;
 
-                    let value_str = cell_data.all_row_values.get(idx)?;
+                    let value = cell_data.all_row_values.get(idx)?.clone();
                     let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
-                    let value = self.parse_value(value_str, col_type).ok()?;
+                    let value = match value {
+                        Value::String(text) => self.parse_value(&text, col_type).ok()?,
+                        other => other,
+                    };
 
                     Some((pk_col.clone(), value))
                 })
@@ -840,7 +868,10 @@ impl TableService {
             .enumerate()
             .map(|(idx, (col, val))| {
                 let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
-                let value = self.parse_value(val, col_type).unwrap_or(Value::Null);
+                let value = match val {
+                    Value::String(text) => self.parse_value(text, col_type).unwrap_or(Value::Null),
+                    other => other.clone(),
+                };
                 (col.clone(), value)
             })
             .collect();
@@ -1156,7 +1187,11 @@ impl TableService {
         key_type: &str,
         cell_data: CellUpdateData,
     ) -> ServiceResult<()> {
-        let new_value = cell_data.new_value.as_deref().unwrap_or("");
+        let new_value = cell_data
+            .new_value
+            .as_ref()
+            .map(Self::value_to_redis_argument)
+            .unwrap_or_default();
 
         let cmd = match key_type {
             "string" => {
@@ -1170,7 +1205,12 @@ impl TableService {
                     .all_row_values
                     .first()
                     .ok_or_else(|| ServiceError::UpdateFailed("No field name found".to_string()))?;
-                format!("HSET {} {} {}", key_name, field, new_value)
+                format!(
+                    "HSET {} {} {}",
+                    key_name,
+                    Self::value_to_redis_argument(field),
+                    new_value
+                )
             }
             "list" => {
                 // LSET key index value
@@ -1178,7 +1218,12 @@ impl TableService {
                     .all_row_values
                     .first()
                     .ok_or_else(|| ServiceError::UpdateFailed("No index found".to_string()))?;
-                format!("LSET {} {} {}", key_name, index, new_value)
+                format!(
+                    "LSET {} {} {}",
+                    key_name,
+                    Self::value_to_redis_argument(index),
+                    new_value
+                )
             }
             "zset" => {
                 // For sorted sets, we need to know if we're updating member or score
@@ -1188,7 +1233,12 @@ impl TableService {
                         .all_row_values
                         .first()
                         .ok_or_else(|| ServiceError::UpdateFailed("No member found".to_string()))?;
-                    format!("ZADD {} {} {}", key_name, new_value, member)
+                    format!(
+                        "ZADD {} {} {}",
+                        key_name,
+                        new_value,
+                        Self::value_to_redis_argument(member)
+                    )
                 } else {
                     // Can't rename member directly - would need ZREM + ZADD
                     return Err(ServiceError::UpdateFailed(
@@ -1226,6 +1276,14 @@ impl TableService {
         );
 
         Ok(())
+    }
+
+    fn value_to_redis_argument(value: &Value) -> String {
+        match value {
+            Value::Null => String::new(),
+            Value::String(text) => text.clone(),
+            other => other.display_for_editor(),
+        }
     }
 
     /// Insert a new row into a table
@@ -1336,7 +1394,11 @@ impl TableService {
                     placeholders.push(Self::param_placeholder(driver, param_index));
                     param_index += 1;
                     let column_type = column_types.get(column_name).map(|s| s.as_str());
-                    params.push(self.parse_value(val, column_type)?);
+                    let parsed_value = match val {
+                        Value::String(text) => self.parse_value(text, column_type)?,
+                        other => other.clone(),
+                    };
+                    params.push(parsed_value);
                 }
                 None => {
                     if has_default || is_auto_increment {
@@ -1432,8 +1494,7 @@ impl TableService {
                             .all_column_names
                             .iter()
                             .position(|col| col == pk_col)?;
-                        let value_str = row_values.get(idx)?;
-                        let value = self.parse_value(value_str, None).ok()?;
+                        let value = row_values.get(idx)?.clone();
                         Some((pk_col.clone(), value))
                     })
                     .collect();
@@ -1480,15 +1541,12 @@ impl TableService {
     fn build_full_row_identifier(
         &self,
         column_names: &[String],
-        row_values: &[String],
+        row_values: &[Value],
     ) -> ServiceResult<RowIdentifier> {
         let row_values: Vec<(String, Value)> = column_names
             .iter()
             .zip(row_values.iter())
-            .map(|(col, val)| {
-                let value = self.parse_value(val, None).unwrap_or(Value::Null);
-                (col.clone(), value)
-            })
+            .map(|(col, val)| (col.clone(), val.clone()))
             .collect();
 
         Ok(RowIdentifier::FullRow(row_values))
@@ -1544,15 +1602,78 @@ impl Default for TableService {
 
 /// Data required to update a cell
 #[derive(Debug, Clone)]
+pub struct BrowseTableWithFiltersRequest<'a> {
+    /// Name of the table to browse.
+    pub table_name: &'a str,
+    /// Optional schema or database qualifier.
+    pub schema: Option<&'a str>,
+    /// WHERE clause fragments joined with `AND`.
+    pub where_clauses: Vec<String>,
+    /// ORDER BY clause fragments already formatted as SQL.
+    pub order_by_clauses: Vec<String>,
+    /// Which columns to select. Empty means all columns.
+    pub visible_columns: Vec<String>,
+    /// Optional page size. Uses the service default when absent.
+    pub limit: Option<usize>,
+    /// Optional page offset.
+    pub offset: Option<usize>,
+    /// Cached total row count for simple page navigations.
+    pub cached_total: Option<u64>,
+}
+
+/// Data required to browse the last page efficiently.
+#[derive(Debug, Clone)]
+pub struct BrowseLastPageRequest<'a> {
+    /// Name of the table to browse.
+    pub table_name: &'a str,
+    /// Optional schema or database qualifier.
+    pub schema: Option<&'a str>,
+    /// WHERE clause fragments joined with `AND`.
+    pub where_clauses: Vec<String>,
+    /// ORDER BY clause fragments already formatted as SQL.
+    pub order_by_clauses: Vec<String>,
+    /// Which columns to select. Empty means all columns.
+    pub visible_columns: Vec<String>,
+    /// Number of rows to fetch.
+    pub limit: usize,
+    /// Primary key columns used when no explicit sort is active.
+    pub pk_columns: Vec<String>,
+}
+
+/// Data required to browse a page near the end of a table efficiently.
+#[derive(Debug, Clone)]
+pub struct BrowseNearEndPageRequest<'a> {
+    /// Name of the table to browse.
+    pub table_name: &'a str,
+    /// Optional schema or database qualifier.
+    pub schema: Option<&'a str>,
+    /// WHERE clause fragments joined with `AND`.
+    pub where_clauses: Vec<String>,
+    /// ORDER BY clause fragments already formatted as SQL.
+    pub order_by_clauses: Vec<String>,
+    /// Which columns to select. Empty means all columns.
+    pub visible_columns: Vec<String>,
+    /// Number of rows to fetch.
+    pub limit: usize,
+    /// Offset of the requested page in forward order.
+    pub offset: usize,
+    /// Known total row count used to compute the reverse offset.
+    pub total_rows: u64,
+    /// Primary key columns used when no explicit sort is active.
+    pub pk_columns: Vec<String>,
+}
+
+/// Data required to update a cell
+#[derive(Debug, Clone)]
 pub struct CellUpdateData {
     /// Column name being updated
     pub column_name: String,
-    /// New value as a string (None means NULL, Some("") means empty string)
-    pub new_value: Option<String>,
+    /// New value preserving its decoded database type when possible.
+    pub new_value: Option<Value>,
     /// All column names in the row (for building row identifier)
     pub all_column_names: Vec<String>,
     /// All values in the row (for building row identifier)
-    pub all_row_values: Vec<String>,
+    pub all_row_values: Vec<Value>,
     /// Database column types (e.g. "varchar", "int4") for type-aware value parsing.
     /// When provided, prevents numeric-looking strings (like phone numbers) from
     /// being incorrectly treated as integers in SQL generation.
@@ -1564,8 +1685,8 @@ pub struct CellUpdateData {
 pub struct RowInsertData {
     /// Column names for the values being inserted
     pub column_names: Vec<String>,
-    /// Values to insert (None means NULL)
-    pub values: Vec<Option<String>>,
+    /// Values to insert, preserving decoded types when available.
+    pub values: Vec<Option<Value>>,
     /// Database column types (ordered to match column_names) for type-aware value parsing.
     /// When provided, prevents numeric-looking strings from being treated as integers.
     pub column_types: Vec<String>,
@@ -1577,7 +1698,7 @@ pub struct RowDeleteData {
     /// All column names in the table
     pub all_column_names: Vec<String>,
     /// Rows to delete (each row contains all column values for identification)
-    pub rows: Vec<Vec<String>>,
+    pub rows: Vec<Vec<Value>>,
 }
 
 #[cfg(test)]
@@ -1644,7 +1765,7 @@ mod tests {
         // "null" and "NULL" become Value::Null
         assert_eq!(service.parse_value("null", None).unwrap(), Value::Null);
         assert_eq!(service.parse_value("NULL", None).unwrap(), Value::Null);
-        assert_eq!(service.parse_value("123", None).unwrap(), Value::Int64(123));
+        assert_eq!(service.parse_value("123", None).unwrap(), Value::Int32(123));
         assert_eq!(
             service.parse_value("123.45", None).unwrap(),
             Value::Float64(123.45)

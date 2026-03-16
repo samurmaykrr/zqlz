@@ -259,21 +259,21 @@ impl Cursor {
     pub fn move_to_prev_word_start(&mut self, buffer: &TextBuffer) {
         let current = self.position;
 
-        if current.column > 0 {
-            if let Some(line_text) = buffer.line(current.line) {
-                // Find word boundary in current line
-                if let Some(new_column) = self.find_prev_word_boundary(&line_text, current.column) {
-                    self.set_position(Position::new(current.line, new_column));
-                    return;
-                }
+        if current.column > 0
+            && let Some(line_text) = buffer.line(current.line)
+        {
+            // Find word boundary in current line
+            if let Some(new_column) = self.find_prev_word_boundary(&line_text, current.column) {
+                self.set_position(Position::new(current.line, new_column));
+                return;
             }
         }
 
         // No word boundary found, move to end of previous line
-        if current.line > 0 {
-            if let Some(prev_line) = buffer.line(current.line - 1) {
-                self.set_position(Position::new(current.line - 1, prev_line.len()));
-            }
+        if current.line > 0
+            && let Some(prev_line) = buffer.line(current.line - 1)
+        {
+            self.set_position(Position::new(current.line - 1, prev_line.len()));
         }
     }
 

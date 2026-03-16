@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 /// These types serve as a universal intermediate representation. When exporting,
 /// drivers map their native types to canonical types. When importing, drivers
 /// map canonical types to their native types (with potential type coercion).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 #[serde(tag = "type", content = "params")]
 pub enum CanonicalType {
     // === Null ===
@@ -80,6 +80,7 @@ pub enum CanonicalType {
 
     /// Unbounded text (CLOB)
     /// Maps to: TEXT (most databases)
+    #[default]
     Text,
 
     /// Case-insensitive text (PostgreSQL CITEXT)
@@ -504,12 +505,6 @@ impl CanonicalType {
                 | CanonicalType::Interval
                 | CanonicalType::Year
         )
-    }
-}
-
-impl Default for CanonicalType {
-    fn default() -> Self {
-        CanonicalType::Text
     }
 }
 

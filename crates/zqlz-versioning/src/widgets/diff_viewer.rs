@@ -5,7 +5,7 @@
 use gpui::*;
 use zqlz_ui::widgets::{
     ActiveTheme, Sizable,
-    button::{Button, ButtonVariant, ButtonVariants},
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, PanelState},
     h_flex, v_flex,
 };
@@ -138,12 +138,12 @@ impl DiffViewer {
             )
             .child(
                 Button::new("toggle-mode")
+                    .ghost()
                     .label(match self.display_mode {
                         DiffDisplayMode::SideBySide => "Unified",
                         DiffDisplayMode::Unified => "Side by Side",
                     })
                     .small()
-                    .with_variant(ButtonVariant::Ghost)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.toggle_mode(cx);
                     })),
@@ -334,9 +334,9 @@ impl DiffViewer {
             .border_color(theme.border)
             .child(
                 Button::new("restore-from")
+                    .warning()
                     .label("Restore Left")
                     .small()
-                    .with_variant(ButtonVariant::Secondary)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         if let Some(ref diff) = this.diff {
                             cx.emit(DiffViewerEvent::RestoreFrom(diff.from_version.id));
@@ -345,9 +345,9 @@ impl DiffViewer {
             )
             .child(
                 Button::new("restore-to")
+                    .warning()
                     .label("Restore Right")
                     .small()
-                    .with_variant(ButtonVariant::Secondary)
                     .on_click(cx.listener(|this, _, _window, cx| {
                         if let Some(ref diff) = this.diff {
                             cx.emit(DiffViewerEvent::RestoreTo(diff.to_version.id));

@@ -96,10 +96,10 @@ pub fn bind_named(sql: &str, params: &HashMap<String, Value>) -> BindResult<Boun
     // First extract all parameters to validate they exist
     let extraction = extract_parameters_with_style(sql);
     for param in &extraction.parameters {
-        if let Parameter::Named(name) = param {
-            if !params.contains_key(name) {
-                return Err(BindError::MissingParameter(name.clone()));
-            }
+        if let Parameter::Named(name) = param
+            && !params.contains_key(name)
+        {
+            return Err(BindError::MissingParameter(name.clone()));
         }
     }
 
@@ -260,28 +260,28 @@ fn find_all_named_params(sql: &str, skip_ranges: &[(usize, usize)]) -> Vec<(usiz
 
     // Find all colon-named params
     for cap in COLON_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1)) {
-            if !is_skipped(full.start()) {
-                matches.push((full.start(), full.end(), name.as_str().to_string()));
-            }
+        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
+            && !is_skipped(full.start())
+        {
+            matches.push((full.start(), full.end(), name.as_str().to_string()));
         }
     }
 
     // Find all at-named params
     for cap in AT_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1)) {
-            if !is_skipped(full.start()) {
-                matches.push((full.start(), full.end(), name.as_str().to_string()));
-            }
+        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
+            && !is_skipped(full.start())
+        {
+            matches.push((full.start(), full.end(), name.as_str().to_string()));
         }
     }
 
     // Find all dollar-named params (non-numeric)
     for cap in DOLLAR_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1)) {
-            if !is_skipped(full.start()) {
-                matches.push((full.start(), full.end(), name.as_str().to_string()));
-            }
+        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
+            && !is_skipped(full.start())
+        {
+            matches.push((full.start(), full.end(), name.as_str().to_string()));
         }
     }
 

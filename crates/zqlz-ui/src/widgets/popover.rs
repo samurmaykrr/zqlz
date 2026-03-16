@@ -8,6 +8,11 @@ use std::rc::Rc;
 
 use crate::widgets::{Anchor, ElementExt, Selectable, StyledExt as _, actions::Cancel, v_flex};
 
+type PopoverTrigger = Box<dyn FnOnce(bool, &Window, &App) -> AnyElement + 'static>;
+type PopoverContent =
+    Rc<dyn Fn(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement>;
+type PopoverOpenChange = Rc<dyn Fn(&bool, &mut Window, &mut App)>;
+
 const CONTEXT: &str = "Popover";
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))])
@@ -22,13 +27,8 @@ pub struct Popover {
     default_open: bool,
     open: Option<bool>,
     tracked_focus_handle: Option<FocusHandle>,
-    trigger: Option<Box<dyn FnOnce(bool, &Window, &App) -> AnyElement + 'static>>,
-    content: Option<
-        Rc<
-            dyn Fn(&mut PopoverState, &mut Window, &mut Context<PopoverState>) -> AnyElement
-                + 'static,
-        >,
-    >,
+    trigger: Option<PopoverTrigger>,
+    content: Option<PopoverContent>,
     children: Vec<AnyElement>,
     /// Style for trigger element.
     /// This is used for hotfix the trigger element style to support w_full.
@@ -36,7 +36,7 @@ pub struct Popover {
     mouse_button: MouseButton,
     appearance: bool,
     overlay_closable: bool,
-    on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_open_change: Option<PopoverOpenChange>,
 }
 
 impl Popover {
@@ -197,7 +197,7 @@ pub struct PopoverState {
     pub(crate) tracked_focus_handle: Option<FocusHandle>,
     trigger_bounds: Option<Bounds<Pixels>>,
     open: bool,
-    on_open_change: Option<Rc<dyn Fn(&bool, &mut Window, &mut App)>>,
+    on_open_change: Option<PopoverOpenChange>,
 
     _dismiss_subscription: Option<Subscription>,
 }

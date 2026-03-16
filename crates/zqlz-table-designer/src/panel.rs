@@ -33,6 +33,7 @@ use zqlz_ui::widgets::{
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
+    kbd::Kbd,
     menu::{ContextMenuExt, PopupMenuItem},
     select::{Select, SelectEvent, SelectState},
     v_flex,
@@ -46,7 +47,7 @@ use crate::models::{
     ColumnDesign, DataTypeInfo, DatabaseDialect, ForeignKeyDesign, IndexDesign, TableDesign,
     get_data_types,
 };
-use crate::service::DdlGenerator;
+use crate::service::{DdlGenerator, FK_ACTION_LABELS, fk_action_from_sql, fk_action_to_sql};
 
 actions!(
     table_designer,
@@ -185,6 +186,12 @@ pub struct TableDesignerPanel {
     /// Input states for FK referenced columns (comma-separated)
     fk_ref_columns_inputs: Vec<Entity<InputState>>,
 
+    /// Select states for FK ON DELETE action
+    fk_on_delete_selects: Vec<Entity<SelectState<Vec<&'static str>>>>,
+
+    /// Select states for FK ON UPDATE action
+    fk_on_update_selects: Vec<Entity<SelectState<Vec<&'static str>>>>,
+
     /// Input state for schema name (non-SQLite dialects)
     schema_input: Entity<InputState>,
 
@@ -233,6 +240,63 @@ pub struct TableDesignerPanel {
 }
 
 impl TableDesignerPanel {
+    fn render_shortcut_hint_rail(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let mut hints: Vec<AnyElement> = Vec::new();
+
+        if let Some(kbd) = Kbd::binding_for_action_in(&SaveDesign, &self.focus_handle, window) {
+            hints.push(Self::render_shortcut_hint("Save", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&Undo, &self.focus_handle, window) {
+            hints.push(Self::render_shortcut_hint("Undo", kbd, cx));
+        }
+        if let Some(kbd) = Kbd::binding_for_action_in(&Redo, &self.focus_handle, window) {
+            hints.push(Self::render_shortcut_hint("Redo", kbd, cx));
+        }
+        if matches!(
+            self.active_tab,
+            DesignerTab::Fields
+                | DesignerTab::Indexes
+                | DesignerTab::ForeignKeys
+                | DesignerTab::CheckConstraints
+        ) {
+            if let Some(kbd) =
+                Kbd::binding_for_action_in(&SelectPreviousRow, &self.focus_handle, window)
+            {
+                hints.push(Self::render_shortcut_hint("Previous row", kbd, cx));
+            }
+            if let Some(kbd) =
+                Kbd::binding_for_action_in(&SelectNextRow, &self.focus_handle, window)
+            {
+                hints.push(Self::render_shortcut_hint("Next row", kbd, cx));
+            }
+        }
+
+        h_flex().gap_3().items_center().children(hints)
+    }
+
+    fn render_shortcut_hint(
+        label: impl Into<SharedString>,
+        kbd: Kbd,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let label = label.into();
+        h_flex()
+            .gap_1()
+            .items_center()
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(label),
+            )
+            .child(kbd)
+            .into_any_element()
+    }
+
     /// Create a new table designer for a new table
     pub fn new(
         connection_id: Uuid,
@@ -305,6 +369,8 @@ impl TableDesignerPanel {
             fk_columns_inputs: Vec::new(),
             fk_ref_table_inputs: Vec::new(),
             fk_ref_columns_inputs: Vec::new(),
+            fk_on_delete_selects: Vec::new(),
+            fk_on_update_selects: Vec::new(),
             schema_input,
             table_comment_input,
             mysql_engine_input,
@@ -367,7 +433,7 @@ impl TableDesignerPanel {
             let length_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("Length");
                 if let Some(length) = col.length {
-                    state.set_value(&length.to_string(), window, cx);
+                    state.set_value(length.to_string(), window, cx);
                 }
                 state
             });
@@ -454,11 +520,11 @@ impl TableDesignerPanel {
             subscriptions.push(cx.subscribe(
                 type_select,
                 move |this, _, event: &SelectEvent<Vec<DataTypeInfo>>, cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        if let Some(col) = this.design.columns.get_mut(idx) {
-                            col.data_type = value.clone();
-                            this.mark_dirty(cx);
-                        }
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(col) = this.design.columns.get_mut(idx)
+                    {
+                        col.data_type = value.clone();
+                        this.mark_dirty(cx);
                     }
                 },
             ));
@@ -470,7 +536,7 @@ impl TableDesignerPanel {
             let scale_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("Scale");
                 if let Some(scale) = col.scale {
-                    state.set_value(&scale.to_string(), window, cx);
+                    state.set_value(scale.to_string(), window, cx);
                 }
                 state
             });
@@ -597,7 +663,7 @@ impl TableDesignerPanel {
 
             let cols_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("col1, col2, ...");
-                state.set_value(&index.columns.join(", "), window, cx);
+                state.set_value(index.columns.join(", "), window, cx);
                 state
             });
             subscriptions.push(
@@ -663,7 +729,9 @@ impl TableDesignerPanel {
         let mut fk_columns_inputs = Vec::new();
         let mut fk_ref_table_inputs = Vec::new();
         let mut fk_ref_columns_inputs = Vec::new();
-        for fk in &design.foreign_keys {
+        let mut fk_on_delete_selects = Vec::new();
+        let mut fk_on_update_selects = Vec::new();
+        for (fk_idx, fk) in design.foreign_keys.iter().enumerate() {
             let fk_name_val = fk.name.clone().unwrap_or_default();
             let fk_cols_val = fk.columns.join(", ");
             let fk_ref_table_val = fk.referenced_table.clone();
@@ -725,6 +793,48 @@ impl TableDesignerPanel {
                 }),
             );
             fk_ref_columns_inputs.push(ref_cols_input);
+
+            let on_delete_action = fk.on_delete;
+            let choices: Vec<&'static str> = FK_ACTION_LABELS.to_vec();
+            let del_label = fk_action_to_sql(&on_delete_action);
+            let del_selected = choices
+                .iter()
+                .position(|&l| l == del_label)
+                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let on_delete_select = cx.new(|cx| SelectState::new(choices, del_selected, window, cx));
+            subscriptions.push(cx.subscribe(
+                &on_delete_select,
+                move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                    {
+                        fk.on_delete = fk_action_from_sql(value);
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            fk_on_delete_selects.push(on_delete_select);
+
+            let on_update_action = fk.on_update;
+            let choices: Vec<&'static str> = FK_ACTION_LABELS.to_vec();
+            let upd_label = fk_action_to_sql(&on_update_action);
+            let upd_selected = choices
+                .iter()
+                .position(|&l| l == upd_label)
+                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let on_update_select = cx.new(|cx| SelectState::new(choices, upd_selected, window, cx));
+            subscriptions.push(cx.subscribe(
+                &on_update_select,
+                move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                    {
+                        fk.on_update = fk_action_from_sql(value);
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            fk_on_update_selects.push(on_update_select);
         }
 
         Self {
@@ -755,6 +865,8 @@ impl TableDesignerPanel {
             fk_columns_inputs,
             fk_ref_table_inputs,
             fk_ref_columns_inputs,
+            fk_on_delete_selects,
+            fk_on_update_selects,
             schema_input,
             table_comment_input,
             mysql_engine_input,
@@ -868,7 +980,7 @@ impl TableDesignerPanel {
             let length_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("Length");
                 if let Some(length) = col.length {
-                    state.set_value(&length.to_string(), window, cx);
+                    state.set_value(length.to_string(), window, cx);
                 }
                 state
             });
@@ -885,7 +997,7 @@ impl TableDesignerPanel {
             let scale_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("Scale");
                 if let Some(scale) = col.scale {
-                    state.set_value(&scale.to_string(), window, cx);
+                    state.set_value(scale.to_string(), window, cx);
                 }
                 state
             });
@@ -944,11 +1056,11 @@ impl TableDesignerPanel {
             self._subscriptions.push(cx.subscribe(
                 &type_select,
                 move |this, _, event: &SelectEvent<Vec<DataTypeInfo>>, cx| {
-                    if let SelectEvent::Confirm(Some(value)) = event {
-                        if let Some(col) = this.design.columns.get_mut(col_idx) {
-                            col.data_type = value.clone();
-                            this.mark_dirty(cx);
-                        }
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(col) = this.design.columns.get_mut(col_idx)
+                    {
+                        col.data_type = value.clone();
+                        this.mark_dirty(cx);
                     }
                 },
             ));
@@ -1098,6 +1210,8 @@ impl TableDesignerPanel {
         self.fk_columns_inputs.clear();
         self.fk_ref_table_inputs.clear();
         self.fk_ref_columns_inputs.clear();
+        self.fk_on_delete_selects.clear();
+        self.fk_on_update_selects.clear();
         let fk_values: Vec<_> = self
             .design
             .foreign_keys
@@ -1108,10 +1222,16 @@ impl TableDesignerPanel {
                     fk.columns.join(", "),
                     fk.referenced_table.clone(),
                     fk.referenced_columns.join(", "),
+                    fk.on_delete,
+                    fk.on_update,
                 )
             })
             .collect();
-        for (fk_name_val, fk_cols_val, fk_ref_table_val, fk_ref_cols_val) in fk_values {
+        for (
+            fk_idx,
+            (fk_name_val, fk_cols_val, fk_ref_table_val, fk_ref_cols_val, on_delete, on_update),
+        ) in fk_values.into_iter().enumerate()
+        {
             let name_input = cx.new(|cx| {
                 let mut state = InputState::new(window, cx).placeholder("FK name");
                 state.set_value(&fk_name_val, window, cx);
@@ -1171,30 +1291,58 @@ impl TableDesignerPanel {
                 },
             ));
             self.fk_ref_columns_inputs.push(ref_cols_input);
+
+            let on_delete_select = self.create_fk_action_select(&on_delete, window, cx);
+            self._subscriptions.push(cx.subscribe(
+                &on_delete_select,
+                move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                    {
+                        fk.on_delete = fk_action_from_sql(value);
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.fk_on_delete_selects.push(on_delete_select);
+
+            let on_update_select = self.create_fk_action_select(&on_update, window, cx);
+            self._subscriptions.push(cx.subscribe(
+                &on_update_select,
+                move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                    {
+                        fk.on_update = fk_action_from_sql(value);
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.fk_on_update_selects.push(on_update_select);
         }
 
         // Adjust selections
         if self
             .selected_column_index
-            .map_or(false, |i| i >= self.design.columns.len())
+            .is_some_and(|i| i >= self.design.columns.len())
         {
             self.selected_column_index = self.design.columns.len().checked_sub(1);
         }
         if self
             .selected_check_index
-            .map_or(false, |i| i >= self.design.check_constraints.len())
+            .is_some_and(|i| i >= self.design.check_constraints.len())
         {
             self.selected_check_index = self.design.check_constraints.len().checked_sub(1);
         }
         if self
             .selected_index_index
-            .map_or(false, |i| i >= self.design.indexes.len())
+            .is_some_and(|i| i >= self.design.indexes.len())
         {
             self.selected_index_index = self.design.indexes.len().checked_sub(1);
         }
         if self
             .selected_fk_index
-            .map_or(false, |i| i >= self.design.foreign_keys.len())
+            .is_some_and(|i| i >= self.design.foreign_keys.len())
         {
             self.selected_fk_index = self.design.foreign_keys.len().checked_sub(1);
         }
@@ -1274,6 +1422,16 @@ impl TableDesignerPanel {
         );
         self.column_length_inputs.push(length_input);
 
+        let scale_input = cx.new(|cx| InputState::new(window, cx).placeholder("Scale"));
+        self._subscriptions.push(
+            cx.subscribe(&scale_input, |this, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.mark_dirty(cx);
+                }
+            }),
+        );
+        self.column_scale_inputs.push(scale_input);
+
         let data_types_clone = self.data_types.clone();
         let type_select =
             cx.new(|cx| SelectState::new(data_types_clone, None, window, cx).searchable(true));
@@ -1281,11 +1439,11 @@ impl TableDesignerPanel {
         self._subscriptions.push(cx.subscribe(
             &type_select,
             move |this, _, event: &SelectEvent<Vec<DataTypeInfo>>, cx| {
-                if let SelectEvent::Confirm(Some(value)) = event {
-                    if let Some(col) = this.design.columns.get_mut(col_idx) {
-                        col.data_type = value.clone();
-                        this.mark_dirty(cx);
-                    }
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Some(col) = this.design.columns.get_mut(col_idx)
+                {
+                    col.data_type = value.clone();
+                    this.mark_dirty(cx);
                 }
             },
         ));
@@ -1317,87 +1475,96 @@ impl TableDesignerPanel {
 
     /// Remove selected column
     fn remove_column(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_column_index {
-            if idx < self.design.columns.len() {
-                self.push_undo_snapshot();
-                self.design.columns.remove(idx);
-                self.column_name_inputs.remove(idx);
-                self.column_default_inputs.remove(idx);
-                self.column_length_inputs.remove(idx);
-                self.column_type_selects.remove(idx);
-                self.column_comment_inputs.remove(idx);
-                if idx < self.column_generated_inputs.len() {
-                    self.column_generated_inputs.remove(idx);
-                }
-
-                // Update ordinals
-                for (i, col) in self.design.columns.iter_mut().enumerate() {
-                    col.ordinal = i;
-                }
-
-                // Adjust selection
-                if self.design.columns.is_empty() {
-                    self.selected_column_index = None;
-                } else if idx >= self.design.columns.len() {
-                    self.selected_column_index = Some(self.design.columns.len() - 1);
-                }
-
-                self.mark_dirty(cx);
+        if let Some(idx) = self.selected_column_index
+            && idx < self.design.columns.len()
+        {
+            self.push_undo_snapshot();
+            self.design.columns.remove(idx);
+            self.column_name_inputs.remove(idx);
+            self.column_default_inputs.remove(idx);
+            self.column_length_inputs.remove(idx);
+            self.column_type_selects.remove(idx);
+            self.column_comment_inputs.remove(idx);
+            if idx < self.column_scale_inputs.len() {
+                self.column_scale_inputs.remove(idx);
             }
+            if idx < self.column_generated_inputs.len() {
+                self.column_generated_inputs.remove(idx);
+            }
+
+            // Update ordinals
+            for (i, col) in self.design.columns.iter_mut().enumerate() {
+                col.ordinal = i;
+            }
+
+            // Adjust selection
+            if self.design.columns.is_empty() {
+                self.selected_column_index = None;
+            } else if idx >= self.design.columns.len() {
+                self.selected_column_index = Some(self.design.columns.len() - 1);
+            }
+
+            self.mark_dirty(cx);
         }
     }
 
     /// Move selected column up
     fn move_column_up(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_column_index {
-            if idx > 0 {
-                self.push_undo_snapshot();
-                self.design.columns.swap(idx, idx - 1);
-                self.column_name_inputs.swap(idx, idx - 1);
-                self.column_default_inputs.swap(idx, idx - 1);
-                self.column_length_inputs.swap(idx, idx - 1);
-                self.column_type_selects.swap(idx, idx - 1);
-                self.column_comment_inputs.swap(idx, idx - 1);
-                if idx < self.column_generated_inputs.len()
-                    && idx - 1 < self.column_generated_inputs.len()
-                {
-                    self.column_generated_inputs.swap(idx, idx - 1);
-                }
-
-                // Update ordinals
-                self.design.columns[idx].ordinal = idx;
-                self.design.columns[idx - 1].ordinal = idx - 1;
-
-                self.selected_column_index = Some(idx - 1);
-                self.mark_dirty(cx);
+        if let Some(idx) = self.selected_column_index
+            && idx > 0
+        {
+            self.push_undo_snapshot();
+            self.design.columns.swap(idx, idx - 1);
+            self.column_name_inputs.swap(idx, idx - 1);
+            self.column_default_inputs.swap(idx, idx - 1);
+            self.column_length_inputs.swap(idx, idx - 1);
+            self.column_type_selects.swap(idx, idx - 1);
+            self.column_comment_inputs.swap(idx, idx - 1);
+            if idx < self.column_scale_inputs.len() && idx - 1 < self.column_scale_inputs.len() {
+                self.column_scale_inputs.swap(idx, idx - 1);
             }
+            if idx < self.column_generated_inputs.len()
+                && idx - 1 < self.column_generated_inputs.len()
+            {
+                self.column_generated_inputs.swap(idx, idx - 1);
+            }
+
+            // Update ordinals
+            self.design.columns[idx].ordinal = idx;
+            self.design.columns[idx - 1].ordinal = idx - 1;
+
+            self.selected_column_index = Some(idx - 1);
+            self.mark_dirty(cx);
         }
     }
 
     /// Move selected column down
     fn move_column_down(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_column_index {
-            if idx < self.design.columns.len() - 1 {
-                self.push_undo_snapshot();
-                self.design.columns.swap(idx, idx + 1);
-                self.column_name_inputs.swap(idx, idx + 1);
-                self.column_default_inputs.swap(idx, idx + 1);
-                self.column_length_inputs.swap(idx, idx + 1);
-                self.column_type_selects.swap(idx, idx + 1);
-                self.column_comment_inputs.swap(idx, idx + 1);
-                if idx < self.column_generated_inputs.len()
-                    && idx + 1 < self.column_generated_inputs.len()
-                {
-                    self.column_generated_inputs.swap(idx, idx + 1);
-                }
-
-                // Update ordinals
-                self.design.columns[idx].ordinal = idx;
-                self.design.columns[idx + 1].ordinal = idx + 1;
-
-                self.selected_column_index = Some(idx + 1);
-                self.mark_dirty(cx);
+        if let Some(idx) = self.selected_column_index
+            && idx < self.design.columns.len().saturating_sub(1)
+        {
+            self.push_undo_snapshot();
+            self.design.columns.swap(idx, idx + 1);
+            self.column_name_inputs.swap(idx, idx + 1);
+            self.column_default_inputs.swap(idx, idx + 1);
+            self.column_length_inputs.swap(idx, idx + 1);
+            self.column_type_selects.swap(idx, idx + 1);
+            self.column_comment_inputs.swap(idx, idx + 1);
+            if idx < self.column_scale_inputs.len() && idx + 1 < self.column_scale_inputs.len() {
+                self.column_scale_inputs.swap(idx, idx + 1);
             }
+            if idx < self.column_generated_inputs.len()
+                && idx + 1 < self.column_generated_inputs.len()
+            {
+                self.column_generated_inputs.swap(idx, idx + 1);
+            }
+
+            // Update ordinals
+            self.design.columns[idx].ordinal = idx;
+            self.design.columns[idx + 1].ordinal = idx + 1;
+
+            self.selected_column_index = Some(idx + 1);
+            self.mark_dirty(cx);
         }
     }
 
@@ -1546,34 +1713,34 @@ impl TableDesignerPanel {
 
     /// Remove selected index
     fn remove_index(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_index_index {
-            if idx < self.design.indexes.len() {
-                self.push_undo_snapshot();
-                self.design.indexes.remove(idx);
-                if idx < self.index_name_inputs.len() {
-                    self.index_name_inputs.remove(idx);
-                }
-                if idx < self.index_columns_inputs.len() {
-                    self.index_columns_inputs.remove(idx);
-                }
-                if idx < self.index_type_inputs.len() {
-                    self.index_type_inputs.remove(idx);
-                }
-                if idx < self.index_where_inputs.len() {
-                    self.index_where_inputs.remove(idx);
-                }
-                if idx < self.index_include_inputs.len() {
-                    self.index_include_inputs.remove(idx);
-                }
-
-                if self.design.indexes.is_empty() {
-                    self.selected_index_index = None;
-                } else if idx >= self.design.indexes.len() {
-                    self.selected_index_index = Some(self.design.indexes.len() - 1);
-                }
-
-                self.mark_dirty(cx);
+        if let Some(idx) = self.selected_index_index
+            && idx < self.design.indexes.len()
+        {
+            self.push_undo_snapshot();
+            self.design.indexes.remove(idx);
+            if idx < self.index_name_inputs.len() {
+                self.index_name_inputs.remove(idx);
             }
+            if idx < self.index_columns_inputs.len() {
+                self.index_columns_inputs.remove(idx);
+            }
+            if idx < self.index_type_inputs.len() {
+                self.index_type_inputs.remove(idx);
+            }
+            if idx < self.index_where_inputs.len() {
+                self.index_where_inputs.remove(idx);
+            }
+            if idx < self.index_include_inputs.len() {
+                self.index_include_inputs.remove(idx);
+            }
+
+            if self.design.indexes.is_empty() {
+                self.selected_index_index = None;
+            } else if idx >= self.design.indexes.len() {
+                self.selected_index_index = Some(self.design.indexes.len() - 1);
+            }
+
+            self.mark_dirty(cx);
         }
     }
 
@@ -1588,6 +1755,25 @@ impl TableDesignerPanel {
                 index.name = index.auto_name(&table_name);
             }
         }
+    }
+
+    /// Create a select state for an FK referential action (ON DELETE / ON UPDATE).
+    ///
+    /// `current` is the action already stored on the FK design.  The returned
+    /// entity is pre-selected to match that action.
+    fn create_fk_action_select(
+        &self,
+        current: &zqlz_core::ForeignKeyAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<SelectState<Vec<&'static str>>> {
+        let choices: Vec<&'static str> = FK_ACTION_LABELS.to_vec();
+        let current_label = fk_action_to_sql(current);
+        let selected_index = choices
+            .iter()
+            .position(|&label| label == current_label)
+            .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+        cx.new(|cx| SelectState::new(choices, selected_index, window, cx))
     }
 
     /// Add a new foreign key
@@ -1639,165 +1825,203 @@ impl TableDesignerPanel {
         ));
         self.fk_ref_columns_inputs.push(ref_cols_input);
 
-        self.selected_fk_index = Some(self.design.foreign_keys.len() - 1);
+        let fk_idx = self.design.foreign_keys.len() - 1;
+
+        let on_delete_select =
+            self.create_fk_action_select(&zqlz_core::ForeignKeyAction::NoAction, window, cx);
+        self._subscriptions.push(cx.subscribe(
+            &on_delete_select,
+            move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                {
+                    fk.on_delete = fk_action_from_sql(value);
+                    this.mark_dirty(cx);
+                }
+            },
+        ));
+        self.fk_on_delete_selects.push(on_delete_select);
+
+        let on_update_select =
+            self.create_fk_action_select(&zqlz_core::ForeignKeyAction::NoAction, window, cx);
+        self._subscriptions.push(cx.subscribe(
+            &on_update_select,
+            move |this, _, event: &SelectEvent<Vec<&'static str>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event
+                    && let Some(fk) = this.design.foreign_keys.get_mut(fk_idx)
+                {
+                    fk.on_update = fk_action_from_sql(value);
+                    this.mark_dirty(cx);
+                }
+            },
+        ));
+        self.fk_on_update_selects.push(on_update_select);
+
+        self.selected_fk_index = Some(fk_idx);
         self.mark_dirty(cx);
     }
 
     /// Remove selected foreign key
     fn remove_foreign_key(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_fk_index {
-            if idx < self.design.foreign_keys.len() {
-                self.push_undo_snapshot();
-                self.design.foreign_keys.remove(idx);
-                if idx < self.fk_name_inputs.len() {
-                    self.fk_name_inputs.remove(idx);
-                }
-                if idx < self.fk_columns_inputs.len() {
-                    self.fk_columns_inputs.remove(idx);
-                }
-                if idx < self.fk_ref_table_inputs.len() {
-                    self.fk_ref_table_inputs.remove(idx);
-                }
-                if idx < self.fk_ref_columns_inputs.len() {
-                    self.fk_ref_columns_inputs.remove(idx);
-                }
-
-                if self.design.foreign_keys.is_empty() {
-                    self.selected_fk_index = None;
-                } else if idx >= self.design.foreign_keys.len() {
-                    self.selected_fk_index = Some(self.design.foreign_keys.len() - 1);
-                }
-
-                self.mark_dirty(cx);
+        if let Some(idx) = self.selected_fk_index
+            && idx < self.design.foreign_keys.len()
+        {
+            self.push_undo_snapshot();
+            self.design.foreign_keys.remove(idx);
+            if idx < self.fk_name_inputs.len() {
+                self.fk_name_inputs.remove(idx);
             }
+            if idx < self.fk_columns_inputs.len() {
+                self.fk_columns_inputs.remove(idx);
+            }
+            if idx < self.fk_ref_table_inputs.len() {
+                self.fk_ref_table_inputs.remove(idx);
+            }
+            if idx < self.fk_ref_columns_inputs.len() {
+                self.fk_ref_columns_inputs.remove(idx);
+            }
+            if idx < self.fk_on_delete_selects.len() {
+                self.fk_on_delete_selects.remove(idx);
+            }
+            if idx < self.fk_on_update_selects.len() {
+                self.fk_on_update_selects.remove(idx);
+            }
+
+            if self.design.foreign_keys.is_empty() {
+                self.selected_fk_index = None;
+            } else if idx >= self.design.foreign_keys.len() {
+                self.selected_fk_index = Some(self.design.foreign_keys.len() - 1);
+            }
+
+            self.mark_dirty(cx);
         }
     }
 
     /// Duplicate the selected column
     fn handle_duplicate_column(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_column_index {
-            if let Some(col) = self.design.columns.get(idx).cloned() {
-                self.push_undo_snapshot();
-                let mut new_col = col;
-                new_col.column_id = uuid::Uuid::new_v4();
-                new_col.name = format!("{}_copy", new_col.name);
-                new_col.ordinal = idx + 1;
-                self.design.columns.insert(idx + 1, new_col.clone());
+        if let Some(idx) = self.selected_column_index
+            && let Some(col) = self.design.columns.get(idx).cloned()
+        {
+            self.push_undo_snapshot();
+            let mut new_col = col;
+            new_col.column_id = uuid::Uuid::new_v4();
+            new_col.name = format!("{}_copy", new_col.name);
+            new_col.ordinal = idx + 1;
+            self.design.columns.insert(idx + 1, new_col.clone());
 
-                // Update ordinals for subsequent columns
-                for i in (idx + 2)..self.design.columns.len() {
-                    self.design.columns[i].ordinal = i;
-                }
-
-                // Create input states for the duplicated column
-                let name_input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder("Column name");
-                    state.set_value(&new_col.name, window, cx);
-                    state
-                });
-                self._subscriptions.push(cx.subscribe(
-                    &name_input,
-                    |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.mark_dirty(cx);
-                        }
-                    },
-                ));
-                self.column_name_inputs.insert(idx + 1, name_input);
-
-                let default_input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder("Default");
-                    if let Some(ref default) = new_col.default_value {
-                        state.set_value(default, window, cx);
-                    }
-                    state
-                });
-                self._subscriptions.push(cx.subscribe(
-                    &default_input,
-                    |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.mark_dirty(cx);
-                        }
-                    },
-                ));
-                self.column_default_inputs.insert(idx + 1, default_input);
-
-                let length_input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder("Length");
-                    if let Some(length) = new_col.length {
-                        state.set_value(&length.to_string(), window, cx);
-                    }
-                    state
-                });
-                self._subscriptions.push(cx.subscribe(
-                    &length_input,
-                    |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.mark_dirty(cx);
-                        }
-                    },
-                ));
-                self.column_length_inputs.insert(idx + 1, length_input);
-
-                let comment_input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder("Comment");
-                    if let Some(ref comment) = new_col.comment {
-                        state.set_value(comment, window, cx);
-                    }
-                    state
-                });
-                self._subscriptions.push(cx.subscribe(
-                    &comment_input,
-                    |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.mark_dirty(cx);
-                        }
-                    },
-                ));
-                self.column_comment_inputs.insert(idx + 1, comment_input);
-
-                let gen_input = cx.new(|cx| {
-                    let mut state = InputState::new(window, cx).placeholder("Expression");
-                    if let Some(ref expr) = new_col.generated_expression {
-                        state.set_value(expr, window, cx);
-                    }
-                    state
-                });
-                self._subscriptions.push(cx.subscribe(
-                    &gen_input,
-                    |this, _, event: &InputEvent, cx| {
-                        if matches!(event, InputEvent::Change) {
-                            this.mark_dirty(cx);
-                        }
-                    },
-                ));
-                self.column_generated_inputs.insert(idx + 1, gen_input);
-
-                let data_types_clone = self.data_types.clone();
-                let selected_index = data_types_clone
-                    .iter()
-                    .position(|dt| dt.name.eq_ignore_ascii_case(&new_col.data_type))
-                    .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
-                let type_select = cx.new(|cx| {
-                    SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
-                });
-                let col_idx = idx + 1;
-                self._subscriptions.push(cx.subscribe(
-                    &type_select,
-                    move |this, _, event: &SelectEvent<Vec<DataTypeInfo>>, cx| {
-                        if let SelectEvent::Confirm(Some(value)) = event {
-                            if let Some(col) = this.design.columns.get_mut(col_idx) {
-                                col.data_type = value.clone();
-                                this.mark_dirty(cx);
-                            }
-                        }
-                    },
-                ));
-                self.column_type_selects.insert(idx + 1, type_select);
-
-                self.selected_column_index = Some(idx + 1);
-                self.mark_dirty(cx);
+            // Update ordinals for subsequent columns
+            for i in (idx + 2)..self.design.columns.len() {
+                self.design.columns[i].ordinal = i;
             }
+
+            // Create input states for the duplicated column
+            let name_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Column name");
+                state.set_value(&new_col.name, window, cx);
+                state
+            });
+            self._subscriptions.push(cx.subscribe(
+                &name_input,
+                |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_name_inputs.insert(idx + 1, name_input);
+
+            let default_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Default");
+                if let Some(ref default) = new_col.default_value {
+                    state.set_value(default, window, cx);
+                }
+                state
+            });
+            self._subscriptions.push(cx.subscribe(
+                &default_input,
+                |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_default_inputs.insert(idx + 1, default_input);
+
+            let length_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Length");
+                if let Some(length) = new_col.length {
+                    state.set_value(length.to_string(), window, cx);
+                }
+                state
+            });
+            self._subscriptions.push(cx.subscribe(
+                &length_input,
+                |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_length_inputs.insert(idx + 1, length_input);
+
+            let comment_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Comment");
+                if let Some(ref comment) = new_col.comment {
+                    state.set_value(comment, window, cx);
+                }
+                state
+            });
+            self._subscriptions.push(cx.subscribe(
+                &comment_input,
+                |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_comment_inputs.insert(idx + 1, comment_input);
+
+            let gen_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Expression");
+                if let Some(ref expr) = new_col.generated_expression {
+                    state.set_value(expr, window, cx);
+                }
+                state
+            });
+            self._subscriptions.push(cx.subscribe(
+                &gen_input,
+                |this, _, event: &InputEvent, cx| {
+                    if matches!(event, InputEvent::Change) {
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_generated_inputs.insert(idx + 1, gen_input);
+
+            let data_types_clone = self.data_types.clone();
+            let selected_index = data_types_clone
+                .iter()
+                .position(|dt| dt.name.eq_ignore_ascii_case(&new_col.data_type))
+                .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
+            let type_select = cx.new(|cx| {
+                SelectState::new(data_types_clone, selected_index, window, cx).searchable(true)
+            });
+            let col_idx = idx + 1;
+            self._subscriptions.push(cx.subscribe(
+                &type_select,
+                move |this, _, event: &SelectEvent<Vec<DataTypeInfo>>, cx| {
+                    if let SelectEvent::Confirm(Some(value)) = event
+                        && let Some(col) = this.design.columns.get_mut(col_idx)
+                    {
+                        col.data_type = value.clone();
+                        this.mark_dirty(cx);
+                    }
+                },
+            ));
+            self.column_type_selects.insert(idx + 1, type_select);
+
+            self.selected_column_index = Some(idx + 1);
+            self.mark_dirty(cx);
         }
     }
 
@@ -1922,21 +2146,21 @@ impl TableDesignerPanel {
 
     /// Remove selected check constraint
     fn remove_check_constraint(&mut self, cx: &mut Context<Self>) {
-        if let Some(idx) = self.selected_check_index {
-            if idx < self.design.check_constraints.len() {
-                self.push_undo_snapshot();
-                self.design.check_constraints.remove(idx);
-                self.check_name_inputs.remove(idx);
-                self.check_expression_inputs.remove(idx);
+        if let Some(idx) = self.selected_check_index
+            && idx < self.design.check_constraints.len()
+        {
+            self.push_undo_snapshot();
+            self.design.check_constraints.remove(idx);
+            self.check_name_inputs.remove(idx);
+            self.check_expression_inputs.remove(idx);
 
-                if self.design.check_constraints.is_empty() {
-                    self.selected_check_index = None;
-                } else if idx >= self.design.check_constraints.len() {
-                    self.selected_check_index = Some(self.design.check_constraints.len() - 1);
-                }
-
-                self.mark_dirty(cx);
+            if self.design.check_constraints.is_empty() {
+                self.selected_check_index = None;
+            } else if idx >= self.design.check_constraints.len() {
+                self.selected_check_index = Some(self.design.check_constraints.len() - 1);
             }
+
+            self.mark_dirty(cx);
         }
     }
 
@@ -2277,6 +2501,9 @@ impl TableDesignerPanel {
     }
 
     /// Build a single column row element
+    // This mirrors the field list assembled in `ui/fields_tab.rs`; changing the
+    // call shape would require a broader cross-file refactor without changing behavior.
+    #[allow(clippy::too_many_arguments)]
     fn build_column_row_element(
         &self,
         idx: usize,
@@ -2295,13 +2522,14 @@ impl TableDesignerPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let can_move_down = idx + 1 < self.design.columns.len();
 
         h_flex()
             .id(SharedString::from(format!("column-{}", idx)))
             .w_full()
             .bg(if is_selected {
                 theme.selection
-            } else if idx % 2 == 0 {
+            } else if idx.is_multiple_of(2) {
                 theme.table_even
             } else {
                 theme.table
@@ -2518,16 +2746,20 @@ impl TableDesignerPanel {
                             },
                         )
                     }))
-                    .item(PopupMenuItem::new("Move Down").on_click({
-                        let view = view.clone();
-                        window.listener_for(
-                            &view,
-                            move |this: &mut TableDesignerPanel, _, _, cx| {
-                                this.selected_column_index = Some(idx);
-                                this.move_column_down(cx);
-                            },
-                        )
-                    }))
+                    .item(
+                        PopupMenuItem::new("Move Down")
+                            .disabled(!can_move_down)
+                            .on_click({
+                                let view = view.clone();
+                                window.listener_for(
+                                    &view,
+                                    move |this: &mut TableDesignerPanel, _, _, cx| {
+                                        this.selected_column_index = Some(idx);
+                                        this.move_column_down(cx);
+                                    },
+                                )
+                            }),
+                    )
                     .separator()
                     .item(PopupMenuItem::new("Delete").on_click({
                         let view = view.clone();
@@ -2610,6 +2842,9 @@ impl TableDesignerPanel {
     }
 
     /// Build a single index row element
+    // This mirrors the index list assembled in `ui/indexes_tab.rs`; keeping the
+    // signature local avoids a wider plumbing-only refactor in this pass.
+    #[allow(clippy::too_many_arguments)]
     fn build_index_row_element(
         &self,
         idx: usize,
@@ -2632,7 +2867,7 @@ impl TableDesignerPanel {
             .w_full()
             .bg(if is_selected {
                 theme.selection
-            } else if idx % 2 == 0 {
+            } else if idx.is_multiple_of(2) {
                 theme.table_even
             } else {
                 theme.table
@@ -2801,6 +3036,9 @@ impl TableDesignerPanel {
     }
 
     /// Render a single foreign key row (inner implementation)
+    // This is a thin rendering adapter for data prepared in `ui/foreign_keys_tab.rs`.
+    // Grouping all inputs here would otherwise force a multi-file refactor.
+    #[allow(clippy::too_many_arguments)]
     fn render_fk_row_inner(
         &self,
         idx: usize,
@@ -2809,8 +3047,8 @@ impl TableDesignerPanel {
         _columns: String,
         _referenced_table: String,
         _referenced_columns: String,
-        on_delete: &'static str,
-        on_update: &'static str,
+        on_delete_select: Option<Entity<SelectState<Vec<&'static str>>>>,
+        on_update_select: Option<Entity<SelectState<Vec<&'static str>>>>,
         name_input: Option<Entity<InputState>>,
         columns_input: Option<Entity<InputState>>,
         ref_table_input: Option<Entity<InputState>>,
@@ -2824,7 +3062,7 @@ impl TableDesignerPanel {
             .w_full()
             .bg(if is_selected {
                 theme.selection
-            } else if idx % 2 == 0 {
+            } else if idx.is_multiple_of(2) {
                 theme.table_even
             } else {
                 theme.table
@@ -2904,10 +3142,19 @@ impl TableDesignerPanel {
                     .py_1()
                     .border_r_1()
                     .border_color(theme.border)
-                    .text_xs()
-                    .child(on_delete),
+                    .when_some(on_delete_select, |el, sel| {
+                        el.child(Select::new(&sel).xsmall().w_full())
+                    }),
             )
-            .child(div().w(px(100.0)).px_2().py_1().text_xs().child(on_update))
+            .child(
+                div()
+                    .w(px(100.0))
+                    .px_2()
+                    .py_1()
+                    .when_some(on_update_select, |el, sel| {
+                        el.child(Select::new(&sel).xsmall().w_full())
+                    }),
+            )
     }
 
     /// Render the check constraints tab (delegates to ui/check_constraints_tab.rs)
@@ -2955,7 +3202,7 @@ impl TableDesignerPanel {
             .w_full()
             .bg(if is_selected {
                 theme.selection
-            } else if idx % 2 == 0 {
+            } else if idx.is_multiple_of(2) {
                 theme.table_even
             } else {
                 theme.table
@@ -3108,7 +3355,7 @@ impl TableDesignerPanel {
     }
 
     /// Render the footer with save/cancel buttons
-    fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_footer(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
         let table_name = self.table_name_input.read(cx).value();
@@ -3125,6 +3372,7 @@ impl TableDesignerPanel {
             .child(
                 h_flex()
                     .gap_2()
+                    .items_center()
                     .child(
                         div()
                             .text_xs()
@@ -3138,7 +3386,8 @@ impl TableDesignerPanel {
                                 .text_color(theme.warning)
                                 .child("(modified)"),
                         )
-                    }),
+                    })
+                    .child(self.render_shortcut_hint_rail(window, cx)),
             )
             .child(
                 h_flex()
@@ -3161,6 +3410,7 @@ impl TableDesignerPanel {
                             })
                             .small()
                             .primary()
+                            .tooltip_with_action("Save Design", &SaveDesign, Some("TableDesigner"))
                             .disabled(!is_valid || !self.is_dirty)
                             .on_click(cx.listener(|this, _, _window, cx| {
                                 this.handle_save(cx);
@@ -3209,7 +3459,7 @@ impl Render for TableDesignerPanel {
         };
 
         let tab_bar = self.render_tab_bar(cx).into_any_element();
-        let footer = self.render_footer(cx).into_any_element();
+        let footer = self.render_footer(_window, cx).into_any_element();
 
         v_flex()
             .id("table-designer-panel")
@@ -3324,6 +3574,14 @@ impl Render for TableDesignerPanel {
                                 .text_xs()
                                 .text_color(danger_color)
                                 .child(validation_error_text),
+                        )
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(danger_color.opacity(0.85))
+                                .child(
+                                    "Fix the issues above, then press Cmd/Ctrl+S to save again.",
+                                ),
                         ),
                 )
             })

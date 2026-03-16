@@ -105,7 +105,7 @@ impl Language {
         }
     }
 
-    #[allow(unused)]
+    #[allow(unused, clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         #[cfg(not(feature = "tree-sitter-languages"))]
         {

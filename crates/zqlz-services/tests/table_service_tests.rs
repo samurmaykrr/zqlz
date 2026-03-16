@@ -7,7 +7,10 @@ mod common;
 
 use std::sync::Arc;
 use zqlz_core::{Connection, Value};
-use zqlz_services::{CellUpdateData, RowDeleteData, RowInsertData, TableService};
+use zqlz_services::{
+    BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest, CellUpdateData,
+    RowDeleteData, RowInsertData, TableService,
+};
 
 use common::{mock_query_result, MockConnection};
 
@@ -169,14 +172,16 @@ async fn browse_with_filters_adds_where_clause() {
     service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec!["status = 'active'".to_string(), "age > 18".to_string()],
-            vec![],
-            vec![],
-            None,
-            None,
-            None,
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec!["status = 'active'".to_string(), "age > 18".to_string()],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: None,
+                offset: None,
+                cached_total: None,
+            },
         )
         .await
         .expect("should browse with filters");
@@ -215,14 +220,16 @@ async fn browse_with_filters_adds_order_by() {
     service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec!["name ASC".to_string(), "created_at DESC".to_string()],
-            vec![],
-            None,
-            None,
-            None,
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec!["name ASC".to_string(), "created_at DESC".to_string()],
+                visible_columns: vec![],
+                limit: None,
+                offset: None,
+                cached_total: None,
+            },
         )
         .await
         .expect("should browse with sorting");
@@ -252,14 +259,16 @@ async fn browse_with_visible_columns() {
     service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec!["id".to_string(), "name".to_string()],
-            None,
-            None,
-            None,
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec!["id".to_string(), "name".to_string()],
+                limit: None,
+                offset: None,
+                cached_total: None,
+            },
         )
         .await
         .expect("should browse with column selection");
@@ -286,12 +295,12 @@ async fn update_cell_succeeds() {
 
     let cell_data = CellUpdateData {
         column_name: "email".to_string(),
-        new_value: Some("new@example.com".to_string()),
+        new_value: Some(Value::String("new@example.com".to_string())),
         all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
         all_row_values: vec![
-            "1".to_string(),
-            "Alice".to_string(),
-            "old@example.com".to_string(),
+            Value::Int32(1),
+            Value::String("Alice".to_string()),
+            Value::String("old@example.com".to_string()),
         ],
         all_column_types: vec!["int4".to_string(), "text".to_string(), "text".to_string()],
     };
@@ -317,8 +326,8 @@ async fn insert_row_builds_correct_sql() {
     let insert_data = RowInsertData {
         column_names: vec!["name".to_string(), "email".to_string()],
         values: vec![
-            Some("Charlie".to_string()),
-            Some("charlie@example.com".to_string()),
+            Some(Value::String("Charlie".to_string())),
+            Some(Value::String("charlie@example.com".to_string())),
         ],
         column_types: Vec::new(),
     };
@@ -342,8 +351,8 @@ async fn insert_row_uses_postgres_placeholders() {
     let insert_data = RowInsertData {
         column_names: vec!["name".to_string(), "email".to_string()],
         values: vec![
-            Some("Charlie".to_string()),
-            Some("charlie@example.com".to_string()),
+            Some(Value::String("Charlie".to_string())),
+            Some(Value::String("charlie@example.com".to_string())),
         ],
         column_types: vec!["text".to_string(), "text".to_string()],
     };
@@ -378,7 +387,7 @@ async fn insert_row_with_null_values() {
 
     let insert_data = RowInsertData {
         column_names: vec!["name".to_string(), "email".to_string()],
-        values: vec![Some("Dave".to_string()), None],
+        values: vec![Some(Value::String("Dave".to_string())), None],
         column_types: Vec::new(),
     };
 
@@ -426,9 +435,9 @@ async fn delete_rows_with_primary_key() {
     let delete_data = RowDeleteData {
         all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
         rows: vec![vec![
-            "1".to_string(),
-            "Alice".to_string(),
-            "alice@example.com".to_string(),
+            Value::Int32(1),
+            Value::String("Alice".to_string()),
+            Value::String("alice@example.com".to_string()),
         ]],
     };
 
@@ -664,14 +673,16 @@ async fn browse_with_filters_skips_estimate_for_slow_drivers() {
     let result = service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec!["status = 'active'".to_string()],
-            vec![],
-            vec![],
-            None,
-            None,
-            None,
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec!["status = 'active'".to_string()],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: None,
+                offset: None,
+                cached_total: None,
+            },
         )
         .await
         .expect("should browse with filters");
@@ -719,14 +730,16 @@ async fn browse_with_filters_no_filters_uses_estimate_for_slow_drivers() {
     let result = service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            None,
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: None,
+                offset: None,
+                cached_total: None,
+            },
         )
         .await
         .expect("should browse without filters");
@@ -766,14 +779,16 @@ async fn browse_with_filters_uses_cached_total_when_provided() {
     let result = service
         .browse_table_with_filters(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            None,
-            None,
-            Some(5000),
+            BrowseTableWithFiltersRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: None,
+                offset: None,
+                cached_total: Some(5000),
+            },
         )
         .await
         .expect("should browse with cached total");
@@ -962,13 +977,15 @@ async fn browse_last_page_reverses_rows_and_returns_total() {
     let result = service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            3,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 3,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should browse last page");
@@ -995,13 +1012,15 @@ async fn browse_last_page_uses_pk_desc_without_user_sorts() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            10,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1041,13 +1060,15 @@ async fn browse_last_page_flips_user_sorts() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "events",
-            None,
-            vec![],
-            vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
-            vec![],
-            25,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "events",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
+                visible_columns: vec![],
+                limit: 25,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1077,13 +1098,15 @@ async fn browse_last_page_with_schema_qualifier() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "booking",
-            Some("hotel_db"),
-            vec![],
-            vec![],
-            vec![],
-            1000,
-            vec!["booking_id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "booking",
+                schema: Some("hotel_db"),
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 1000,
+                pk_columns: vec!["booking_id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1109,13 +1132,15 @@ async fn browse_last_page_with_where_clauses() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec!["status = 'active'".to_string()],
-            vec![],
-            vec![],
-            50,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec!["status = 'active'".to_string()],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 50,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1142,13 +1167,15 @@ async fn browse_last_page_with_visible_columns() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec!["id".to_string(), "name".to_string()],
-            20,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec!["id".to_string(), "name".to_string()],
+                limit: 20,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1178,13 +1205,15 @@ async fn browse_last_page_with_composite_pk() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "order_items",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            50,
-            vec!["order_id".to_string(), "item_id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "order_items",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 50,
+                pk_columns: vec!["order_id".to_string(), "item_id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1213,13 +1242,15 @@ async fn browse_last_page_on_failing_connection_returns_error() {
     let result = service
         .browse_last_page(
             conn as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            50,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 50,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await;
 
@@ -1239,13 +1270,15 @@ async fn browse_last_page_runs_count_and_data_concurrently() {
     service
         .browse_last_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            10,
-            vec!["id".to_string()],
+            BrowseLastPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1289,15 +1322,17 @@ async fn browse_near_end_page_reverses_rows_and_preserves_total() {
     let result = service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            2,   // limit
-            96,  // offset (near the end of 100 rows)
-            100, // total_rows
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 2,
+                offset: 96,
+                total_rows: 100,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should browse near-end page");
@@ -1325,15 +1360,17 @@ async fn browse_near_end_page_computes_correct_reverse_offset() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "booking",
-            Some("hotel_db"),
-            vec![],
-            vec![],
-            vec![],
-            1000,
-            54_302_000,
-            54_305_000,
-            vec!["booking_id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "booking",
+                schema: Some("hotel_db"),
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 1000,
+                offset: 54_302_000,
+                total_rows: 54_305_000,
+                pk_columns: vec!["booking_id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1376,15 +1413,17 @@ async fn browse_near_end_page_last_page_has_zero_reverse_offset() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            10,
-            90,
-            100,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                offset: 90,
+                total_rows: 100,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1413,15 +1452,17 @@ async fn browse_near_end_page_partial_last_page_adjusts_limit() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            10,
-            90,
-            95,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                offset: 90,
+                total_rows: 95,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1447,15 +1488,17 @@ async fn browse_near_end_page_flips_user_sorts() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "events",
-            None,
-            vec![],
-            vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
-            vec![],
-            100,
-            900,
-            1000,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "events",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec!["\"created_at\" ASC".to_string(), "\"id\" DESC".to_string()],
+                visible_columns: vec![],
+                limit: 100,
+                offset: 900,
+                total_rows: 1000,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1481,15 +1524,17 @@ async fn browse_near_end_page_with_where_clauses() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec!["status = 'active'".to_string()],
-            vec![],
-            vec![],
-            10,
-            90,
-            100,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec!["status = 'active'".to_string()],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                offset: 90,
+                total_rows: 100,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1515,15 +1560,17 @@ async fn browse_near_end_page_with_visible_columns() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec!["id".to_string(), "name".to_string()],
-            10,
-            90,
-            100,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec!["id".to_string(), "name".to_string()],
+                limit: 10,
+                offset: 90,
+                total_rows: 100,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1549,15 +1596,17 @@ async fn browse_near_end_page_with_composite_pk() {
     service
         .browse_near_end_page(
             conn.clone() as Arc<dyn Connection>,
-            "order_items",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            50,
-            950,
-            1000,
-            vec!["order_id".to_string(), "item_id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "order_items",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 50,
+                offset: 950,
+                total_rows: 1000,
+                pk_columns: vec!["order_id".to_string(), "item_id".to_string()],
+            },
         )
         .await
         .expect("should succeed");
@@ -1583,15 +1632,17 @@ async fn browse_near_end_page_on_failing_connection_returns_error() {
     let result = service
         .browse_near_end_page(
             conn as Arc<dyn Connection>,
-            "users",
-            None,
-            vec![],
-            vec![],
-            vec![],
-            10,
-            90,
-            100,
-            vec!["id".to_string()],
+            BrowseNearEndPageRequest {
+                table_name: "users",
+                schema: None,
+                where_clauses: vec![],
+                order_by_clauses: vec![],
+                visible_columns: vec![],
+                limit: 10,
+                offset: 90,
+                total_rows: 100,
+                pk_columns: vec!["id".to_string()],
+            },
         )
         .await;
 

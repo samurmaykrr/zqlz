@@ -24,15 +24,13 @@ pub use service::QueryService;
 pub use view_models::StatementExecution;
 // Re-export widgets for convenient access
 pub use widgets::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CommentSelection, CopyLineDown,
-    CopyLineUp, DeleteLine, DiagnosticInfo, DiagnosticInfoSeverity, DismissInlineSuggestion,
-    DuplicateLine, EditorMode, EditorObjectType, ExplainResult, FindNext, FindPrevious,
-    FindReferences, FormatQuery, GoToDefinition, MoveLineDown, MoveLineUp, NextProblem,
-    PreviousProblem, ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryEditor,
-    QueryEditorEvent, QueryExecution, QueryHistoryPanel, QueryHistoryPanelEvent, QueryTabsPanel,
-    QueryTabsPanelEvent, RenameSymbol, ResultsPanel, ResultsPanelEvent, SaveQuery, SaveQueryAs,
-    ShowCodeActions, ShowHover, StatementResult, ToggleLineComment, ToggleProblemsPanel,
-    TriggerCompletion, TriggerParameterHints, UncommentSelection,
+    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, DiagnosticInfo,
+    DiagnosticInfoSeverity, DismissInlineSuggestion, EditorMode, EditorObjectType, ExplainResult,
+    FormatQuery, NextProblem, PreviousProblem, ProblemEntry, ProblemSeverity, ProblemsPanel,
+    ProblemsPanelEvent, QueryEditor, QueryEditorEvent, QueryExecution, QueryHistoryPanel,
+    QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent,
+    SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult, ToggleProblemsPanel,
+    TriggerCompletion, TriggerParameterHints,
 };
 
 // Re-export batch execution types
@@ -80,61 +78,34 @@ mod performance {
     /// Sub-100ms response target for LSP operations
     pub const LSP_RESPONSE_TARGET_MS: u64 = 100;
 
-    #[cfg(test)]
-    mod tests {
-        use super::*;
-
-        #[test]
-        fn test_completion_debounce_is_responsive() {
-            // Completion debounce should be fast enough for responsive UI
-            assert!(
-                COMPLETION_DEBOUNCE_MS <= MAX_INTERACTIVE_DEBOUNCE_MS,
-                "Completion debounce {}ms exceeds maximum interactive threshold {}ms",
-                COMPLETION_DEBOUNCE_MS,
-                MAX_INTERACTIVE_DEBOUNCE_MS
-            );
-        }
-
-        #[test]
-        fn test_diagnostics_debounce_is_responsive() {
-            // Diagnostics debounce should still be responsive
-            assert!(
-                DIAGNOSTICS_DEBOUNCE_MS <= MAX_INTERACTIVE_DEBOUNCE_MS,
-                "Diagnostics debounce {}ms exceeds maximum interactive threshold {}ms",
-                DIAGNOSTICS_DEBOUNCE_MS,
-                MAX_INTERACTIVE_DEBOUNCE_MS
-            );
-        }
-
-        #[test]
-        fn test_lsp_response_target_is_aggressive() {
-            // LSP should aim for sub-100ms response
-            assert!(
-                LSP_RESPONSE_TARGET_MS <= 100,
-                "LSP target {}ms should be <= 100ms for responsive experience",
-                LSP_RESPONSE_TARGET_MS
-            );
-        }
-
-        #[test]
-        fn test_debounce_values_are_reasonable() {
-            // Both debounce values should be non-zero and within reasonable bounds
-            assert!(
-                COMPLETION_DEBOUNCE_MS > 0,
-                "Completion debounce must be positive"
-            );
-            assert!(
-                DIAGNOSTICS_DEBOUNCE_MS > 0,
-                "Diagnostics debounce must be positive"
-            );
-            assert!(
-                COMPLETION_DEBOUNCE_MS < 1000,
-                "Completion debounce should be < 1s"
-            );
-            assert!(
-                DIAGNOSTICS_DEBOUNCE_MS < 1000,
-                "Diagnostics debounce should be < 1s"
-            );
-        }
-    }
+    const _: () = {
+        assert!(
+            COMPLETION_DEBOUNCE_MS <= MAX_INTERACTIVE_DEBOUNCE_MS,
+            "completion debounce exceeds interactive threshold"
+        );
+        assert!(
+            DIAGNOSTICS_DEBOUNCE_MS <= MAX_INTERACTIVE_DEBOUNCE_MS,
+            "diagnostics debounce exceeds interactive threshold"
+        );
+        assert!(
+            LSP_RESPONSE_TARGET_MS <= 100,
+            "LSP response target should stay sub-100ms"
+        );
+        assert!(
+            COMPLETION_DEBOUNCE_MS > 0,
+            "completion debounce must be positive"
+        );
+        assert!(
+            DIAGNOSTICS_DEBOUNCE_MS > 0,
+            "diagnostics debounce must be positive"
+        );
+        assert!(
+            COMPLETION_DEBOUNCE_MS < 1000,
+            "completion debounce should be < 1s"
+        );
+        assert!(
+            DIAGNOSTICS_DEBOUNCE_MS < 1000,
+            "diagnostics debounce should be < 1s"
+        );
+    };
 }

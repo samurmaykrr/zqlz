@@ -149,18 +149,17 @@ impl ConnectionSidebar {
     }
 
     /// Update a connection's schema info
-    pub fn set_schema(
-        &mut self,
-        id: Uuid,
-        tables: Vec<String>,
-        views: Vec<String>,
-        materialized_views: Vec<String>,
-        triggers: Vec<String>,
-        functions: Vec<String>,
-        procedures: Vec<String>,
-        schema_name: Option<String>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set_schema(&mut self, id: Uuid, schema: SchemaObjects, cx: &mut Context<Self>) {
+        let SchemaObjects {
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            schema_name,
+        } = schema;
+
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.tables = tables;
             conn.views = views;
@@ -220,7 +219,7 @@ impl ConnectionSidebar {
             conn.databases = databases
                 .into_iter()
                 .map(|(name, size_bytes)| {
-                    let is_active = active_database.map_or(false, |a| a == name);
+                    let is_active = active_database.is_some_and(|a| a == name);
                     if let Some(mut db) = existing.remove(&name) {
                         db.size_bytes = size_bytes;
                         db.is_active = is_active;
@@ -279,7 +278,7 @@ impl ConnectionSidebar {
             conn.databases = databases
                 .into_iter()
                 .map(|(name, size_bytes)| {
-                    let is_active = active_database.map_or(false, |active| active == name);
+                    let is_active = active_database.is_some_and(|active| active == name);
                     SidebarDatabaseInfo {
                         name,
                         size_bytes,
@@ -304,41 +303,45 @@ impl ConnectionSidebar {
         &mut self,
         conn_id: Uuid,
         database_name: &str,
-        tables: Vec<String>,
-        views: Vec<String>,
-        materialized_views: Vec<String>,
-        triggers: Vec<String>,
-        functions: Vec<String>,
-        procedures: Vec<String>,
-        schema_name: Option<String>,
+        schema: SchemaObjects,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name) {
-                db.is_loading = false;
-                db.schema = Some(DatabaseSchemaData {
-                    schema_name,
-                    schema_expanded: true,
-                    tables,
-                    views,
-                    materialized_views,
-                    triggers,
-                    functions,
-                    procedures,
-                    tables_expanded: true,
-                    views_expanded: false,
-                    materialized_views_expanded: false,
-                    triggers_expanded: false,
-                    functions_expanded: false,
-                    procedures_expanded: false,
-                    tables_loading: false,
-                    views_loading: false,
-                    materialized_views_loading: false,
-                    triggers_loading: false,
-                    functions_loading: false,
-                    procedures_loading: false,
-                });
-            }
+        let SchemaObjects {
+            tables,
+            views,
+            materialized_views,
+            triggers,
+            functions,
+            procedures,
+            schema_name,
+        } = schema;
+
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name)
+        {
+            db.is_loading = false;
+            db.schema = Some(DatabaseSchemaData {
+                schema_name,
+                schema_expanded: true,
+                tables,
+                views,
+                materialized_views,
+                triggers,
+                functions,
+                procedures,
+                tables_expanded: true,
+                views_expanded: false,
+                materialized_views_expanded: false,
+                triggers_expanded: false,
+                functions_expanded: false,
+                procedures_expanded: false,
+                tables_loading: false,
+                views_loading: false,
+                materialized_views_loading: false,
+                triggers_loading: false,
+                functions_loading: false,
+                procedures_loading: false,
+            });
         }
         cx.notify();
     }
@@ -351,10 +354,10 @@ impl ConnectionSidebar {
         loading: bool,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name) {
-                db.is_loading = loading;
-            }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == database_name)
+        {
+            db.is_loading = loading;
         }
         cx.notify();
     }
@@ -369,11 +372,11 @@ impl ConnectionSidebar {
 
     /// Add a table to a connection's schema
     pub fn add_table(&mut self, conn_id: Uuid, table_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if !conn.tables.contains(&table_name) {
-                conn.tables.push(table_name);
-                conn.tables.sort();
-            }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && !conn.tables.contains(&table_name)
+        {
+            conn.tables.push(table_name);
+            conn.tables.sort();
         }
         cx.notify();
     }
@@ -388,11 +391,11 @@ impl ConnectionSidebar {
 
     /// Add a view to a connection's schema
     pub fn add_view(&mut self, conn_id: Uuid, view_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if !conn.views.contains(&view_name) {
-                conn.views.push(view_name);
-                conn.views.sort();
-            }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && !conn.views.contains(&view_name)
+        {
+            conn.views.push(view_name);
+            conn.views.sort();
         }
         cx.notify();
     }
@@ -407,11 +410,11 @@ impl ConnectionSidebar {
 
     /// Add a trigger to a connection's schema
     pub fn add_trigger(&mut self, conn_id: Uuid, trigger_name: String, cx: &mut Context<Self>) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if !conn.triggers.contains(&trigger_name) {
-                conn.triggers.push(trigger_name);
-                conn.triggers.sort();
-            }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && !conn.triggers.contains(&trigger_name)
+        {
+            conn.triggers.push(trigger_name);
+            conn.triggers.sort();
         }
         cx.notify();
     }
@@ -436,11 +439,11 @@ impl ConnectionSidebar {
         query: SavedQueryInfo,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if !conn.queries.iter().any(|q| q.id == query.id) {
-                conn.queries.push(query);
-                conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
-            }
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && !conn.queries.iter().any(|q| q.id == query.id)
+        {
+            conn.queries.push(query);
+            conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
         }
         cx.notify();
     }
@@ -477,11 +480,11 @@ impl ConnectionSidebar {
     pub fn set_all_sections_loading(&mut self, conn_id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.tables_loading = true;
-            conn.views_loading = true;
-            conn.materialized_views_loading = true;
-            conn.triggers_loading = true;
-            conn.functions_loading = true;
-            conn.procedures_loading = true;
+            conn.views_loading = conn.object_capabilities.supports_views;
+            conn.materialized_views_loading = conn.object_capabilities.supports_materialized_views;
+            conn.triggers_loading = conn.object_capabilities.supports_triggers;
+            conn.functions_loading = conn.object_capabilities.supports_functions;
+            conn.procedures_loading = conn.object_capabilities.supports_procedures;
         }
         cx.notify();
     }
@@ -516,16 +519,15 @@ impl ConnectionSidebar {
         keys: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(db) = conn
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(db) = conn
                 .redis_databases
                 .iter_mut()
                 .find(|d| d.index == database_index)
-            {
-                db.keys = keys;
-                db.is_loading = false;
-                db.key_count = Some(db.keys.len() as i64);
-            }
+        {
+            db.keys = keys;
+            db.is_loading = false;
+            db.key_count = Some(db.keys.len() as i64);
         }
         cx.notify();
     }

@@ -3,11 +3,9 @@
 //! Handles rendering of Redis-specific database trees with numbered databases.
 
 use gpui::*;
-use uuid::Uuid;
 
-use crate::widgets::sidebar::{
-    ConnectionSidebar, ConnectionSidebarEvent, RedisDatabaseInfo, SavedQueryInfo,
-};
+use super::{LeafItemProps, RedisSchemaTreeProps, SectionHeaderProps};
+use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
 use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, caption, v_flex};
 
 impl ConnectionSidebar {
@@ -55,14 +53,16 @@ impl ConnectionSidebar {
     /// A tree element containing databases and saved queries sections.
     pub(super) fn render_redis_schema_tree(
         &self,
-        conn_id: Uuid,
-        databases: &[RedisDatabaseInfo],
-        databases_expanded: bool,
-        queries: &[SavedQueryInfo],
-        queries_expanded: bool,
-        _window: &mut Window,
+        props: RedisSchemaTreeProps<'_>,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let RedisSchemaTreeProps {
+            conn_id,
+            databases,
+            databases_expanded,
+            queries,
+            queries_expanded,
+        } = props;
         let muted_foreground = cx.theme().muted_foreground;
         let list_hover = cx.theme().list_hover;
         let font_family = cx.theme().font_family.clone();
@@ -100,32 +100,37 @@ impl ConnectionSidebar {
         // ── Databases section ─────────────────────────────────────────
         if !has_search || !filtered_databases.is_empty() {
             let header = self.render_section_header(
-                SharedString::from(format!("databases-header-{}", conn_id)),
-                Icon::new(ZqlzIcon::Database).size_3().into_any_element(),
-                "Databases",
-                databases.len(),
-                filtered_databases.len(),
-                databases_expanded,
-                move |this, _, _, cx| {
-                    this.toggle_redis_databases_expand(conn_id, cx);
-                },
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "redis_databases",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("databases-header-{}", conn_id)),
+                    icon: Icon::new(ZqlzIcon::Database).size_3().into_any_element(),
+                    label: "Databases",
+                    total_count: databases.len(),
+                    filtered_count: filtered_databases.len(),
+                    is_expanded: databases_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        this.toggle_redis_databases_expand(conn_id, cx);
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                1,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "redis_databases",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth: 1,
+                },
                 cx,
             );
 
@@ -143,34 +148,43 @@ impl ConnectionSidebar {
                     );
 
                     let mut row = Self::render_leaf_item(
-                        SharedString::from(format!("redis-db-{}-{}", conn_id, db_index)),
-                        Icon::new(ZqlzIcon::Database)
-                            .size_3()
-                            .text_color(muted_foreground)
-                            .into_any_element(),
-                        label,
-                        move |_this, _, _, cx| {
-                            cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
-                                connection_id: conn_id,
-                                database_index: db_index,
-                            });
+                        LeafItemProps {
+                            element_id: SharedString::from(format!(
+                                "redis-db-{}-{}",
+                                conn_id, db_index
+                            )),
+                            icon: Icon::new(ZqlzIcon::Database)
+                                .size_3()
+                                .text_color(muted_foreground)
+                                .into_any_element(),
+                            label,
+                            on_click:
+                                move |_this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
+                                        connection_id: conn_id,
+                                        database_index: db_index,
+                                    });
+                                },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_redis_db_context_menu(
+                                        conn_id,
+                                        db_index,
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            list_hover,
+                            depth: 2,
                         },
-                        Some(
-                            move |this: &mut Self,
-                                  event: &MouseDownEvent,
-                                  window: &mut Window,
-                                  cx: &mut Context<Self>| {
-                                this.show_redis_db_context_menu(
-                                    conn_id,
-                                    db_index,
-                                    event.position,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ),
-                        list_hover,
-                        2,
                         cx,
                     );
 
@@ -187,32 +201,37 @@ impl ConnectionSidebar {
         // ── Saved Queries section ─────────────────────────────────────
         if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
             let header = self.render_section_header(
-                SharedString::from(format!("queries-header-{}", conn_id)),
-                Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
-                "Saved Queries",
-                queries.len(),
-                filtered_queries.len(),
-                queries_expanded,
-                move |this, _, _, cx| {
-                    this.toggle_queries_expand(conn_id, cx);
-                },
-                Some(
-                    move |this: &mut Self,
-                          event: &MouseDownEvent,
-                          window: &mut Window,
-                          cx: &mut Context<Self>| {
-                        this.show_section_context_menu(
-                            conn_id,
-                            "queries",
-                            event.position,
-                            window,
-                            cx,
-                        );
+                SectionHeaderProps {
+                    element_id: SharedString::from(format!("queries-header-{}", conn_id)),
+                    icon: Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
+                    label: "Saved Queries",
+                    total_count: queries.len(),
+                    filtered_count: filtered_queries.len(),
+                    is_expanded: queries_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        this.toggle_queries_expand(conn_id, cx);
                     },
-                ),
-                muted_foreground,
-                list_hover,
-                1,
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "queries",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth: 1,
+                },
                 cx,
             );
 
@@ -224,36 +243,45 @@ impl ConnectionSidebar {
                     let name_for_click = query.name.clone();
                     let name_for_menu = query.name.clone();
                     section = section.child(Self::render_leaf_item(
-                        SharedString::from(format!("query-{}-{}", conn_id, query_id)),
-                        Icon::new(ZqlzIcon::FileSql)
-                            .size_3()
-                            .text_color(muted_foreground)
-                            .into_any_element(),
-                        query_name,
-                        move |_this, _, _, cx| {
-                            cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
-                                connection_id: conn_id,
-                                query_id,
-                                query_name: name_for_click.clone(),
-                            });
+                        LeafItemProps {
+                            element_id: SharedString::from(format!(
+                                "query-{}-{}",
+                                conn_id, query_id
+                            )),
+                            icon: Icon::new(ZqlzIcon::FileSql)
+                                .size_3()
+                                .text_color(muted_foreground)
+                                .into_any_element(),
+                            label: query_name,
+                            on_click:
+                                move |_this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenSavedQuery {
+                                        connection_id: conn_id,
+                                        query_id,
+                                        query_name: name_for_click.clone(),
+                                    });
+                                },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_query_context_menu(
+                                        conn_id,
+                                        query_id,
+                                        name_for_menu.clone(),
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            list_hover,
+                            depth: 2,
                         },
-                        Some(
-                            move |this: &mut Self,
-                                  event: &MouseDownEvent,
-                                  window: &mut Window,
-                                  cx: &mut Context<Self>| {
-                                this.show_query_context_menu(
-                                    conn_id,
-                                    query_id,
-                                    name_for_menu.clone(),
-                                    event.position,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        ),
-                        list_hover,
-                        2,
                         cx,
                     ));
                 }

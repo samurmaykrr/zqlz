@@ -253,66 +253,17 @@ impl From<ScrollbarVisibility> for zqlz_ui::widgets::scroll::ScrollbarShow {
     }
 }
 
-/// SQL dialect for syntax highlighting and parsing
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SqlDialect {
-    /// Standard SQL (SQL-92 compatible)
-    Standard,
-    /// PostgreSQL dialect
-    Postgres,
-    /// MySQL dialect
-    Mysql,
-    /// SQLite dialect
-    Sqlite,
-    /// MariaDB dialect
-    Mariadb,
-}
-
-impl Default for SqlDialect {
-    fn default() -> Self {
-        Self::Standard
-    }
-}
-
-impl SqlDialect {
-    pub fn display_name(&self) -> &'static str {
-        match self {
-            Self::Standard => "Standard SQL",
-            Self::Postgres => "PostgreSQL",
-            Self::Mysql => "MySQL",
-            Self::Sqlite => "SQLite",
-            Self::Mariadb => "MariaDB",
-        }
-    }
-
-    pub fn all() -> &'static [Self] {
-        &[
-            Self::Standard,
-            Self::Postgres,
-            Self::Mysql,
-            Self::Sqlite,
-            Self::Mariadb,
-        ]
-    }
-}
-
 /// Inline suggestion provider
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum InlineSuggestionProvider {
     /// Use LSP completions only
+    #[default]
     LspOnly,
     /// Use AI completions only
     AiOnly,
     /// Use both LSP and AI, show LSP first
     Both,
-}
-
-impl Default for InlineSuggestionProvider {
-    fn default() -> Self {
-        Self::LspOnly
-    }
 }
 
 impl InlineSuggestionProvider {
@@ -330,10 +281,11 @@ impl InlineSuggestionProvider {
 }
 
 /// AI provider for inline suggestions
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AiProvider {
     /// OpenAI API
+    #[default]
     OpenAi,
     /// Anthropic API
     Anthropic,
@@ -341,12 +293,6 @@ pub enum AiProvider {
     Local,
     /// No AI provider (disabled)
     None,
-}
-
-impl Default for AiProvider {
-    fn default() -> Self {
-        Self::OpenAi
-    }
 }
 
 impl AiProvider {
@@ -414,60 +360,40 @@ impl FontSettings {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorBlink {
+    #[default]
     On,
     Off,
     System,
 }
 
-impl Default for CursorBlink {
-    fn default() -> Self {
-        Self::On
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CursorShape {
     Block,
+    #[default]
     Line,
     Underline,
 }
 
-impl Default for CursorShape {
-    fn default() -> Self {
-        Self::Line
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScrollBeyondLastLine {
+    #[default]
     Disabled,
     Enabled,
     HorizontalScrollbar,
 }
 
-impl Default for ScrollBeyondLastLine {
-    fn default() -> Self {
-        Self::Disabled
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SearchWrap {
     Disabled,
+    #[default]
     Enabled,
     NoWrap,
-}
-
-impl Default for SearchWrap {
-    fn default() -> Self {
-        Self::Enabled
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -482,9 +408,7 @@ pub struct EditorSettings {
     pub show_inline_diagnostics: bool,
     pub auto_indent: bool,
     pub bracket_matching: bool,
-    pub vim_mode_enabled: bool,
     pub highlight_enabled: bool,
-    pub sql_dialect: SqlDialect,
     // Cursor and selection
     pub cursor_blink: CursorBlink,
     pub cursor_shape: CursorShape,
@@ -535,9 +459,7 @@ impl Default for EditorSettings {
             show_inline_diagnostics: true,
             auto_indent: true,
             bracket_matching: true,
-            vim_mode_enabled: false,
             highlight_enabled: true,
-            sql_dialect: SqlDialect::Standard,
             // Cursor and selection
             cursor_blink: CursorBlink::On,
             cursor_shape: CursorShape::Line,
@@ -660,7 +582,7 @@ impl WindowAppearanceExt for gpui::WindowAppearance {
 ///     EditorConfig::new(cx)
 /// }
 /// ```
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct EditorConfig {
     editor: EditorSettings,
 }
@@ -725,11 +647,6 @@ impl EditorConfig {
     /// Returns whether to highlight matching brackets.
     pub fn bracket_matching(&self) -> bool {
         self.editor.bracket_matching
-    }
-
-    /// Returns whether vim mode is enabled.
-    pub fn vim_mode_enabled(&self) -> bool {
-        self.editor.vim_mode_enabled
     }
 
     /// Returns whether syntax highlighting is enabled.
@@ -845,13 +762,5 @@ impl EditorConfig {
     /// Returns a reference to the underlying EditorSettings.
     pub fn as_settings(&self) -> &EditorSettings {
         &self.editor
-    }
-}
-
-impl Default for EditorConfig {
-    fn default() -> Self {
-        Self {
-            editor: EditorSettings::default(),
-        }
     }
 }

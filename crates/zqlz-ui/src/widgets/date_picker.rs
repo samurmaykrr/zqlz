@@ -44,6 +44,8 @@ use super::{
 
 const CONTEXT: &str = "DatePicker";
 
+type DatePickerChangeHandler = Rc<dyn Fn(&str, &mut Window, &mut App)>;
+
 /// Initialize the date picker key bindings
 pub fn init(cx: &mut App) {
     cx.bind_keys([KeyBinding::new("escape", Cancel, Some(CONTEXT))])
@@ -152,7 +154,7 @@ fn current_datetime_string(mode: DatePickerMode) -> String {
 /// Parse year, month, day from a date string
 fn parse_date_parts(value: &str) -> Option<(i32, u32, u32)> {
     // Try to extract date part (before space or T)
-    let date_part = value.split(|c| c == ' ' || c == 'T').next()?;
+    let date_part = value.split([' ', 'T']).next()?;
     let parts: Vec<&str> = date_part.split('-').collect();
     if parts.len() >= 3 {
         let year = parts[0].parse().ok()?;
@@ -186,7 +188,7 @@ pub struct DatePickerState {
     nullable: bool,
     /// Whether the calendar popover is open
     popover_open: bool,
-    on_change: Option<Rc<dyn Fn(&str, &mut Window, &mut App)>>,
+    on_change: Option<DatePickerChangeHandler>,
 }
 
 impl DatePickerState {
@@ -469,7 +471,7 @@ impl DatePickerState {
             // Try to extract existing time part
             let time_part = self
                 .text_value
-                .split(|c| c == ' ' || c == 'T')
+                .split([' ', 'T'])
                 .nth(1)
                 .unwrap_or("00:00:00");
             format!("{} {}", new_date, time_part)
@@ -618,7 +620,7 @@ impl DatePickerState {
         }
 
         // Empty cells after last day (fill to complete weeks)
-        while cells.len() % 7 != 0 || cells.len() < 35 {
+        while !cells.len().is_multiple_of(7) || cells.len() < 35 {
             cells.push(None);
         }
 
@@ -672,7 +674,7 @@ impl DatePickerState {
         // Parse current time from text value
         let time_part = self
             .text_value
-            .split(|c| c == ' ' || c == 'T')
+            .split([' ', 'T'])
             .nth(if self.mode == DatePickerMode::Time {
                 0
             } else {
@@ -687,10 +689,7 @@ impl DatePickerState {
         // Handle seconds with potential fractional part
         let (second, micros): (u32, u32) = if let Some(sec_str) = time_parts.get(2) {
             // Remove timezone suffix if present (e.g., "+00" or "-05")
-            let sec_clean = sec_str
-                .split(|c: char| c == '+' || c == '-')
-                .next()
-                .unwrap_or(sec_str);
+            let sec_clean = sec_str.split(['+', '-']).next().unwrap_or(sec_str);
 
             if let Some(dot_pos) = sec_clean.find('.') {
                 let sec: u32 = sec_clean[..dot_pos].parse().unwrap_or(0);
@@ -820,7 +819,7 @@ impl DatePickerState {
         // Parse current time
         let time_part = self
             .text_value
-            .split(|c| c == ' ' || c == 'T')
+            .split([' ', 'T'])
             .nth(if self.mode == DatePickerMode::Time {
                 0
             } else {
@@ -834,10 +833,7 @@ impl DatePickerState {
 
         // Parse seconds with fractional part
         let sec_str = time_parts.get(2).unwrap_or(&"00");
-        let sec_clean = sec_str
-            .split(|c: char| c == '+' || c == '-')
-            .next()
-            .unwrap_or(sec_str);
+        let sec_clean = sec_str.split(['+', '-']).next().unwrap_or(sec_str);
         let (mut second, frac_part): (i32, &str) = if let Some(dot_pos) = sec_clean.find('.') {
             (
                 sec_clean[..dot_pos].parse().unwrap_or(0),
@@ -848,7 +844,7 @@ impl DatePickerState {
         };
 
         // Extract timezone suffix if present
-        let tz_suffix = if let Some(pos) = time_part.rfind(|c: char| c == '+' || c == '-') {
+        let tz_suffix = if let Some(pos) = time_part.rfind(['+', '-']) {
             if pos > time_part.len() - 10 {
                 // Likely a timezone
                 &time_part[pos..]
@@ -885,7 +881,7 @@ impl DatePickerState {
             DatePickerMode::DateTime | DatePickerMode::Date => {
                 let date_part = self
                     .text_value
-                    .split(|c| c == ' ' || c == 'T')
+                    .split([' ', 'T'])
                     .next()
                     .unwrap_or("1970-01-01");
                 format!("{} {}", date_part, new_time)
@@ -904,7 +900,7 @@ impl DatePickerState {
         // Parse current time
         let time_part = self
             .text_value
-            .split(|c| c == ' ' || c == 'T')
+            .split([' ', 'T'])
             .nth(if self.mode == DatePickerMode::Time {
                 0
             } else {
@@ -917,10 +913,7 @@ impl DatePickerState {
         let minute: u32 = time_parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0);
 
         let sec_str = time_parts.get(2).unwrap_or(&"00");
-        let sec_clean = sec_str
-            .split(|c: char| c == '+' || c == '-')
-            .next()
-            .unwrap_or(sec_str);
+        let sec_clean = sec_str.split(['+', '-']).next().unwrap_or(sec_str);
         let (second, micros): (u32, u32) = if let Some(dot_pos) = sec_clean.find('.') {
             let sec: u32 = sec_clean[..dot_pos].parse().unwrap_or(0);
             let frac_str = &sec_clean[dot_pos + 1..];
@@ -932,7 +925,7 @@ impl DatePickerState {
         };
 
         // Extract timezone suffix
-        let tz_suffix = if let Some(pos) = time_part.rfind(|c: char| c == '+' || c == '-') {
+        let tz_suffix = if let Some(pos) = time_part.rfind(['+', '-']) {
             if pos > time_part.len() - 10 {
                 &time_part[pos..]
             } else {
@@ -957,7 +950,7 @@ impl DatePickerState {
             DatePickerMode::DateTime | DatePickerMode::Date => {
                 let date_part = self
                     .text_value
-                    .split(|c| c == ' ' || c == 'T')
+                    .split([' ', 'T'])
                     .next()
                     .unwrap_or("1970-01-01");
                 format!("{} {}", date_part, new_time)
@@ -1445,7 +1438,7 @@ fn render_calendar_grid_static(
     }
 
     // Empty cells after last day (fill to complete weeks)
-    while cells.len() % 7 != 0 || cells.len() < 35 {
+    while !cells.len().is_multiple_of(7) || cells.len() < 35 {
         cells.push(None);
     }
 
@@ -1510,7 +1503,7 @@ fn render_time_spinners_static(
 
     // Parse current time from text value
     let time_part = text_value
-        .split(|c| c == ' ' || c == 'T')
+        .split([' ', 'T'])
         .nth(if mode == DatePickerMode::Time { 0 } else { 1 })
         .unwrap_or("00:00:00");
 
@@ -1520,10 +1513,7 @@ fn render_time_spinners_static(
 
     // Handle seconds with potential fractional part
     let (second, micros): (u32, u32) = if let Some(sec_str) = time_parts.get(2) {
-        let sec_clean = sec_str
-            .split(|c: char| c == '+' || c == '-')
-            .next()
-            .unwrap_or(sec_str);
+        let sec_clean = sec_str.split(['+', '-']).next().unwrap_or(sec_str);
 
         if let Some(dot_pos) = sec_clean.find('.') {
             let sec: u32 = sec_clean[..dot_pos].parse().unwrap_or(0);

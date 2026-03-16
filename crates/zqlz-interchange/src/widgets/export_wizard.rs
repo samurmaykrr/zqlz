@@ -657,10 +657,10 @@ impl ExportWizard {
 
     /// Toggle column selection
     fn toggle_column_selection(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let Some(table) = self.state.current_table_mut() {
-            if let Some(col) = table.columns.get_mut(index) {
-                col.selected = !col.selected;
-            }
+        if let Some(table) = self.state.current_table_mut()
+            && let Some(col) = table.columns.get_mut(index)
+        {
+            col.selected = !col.selected;
         }
         cx.notify();
     }
@@ -839,19 +839,19 @@ impl ExportWizard {
         let driver_name = connection.driver_name().to_string();
 
         // Build ExportOptions from wizard state
-        let mut options = ExportOptions::default();
-        options.include_schema = export_state.include_schema;
-        options.include_data = export_state.include_data;
-        options.include_indexes = export_state.include_indexes;
-        options.include_foreign_keys = export_state.include_foreign_keys;
-
-        // Add selected tables
-        options.include_tables = export_state
-            .tables
-            .iter()
-            .filter(|t| t.selected)
-            .map(|t| t.table_name.clone())
-            .collect();
+        let mut options = ExportOptions {
+            include_schema: export_state.include_schema,
+            include_data: export_state.include_data,
+            include_indexes: export_state.include_indexes,
+            include_foreign_keys: export_state.include_foreign_keys,
+            include_tables: export_state
+                .tables
+                .iter()
+                .filter(|t| t.selected)
+                .map(|t| t.table_name.clone())
+                .collect(),
+            ..Default::default()
+        };
 
         // Build include_columns map from selected columns
         for table in &export_state.tables {
@@ -1182,21 +1182,21 @@ impl ExportWizard {
                                 });
 
                                 cx.spawn(async move |cx| {
-                                    if let Ok(Ok(Some(paths))) = receiver.await {
-                                        if let Some(path) = paths.first() {
-                                            let path_str = path.to_string_lossy().to_string();
-                                            let path_buf = path.clone();
-                                            _ = window_handle.update(cx, |_, window, cx| {
-                                                folder_input.update(cx, |input, cx| {
-                                                    input.set_value(path_str, window, cx);
-                                                });
+                                    if let Ok(Ok(Some(paths))) = receiver.await
+                                        && let Some(path) = paths.first()
+                                    {
+                                        let path_str = path.to_string_lossy().to_string();
+                                        let path_buf = path.clone();
+                                        _ = window_handle.update(cx, |_, window, cx| {
+                                            folder_input.update(cx, |input, cx| {
+                                                input.set_value(path_str, window, cx);
                                             });
-                                            // Also update the state
-                                            _ = view.update(cx, |this, cx| {
-                                                this.state.output_folder = path_buf;
-                                                cx.notify();
-                                            });
-                                        }
+                                        });
+                                        // Also update the state
+                                        view.update(cx, |this, cx| {
+                                            this.state.output_folder = path_buf;
+                                            cx.notify();
+                                        });
                                     }
                                     anyhow::Ok(())
                                 })
@@ -1297,19 +1297,15 @@ impl ExportWizard {
         let theme = cx.theme();
         let tables = self.state.tables.clone();
         let view = cx.entity().clone();
-        let context_menu_row = self.context_menu_row;
-
-        // Single context menu on container that uses the tracked row index
-        let view_for_container_menu = view.clone();
-
         div()
             .w_full()
             .h_full()
             .overflow_y_scrollbar()
             // Single context menu on container
             .context_menu({
+                let view_for_container_menu = view.clone();
                 move |menu, window, _cx| {
-                    let row_idx = context_menu_row;
+                    let row_idx = view_for_container_menu.read(_cx).context_menu_row;
 
                     menu.when_some(row_idx, |menu, idx| {
                         menu.item(PopupMenuItem::new("Select Only This").on_click({

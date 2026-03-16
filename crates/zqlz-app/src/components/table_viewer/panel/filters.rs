@@ -125,10 +125,9 @@ impl TableViewerPanel {
                 state.add_sort(column_name.clone(), cx);
                 if direction
                     == crate::components::table_viewer::filter_types::SortDirection::Descending
+                    && let Some(sort) = state.sorts.last_mut()
                 {
-                    if let Some(sort) = state.sorts.last_mut() {
-                        sort.direction = direction;
-                    }
+                    sort.direction = direction;
                 }
             });
         }
@@ -145,8 +144,18 @@ impl TableViewerPanel {
         cx.notify();
     }
 
-    pub fn toggle_column_visibility(&mut self, cx: &mut Context<Self>) {
+    pub fn toggle_column_visibility(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.column_visibility_shown = !self.column_visibility_shown;
+
+        if self.column_visibility_shown
+            && let Some(column_visibility_state) = &self.column_visibility_state
+        {
+            self.focus_handle.focus(window, cx);
+            column_visibility_state.update(cx, |state, cx| {
+                state.focus_search(window, cx);
+            });
+        }
+
         cx.notify();
     }
 }

@@ -59,7 +59,6 @@ pub struct LocalStorage {
 }
 
 #[allow(dead_code)]
-#[allow(dead_code)]
 impl LocalStorage {
     /// Create a new local storage instance
     pub fn new() -> Result<Self> {

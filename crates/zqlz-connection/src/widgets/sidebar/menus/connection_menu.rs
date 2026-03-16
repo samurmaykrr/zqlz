@@ -41,11 +41,21 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.selected_connection != Some(conn_id) {
+            self.select_connection(conn_id, cx);
+        }
+
         let is_connected = self
             .connections
             .iter()
             .find(|c| c.id == conn_id)
             .map(|c| c.is_connected)
+            .unwrap_or(false);
+        let is_connecting = self
+            .connections
+            .iter()
+            .find(|c| c.id == conn_id)
+            .map(|c| c.is_connecting)
             .unwrap_or(false);
 
         if self.connection_context_menu.is_none() {
@@ -53,39 +63,53 @@ impl ConnectionSidebar {
         }
 
         let sidebar_weak = cx.entity().downgrade();
+        let action_context = self.focus_handle.clone();
 
         if let Some(menu_state) = &self.connection_context_menu {
             menu_state.update(cx, |state, cx| {
+                state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
                     let menu = if !is_connected {
-                        menu.item(PopupMenuItem::new("Connect").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::Connect(conn_id));
-                                });
-                            }
-                        }))
-                        .separator()
+                        menu.action_context(action_context.clone())
+                            .item(
+                                PopupMenuItem::new("Connect")
+                                    .disabled(is_connecting)
+                                    .on_click({
+                                        let sidebar = sidebar_weak.clone();
+                                        move |_event, _window, cx| {
+                                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                                cx.emit(ConnectionSidebarEvent::Connect(conn_id));
+                                            });
+                                        }
+                                    }),
+                            )
+                            .separator()
                     } else {
-                        menu.item(PopupMenuItem::new("New Query").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::NewQuery(conn_id));
-                                });
-                            }
-                        }))
-                        .item(PopupMenuItem::new("Disconnect").on_click({
-                            let sidebar = sidebar_weak.clone();
-                            move |_event, _window, cx| {
-                                _ = sidebar.update(cx, |_sidebar, cx| {
-                                    cx.emit(ConnectionSidebarEvent::Disconnect(conn_id));
-                                });
-                            }
-                        }))
-                        .separator()
+                        menu.action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Query").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::NewQuery(conn_id));
+                                    });
+                                }
+                            }))
+                            .item(
+                                PopupMenuItem::new("Disconnect")
+                                    .disabled(is_connecting)
+                                    .on_click({
+                                        let sidebar = sidebar_weak.clone();
+                                        move |_event, _window, cx| {
+                                            _ = sidebar.update(cx, |_sidebar, cx| {
+                                                cx.emit(ConnectionSidebarEvent::Disconnect(
+                                                    conn_id,
+                                                ));
+                                            });
+                                        }
+                                    }),
+                            )
+                            .separator()
                     };
 
                     menu.item(PopupMenuItem::new("Open Settings").on_click({
@@ -130,7 +154,7 @@ impl ConnectionSidebar {
                     move |_state, _, _event: &DismissEvent, cx| {
                         let menu_state = menu_state_entity.clone();
                         cx.defer(move |cx| {
-                            _ = menu_state.update(cx, |state, cx| {
+                            menu_state.update(cx, |state, cx| {
                                 state.open = false;
                                 cx.notify();
                             });

@@ -3,9 +3,10 @@
 //! Defines the types of database objects that can be version controlled.
 
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
 /// Types of database objects that can be versioned
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DatabaseObjectType {
     /// Stored procedure
     Procedure,
@@ -30,6 +31,7 @@ pub enum DatabaseObjectType {
     /// Policy (row-level security)
     Policy,
     /// Other/unknown object type
+    #[default]
     Other,
 }
 
@@ -52,8 +54,8 @@ impl DatabaseObjectType {
         }
     }
 
-    /// Parse from string representation
-    pub fn from_str(s: &str) -> Self {
+    /// Parse from string representation.
+    pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
             "procedure" | "stored_procedure" => Self::Procedure,
             "function" => Self::Function,
@@ -129,9 +131,11 @@ impl DatabaseObjectType {
     }
 }
 
-impl Default for DatabaseObjectType {
-    fn default() -> Self {
-        Self::Other
+impl FromStr for DatabaseObjectType {
+    type Err = std::convert::Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::parse(s))
     }
 }
 
@@ -157,7 +161,7 @@ mod tests {
 
         for t in types {
             let s = t.as_str();
-            let parsed = DatabaseObjectType::from_str(s);
+            let parsed = DatabaseObjectType::parse(s);
             assert_eq!(t, parsed, "Failed roundtrip for {:?}", t);
         }
     }
@@ -165,15 +169,15 @@ mod tests {
     #[test]
     fn test_from_str_variants() {
         assert_eq!(
-            DatabaseObjectType::from_str("stored_procedure"),
+            DatabaseObjectType::parse("stored_procedure"),
             DatabaseObjectType::Procedure
         );
         assert_eq!(
-            DatabaseObjectType::from_str("FUNCTION"),
+            DatabaseObjectType::parse("FUNCTION"),
             DatabaseObjectType::Function
         );
         assert_eq!(
-            DatabaseObjectType::from_str("matview"),
+            DatabaseObjectType::parse("matview"),
             DatabaseObjectType::MaterializedView
         );
     }

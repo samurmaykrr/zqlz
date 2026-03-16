@@ -8,12 +8,561 @@
 
 use anyhow::Result;
 use gpui::{App, Context, Task, Window};
-use lsp_types::{CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse, Hover};
+use lsp_types::{
+    CodeActionOrCommand, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
+    Hover, InsertTextFormat, WorkspaceEdit,
+};
 use ropey::Rope;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::TextEditor;
+use crate::{DocumentContext, TextEditor};
+
+#[derive(Clone, Debug)]
+pub struct CompletionRequestContext {
+    pub revision: usize,
+    pub cursor_offset: usize,
+    pub trigger_offset: usize,
+    pub current_prefix: String,
+}
+
+#[derive(Clone, Debug)]
+pub enum CompletionResolution {
+    CachedFilter {
+        items: Vec<CompletionItem>,
+        trigger_offset: usize,
+    },
+    Clear,
+    Provider {
+        request: RequestToken,
+        trigger_offset: usize,
+        trigger_prefix: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct HoverRequestContext {
+    pub revision: usize,
+    pub cursor_offset: usize,
+    pub offset: usize,
+    pub word_target: Option<crate::WordTarget>,
+}
+
+#[derive(Clone, Debug)]
+pub enum HoverResolution {
+    Provider { request: RequestToken },
+    Fallback(Option<HoverState>),
+    Clear,
+}
+
+#[derive(Clone, Debug)]
+pub struct HoverState {
+    pub word: String,
+    pub documentation: String,
+    pub range: std::ops::Range<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub struct CompletionMenuData {
+    pub items: Vec<CompletionItem>,
+    pub selected_index: usize,
+    pub scroll_offset: usize,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompletionMenuState {
+    pub(crate) items: Vec<CompletionItem>,
+    pub(crate) trigger_offset: usize,
+    pub(crate) selected_index: usize,
+    pub(crate) scroll_offset: usize,
+    pub(crate) scroll_accumulator: f32,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct CompletionCache {
+    pub(crate) all_items: Vec<CompletionItem>,
+    pub(crate) trigger_prefix: String,
+    pub(crate) trigger_offset: usize,
+}
+
+#[derive(Default)]
+pub struct LspUiState {
+    completion_menu: Option<CompletionMenuState>,
+    completion_cache: Option<CompletionCache>,
+    hover_state: Option<HoverState>,
+}
+
+impl LspUiState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn completion_menu_state(&self) -> Option<&CompletionMenuState> {
+        self.completion_menu.as_ref()
+    }
+
+    pub(crate) fn completion_menu_state_mut(&mut self) -> Option<&mut CompletionMenuState> {
+        self.completion_menu.as_mut()
+    }
+
+    pub(crate) fn completion_cache(&self) -> Option<&CompletionCache> {
+        self.completion_cache.as_ref()
+    }
+
+    pub(crate) fn set_completion_cache(&mut self, cache: CompletionCache) {
+        self.completion_cache = Some(cache);
+    }
+
+    pub(crate) fn set_completion_items(
+        &mut self,
+        items: Vec<CompletionItem>,
+        trigger_offset: usize,
+    ) {
+        if items.is_empty() {
+            self.completion_menu = None;
+            return;
+        }
+
+        self.completion_menu = Some(CompletionMenuState {
+            items,
+            trigger_offset,
+            selected_index: 0,
+            scroll_offset: 0,
+            scroll_accumulator: 0.0,
+        });
+    }
+
+    pub(crate) fn take_completion_menu_state(&mut self) -> Option<CompletionMenuState> {
+        self.completion_menu.take()
+    }
+
+    pub fn clear_completion_menu(&mut self) {
+        self.completion_menu = None;
+    }
+
+    pub fn clear_completion(&mut self) {
+        self.completion_menu = None;
+        self.completion_cache = None;
+    }
+
+    pub fn has_completion_menu(&self) -> bool {
+        self.completion_menu.is_some()
+    }
+
+    pub fn completion_menu(&self) -> Option<CompletionMenuData> {
+        self.completion_menu
+            .as_ref()
+            .map(|menu| CompletionMenuData {
+                items: menu.items.clone(),
+                selected_index: menu.selected_index,
+                scroll_offset: menu.scroll_offset,
+            })
+    }
+
+    pub fn hover_state(&self) -> Option<HoverState> {
+        self.hover_state.clone()
+    }
+
+    pub fn set_hover_state(&mut self, hover_state: HoverState) {
+        self.hover_state = Some(hover_state);
+    }
+
+    pub fn clear_hover_state(&mut self) {
+        self.hover_state = None;
+    }
+
+    pub fn has_hover(&self) -> bool {
+        self.hover_state.is_some()
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RequestToken {
+    pub revision: usize,
+    pub cursor_offset: usize,
+    pub generation: u64,
+}
+
+#[derive(Default)]
+struct RequestTracker {
+    generation: u64,
+}
+
+impl RequestTracker {
+    fn begin(&mut self, revision: usize, cursor_offset: usize) -> RequestToken {
+        self.generation = self.generation.saturating_add(1);
+        RequestToken {
+            revision,
+            cursor_offset,
+            generation: self.generation,
+        }
+    }
+
+    fn matches(&self, token: RequestToken, revision: usize, cursor_offset: usize) -> bool {
+        revision == token.revision
+            && cursor_offset == token.cursor_offset
+            && self.generation == token.generation
+    }
+}
+
+pub struct LspRequestState {
+    completion: RequestTracker,
+    hover: RequestTracker,
+    completion_debounce_task: Task<Result<()>>,
+    completion_task: Task<Result<()>>,
+    hover_task: Task<Result<()>>,
+    completion_pending: bool,
+    completion_pending_context: Option<CompletionContext>,
+}
+
+impl Default for LspRequestState {
+    fn default() -> Self {
+        Self {
+            completion: RequestTracker::default(),
+            hover: RequestTracker::default(),
+            completion_debounce_task: Task::ready(Ok(())),
+            completion_task: Task::ready(Ok(())),
+            hover_task: Task::ready(Ok(())),
+            completion_pending: false,
+            completion_pending_context: None,
+        }
+    }
+}
+
+impl LspRequestState {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn begin_completion(&mut self, revision: usize, cursor_offset: usize) -> RequestToken {
+        self.completion.begin(revision, cursor_offset)
+    }
+
+    pub fn begin_hover(&mut self, revision: usize, cursor_offset: usize) -> RequestToken {
+        self.hover.begin(revision, cursor_offset)
+    }
+
+    pub fn matches_completion(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.completion.matches(token, revision, cursor_offset)
+    }
+
+    pub fn matches_hover(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.hover.matches(token, revision, cursor_offset)
+    }
+
+    pub fn replace_completion_debounce_task(&mut self, task: Task<Result<()>>) {
+        self.completion_debounce_task = task;
+    }
+
+    pub fn replace_completion_task(&mut self, task: Task<Result<()>>) {
+        self.completion_task = task;
+    }
+
+    pub fn replace_hover_task(&mut self, task: Task<Result<()>>) {
+        self.hover_task = task;
+    }
+
+    pub fn queue_completion_refresh(&mut self, trigger: CompletionContext) {
+        self.completion_pending = true;
+        self.completion_pending_context = Some(trigger);
+    }
+
+    pub fn completion_pending(&self) -> bool {
+        self.completion_pending
+    }
+
+    pub fn take_pending_completion_context(&mut self) -> Option<CompletionContext> {
+        self.completion_pending = false;
+        self.completion_pending_context.take()
+    }
+
+    pub fn clear_pending_completion(&mut self) {
+        self.completion_pending = false;
+        self.completion_pending_context = None;
+    }
+
+    pub fn reset(&mut self) {
+        self.completion_debounce_task = Task::ready(Ok(()));
+        self.completion_task = Task::ready(Ok(()));
+        self.hover_task = Task::ready(Ok(()));
+        self.completion_pending = false;
+        self.completion_pending_context = None;
+    }
+
+    pub(crate) fn resolve_completion_request(
+        &mut self,
+        completion_cache: Option<&CompletionCache>,
+        allow_provider_requests: bool,
+        provider_available: bool,
+        context: CompletionRequestContext,
+    ) -> CompletionResolution {
+        if let Some(cache) = completion_cache
+            && cache.trigger_offset == context.trigger_offset
+            && context
+                .current_prefix
+                .to_lowercase()
+                .starts_with(&cache.trigger_prefix.to_lowercase())
+        {
+            let prefix_lower = context.current_prefix.to_lowercase();
+            let filtered = cache
+                .all_items
+                .iter()
+                .filter(|item| item.label.to_lowercase().contains(&prefix_lower))
+                .cloned()
+                .collect();
+            return CompletionResolution::CachedFilter {
+                items: filtered,
+                trigger_offset: context.trigger_offset,
+            };
+        }
+
+        if !provider_available || !allow_provider_requests {
+            return CompletionResolution::Clear;
+        }
+
+        CompletionResolution::Provider {
+            request: self.begin_completion(context.revision, context.cursor_offset),
+            trigger_offset: context.trigger_offset,
+            trigger_prefix: context.current_prefix,
+        }
+    }
+
+    pub(crate) fn resolve_hover_request(
+        &mut self,
+        allow_provider_requests: bool,
+        provider_available: bool,
+        fallback_hover: Option<HoverState>,
+        context: HoverRequestContext,
+    ) -> HoverResolution {
+        if provider_available && allow_provider_requests {
+            return HoverResolution::Provider {
+                request: self.begin_hover(context.revision, context.cursor_offset),
+            };
+        }
+
+        if let Some(hover) = fallback_hover {
+            return HoverResolution::Fallback(Some(hover));
+        }
+
+        if context.word_target.is_none() {
+            HoverResolution::Clear
+        } else {
+            HoverResolution::Fallback(None)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CompletionRequestContext, CompletionResolution, HoverRequestContext, HoverResolution,
+        HoverState, LspRequestState, LspUiState,
+    };
+    use lsp_types::CompletionItem;
+
+    #[test]
+    fn request_state_rejects_stale_completion_tokens() {
+        let mut state = LspRequestState::new();
+        let stale = state.begin_completion(1, 4);
+        let current = state.begin_completion(2, 5);
+
+        assert!(!state.matches_completion(stale, 2, 5));
+        assert!(state.matches_completion(current, 2, 5));
+    }
+
+    #[test]
+    fn request_state_rejects_stale_hover_tokens_after_cursor_move() {
+        let mut state = LspRequestState::new();
+        let stale = state.begin_hover(3, 7);
+        let current = state.begin_hover(3, 9);
+
+        assert!(!state.matches_hover(stale, 3, 9));
+        assert!(state.matches_hover(current, 3, 9));
+    }
+
+    #[test]
+    fn ui_state_keeps_completion_cache_when_menu_is_filtered() {
+        let mut state = LspUiState::new();
+        state.set_completion_cache(super::CompletionCache {
+            all_items: vec![CompletionItem {
+                label: "select".to_string(),
+                ..Default::default()
+            }],
+            trigger_prefix: "se".to_string(),
+            trigger_offset: 3,
+        });
+        state.set_completion_items(
+            vec![CompletionItem {
+                label: "select".to_string(),
+                ..Default::default()
+            }],
+            3,
+        );
+
+        assert!(state.has_completion_menu());
+        assert_eq!(
+            state
+                .completion_cache()
+                .expect("completion cache")
+                .trigger_offset,
+            3
+        );
+
+        state.clear_completion_menu();
+
+        assert!(state.completion_cache().is_some());
+        assert!(!state.has_completion_menu());
+    }
+
+    #[test]
+    fn ui_state_tracks_hover_state_separately_from_provider_availability() {
+        let mut state = LspUiState::new();
+        state.set_hover_state(HoverState {
+            word: "select".to_string(),
+            documentation: "keyword".to_string(),
+            range: 0..6,
+        });
+
+        assert!(state.has_hover());
+        assert_eq!(state.hover_state().expect("hover state").word, "select");
+
+        state.clear_hover_state();
+
+        assert!(!state.has_hover());
+    }
+
+    #[test]
+    fn request_state_prefers_cached_completion_filter_when_prefix_extends_trigger() {
+        let mut state = LspRequestState::new();
+        let cache = super::CompletionCache {
+            all_items: vec![CompletionItem {
+                label: "select".to_string(),
+                ..Default::default()
+            }],
+            trigger_prefix: "se".to_string(),
+            trigger_offset: 3,
+        };
+
+        let resolution = state.resolve_completion_request(
+            Some(&cache),
+            true,
+            true,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 5,
+                trigger_offset: 3,
+                current_prefix: "sel".to_string(),
+            },
+        );
+
+        match resolution {
+            CompletionResolution::CachedFilter {
+                items,
+                trigger_offset,
+            } => {
+                assert_eq!(trigger_offset, 3);
+                assert_eq!(items.len(), 1);
+            }
+            other => panic!("expected cached completion filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_state_clears_completions_without_provider_or_cache() {
+        let mut state = LspRequestState::new();
+
+        let resolution = state.resolve_completion_request(
+            None,
+            true,
+            false,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 5,
+                trigger_offset: 3,
+                current_prefix: "se".to_string(),
+            },
+        );
+
+        assert!(matches!(resolution, CompletionResolution::Clear));
+    }
+
+    #[test]
+    fn request_state_returns_provider_hover_when_provider_is_available() {
+        let mut state = LspRequestState::new();
+
+        let resolution = state.resolve_hover_request(
+            true,
+            true,
+            None,
+            HoverRequestContext {
+                revision: 2,
+                cursor_offset: 8,
+                offset: 8,
+                word_target: None,
+            },
+        );
+
+        match resolution {
+            HoverResolution::Provider { request } => {
+                assert_eq!(request.revision, 2);
+                assert_eq!(request.cursor_offset, 8);
+            }
+            other => panic!("expected provider hover request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_state_clears_completions_when_policy_blocks_provider_requests() {
+        let mut state = LspRequestState::new();
+
+        let resolution = state.resolve_completion_request(
+            None,
+            false,
+            true,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 4,
+                trigger_offset: 0,
+                current_prefix: "sel".to_string(),
+            },
+        );
+
+        assert!(matches!(resolution, CompletionResolution::Clear));
+    }
+
+    #[test]
+    fn request_state_uses_fallback_hover_when_policy_blocks_provider_requests() {
+        let mut state = LspRequestState::new();
+
+        let resolution = state.resolve_hover_request(
+            false,
+            true,
+            Some(HoverState {
+                word: "select".to_string(),
+                documentation: "keyword".to_string(),
+                range: 0..6,
+            }),
+            HoverRequestContext {
+                revision: 1,
+                cursor_offset: 4,
+                offset: 4,
+                word_target: None,
+            },
+        );
+
+        assert!(matches!(resolution, HoverResolution::Fallback(Some(_))));
+    }
+}
 
 /// SQL keywords for basic completion
 const SQL_KEYWORDS: &[&str] = &[
@@ -231,6 +780,8 @@ impl SqlCompletionProvider {
                     label: func.to_string(),
                     kind: Some(CompletionItemKind::FUNCTION),
                     detail: Some("SQL Function".to_string()),
+                    insert_text: Some(format!("{}(${{1:value}})", func)),
+                    insert_text_format: Some(InsertTextFormat::SNIPPET),
                     ..Default::default()
                 });
             }
@@ -292,18 +843,6 @@ pub trait CompletionProvider: 'static {
         cx: &mut Context<TextEditor>,
     ) -> Task<Result<CompletionResponse>>;
 
-    /// Get completions for a word prefix (synchronous, basic implementation)
-    ///
-    /// This is a convenience method for getting completions without async context.
-    /// The default implementation returns empty completions; providers should override
-    /// this to provide synchronous keyword/function completions.
-    ///
-    /// For full schema-aware completions, use the async `completions()` method instead.
-    fn get_word_completions(&self, _prefix: &str) -> Vec<CompletionItem> {
-        // Default implementation returns empty - providers should override
-        Vec::new()
-    }
-
     /// Check if completion should be triggered for the given text insertion
     ///
     /// # Arguments
@@ -312,13 +851,13 @@ pub trait CompletionProvider: 'static {
     /// * `cx` - The editor context
     ///
     /// # Returns
-    /// true if completions should be shown, false otherwise
-    fn is_completion_trigger(
+    /// LSP trigger metadata when completion should be shown.
+    fn completion_trigger_context(
         &self,
         offset: usize,
         new_text: &str,
         cx: &mut Context<TextEditor>,
-    ) -> bool;
+    ) -> Option<CompletionContext>;
 }
 
 /// Implementation of CompletionProvider using SqlCompletionProvider
@@ -339,27 +878,39 @@ impl CompletionProvider for SqlCompletionProvider {
         Task::ready(Ok(CompletionResponse::Array(items)))
     }
 
-    fn get_word_completions(&self, prefix: &str) -> Vec<CompletionItem> {
-        // Forward to the SqlCompletionProvider's implementation
-        SqlCompletionProvider::get_word_completions(self, prefix)
-    }
-
-    fn is_completion_trigger(
+    fn completion_trigger_context(
         &self,
         _offset: usize,
         new_text: &str,
         _cx: &mut Context<TextEditor>,
-    ) -> bool {
-        // Trigger on alphanumeric characters (typing)
+    ) -> Option<CompletionContext> {
         if new_text.len() == 1 {
-            let Some(ch) = new_text.chars().next() else {
-                return false;
-            };
-            return ch.is_alphanumeric() || ch == '_';
+            let ch = new_text.chars().next()?;
+
+            if matches!(ch, '.' | ' ' | '(' | ',') {
+                return Some(CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
+                    trigger_character: Some(ch.to_string()),
+                });
+            }
+
+            if ch.is_alphanumeric() || ch == '_' {
+                return Some(CompletionContext {
+                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                    trigger_character: None,
+                });
+            }
+
+            return None;
         }
 
-        // Multi-character input (paste or rapid typing)
-        new_text.chars().any(|c| c.is_alphanumeric())
+        new_text
+            .chars()
+            .any(|c| c.is_alphanumeric())
+            .then_some(CompletionContext {
+                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            })
     }
 }
 
@@ -423,7 +974,7 @@ pub trait HoverProvider: 'static {
 /// the same buffer. Returning `None` means "no definition found."
 pub trait DefinitionProvider: 'static {
     /// Return the byte offset of the definition for the symbol at `offset`, if known.
-    fn definition(&self, text: &Rope, offset: usize) -> Option<usize>;
+    fn definition(&self, text: &Rope, offset: usize, document: &DocumentContext) -> Option<usize>;
 }
 
 /// Provider for find-references requests (feat-047).
@@ -432,7 +983,66 @@ pub trait DefinitionProvider: 'static {
 /// An empty `Vec` means "no references found."
 pub trait ReferencesProvider: 'static {
     /// Return byte ranges of all usages of the symbol at `offset`.
-    fn references(&self, text: &Rope, offset: usize) -> Vec<std::ops::Range<usize>>;
+    fn references(
+        &self,
+        text: &Rope,
+        offset: usize,
+        document: &DocumentContext,
+    ) -> Vec<std::ops::Range<usize>>;
+}
+
+/// Provider for symbol rename operations.
+pub trait RenameProvider: 'static {
+    /// Build the workspace edit required to rename the symbol at `offset`.
+    fn rename(
+        &self,
+        text: &Rope,
+        offset: usize,
+        new_name: &str,
+        document: &DocumentContext,
+    ) -> Option<WorkspaceEdit>;
+}
+
+/// Provider for code actions at the current cursor position.
+pub trait CodeActionProvider: 'static {
+    /// Return available code actions for the symbol or diagnostic under `offset`.
+    fn code_actions(
+        &self,
+        text: &Rope,
+        offset: usize,
+        document: &DocumentContext,
+    ) -> Vec<CodeActionOrCommand>;
+}
+
+/// Preferred side of the anchor position to render an inlay hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlayHintSide {
+    Before,
+    After,
+}
+
+/// Semantic kind for an editor-owned inlay hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InlayHintKind {
+    Type,
+    Parameter,
+}
+
+/// Normalized inlay hint data used by the editor render pipeline.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EditorInlayHint {
+    /// Byte offset in the buffer that anchors the hint.
+    pub byte_offset: usize,
+    /// Plain-text label rendered for the hint.
+    pub label: String,
+    /// Preferred side of the anchor position.
+    pub side: InlayHintSide,
+    /// Optional semantic kind used for styling.
+    pub kind: Option<InlayHintKind>,
+    /// Whether to leave visual padding before the label.
+    pub padding_left: bool,
+    /// Whether to leave visual padding after the label.
+    pub padding_right: bool,
 }
 
 /// Container for all LSP providers
@@ -452,17 +1062,20 @@ pub struct Lsp {
     /// Optional references provider for find-references
     pub references_provider: Option<Rc<dyn ReferencesProvider>>,
 
+    /// Optional rename provider for symbol rename.
+    pub rename_provider: Option<Rc<dyn RenameProvider>>,
+
+    /// Optional code action provider.
+    pub code_action_provider: Option<Rc<dyn CodeActionProvider>>,
+
     /// Back-compat SQL LSP handle set through `TextEditor::set_sql_lsp`.
     ///
     /// The editor itself does not depend on a concrete `zqlz-lsp` type; this handle
     /// is retained so legacy integrations can still indicate "connected" status.
     pub legacy_sql_lsp: Option<Arc<dyn std::any::Any + Send + Sync>>,
 
-    /// Held so it isn't dropped (dropping a Task cancels it).
-    pub completion_task: Task<Result<()>>,
-
-    /// Held so it isn't dropped (dropping a Task cancels it).
-    pub hover_task: Task<Result<()>>,
+    pub request_state: LspRequestState,
+    pub ui_state: LspUiState,
 }
 
 impl Default for Lsp {
@@ -472,9 +1085,11 @@ impl Default for Lsp {
             hover_provider: None,
             definition_provider: None,
             references_provider: None,
+            rename_provider: None,
+            code_action_provider: None,
             legacy_sql_lsp: None,
-            completion_task: Task::ready(Ok(())),
-            hover_task: Task::ready(Ok(())),
+            request_state: LspRequestState::new(),
+            ui_state: LspUiState::new(),
         }
     }
 }
@@ -489,8 +1104,9 @@ impl Lsp {
     ///
     /// This clears any ongoing tasks and resets internal state.
     pub fn reset(&mut self) {
-        self.completion_task = Task::ready(Ok(()));
-        self.hover_task = Task::ready(Ok(()));
+        self.request_state.reset();
+        self.ui_state.clear_completion();
+        self.ui_state.clear_hover_state();
     }
 
     /// Check if completions are available
@@ -511,5 +1127,17 @@ impl Lsp {
     /// Check if find-references is available
     pub fn has_references(&self) -> bool {
         self.references_provider.is_some()
+    }
+
+    /// Check if rename is available.
+    pub fn has_rename(&self) -> bool {
+        self.rename_provider.is_some()
+    }
+    pub fn hover_state(&self) -> Option<HoverState> {
+        self.ui_state.hover_state()
+    }
+
+    pub fn completion_menu(&self) -> Option<CompletionMenuData> {
+        self.ui_state.completion_menu()
     }
 }

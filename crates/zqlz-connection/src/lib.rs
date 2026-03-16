@@ -17,4 +17,7 @@ pub use pool::{ConnectionPool, PoolConfig, PoolStats, PooledConnection};
 pub use reconnect::{
     BackoffStrategy, ConnectionFactory, ReconnectConfig, ReconnectEvent, ReconnectingConnection,
 };
-pub use widgets::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo};
+pub use widgets::{
+    ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo, SchemaObjects,
+    SidebarObjectCapabilities,
+};

@@ -110,11 +110,11 @@ impl TableStatistics {
     /// Returns true if table needs vacuuming (PostgreSQL).
     /// Uses a heuristic: dead tuples > 10% of row count.
     pub fn needs_vacuum(&self) -> bool {
-        if let Some(dead) = self.dead_tuples {
-            if self.row_count > 0 {
-                let dead_ratio = dead as f64 / self.row_count as f64;
-                return dead_ratio > 0.1;
-            }
+        if let Some(dead) = self.dead_tuples
+            && self.row_count > 0
+        {
+            let dead_ratio = dead as f64 / self.row_count as f64;
+            return dead_ratio > 0.1;
         }
         false
     }
@@ -122,7 +122,7 @@ impl TableStatistics {
     /// Returns true if table needs analysis.
     /// Uses modification_percentage > 10% as threshold.
     pub fn needs_analyze(&self) -> bool {
-        self.modification_percentage.map_or(false, |p| p > 10.0)
+        self.modification_percentage.is_some_and(|p| p > 10.0)
     }
 }
 
@@ -182,7 +182,7 @@ impl IndexStatistics {
 
     /// Returns true if index appears unused (0 scans).
     pub fn is_unused(&self) -> bool {
-        self.scans.map_or(false, |s| s == 0)
+        self.scans == Some(0)
     }
 }
 

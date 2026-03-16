@@ -5,5 +5,5 @@
 mod ddl_generator;
 mod table_loader;
 
-pub use ddl_generator::{DdlGenerator, fk_action_to_sql};
+pub use ddl_generator::{DdlGenerator, FK_ACTION_LABELS, fk_action_from_sql, fk_action_to_sql};
 pub use table_loader::TableLoader;

@@ -17,6 +17,8 @@ use crate::widgets::{
     v_flex,
 };
 
+type EmptyStateRenderer = Box<dyn Fn(&Window, &App) -> AnyElement>;
+
 const CONTEXT: &str = "Select";
 pub(crate) fn init(cx: &mut App) {
     cx.bind_keys([
@@ -62,7 +64,7 @@ impl SelectItem for String {
     }
 
     fn value(&self) -> &Self::Value {
-        &self
+        self
     }
 }
 
@@ -74,7 +76,7 @@ impl SelectItem for SharedString {
     }
 
     fn value(&self) -> &Self::Value {
-        &self
+        self
     }
 }
 
@@ -100,7 +102,7 @@ pub trait SelectDelegate: Sized {
 
     /// Returns the section header element for the given section index.
     fn section(&self, _section: usize) -> Option<AnyElement> {
-        return None;
+        None
     }
 
     /// Returns the number of items in the given section.
@@ -174,11 +176,9 @@ where
         cx: &mut Context<ListState<Self>>,
     ) -> Option<impl IntoElement> {
         let state = self.state.upgrade()?.read(cx);
-        let Some(item) = self.delegate.section(section) else {
-            return None;
-        };
+        let item = self.delegate.section(section)?;
 
-        return Some(
+        Some(
             div()
                 .py_0p5()
                 .px_2()
@@ -186,7 +186,7 @@ where
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
                 .child(item),
-        );
+        )
     }
 
     fn render_item(
@@ -195,9 +195,7 @@ where
         window: &mut Window,
         cx: &mut Context<ListState<Self>>,
     ) -> Option<Self::Item> {
-        let selected = self
-            .selected_index
-            .map_or(false, |selected_index| selected_index == ix);
+        let selected = self.selected_index == Some(ix);
         let size = self
             .state
             .upgrade()
@@ -350,7 +348,7 @@ pub struct SelectState<D: SelectDelegate + 'static> {
     options: SelectOptions,
     searchable: bool,
     list: Entity<ListState<SelectListDelegate<D>>>,
-    empty: Option<Box<dyn Fn(&Window, &App) -> AnyElement>>,
+    empty: Option<EmptyStateRenderer>,
     /// Store the bounds of the input
     bounds: Bounds<Pixels>,
     open: bool,
@@ -496,10 +494,10 @@ impl<I: SelectItem> SelectDelegate for SearchableVec<SelectGroup<I>> {
         self.matched_items = self
             .items
             .iter()
-            .filter(|item| item.matches(&query))
+            .filter(|item| item.matches(query))
             .cloned()
             .map(|mut item| {
-                item.items.retain(|item| item.matches(&query));
+                item.items.retain(|item| item.matches(query));
                 item
             })
             .collect();
@@ -762,12 +760,10 @@ where
             .map(|item| {
                 if let Some(el) = item.display_title() {
                     el
+                } else if let Some(prefix) = self.options.title_prefix.as_ref() {
+                    format!("{}{}", prefix, item.title()).into_any_element()
                 } else {
-                    if let Some(prefix) = self.options.title_prefix.as_ref() {
-                        format!("{}{}", prefix, item.title()).into_any_element()
-                    } else {
-                        item.title().into_any_element()
-                    }
+                    item.title().into_any_element()
                 }
             })
         else {

@@ -32,13 +32,11 @@ members = [
     "crates/zqlz-monitor",
     "crates/zqlz-app",
     "crates/zqlz-cli",
-    # Testing
-    "crates/zqlz-driver-tests",
 ]
 default-members = ["crates/zqlz-app"]
 
 [workspace.package]
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourorg/zqlz"

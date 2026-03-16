@@ -19,6 +19,10 @@ pub struct ForeignKeyDesign {
     pub on_update: ForeignKeyAction,
     /// Action on delete
     pub on_delete: ForeignKeyAction,
+    /// Whether the constraint can be deferred within a transaction (PostgreSQL)
+    pub is_deferrable: bool,
+    /// Whether the constraint starts in DEFERRED mode (only when is_deferrable is true)
+    pub initially_deferred: bool,
 }
 
 impl ForeignKeyDesign {
@@ -32,6 +36,8 @@ impl ForeignKeyDesign {
             referenced_columns: Vec::new(),
             on_update: ForeignKeyAction::NoAction,
             on_delete: ForeignKeyAction::NoAction,
+            is_deferrable: false,
+            initially_deferred: false,
         }
     }
 
@@ -45,6 +51,8 @@ impl ForeignKeyDesign {
             referenced_columns: info.referenced_columns.clone(),
             on_update: info.on_update,
             on_delete: info.on_delete,
+            is_deferrable: info.is_deferrable,
+            initially_deferred: info.initially_deferred,
         }
     }
 
