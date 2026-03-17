@@ -10,6 +10,8 @@ mod standalone;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
+#[cfg(windows)]
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -28,8 +30,8 @@ use crate::standalone::{SavedConnection, load_history_entry};
 #[derive(Debug, Parser)]
 #[command(name = "zqlz", about = "ZQLZ database IDE — command-line interface")]
 struct Cli {
-    /// Override the Unix socket path used to reach a running GUI instance.
-    /// Defaults to ~/.config/zqlz/ipc.sock
+    /// Override the IPC endpoint path used to reach a running GUI instance.
+    /// Defaults to `~/.config/zqlz/ipc.sock` on Unix and `\\.\pipe\...` on Windows.
     #[arg(long, env = "ZQLZ_IPC_SOCKET", global = true)]
     socket: Option<PathBuf>,
 
@@ -436,7 +438,7 @@ async fn main() -> Result<()> {
         .socket
         .unwrap_or_else(|| default_socket_path().expect("could not determine socket path"));
 
-    let use_ipc = !cli.standalone && socket_path.exists();
+    let use_ipc = !cli.standalone;
 
     match cli.command {
         Command::Connections(args) => handle_connections(args, use_ipc, &socket_path).await,
@@ -449,6 +451,25 @@ async fn main() -> Result<()> {
 }
 
 fn default_socket_path() -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let config_dir = dirs::config_dir().context("could not determine config directory")?;
+        return Ok(config_dir.join("zqlz").join("ipc.sock"));
+    }
+
+    #[cfg(windows)]
+    {
+        let config_dir = dirs::config_dir().context("could not determine config directory")?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config_dir
+            .to_string_lossy()
+            .to_lowercase()
+            .hash(&mut hasher);
+        let endpoint = format!(r"\\.\pipe\zqlz-ipc-{:016x}", hasher.finish());
+        return Ok(PathBuf::from(endpoint));
+    }
+
+    #[allow(unreachable_code)]
     let config_dir = dirs::config_dir().context("could not determine config directory")?;
     Ok(config_dir.join("zqlz").join("ipc.sock"))
 }
@@ -1078,14 +1099,13 @@ fn validate_color(color: &str) -> Result<()> {
 
 /// Check whether the ZQLZ GUI IPC socket is alive and responsive.
 async fn handle_status(socket_path: &Path) -> Result<()> {
-    if !socket_path.exists() {
-        println!("GUI: not running (no socket at {})", socket_path.display());
-        return Ok(());
-    }
-
     match ipc::send_request(socket_path, ipc::Request::ListConnections).await {
         Ok(_) => println!("GUI: running ({})", socket_path.display()),
-        Err(e) => println!("GUI: socket exists but not responding — {}", e),
+        Err(e) => println!(
+            "GUI: not running or not responding at {} — {}",
+            socket_path.display(),
+            e
+        ),
     }
     Ok(())
 }

@@ -1,4 +1,4 @@
-//! IPC protocol types and Unix socket client
+//! IPC protocol types and platform IPC client
 //!
 //! Sends JSON-encoded `Request` messages to a running ZQLZ GUI instance and
 //! deserializes the `Response`.  A length-prefixed framing protocol is used:
@@ -8,7 +8,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::UnixStream;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
+#[cfg(windows)]
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 
 use crate::standalone::SavedConnection;
@@ -187,9 +192,15 @@ pub enum Response {
 
 /// Send a single request to the running GUI server and return the response.
 pub async fn send_request(socket_path: &Path, request: Request) -> Result<Response> {
+    #[cfg(unix)]
     let mut stream = UnixStream::connect(socket_path)
         .await
         .with_context(|| format!("connecting to IPC socket at {}", socket_path.display()))?;
+
+    #[cfg(windows)]
+    let mut stream = connect_windows_named_pipe(socket_path)
+        .await
+        .with_context(|| format!("connecting to IPC named pipe at {}", socket_path.display()))?;
 
     let payload = serde_json::to_vec(&request).context("serializing IPC request")?;
 
@@ -226,4 +237,23 @@ pub async fn send_request(socket_path: &Path, request: Request) -> Result<Respon
         serde_json::from_slice(&response_buf).context("deserializing IPC response")?;
 
     Ok(response)
+}
+
+#[cfg(windows)]
+async fn connect_windows_named_pipe(socket_path: &Path) -> Result<NamedPipeClient> {
+    const PIPE_BUSY: i32 = 231;
+
+    for _ in 0..20 {
+        match ClientOptions::new().open(socket_path) {
+            Ok(client) => return Ok(client),
+            Err(error) if error.raw_os_error() == Some(PIPE_BUSY) => {
+                sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "timed out waiting for named pipe server availability"
+    ))
 }

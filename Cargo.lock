@@ -10865,6 +10865,7 @@ version = "0.0.5"
 dependencies = [
  "async-trait",
  "chrono",
+ "dirs 4.0.0",
  "parking_lot",
  "rusqlite",
  "serde_json",

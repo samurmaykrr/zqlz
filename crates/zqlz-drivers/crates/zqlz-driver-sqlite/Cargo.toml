@@ -21,6 +21,7 @@ chrono.workspace = true
 uuid.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true
+dirs.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }
