@@ -2,7 +2,9 @@
 //!
 //! Displays a side-by-side or unified diff view for comparing versions.
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
+use zqlz_schema_tools::{PrimaryKeyChange, SchemaDiff, TableDiff};
 use zqlz_ui::widgets::{
     ActiveTheme, Sizable,
     button::{Button, ButtonVariants},
@@ -198,6 +200,271 @@ impl DiffViewer {
                             .child(change.value.trim_end().to_string()),
                     )
             }))
+    }
+
+    fn render_schema_summary(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        let theme = cx.theme();
+        let schema_diff = self.diff.as_ref()?.schema_diff.as_ref()?;
+
+        Some(
+            v_flex()
+                .id("schema-diff-summary")
+                .w_full()
+                .gap_2()
+                .p_2()
+                .border_b_1()
+                .border_color(theme.border)
+                .bg(theme.secondary.opacity(0.15))
+                .child(
+                    div()
+                        .text_sm()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child("Schema Summary"),
+                )
+                .children(self.render_schema_diff_lines(schema_diff, theme))
+                .into_any_element(),
+        )
+    }
+
+    fn render_schema_diff_lines(
+        &self,
+        schema_diff: &SchemaDiff,
+        theme: &zqlz_ui::widgets::theme::ThemeColor,
+    ) -> Vec<AnyElement> {
+        let mut lines = Vec::new();
+
+        for table in &schema_diff.added_tables {
+            lines.push(
+                div()
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child(format!(
+                        "Added table {}",
+                        qualify_name(table.schema.as_deref(), &table.name)
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for table in &schema_diff.removed_tables {
+            lines.push(
+                div()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(format!(
+                        "Removed table {}",
+                        qualify_name(table.schema.as_deref(), &table.name)
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for table_diff in &schema_diff.modified_tables {
+            lines.extend(self.render_table_diff_lines(table_diff, theme));
+        }
+
+        lines
+    }
+
+    fn render_table_diff_lines(
+        &self,
+        table_diff: &TableDiff,
+        theme: &zqlz_ui::widgets::theme::ThemeColor,
+    ) -> Vec<AnyElement> {
+        let mut lines = Vec::new();
+        let table_name = table_diff.qualified_name();
+
+        lines.push(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(format!("Changed table {}", table_name))
+                .into_any_element(),
+        );
+
+        for column in &table_diff.added_columns {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child(format!("+ column {} ({})", column.name, column.data_type))
+                    .into_any_element(),
+            );
+        }
+
+        for column in &table_diff.removed_columns {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(format!("- column {} ({})", column.name, column.data_type))
+                    .into_any_element(),
+            );
+        }
+
+        for column in &table_diff.modified_columns {
+            let mut details = Vec::new();
+            if let Some((old_type, new_type)) = &column.type_change {
+                details.push(format!("type {} -> {}", old_type, new_type));
+            }
+            if let Some((old_nullable, new_nullable)) = column.nullable_change {
+                details.push(format!("nullable {} -> {}", old_nullable, new_nullable));
+            }
+            if let Some((old_default, new_default)) = &column.default_change {
+                details.push(format!(
+                    "default {} -> {}",
+                    old_default.as_deref().unwrap_or("NULL"),
+                    new_default.as_deref().unwrap_or("NULL")
+                ));
+            }
+
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.warning)
+                    .child(format!(
+                        "~ column {} ({})",
+                        column.column_name,
+                        details.join(", ")
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for index in &table_diff.added_indexes {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child(format!(
+                        "+ index {} on {}",
+                        index.name,
+                        index.columns.join(", ")
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for index in &table_diff.removed_indexes {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(format!("- index {}", index.name))
+                    .into_any_element(),
+            );
+        }
+
+        for index in &table_diff.modified_indexes {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.warning)
+                    .child(format!("~ index {} definition changed", index.index_name))
+                    .into_any_element(),
+            );
+        }
+
+        for foreign_key in &table_diff.added_foreign_keys {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child(format!(
+                        "+ foreign key {} -> {}",
+                        foreign_key.name,
+                        qualify_name(
+                            foreign_key.referenced_schema.as_deref(),
+                            &foreign_key.referenced_table
+                        )
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for foreign_key in &table_diff.removed_foreign_keys {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(format!("- foreign key {}", foreign_key.name))
+                    .into_any_element(),
+            );
+        }
+
+        for foreign_key in &table_diff.modified_foreign_keys {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.warning)
+                    .child(format!(
+                        "~ foreign key {} definition changed",
+                        foreign_key.fk_name
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        for constraint in &table_diff.added_constraints {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.success)
+                    .child(format!("+ constraint {}", constraint.name))
+                    .into_any_element(),
+            );
+        }
+
+        for constraint in &table_diff.removed_constraints {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.danger)
+                    .child(format!("- constraint {}", constraint.name))
+                    .into_any_element(),
+            );
+        }
+
+        for constraint in &table_diff.modified_constraints {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.warning)
+                    .child(format!(
+                        "~ constraint {} definition changed",
+                        constraint.constraint_name
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        if let Some(primary_key_change) = &table_diff.primary_key_change {
+            lines.push(
+                div()
+                    .pl_4()
+                    .text_sm()
+                    .text_color(theme.warning)
+                    .child(format!(
+                        "~ primary key {}",
+                        describe_primary_key_change(primary_key_change)
+                    ))
+                    .into_any_element(),
+            );
+        }
+
+        lines
     }
 
     fn render_side_by_side(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -411,6 +678,9 @@ impl Render for DiffViewer {
                 v_flex()
                     .size_full()
                     .child(self.render_header(cx))
+                    .when_some(self.render_schema_summary(cx), |this, summary| {
+                        this.child(summary)
+                    })
                     .child(
                         div()
                             .flex_1()
@@ -427,5 +697,28 @@ impl Render for DiffViewer {
                     .child(self.render_actions(cx))
                     .into_any_element()
             })
+    }
+}
+
+fn qualify_name(schema: Option<&str>, name: &str) -> String {
+    match schema {
+        Some(schema) if !schema.is_empty() => format!("{}.{}", schema, name),
+        _ => name.to_string(),
+    }
+}
+
+fn describe_primary_key_change(change: &PrimaryKeyChange) -> String {
+    match change {
+        PrimaryKeyChange::Added(primary_key) => {
+            format!("added ({})", primary_key.columns.join(", "))
+        }
+        PrimaryKeyChange::Removed(primary_key) => {
+            format!("removed ({})", primary_key.columns.join(", "))
+        }
+        PrimaryKeyChange::Modified { old, new } => format!(
+            "changed from ({}) to ({})",
+            old.columns.join(", "),
+            new.columns.join(", ")
+        ),
     }
 }

@@ -18,6 +18,8 @@ thiserror.workspace = true
 rusqlite.workspace = true
 dirs.workspace = true
 async-trait.workspace = true
+zqlz-core.workspace = true
+zqlz-schema-tools.workspace = true
 
 # UI dependencies
 gpui.workspace = true

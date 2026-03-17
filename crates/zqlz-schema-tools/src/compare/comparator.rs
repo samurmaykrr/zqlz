@@ -179,8 +179,8 @@ impl SchemaComparator {
             } else if let (Some(source_detail), Some(target_detail)) = (
                 source_details.get(&table.name),
                 target_details.get(&table.name),
-            )
-                && let Some(table_diff) = self.compare_table_details(source_detail, target_detail)
+            ) && let Some(table_diff) =
+                self.compare_table_details(source_detail, target_detail)
             {
                 if !table_diff.is_empty() {
                     diff.modified_tables.push(table_diff);

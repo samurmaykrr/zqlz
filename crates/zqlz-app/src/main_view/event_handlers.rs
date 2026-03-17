@@ -202,8 +202,9 @@ impl MainView {
             ConnectionSidebarEvent::DesignView {
                 connection_id,
                 view_name,
+                object_schema,
             } => {
-                self.design_view(connection_id, view_name, window, cx);
+                self.design_view(connection_id, view_name, object_schema, window, cx);
             }
             ConnectionSidebarEvent::NewView { connection_id } => {
                 self.new_view(connection_id, window, cx);
@@ -342,9 +343,11 @@ impl MainView {
             ConnectionSidebarEvent::ViewHistory {
                 connection_id,
                 object_name,
+                object_schema,
                 object_type,
             } => {
                 let db_object_type = match object_type.as_str() {
+                    "table" => DatabaseObjectType::Table,
                     "view" => DatabaseObjectType::View,
                     "function" => DatabaseObjectType::Function,
                     "procedure" => DatabaseObjectType::Procedure,
@@ -354,33 +357,55 @@ impl MainView {
                         return;
                     }
                 };
-                self.show_version_history(connection_id, object_name, db_object_type, window, cx);
+                self.show_version_history(
+                    connection_id,
+                    object_name,
+                    object_schema,
+                    db_object_type,
+                    window,
+                    cx,
+                );
             }
 
             // Function events
             ConnectionSidebarEvent::OpenFunction {
                 connection_id,
                 function_name,
+                object_schema,
             } => {
                 // Open a query editor with the function definition
-                self.open_function_definition(connection_id, function_name, window, cx);
+                self.open_function_definition(
+                    connection_id,
+                    function_name,
+                    object_schema,
+                    window,
+                    cx,
+                );
             }
 
             // Procedure events
             ConnectionSidebarEvent::OpenProcedure {
                 connection_id,
                 procedure_name,
+                object_schema,
             } => {
                 // Open a query editor with the procedure definition
-                self.open_procedure_definition(connection_id, procedure_name, window, cx);
+                self.open_procedure_definition(
+                    connection_id,
+                    procedure_name,
+                    object_schema,
+                    window,
+                    cx,
+                );
             }
 
             // Trigger events
             ConnectionSidebarEvent::DesignTrigger {
                 connection_id,
                 trigger_name,
+                object_schema,
             } => {
-                self.design_trigger(connection_id, trigger_name, window, cx);
+                self.design_trigger(connection_id, trigger_name, object_schema, window, cx);
             }
             ConnectionSidebarEvent::NewTrigger { connection_id } => {
                 self.new_trigger(connection_id, window, cx);
@@ -394,8 +419,9 @@ impl MainView {
             ConnectionSidebarEvent::OpenTriggerDesigner {
                 connection_id,
                 trigger_name,
+                object_schema,
             } => {
-                self.open_trigger_designer(connection_id, trigger_name, window, cx);
+                self.open_trigger_designer(connection_id, trigger_name, object_schema, window, cx);
             }
 
             // Redis-specific events
@@ -1976,9 +2002,11 @@ impl MainView {
             ObjectsPanelEvent::ViewHistory {
                 connection_id,
                 object_name,
+                object_schema,
                 object_type,
             } => {
                 let db_object_type = match object_type.as_str() {
+                    "table" => DatabaseObjectType::Table,
                     "view" => DatabaseObjectType::View,
                     "function" => DatabaseObjectType::Function,
                     "procedure" => DatabaseObjectType::Procedure,
@@ -1991,6 +2019,7 @@ impl MainView {
                 self.show_version_history(
                     *connection_id,
                     object_name.clone(),
+                    object_schema.clone(),
                     db_object_type,
                     window,
                     cx,

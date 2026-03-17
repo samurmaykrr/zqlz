@@ -8,6 +8,8 @@ use std::str::FromStr;
 /// Types of database objects that can be versioned
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DatabaseObjectType {
+    /// Database table
+    Table,
     /// Stored procedure
     Procedure,
     /// User-defined function
@@ -39,6 +41,7 @@ impl DatabaseObjectType {
     /// Convert to string representation for storage
     pub fn as_str(&self) -> &'static str {
         match self {
+            Self::Table => "table",
             Self::Procedure => "procedure",
             Self::Function => "function",
             Self::View => "view",
@@ -57,6 +60,7 @@ impl DatabaseObjectType {
     /// Parse from string representation.
     pub fn parse(s: &str) -> Self {
         match s.to_lowercase().as_str() {
+            "table" => Self::Table,
             "procedure" | "stored_procedure" => Self::Procedure,
             "function" => Self::Function,
             "view" => Self::View,
@@ -75,6 +79,7 @@ impl DatabaseObjectType {
     /// Human-readable display name
     pub fn display_name(&self) -> &'static str {
         match self {
+            Self::Table => "Table",
             Self::Procedure => "Procedure",
             Self::Function => "Function",
             Self::View => "View",
@@ -93,6 +98,7 @@ impl DatabaseObjectType {
     /// Icon name for UI display (matches icon assets)
     pub fn icon_name(&self) -> &'static str {
         match self {
+            Self::Table => "table",
             Self::Procedure => "function",
             Self::Function => "function",
             Self::View => "table",
@@ -152,6 +158,7 @@ mod tests {
     #[test]
     fn test_roundtrip() {
         let types = [
+            DatabaseObjectType::Table,
             DatabaseObjectType::Procedure,
             DatabaseObjectType::Function,
             DatabaseObjectType::View,

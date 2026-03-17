@@ -1,7 +1,7 @@
 //! Table node context menu
 //!
 //! Provides a comprehensive context menu for table nodes with operations for:
-//! - Opening and designing tables
+//! - Opening, designing, and versioning tables
 //! - Creating, deleting, and duplicating tables
 //! - Emptying table data
 //! - Importing and exporting data
@@ -22,6 +22,7 @@ impl ConnectionSidebar {
     /// Displays a comprehensive menu for table operations:
     /// - **Open Table**: Emits `OpenTable` to view table data
     /// - **Design Table**: Emits `DesignTable` to edit table structure
+    /// - **View History**: Emits `ViewHistory { object_type: "table" }` to show version history
     /// - **New Table**: Emits `NewTable` to create a new table
     /// - **Delete Table**: Emits `DeleteTable` to drop the table
     /// - **Empty Table**: Emits `EmptyTable` to truncate all rows
@@ -39,6 +40,7 @@ impl ConnectionSidebar {
         &mut self,
         conn_id: Uuid,
         table_name: String,
+        object_schema: Option<String>,
         database_name: Option<String>,
         position: Point<Pixels>,
         window: &mut Window,
@@ -86,6 +88,22 @@ impl ConnectionSidebar {
                                     cx.emit(ConnectionSidebarEvent::DesignTable {
                                         connection_id: conn_id,
                                         table_name: table.clone(),
+                                    });
+                                });
+                            }
+                        }))
+                        .separator()
+                        .item(PopupMenuItem::new("View History").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            let table = table_for_menu.clone();
+                            let object_schema = object_schema.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::ViewHistory {
+                                        connection_id: conn_id,
+                                        object_name: table.clone(),
+                                        object_schema: object_schema.clone(),
+                                        object_type: "table".to_string(),
                                     });
                                 });
                             }

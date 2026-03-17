@@ -1397,6 +1397,7 @@ impl SchemaIntrospection for PostgresConnection {
 
                 ObjectsPanelRow {
                     name,
+                    schema: Some(schema.to_string()),
                     object_type: object_type.to_string(),
                     values,
                     redis_database_index: None,

@@ -19,6 +19,7 @@ use zqlz_ui::widgets::{
     notification::Notification,
     v_flex,
 };
+use zqlz_versioning::{DatabaseObjectType, VersionRepository};
 
 use crate::app::AppState;
 use crate::components::QueryEditor;
@@ -136,13 +137,16 @@ pub(in crate::main_view) fn validate_view_name(name: &str) -> Option<&'static st
 /// Fetches the SELECT statement definition of a view from the database.
 pub(in crate::main_view) async fn fetch_view_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
     view_name: &str,
     driver_type: &str,
 ) -> Result<String, String> {
     // Different databases store view definitions differently
     let sql = if driver_type.contains("postgres") {
+        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
         format!(
-            "SELECT definition FROM pg_views WHERE viewname = '{}'",
+            "SELECT definition FROM pg_views WHERE schemaname = '{}' AND viewname = '{}'",
+            schema_name,
             view_name.replace("'", "''")
         )
     } else {
@@ -179,13 +183,86 @@ pub(in crate::main_view) async fn fetch_view_definition(
     }
 }
 
+fn normalize_schema_name(schema_name: Option<&str>) -> Option<String> {
+    schema_name
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty() && *schema != "main")
+        .map(ToOwned::to_owned)
+}
+
+fn editor_object_type_to_version_type(
+    object_type: &EditorObjectType,
+) -> Option<DatabaseObjectType> {
+    match object_type {
+        EditorObjectType::View { .. } => Some(DatabaseObjectType::View),
+        EditorObjectType::Function { .. } => Some(DatabaseObjectType::Function),
+        EditorObjectType::Procedure { .. } => Some(DatabaseObjectType::Procedure),
+        EditorObjectType::Trigger { .. } => Some(DatabaseObjectType::Trigger),
+        EditorObjectType::Query => None,
+    }
+}
+
+fn build_sql_object_version_message(
+    object_type: DatabaseObjectType,
+    object_name: &str,
+    is_new: bool,
+) -> String {
+    let action = if is_new { "Create" } else { "Update" };
+    format!(
+        "{} {} {}",
+        action,
+        object_type.display_name().to_lowercase(),
+        object_name
+    )
+}
+
+fn version_target_from_editor_object(
+    connection_id: Uuid,
+    object_type: &EditorObjectType,
+) -> Option<SqlObjectVersionTarget> {
+    let object_name = object_type.object_name()?.to_string();
+    let object_schema = match object_type {
+        EditorObjectType::View { schema, .. }
+        | EditorObjectType::Function { schema, .. }
+        | EditorObjectType::Procedure { schema, .. }
+        | EditorObjectType::Trigger { schema, .. } => normalize_schema_name(schema.as_deref()),
+        EditorObjectType::Query => None,
+    };
+
+    Some(SqlObjectVersionTarget {
+        connection_id,
+        object_type: editor_object_type_to_version_type(object_type)?,
+        object_name,
+        object_schema,
+    })
+}
+
+fn record_sql_object_version(
+    version_repository: &VersionRepository,
+    target: &SqlObjectVersionTarget,
+    content: String,
+    message: String,
+) -> anyhow::Result<()> {
+    version_repository.commit(
+        target.connection_id,
+        target.object_type,
+        target.object_schema.clone(),
+        target.object_name.clone(),
+        content,
+        message,
+    )?;
+    Ok(())
+}
+
 /// Fetches the definition of a function from the database.
 async fn fetch_function_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
     function_name: &str,
     driver_type: &str,
 ) -> Result<String, String> {
     let sql = if driver_type.contains("postgres") {
+        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
         // PostgreSQL: get function definition using pg_get_functiondef
         format!(
             r#"
@@ -193,9 +270,10 @@ async fn fetch_function_definition(
             FROM pg_proc p
             JOIN pg_namespace n ON p.pronamespace = n.oid
             WHERE p.proname = '{}'
-            AND n.nspname = 'public'
+            AND n.nspname = '{}'
             LIMIT 1
             "#,
+            schema_name,
             function_name.replace("'", "''")
         )
     } else {
@@ -223,10 +301,12 @@ async fn fetch_function_definition(
 /// Fetches the definition of a stored procedure from the database.
 async fn fetch_procedure_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
     procedure_name: &str,
     driver_type: &str,
 ) -> Result<String, String> {
     let sql = if driver_type.contains("postgres") {
+        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
         // PostgreSQL: procedures are functions with prorettype = 0 (void) in newer versions
         // or use pg_get_functiondef for functions marked as procedures
         format!(
@@ -235,10 +315,11 @@ async fn fetch_procedure_definition(
             FROM pg_proc p
             JOIN pg_namespace n ON p.pronamespace = n.oid
             WHERE p.proname = '{}'
-            AND n.nspname = 'public'
+            AND n.nspname = '{}'
             AND p.prokind = 'p'
             LIMIT 1
             "#,
+            schema_name,
             procedure_name.replace("'", "''")
         )
     } else {
@@ -276,6 +357,14 @@ struct ObjectEditorDefinition {
     schema_service: Arc<SchemaService>,
 }
 
+#[derive(Clone)]
+struct SqlObjectVersionTarget {
+    connection_id: Uuid,
+    object_type: DatabaseObjectType,
+    object_name: String,
+    object_schema: Option<String>,
+}
+
 struct ViewSavePromptRequest {
     connection_id: Uuid,
     definition: String,
@@ -289,6 +378,7 @@ struct TriggerDesignerSaveRequest {
     design: TriggerDesign,
     ddl: String,
     is_new: bool,
+    object_schema: Option<String>,
     original_name: Option<String>,
     panel: Entity<TriggerDesignerPanel>,
 }
@@ -399,10 +489,12 @@ impl MainView {
         &mut self,
         connection_id: Uuid,
         view_name: String,
+        object_schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!("Design view: {} on connection {}", view_name, connection_id);
+        let object_schema = normalize_schema_name(object_schema.as_deref());
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -432,12 +524,19 @@ impl MainView {
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the view definition
-            match fetch_view_definition(&connection, &view_name_for_spawn, &driver_name).await {
+            match fetch_view_definition(
+                &connection,
+                object_schema.as_deref(),
+                &view_name_for_spawn,
+                &driver_name,
+            )
+            .await
+            {
                 Ok(definition) => {
                     cx.update(|window, cx| {
                         let object_type = EditorObjectType::edit_view(
                             view_name_for_spawn.clone(),
-                            None, // schema
+                            object_schema.clone(),
                         );
 
                         let _ = dock_area;
@@ -748,7 +847,13 @@ impl MainView {
 
                         cx.spawn(async move |cx| {
                             // First, fetch the original view definition
-                            match fetch_view_definition(&connection, &source_view_name, &driver_name).await {
+                            match fetch_view_definition(
+                                &connection,
+                                None,
+                                &source_view_name,
+                                &driver_name,
+                            )
+                            .await {
                                 Ok(definition) => {
                                     // Create the new view with the same definition
                                     let create_sql = format!(
@@ -1018,7 +1123,7 @@ impl MainView {
     ) {
         let EditorObjectType::View {
             name,
-            schema: _,
+            schema,
             is_new,
         } = object_type
         else {
@@ -1044,6 +1149,7 @@ impl MainView {
             .unwrap_or_else(|| "sqlite".to_string());
 
         let schema_service = app_state.schema_service.clone();
+        let version_repository = self.version_repository.clone();
 
         // For new views, we need to prompt for a name
         if is_new {
@@ -1065,8 +1171,15 @@ impl MainView {
             tracing::error!("save_view called for existing view without a name");
             return;
         };
+        let object_schema = normalize_schema_name(schema.as_deref());
         let connection = connection.clone();
         let _connection_sidebar = self.connection_sidebar.downgrade();
+        let version_target = SqlObjectVersionTarget {
+            connection_id,
+            object_type: DatabaseObjectType::View,
+            object_name: view_name.clone(),
+            object_schema: object_schema.clone(),
+        };
 
         // Generate the appropriate DDL based on database type
         let ddl = if driver_name.contains("postgres") {
@@ -1102,6 +1215,20 @@ impl MainView {
 
             if success {
                 tracing::info!("View '{}' saved successfully", view_name);
+
+                 let version_message = build_sql_object_version_message(
+                    DatabaseObjectType::View,
+                    &view_name,
+                    false,
+                );
+                if let Err(error) = record_sql_object_version(
+                    &version_repository,
+                    &version_target,
+                    definition.clone(),
+                    version_message,
+                ) {
+                    tracing::error!(%error, view = %view_name, "Failed to store view version snapshot");
+                }
 
                 schema_service.invalidate_connection_cache(connection_id);
 
@@ -1147,12 +1274,31 @@ impl MainView {
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
+        let version_repository = self.version_repository.clone();
+        let version_target = version_target_from_editor_object(connection_id, &object_type);
+        let is_new_object = object_type.is_new();
 
         cx.spawn_in(window, async move |_this, cx| {
             // The editor content is the full DDL (e.g. CREATE OR REPLACE FUNCTION ...)
             match connection.execute(definition.trim(), &[]).await {
                 Ok(_) => {
                     tracing::info!("{} '{}' saved successfully", type_name, object_name);
+
+                    if let Some(version_target) = &version_target {
+                        let version_message = build_sql_object_version_message(
+                            version_target.object_type,
+                            &version_target.object_name,
+                            is_new_object,
+                        );
+                        if let Err(error) = record_sql_object_version(
+                            &version_repository,
+                            version_target,
+                            definition.clone(),
+                            version_message,
+                        ) {
+                            tracing::error!(%error, object = %object_name, "Failed to store database object version snapshot");
+                        }
+                    }
 
                     schema_service.invalidate_connection_cache(connection_id);
 
@@ -1201,6 +1347,7 @@ impl MainView {
             schema_service,
             editor_weak,
         } = request;
+        let version_repository = self.version_repository.clone();
         let name_input = cx.new(|cx| InputState::new(window, cx).placeholder("View name"));
         let error_message: Entity<Option<String>> = cx.new(|_| None);
         let connection_sidebar = self.connection_sidebar.downgrade();
@@ -1233,6 +1380,7 @@ impl MainView {
                 let editor_weak = editor_weak.clone();
                 let connection_sidebar = connection_sidebar.clone();
                 let schema_service = schema_service.clone();
+                let version_repository = version_repository.clone();
 
                 dialog
                     .title("Save View As")
@@ -1265,6 +1413,7 @@ impl MainView {
                         let editor_weak = editor_weak.clone();
                         let connection_sidebar = connection_sidebar.clone();
                         let schema_service = schema_service.clone();
+                        let version_repository = version_repository.clone();
 
                         cx.spawn(async move |cx| {
                             let create_sql =
@@ -1273,6 +1422,26 @@ impl MainView {
                             match connection.execute(&create_sql, &[]).await {
                                 Ok(_) => {
                                     tracing::info!("View '{}' created successfully", view_name);
+
+                                    let version_target = SqlObjectVersionTarget {
+                                        connection_id,
+                                        object_type: DatabaseObjectType::View,
+                                        object_name: view_name.clone(),
+                                        object_schema: None,
+                                    };
+                                    let version_message = build_sql_object_version_message(
+                                        DatabaseObjectType::View,
+                                        &view_name,
+                                        true,
+                                    );
+                                    if let Err(error) = record_sql_object_version(
+                                        &version_repository,
+                                        &version_target,
+                                        definition.clone(),
+                                        version_message,
+                                    ) {
+                                        tracing::error!(%error, view = %view_name, "Failed to store created view version snapshot");
+                                    }
 
                                     schema_service.invalidate_connection_cache(connection_id);
 
@@ -1310,6 +1479,7 @@ impl MainView {
         &mut self,
         connection_id: Uuid,
         function_name: String,
+        object_schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1318,6 +1488,7 @@ impl MainView {
             function_name,
             connection_id
         );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -1342,14 +1513,19 @@ impl MainView {
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the function definition
-            match fetch_function_definition(&connection, &function_name_for_spawn, &driver_name)
-                .await
+            match fetch_function_definition(
+                &connection,
+                object_schema.as_deref(),
+                &function_name_for_spawn,
+                &driver_name,
+            )
+            .await
             {
                 Ok(definition) => {
                     cx.update(|window, cx| {
                         let object_type = EditorObjectType::Function {
                             name: Some(function_name_for_spawn.clone()),
-                            schema: None,
+                            schema: object_schema.clone(),
                             is_new: false,
                         };
 
@@ -1398,6 +1574,7 @@ impl MainView {
         &mut self,
         connection_id: Uuid,
         procedure_name: String,
+        object_schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1406,6 +1583,7 @@ impl MainView {
             procedure_name,
             connection_id
         );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -1430,14 +1608,19 @@ impl MainView {
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the procedure definition
-            match fetch_procedure_definition(&connection, &procedure_name_for_spawn, &driver_name)
-                .await
+            match fetch_procedure_definition(
+                &connection,
+                object_schema.as_deref(),
+                &procedure_name_for_spawn,
+                &driver_name,
+            )
+            .await
             {
                 Ok(definition) => {
                     cx.update(|window, cx| {
                         let object_type = EditorObjectType::Procedure {
                             name: Some(procedure_name_for_spawn.clone()),
-                            schema: None,
+                            schema: object_schema.clone(),
                             is_new: false,
                         };
 
@@ -1490,6 +1673,7 @@ impl MainView {
         &mut self,
         connection_id: Uuid,
         trigger_name: String,
+        object_schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1498,6 +1682,7 @@ impl MainView {
             trigger_name,
             connection_id
         );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -1523,12 +1708,20 @@ impl MainView {
         let editor_title = format!("[Trigger] {} ({})", trigger_name, connection_name);
 
         cx.spawn_in(window, async move |this, cx| {
-            match fetch_trigger_definition(&connection, &trigger_name_for_spawn, &driver_name).await
+            match fetch_trigger_definition(
+                &connection,
+                object_schema.as_deref(),
+                &trigger_name_for_spawn,
+                &driver_name,
+            )
+            .await
             {
                 Ok(definition) => {
                     cx.update(|window, cx| {
-                        let object_type =
-                            EditorObjectType::edit_trigger(trigger_name_for_spawn.clone(), None);
+                        let object_type = EditorObjectType::edit_trigger(
+                            trigger_name_for_spawn.clone(),
+                            object_schema.clone(),
+                        );
 
                         _ = this.update(cx, |main_view, cx| {
                             main_view.open_workspace_object_editor(
@@ -1751,6 +1944,7 @@ END;"#
         &mut self,
         connection_id: Uuid,
         trigger_name: Option<String>,
+        object_schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1759,6 +1953,7 @@ END;"#
             trigger_name,
             connection_id
         );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
 
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
@@ -1796,9 +1991,13 @@ END;"#
 
             cx.spawn_in(window, async move |this, cx| {
                 // Fetch trigger definition
-                let definition =
-                    fetch_trigger_definition(&connection, &trigger_name_for_spawn, &driver_name)
-                        .await;
+                let definition = fetch_trigger_definition(
+                    &connection,
+                    object_schema.as_deref(),
+                    &trigger_name_for_spawn,
+                    &driver_name,
+                )
+                .await;
 
                 // Get available tables
                 let tables = match schema_service
@@ -1956,6 +2155,7 @@ END;"#
                 self.save_trigger_from_designer(
                     TriggerDesignerSaveRequest {
                         connection_id,
+                        object_schema: normalize_schema_name(design.schema.as_deref()),
                         design,
                         ddl,
                         is_new,
@@ -1988,6 +2188,7 @@ END;"#
     ) {
         let TriggerDesignerSaveRequest {
             connection_id,
+            object_schema,
             design,
             ddl,
             is_new,
@@ -2015,6 +2216,13 @@ END;"#
         let connection_sidebar = self.connection_sidebar.downgrade();
         let trigger_name = design.name.clone();
         let schema_service = app_state.schema_service.clone();
+        let version_repository = self.version_repository.clone();
+        let version_target = SqlObjectVersionTarget {
+            connection_id,
+            object_type: DatabaseObjectType::Trigger,
+            object_name: trigger_name.clone(),
+            object_schema,
+        };
 
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
         let dock_area = self.dock_area.downgrade();
@@ -2037,6 +2245,20 @@ END;"#
             match connection.execute(&ddl, &[]).await {
                 Ok(_) => {
                     tracing::info!("Trigger '{}' saved successfully", trigger_name);
+
+                    let version_message = build_sql_object_version_message(
+                        DatabaseObjectType::Trigger,
+                        &trigger_name,
+                        is_new,
+                    );
+                    if let Err(error) = record_sql_object_version(
+                        &version_repository,
+                        &version_target,
+                        ddl.clone(),
+                        version_message,
+                    ) {
+                        tracing::error!(%error, trigger = %trigger_name, "Failed to store trigger version snapshot from designer");
+                    }
 
                     schema_service.invalidate_connection_cache(connection_id);
 
@@ -2137,7 +2359,7 @@ END;"#
     ) {
         let EditorObjectType::Trigger {
             name,
-            schema: _,
+            schema,
             is_new,
         } = object_type
         else {
@@ -2165,6 +2387,14 @@ END;"#
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
         let schema_service = app_state.schema_service.clone();
+        let version_repository = self.version_repository.clone();
+        let object_schema = normalize_schema_name(schema.as_deref());
+        let existing_version_target = name.clone().map(|trigger_name| SqlObjectVersionTarget {
+            connection_id,
+            object_type: DatabaseObjectType::Trigger,
+            object_name: trigger_name,
+            object_schema: object_schema.clone(),
+        });
 
         if is_new {
             // For new triggers, the definition should be the full CREATE TRIGGER statement
@@ -2183,6 +2413,26 @@ END;"#
                         // Try to extract trigger name from CREATE TRIGGER statement
                         let trigger_name = extract_trigger_name(&definition);
                         if let Some(name) = trigger_name {
+                            let version_target = SqlObjectVersionTarget {
+                                connection_id,
+                                object_type: DatabaseObjectType::Trigger,
+                                object_name: name.clone(),
+                                object_schema: object_schema.clone(),
+                            };
+                            let version_message = build_sql_object_version_message(
+                                DatabaseObjectType::Trigger,
+                                &name,
+                                true,
+                            );
+                            if let Err(error) = record_sql_object_version(
+                                &version_repository,
+                                &version_target,
+                                definition.clone(),
+                                version_message,
+                            ) {
+                                tracing::error!(%error, trigger = %name, "Failed to store created trigger version snapshot");
+                            }
+
                             _ = connection_sidebar.update(cx, |sidebar, cx| {
                                 sidebar.add_trigger(connection_id, name.clone(), cx);
                             });
@@ -2190,7 +2440,7 @@ END;"#
                             // Update editor object type with the name
                             _ = editor_weak.update(cx, |editor, cx| {
                                 editor.set_object_type(
-                                    EditorObjectType::edit_trigger(name, None),
+                                    EditorObjectType::edit_trigger(name, object_schema.clone()),
                                     cx,
                                 );
                             });
@@ -2235,6 +2485,22 @@ END;"#
                     Ok(_) => {
                         tracing::info!("Trigger '{}' saved successfully", trigger_name);
 
+                        if let Some(version_target) = &existing_version_target {
+                            let version_message = build_sql_object_version_message(
+                                version_target.object_type,
+                                &version_target.object_name,
+                                false,
+                            );
+                            if let Err(error) = record_sql_object_version(
+                                &version_repository,
+                                version_target,
+                                definition.clone(),
+                                version_message,
+                            ) {
+                                tracing::error!(%error, trigger = %trigger_name, "Failed to store updated trigger version snapshot");
+                            }
+                        }
+
                         schema_service.invalidate_connection_cache(connection_id);
 
                         _ = editor_weak.update(cx, |editor, cx| {
@@ -2278,7 +2544,7 @@ END;"#
         cx: &mut Context<Self>,
     ) {
         for view_name in view_names {
-            self.design_view(connection_id, view_name, window, cx);
+            self.design_view(connection_id, view_name, None, window, cx);
         }
     }
 
@@ -2560,7 +2826,8 @@ END;"#
                             let new_name = format!("{}_copy", view_name);
 
                             // Fetch the source view definition, then create with new name
-                            match fetch_view_definition(&connection, view_name, &driver_name).await
+                            match fetch_view_definition(&connection, None, view_name, &driver_name)
+                                .await
                             {
                                 Ok(definition) => {
                                     let create_sql =
@@ -2716,19 +2983,24 @@ fn parse_trigger_definition(
 /// Fetches the definition of a trigger from the database.
 async fn fetch_trigger_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
     trigger_name: &str,
     driver_type: &str,
 ) -> Result<String, String> {
     let sql = if driver_type.contains("postgres") {
+        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
         format!(
             r#"
             SELECT pg_get_triggerdef(t.oid, true)
             FROM pg_trigger t
+            JOIN pg_namespace n ON c.relnamespace = n.oid
             JOIN pg_class c ON t.tgrelid = c.oid
             WHERE t.tgname = '{}'
+            AND n.nspname = '{}'
             LIMIT 1
             "#,
-            trigger_name.replace("'", "''")
+            trigger_name.replace("'", "''"),
+            schema_name,
         )
     } else if driver_type.contains("mysql") {
         format!("SHOW CREATE TRIGGER `{}`", trigger_name.replace("`", "``"))

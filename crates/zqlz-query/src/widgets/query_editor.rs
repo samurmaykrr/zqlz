@@ -2924,16 +2924,7 @@ impl QueryEditor {
                     .when(!supports_save, |b| b.primary())
                     .small()
                     .icon(ZqlzIcon::Play)
-                    .tooltip({
-                        #[cfg(target_os = "macos")]
-                        {
-                            "Run Query (⌘↩)"
-                        }
-                        #[cfg(not(target_os = "macos"))]
-                        {
-                            "Run Query (Ctrl+Enter / F5)"
-                        }
-                    })
+                    .tooltip(Self::run_query_tooltip_text())
                     .disabled(self.is_executing || is_empty || has_template_error)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.emit_execute_query(cx);
@@ -3270,6 +3261,35 @@ impl QueryEditor {
 
     fn kbd_for_keystroke(stroke: &str) -> Option<Kbd> {
         Keystroke::parse(stroke).ok().map(Kbd::new)
+    }
+
+    fn formatted_keystroke(stroke: &str) -> Option<String> {
+        Keystroke::parse(stroke).ok().map(|key| Kbd::format(&key))
+    }
+
+    fn run_query_tooltip_text() -> SharedString {
+        #[cfg(target_os = "macos")]
+        {
+            Self::formatted_keystroke("cmd-enter")
+                .map(|shortcut| format!("Run Query ({shortcut})"))
+                .unwrap_or_else(|| "Run Query".into())
+                .into()
+        }
+
+        #[cfg(not(target_os = "macos"))]
+        {
+            match (
+                Self::formatted_keystroke("ctrl-enter"),
+                Self::formatted_keystroke("f5"),
+            ) {
+                (Some(primary), Some(secondary)) => {
+                    format!("Run Query ({primary} / {secondary})").into()
+                }
+                (Some(primary), None) => format!("Run Query ({primary})").into(),
+                (None, Some(secondary)) => format!("Run Query ({secondary})").into(),
+                (None, None) => "Run Query".into(),
+            }
+        }
     }
 
     /// Render the SQL editor area using the custom TextEditor

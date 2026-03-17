@@ -35,6 +35,7 @@ impl ConnectionSidebar {
         &mut self,
         conn_id: Uuid,
         view_name: String,
+        object_schema: Option<String>,
         database_name: Option<String>,
         position: Point<Pixels>,
         window: &mut Window,
@@ -79,11 +80,13 @@ impl ConnectionSidebar {
                         .item(PopupMenuItem::new("Design View").on_click({
                             let sidebar = sidebar_weak.clone();
                             let view = view_for_menu.clone();
+                            let object_schema = object_schema.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::DesignView {
                                         connection_id: conn_id,
                                         view_name: view.clone(),
+                                        object_schema: object_schema.clone(),
                                     });
                                 });
                             }
@@ -170,11 +173,13 @@ impl ConnectionSidebar {
                         .item(PopupMenuItem::new("View History").on_click({
                             let sidebar = sidebar_weak.clone();
                             let view = view_for_menu.clone();
+                            let object_schema = object_schema.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::ViewHistory {
                                         connection_id: conn_id,
                                         object_name: view.clone(),
+                                        object_schema: object_schema.clone(),
                                         object_type: "view".to_string(),
                                     });
                                 });

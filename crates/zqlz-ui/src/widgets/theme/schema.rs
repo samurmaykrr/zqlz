@@ -675,7 +675,12 @@ impl ThemeColor {
         apply_color!(
             secondary_foreground,
             fallback = if self.secondary.l > 0.5 {
-                self.background
+                // Secondary surfaces often come from neutral theme tokens like
+                // `element.background`. On light themes those backgrounds are close to the app
+                // background, so reusing `background` here makes secondary labels nearly
+                // invisible. The base foreground token keeps dismissive actions readable while
+                // still inheriting the theme's intended neutral text color.
+                self.foreground
             } else {
                 hsla(0., 0., 0.98, 1.)
             }

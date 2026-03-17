@@ -257,7 +257,7 @@ pub enum SchemaTreeEvent {
     ViewHistory {
         connection_id: Uuid,
         object_name: String,
-        object_type: String, // "view", "function", "procedure", "trigger"
+        object_type: String, // "table", "view", "function", "procedure", "trigger"
     },
 
     // ============================================
@@ -896,6 +896,7 @@ impl SchemaTreePanel {
         let panel = panel_weak.clone();
         let table_name_open = table_name.clone();
         let table_name_design = table_name.clone();
+        let table_name_history = table_name.clone();
 
         PopupMenu::build(window, cx, move |menu, _, _| {
             menu.action_context(action_context.clone())
@@ -922,6 +923,21 @@ impl SchemaTreePanel {
                             cx.emit(SchemaTreeEvent::DesignTable {
                                 connection_id,
                                 table_name: name.clone(),
+                            });
+                        });
+                    }
+                }))
+                .separator()
+                .item(PopupMenuItem::new("View History").on_click({
+                    let panel = panel.clone();
+                    let name = table_name_history.clone();
+                    move |_event, _window, cx| {
+                        _ = panel.update(cx, |_panel, cx| {
+                            cx.emit(PanelEvent::LayoutChanged);
+                            cx.emit(SchemaTreeEvent::ViewHistory {
+                                connection_id,
+                                object_name: name.clone(),
+                                object_type: "table".to_string(),
                             });
                         });
                     }

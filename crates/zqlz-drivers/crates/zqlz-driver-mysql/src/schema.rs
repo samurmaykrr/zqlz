@@ -1067,6 +1067,7 @@ impl SchemaIntrospection for MySqlConnection {
 
                 ObjectsPanelRow {
                     name,
+                    schema: None,
                     object_type: object_type.to_string(),
                     values,
                     redis_database_index: None,

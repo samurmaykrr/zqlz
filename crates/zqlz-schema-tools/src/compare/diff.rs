@@ -272,7 +272,8 @@ impl ColumnDiff {
     /// Returns true if all changes are safe (no data loss risk)
     pub fn is_safe(&self) -> bool {
         if let Some((old_nullable, new_nullable)) = self.nullable_change
-            && old_nullable && !new_nullable
+            && old_nullable
+            && !new_nullable
         {
             return false;
         }
