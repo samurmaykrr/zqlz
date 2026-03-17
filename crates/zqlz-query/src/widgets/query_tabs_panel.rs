@@ -99,13 +99,12 @@ pub struct QueryTabsPanel {
 }
 
 impl QueryTabsPanel {
-    fn shortcut_label(macos: &str, _other: &str) -> String {
-        #[cfg(target_os = "macos")]
-        let shortcut = macos;
-        #[cfg(not(target_os = "macos"))]
-        let shortcut = _other;
-
-        shortcut.to_string()
+    fn shortcut_label(macos: &str, other: &str) -> String {
+        if cfg!(target_os = "macos") {
+            macos.to_string()
+        } else {
+            other.to_string()
+        }
     }
 
     fn subscribe_to_editor(

@@ -1,16 +1,21 @@
-//! Unix socket IPC server for the `zqlz` CLI.
+//! IPC server for the `zqlz` CLI.
 //!
-//! Listens on `~/.config/zqlz/ipc.sock` and dispatches requests from the CLI.
+//! Listens on a platform-specific endpoint and dispatches requests from the CLI.
 //! Wire protocol: 4-byte big-endian u32 length prefix + JSON payload.
 
+#[cfg(windows)]
+use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{UnixListener, UnixStream};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+#[cfg(unix)]
+use tokio::net::UnixListener;
+#[cfg(windows)]
+use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SavedConnection};
 use zqlz_query::{QueryHistory, QueryService};
@@ -165,8 +170,30 @@ pub struct IpcServerHandle {
     pub storage: Arc<LocalStorage>,
 }
 
-/// Default socket path: `~/.config/zqlz/ipc.sock`
+/// Default IPC endpoint.
+///
+/// On Unix this is `~/.config/zqlz/ipc.sock`.
+/// On Windows this is a per-user named pipe path derived from the config dir.
 pub fn default_socket_path() -> Result<PathBuf> {
+    #[cfg(unix)]
+    {
+        let config_dir = dirs::config_dir().context("could not determine config directory")?;
+        return Ok(config_dir.join("zqlz").join("ipc.sock"));
+    }
+
+    #[cfg(windows)]
+    {
+        let config_dir = dirs::config_dir().context("could not determine config directory")?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config_dir
+            .to_string_lossy()
+            .to_lowercase()
+            .hash(&mut hasher);
+        let endpoint = format!(r"\\.\pipe\zqlz-ipc-{:016x}", hasher.finish());
+        return Ok(PathBuf::from(endpoint));
+    }
+
+    #[allow(unreachable_code)]
     let config_dir = dirs::config_dir().context("could not determine config directory")?;
     Ok(config_dir.join("zqlz").join("ipc.sock"))
 }
@@ -202,6 +229,7 @@ pub fn start(handle: IpcServerHandle, socket_path: PathBuf) {
     }
 }
 
+#[cfg(unix)]
 async fn run_server(handle: IpcServerHandle, socket_path: PathBuf) -> Result<()> {
     // Remove stale socket file if it exists
     if socket_path.exists() {
@@ -236,18 +264,68 @@ async fn run_server(handle: IpcServerHandle, socket_path: PathBuf) -> Result<()>
     }
 }
 
+#[cfg(windows)]
+async fn run_server(handle: IpcServerHandle, socket_path: PathBuf) -> Result<()> {
+    let mut listener = create_windows_listener(&socket_path, true)
+        .with_context(|| format!("binding IPC named pipe at {}", socket_path.display()))?;
+
+    tracing::info!(pipe = %socket_path.display(), "IPC server listening");
+
+    loop {
+        listener.connect().await.with_context(|| {
+            format!(
+                "accepting IPC named pipe connection at {}",
+                socket_path.display()
+            )
+        })?;
+
+        let connected_stream = listener;
+        listener = create_windows_listener(&socket_path, false).with_context(|| {
+            format!(
+                "preparing next IPC named pipe listener at {}",
+                socket_path.display()
+            )
+        })?;
+
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            if let Err(e) = handle_connection(connected_stream, handle).await {
+                tracing::warn!("IPC connection error: {}", e);
+            }
+        });
+    }
+}
+
+#[cfg(windows)]
+fn create_windows_listener(
+    socket_path: &std::path::Path,
+    first_instance: bool,
+) -> std::io::Result<NamedPipeServer> {
+    let mut options = ServerOptions::new();
+    if first_instance {
+        options.first_pipe_instance(true);
+    }
+    options.create(socket_path)
+}
+
 // ---------------------------------------------------------------------------
 // Per-connection handler
 // ---------------------------------------------------------------------------
 
-async fn handle_connection(mut stream: UnixStream, handle: IpcServerHandle) -> Result<()> {
+async fn handle_connection<S>(mut stream: S, handle: IpcServerHandle) -> Result<()>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     let request = read_request(&mut stream).await?;
     let response = dispatch(request, &handle).await;
     write_response(&mut stream, &response).await?;
     Ok(())
 }
 
-async fn read_request(stream: &mut UnixStream) -> Result<Request> {
+async fn read_request<S>(stream: &mut S) -> Result<Request>
+where
+    S: AsyncRead + Unpin,
+{
     let mut len_buf = [0u8; 4];
     stream
         .read_exact(&mut len_buf)
@@ -268,7 +346,10 @@ async fn read_request(stream: &mut UnixStream) -> Result<Request> {
     serde_json::from_slice(&payload).context("deserializing IPC request")
 }
 
-async fn write_response(stream: &mut UnixStream, response: &Response) -> Result<()> {
+async fn write_response<S>(stream: &mut S, response: &Response) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
     let payload = serde_json::to_vec(response).context("serializing IPC response")?;
     let len = payload.len() as u32;
     stream

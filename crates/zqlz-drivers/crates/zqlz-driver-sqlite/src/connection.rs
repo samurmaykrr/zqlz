@@ -127,12 +127,11 @@ impl SqliteConnection {
 
         // Expand ~ to home directory
         let expanded = if let Some(rest) = path.strip_prefix("~/") {
-            if let Some(home) = std::env::var_os("HOME") {
-                let home_path = std::path::PathBuf::from(home);
+            if let Some(home_path) = dirs::home_dir() {
                 home_path.join(rest).to_string_lossy().to_string()
             } else {
                 return Err(ZqlzError::Configuration(
-                    "Unable to determine HOME directory".into(),
+                    "Unable to determine home directory".into(),
                 ));
             }
         } else if path.starts_with('~') {
