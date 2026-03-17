@@ -11,6 +11,30 @@ use crate::widgets::sidebar::{
 use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, v_flex};
 
 impl ConnectionSidebar {
+    fn current_schema_for(&self, database_name: Option<&str>) -> Option<String> {
+        self.selected_connection.and_then(|selected_connection| {
+            self.connections
+                .iter()
+                .find(|connection| connection.id == selected_connection)
+                .and_then(|connection| {
+                    database_name
+                        .and_then(|database_name| {
+                            connection
+                                .databases
+                                .iter()
+                                .find(|database| database.name == database_name)
+                                .and_then(|database| {
+                                    database
+                                        .schema
+                                        .as_ref()
+                                        .and_then(|schema| schema.schema_name.clone())
+                                })
+                        })
+                        .or_else(|| connection.schema_name.clone())
+                })
+        })
+    }
+
     /// Build a tree of database schema objects (tables, views, triggers, etc.).
     ///
     /// This is a reusable tree builder that renders all standard SQL objects
@@ -168,6 +192,8 @@ impl ConnectionSidebar {
                     for table_name in &filtered_tables {
                         let table = (*table_name).clone();
                         let name_for_menu = (*table_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_menu = object_schema.clone();
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
@@ -196,6 +222,7 @@ impl ConnectionSidebar {
                                         this.show_table_context_menu(
                                             conn_id,
                                             name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
                                             db_name_for_menu.clone(),
                                             event.position,
                                             window,
@@ -267,6 +294,8 @@ impl ConnectionSidebar {
                     for view_name in &filtered_views {
                         let view = (*view_name).clone();
                         let name_for_menu = (*view_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_menu = object_schema.clone();
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
                         section = section.child(Self::render_leaf_item(
@@ -295,6 +324,7 @@ impl ConnectionSidebar {
                                         this.show_view_context_menu(
                                             conn_id,
                                             name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
                                             db_name_for_menu.clone(),
                                             event.position,
                                             window,
@@ -469,6 +499,9 @@ impl ConnectionSidebar {
                     for trigger_name in &filtered_triggers {
                         let trig = (*trigger_name).clone();
                         let name_for_menu = (*trigger_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
                         section = section.child(Self::render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
@@ -484,6 +517,7 @@ impl ConnectionSidebar {
                                     cx.emit(ConnectionSidebarEvent::DesignTrigger {
                                         connection_id: conn_id,
                                         trigger_name: trig.clone(),
+                                        object_schema: object_schema_for_click.clone(),
                                     });
                                 },
                                 on_right_click: Some(
@@ -494,6 +528,7 @@ impl ConnectionSidebar {
                                         this.show_trigger_context_menu(
                                             conn_id,
                                             name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
                                             event.position,
                                             window,
                                             cx,
@@ -564,6 +599,9 @@ impl ConnectionSidebar {
                     for function_name in &filtered_functions {
                         let func = (*function_name).clone();
                         let name_for_menu = (*function_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
                         section = section.child(Self::render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
@@ -579,6 +617,7 @@ impl ConnectionSidebar {
                                     cx.emit(ConnectionSidebarEvent::OpenFunction {
                                         connection_id: conn_id,
                                         function_name: func.clone(),
+                                        object_schema: object_schema_for_click.clone(),
                                     });
                                 },
                                 on_right_click: Some(
@@ -589,6 +628,7 @@ impl ConnectionSidebar {
                                         this.show_function_context_menu(
                                             conn_id,
                                             name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
                                             event.position,
                                             window,
                                             cx,
@@ -659,6 +699,9 @@ impl ConnectionSidebar {
                     for procedure_name in &filtered_procedures {
                         let proc = (*procedure_name).clone();
                         let name_for_menu = (*procedure_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
                         section = section.child(Self::render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
@@ -674,6 +717,7 @@ impl ConnectionSidebar {
                                     cx.emit(ConnectionSidebarEvent::OpenProcedure {
                                         connection_id: conn_id,
                                         procedure_name: proc.clone(),
+                                        object_schema: object_schema_for_click.clone(),
                                     });
                                 },
                                 on_right_click: Some(
@@ -684,6 +728,7 @@ impl ConnectionSidebar {
                                         this.show_procedure_context_menu(
                                             conn_id,
                                             name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
                                             event.position,
                                             window,
                                             cx,

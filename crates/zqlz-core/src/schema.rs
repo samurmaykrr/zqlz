@@ -597,6 +597,8 @@ impl ObjectsPanelColumn {
 pub struct ObjectsPanelRow {
     /// Object name (used for context menus, double-click actions)
     pub name: String,
+    /// Optional schema/namespace for the object when the driver exposes it.
+    pub schema: Option<String>,
     /// Object type: "table", "view", "key", "redis_database", etc.
     pub object_type: String,
     /// Cell values keyed by column id, in display-ready string form
@@ -684,6 +686,7 @@ impl ObjectsPanelData {
 
                 ObjectsPanelRow {
                     name: info.name,
+                    schema: info.schema,
                     object_type: object_type.to_string(),
                     values,
                     redis_database_index: None,

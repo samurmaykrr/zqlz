@@ -23,6 +23,7 @@ gpui.workspace = true
 # Internal crates
 zqlz-ui.workspace = true
 zqlz-core.workspace = true
+zqlz-schema-tools.workspace = true
 zqlz-connection.workspace = true
 zqlz-services.workspace = true
 zqlz-query.workspace = true

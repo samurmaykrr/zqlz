@@ -65,6 +65,7 @@ pub enum ConnectionSidebarEvent {
     DesignView {
         connection_id: Uuid,
         view_name: String,
+        object_schema: Option<String>,
     },
     /// User wants to create a new view
     NewView { connection_id: Uuid },
@@ -172,7 +173,8 @@ pub enum ConnectionSidebarEvent {
     ViewHistory {
         connection_id: Uuid,
         object_name: String,
-        object_type: String, // "view", "function", "procedure", "trigger"
+        object_schema: Option<String>,
+        object_type: String, // "table", "view", "function", "procedure", "trigger"
     },
 
     // Function events
@@ -180,6 +182,7 @@ pub enum ConnectionSidebarEvent {
     OpenFunction {
         connection_id: Uuid,
         function_name: String,
+        object_schema: Option<String>,
     },
 
     // Procedure events
@@ -187,6 +190,7 @@ pub enum ConnectionSidebarEvent {
     OpenProcedure {
         connection_id: Uuid,
         procedure_name: String,
+        object_schema: Option<String>,
     },
 
     // Trigger events
@@ -194,6 +198,7 @@ pub enum ConnectionSidebarEvent {
     DesignTrigger {
         connection_id: Uuid,
         trigger_name: String,
+        object_schema: Option<String>,
     },
     /// User wants to create a new trigger
     NewTrigger { connection_id: Uuid },
@@ -206,6 +211,7 @@ pub enum ConnectionSidebarEvent {
     OpenTriggerDesigner {
         connection_id: Uuid,
         trigger_name: Option<String>,
+        object_schema: Option<String>,
     },
 
     // Redis-specific events

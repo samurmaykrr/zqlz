@@ -244,9 +244,11 @@ mod table_comparison_tests {
             diff.modified_tables[0].modified_columns[0].column_name,
             "name"
         );
-        assert!(diff.modified_tables[0].modified_columns[0]
-            .type_change
-            .is_some());
+        assert!(
+            diff.modified_tables[0].modified_columns[0]
+                .type_change
+                .is_some()
+        );
     }
 
     #[test]

@@ -29,6 +29,7 @@ impl ConnectionSidebar {
         &mut self,
         conn_id: Uuid,
         procedure_name: String,
+        object_schema: Option<String>,
         position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -59,11 +60,13 @@ impl ConnectionSidebar {
                         .item(PopupMenuItem::new("View Definition").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = procedure_for_menu.clone();
+                            let object_schema = object_schema.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::OpenProcedure {
                                         connection_id: conn_id,
                                         procedure_name: name.clone(),
+                                        object_schema: object_schema.clone(),
                                     });
                                 });
                             }
@@ -72,11 +75,13 @@ impl ConnectionSidebar {
                         .item(PopupMenuItem::new("View History").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = procedure_for_menu.clone();
+                            let object_schema = object_schema.clone();
                             move |_event, _window, cx| {
                                 _ = sidebar.update(cx, |_sidebar, cx| {
                                     cx.emit(ConnectionSidebarEvent::ViewHistory {
                                         connection_id: conn_id,
                                         object_name: name.clone(),
+                                        object_schema: object_schema.clone(),
                                         object_type: "procedure".to_string(),
                                     });
                                 });

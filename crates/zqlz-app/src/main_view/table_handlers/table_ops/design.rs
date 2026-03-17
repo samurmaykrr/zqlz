@@ -3,7 +3,9 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
+use zqlz_core::TableDetails;
 use zqlz_ui::widgets::WindowExt;
+use zqlz_versioning::{DatabaseObjectType, make_object_id};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -159,6 +161,8 @@ impl MainView {
         let connection = connection.clone();
         let _connection_sidebar = self.connection_sidebar.clone();
         let table_name = design.table_name.clone();
+        let object_schema = design.schema.clone();
+        let version_repository = self.version_repository.clone();
         let dock_area = self.dock_area.clone();
 
         // Generate the DDL — CREATE for new tables, ALTER for existing
@@ -217,6 +221,24 @@ impl MainView {
         };
 
         cx.spawn_in(window, async move |this, cx| {
+            let pre_save_snapshot = if is_new {
+                None
+            } else {
+                match connection.as_schema_introspection() {
+                    Some(schema_introspection) => match schema_introspection
+                        .get_table(object_schema.as_deref(), &table_name)
+                        .await
+                    {
+                        Ok(table_details) => Some(table_details),
+                        Err(error) => {
+                            tracing::warn!(%error, table = %table_name, "Failed to capture pre-save table snapshot");
+                            None
+                        }
+                    },
+                    None => None,
+                }
+            };
+
             // Execute each DDL statement in sequence
             for ddl in &ddl_statements {
                 if let Err(e) = connection.execute(ddl, &[]).await {
@@ -234,6 +256,96 @@ impl MainView {
 
                     return anyhow::Ok(());
                 }
+            }
+
+            if let Some(schema_introspection) = connection.as_schema_introspection() {
+                if let Some(table_details) = &pre_save_snapshot {
+                        let object_id = make_object_id(object_schema.as_deref(), &table_name);
+                        match version_repository.get_latest(connection_id, &object_id) {
+                            Ok(None) => {
+                                if let Err(error) = record_table_version_snapshot(
+                                    &version_repository,
+                                    connection_id,
+                                    object_schema.as_deref(),
+                                    &table_name,
+                                    table_details,
+                                    "Capture table before manual edit".to_string(),
+                                ) {
+                                tracing::warn!(%error, table = %table_name, "Failed to persist pre-save table snapshot");
+                            }
+                        }
+                        Ok(Some(_)) => {}
+                        Err(error) => {
+                            tracing::warn!(%error, table = %table_name, "Failed to inspect existing table history before snapshot commit");
+                        }
+                    }
+                }
+
+                match schema_introspection
+                    .get_table(object_schema.as_deref(), &table_name)
+                    .await
+                {
+                    Ok(table_details) => match serde_json::to_string_pretty(&table_details) {
+                        Ok(snapshot) => {
+                            let version_message = build_table_version_message(&table_details, is_new);
+                            if let Err(error) = version_repository.commit(
+                                connection_id,
+                                DatabaseObjectType::Table,
+                                object_schema.clone(),
+                                table_name.clone(),
+                                snapshot,
+                                version_message,
+                            ) {
+                                tracing::error!(%error, table = %table_name, "Failed to store table version snapshot");
+
+                                _ = cx.update(|window, cx| {
+                                    window.push_notification(
+                                        zqlz_ui::widgets::notification::Notification::warning(format!(
+                                            "Table saved, but version history was not updated: {}",
+                                            error
+                                        )),
+                                        cx,
+                                    );
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, table = %table_name, "Failed to serialize table snapshot");
+
+                            _ = cx.update(|window, cx| {
+                                window.push_notification(
+                                    zqlz_ui::widgets::notification::Notification::warning(format!(
+                                        "Table saved, but version snapshot could not be serialized: {}",
+                                        error
+                                    )),
+                                    cx,
+                                );
+                            });
+                        }
+                    },
+                    Err(error) => {
+                        tracing::error!(%error, table = %table_name, "Failed to reload table after save");
+
+                        _ = cx.update(|window, cx| {
+                            window.push_notification(
+                                zqlz_ui::widgets::notification::Notification::warning(format!(
+                                    "Table saved, but version snapshot could not be reloaded: {}",
+                                    error
+                                )),
+                                cx,
+                            );
+                        });
+                    }
+                }
+            } else {
+                _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        zqlz_ui::widgets::notification::Notification::warning(
+                            "Table saved, but version snapshot could not be recorded because schema introspection is unavailable",
+                        ),
+                        cx,
+                    );
+                });
             }
 
             tracing::info!("Table '{}' saved successfully", table_name);
@@ -271,4 +383,35 @@ impl MainView {
         })
         .detach();
     }
+}
+
+fn build_table_version_message(table_details: &TableDetails, is_new: bool) -> String {
+    let action = if is_new { "Create" } else { "Update" };
+    format!(
+        "{} table with {} columns, {} indexes, and {} foreign keys",
+        action,
+        table_details.columns.len(),
+        table_details.indexes.len(),
+        table_details.foreign_keys.len()
+    )
+}
+
+fn record_table_version_snapshot(
+    version_repository: &zqlz_versioning::VersionRepository,
+    connection_id: Uuid,
+    table_schema: Option<&str>,
+    table_name: &str,
+    table_details: &TableDetails,
+    message: String,
+) -> anyhow::Result<()> {
+    let snapshot = serde_json::to_string_pretty(table_details)?;
+    version_repository.commit(
+        connection_id,
+        DatabaseObjectType::Table,
+        table_schema.map(ToOwned::to_owned),
+        table_name.to_string(),
+        snapshot,
+        message,
+    )?;
+    Ok(())
 }

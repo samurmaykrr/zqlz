@@ -942,7 +942,7 @@ impl CellEditorPanel {
             .justify_end()
             .child(
                 Button::new("cancel-edit")
-                    .secondary()
+                    .secondary_primary()
                     .label("Cancel")
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.cancel(cx);
@@ -1211,7 +1211,7 @@ impl CellEditorPanel {
                     .child(
                         div().ml_auto().child(
                             Button::new("close-binary")
-                                .secondary()
+                                .secondary_primary()
                                 .label("Close")
                                 .on_click(cx.listener(|this, _, _window, cx| {
                                     this.cancel(cx);

@@ -149,7 +149,8 @@ pub enum ObjectsPanelEvent {
     ViewHistory {
         connection_id: Uuid,
         object_name: String,
-        object_type: String, // "view", "function", "procedure", "trigger"
+        object_schema: Option<String>,
+        object_type: String, // "table", "view", "function", "procedure", "trigger"
     },
 }
 
@@ -354,6 +355,13 @@ impl ObjectsTableDelegate {
             names.push(right_clicked_name.to_string());
         }
         names
+    }
+
+    fn schema_for_object(&self, object_name: &str, object_type: &str) -> Option<String> {
+        self.objects
+            .iter()
+            .find(|object| object.name == object_name && object.object_type == object_type)
+            .and_then(|object| object.schema.clone())
     }
 
     /// Get names of selected keys (for Redis, including right-clicked if not in selection).
@@ -835,6 +843,27 @@ impl ObjectsTableDelegate {
                 ))
             })
             .separator()
+            .when(!is_multi, |menu| {
+                menu.item({
+                    let panel = panel.clone();
+                    let table_name = table_name.clone();
+                    let object_schema = self.schema_for_object(&table_name, "table");
+                    PopupMenuItem::new("View History").on_click(window.listener_for(
+                        &menu_entity,
+                        move |_this, _, _, cx| {
+                            _ = panel.update(cx, |_panel, cx| {
+                                cx.emit(ObjectsPanelEvent::ViewHistory {
+                                    connection_id,
+                                    object_name: table_name.clone(),
+                                    object_schema: object_schema.clone(),
+                                    object_type: "table".to_string(),
+                                });
+                            });
+                        },
+                    ))
+                })
+                .separator()
+            })
             // Rename (single table only - show only when single selection)
             .when(!is_multi, |menu| {
                 menu.item({
@@ -1047,6 +1076,7 @@ impl ObjectsTableDelegate {
                 menu.item({
                     let panel = panel.clone();
                     let view_name = view_name.clone();
+                    let object_schema = self.schema_for_object(&view_name, "view");
                     PopupMenuItem::new("View History").on_click(window.listener_for(
                         &menu_entity,
                         move |_this, _, _, cx| {
@@ -1054,6 +1084,7 @@ impl ObjectsTableDelegate {
                                 cx.emit(ObjectsPanelEvent::ViewHistory {
                                     connection_id,
                                     object_name: view_name.clone(),
+                                    object_schema: object_schema.clone(),
                                     object_type: "view".to_string(),
                                 });
                             });
@@ -1463,6 +1494,7 @@ impl ObjectsPanel {
 
                 ObjectsPanelRow {
                     name: format!("db{}", index),
+                    schema: None,
                     object_type: "redis_database".to_string(),
                     values,
                     redis_database_index: Some(index),

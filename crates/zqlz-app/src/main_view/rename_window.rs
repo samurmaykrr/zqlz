@@ -107,7 +107,8 @@ impl RenameTarget {
                 connection,
                 ..
             } => {
-                let definition = fetch_view_definition(connection, old_name, driver_name).await?;
+                let definition =
+                    fetch_view_definition(connection, None, old_name, driver_name).await?;
 
                 let drop_sql = format!("DROP VIEW \"{}\"", old_name);
                 connection

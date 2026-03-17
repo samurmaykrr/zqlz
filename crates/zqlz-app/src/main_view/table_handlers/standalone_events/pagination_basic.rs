@@ -367,8 +367,6 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                         let last_page = (total as usize).div_ceil(records_per_page);
                         let last_page = last_page.max(1);
                         let rows_loaded = result.rows.len();
-                        let total_records = result.total_rows;
-
                         tracing::info!(
                             "Last-page loaded concurrently: {} rows, total={}, page={}",
                             rows_loaded,
@@ -387,6 +385,12 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                                 return;
                             }
 
+                            if let Some(pag_state) = &viewer.pagination_state {
+                                pag_state.update(cx, |state, _cx| {
+                                    state.current_page = last_page;
+                                });
+                            }
+
                             viewer.load_table(
                                 connection_id,
                                 connection_name.clone(),
@@ -398,14 +402,6 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                                 window,
                                 cx,
                             );
-
-                            if let Some(pag_state) = &viewer.pagination_state {
-                                pag_state.update(cx, |state, cx| {
-                                    state.total_records = total_records;
-                                    state.current_page = last_page;
-                                    state.update_after_load(rows_loaded, total_records, false, cx);
-                                });
-                            }
                         }) {
                             tracing::debug!(error = %error, "Last-page result arrived after viewer dropped");
                         }

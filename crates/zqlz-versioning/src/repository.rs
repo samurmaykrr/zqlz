@@ -8,6 +8,8 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use uuid::Uuid;
+use zqlz_core::TableDetails;
+use zqlz_schema_tools::{SchemaComparator, SchemaDiff};
 
 use crate::storage::{
     TrackedObject, VersionStorage, VersionTag, VersionedObjectInfo, make_object_id,
@@ -218,9 +220,12 @@ impl VersionRepository {
             .get_version(to_version_id)?
             .ok_or_else(|| anyhow::anyhow!("To version not found"))?;
 
-        let unified = DiffEngine::unified_diff(&from.content, &to.content, 3);
-        let changes = DiffEngine::changes(&from.content, &to.content);
-        let is_identical = DiffEngine::is_identical(&from.content, &to.content);
+        let from_diff_content = self.diff_content_for_version(&from)?;
+        let to_diff_content = self.diff_content_for_version(&to)?;
+        let unified = DiffEngine::unified_diff(&from_diff_content, &to_diff_content, 3);
+        let changes = DiffEngine::changes(&from_diff_content, &to_diff_content);
+        let is_identical = DiffEngine::is_identical(&from_diff_content, &to_diff_content);
+        let schema_diff = self.schema_diff_for_versions(&from, &to)?;
 
         Ok(VersionDiff {
             from_version: from,
@@ -228,6 +233,7 @@ impl VersionRepository {
             unified_diff: unified,
             changes,
             is_identical,
+            schema_diff,
         })
     }
 
@@ -256,9 +262,10 @@ impl VersionRepository {
             None => return Ok(None),
         };
 
-        let unified = DiffEngine::unified_diff(&latest.content, current_content, 3);
-        let changes = DiffEngine::changes(&latest.content, current_content);
-        let is_identical = DiffEngine::is_identical(&latest.content, current_content);
+        let latest_diff_content = self.diff_content_for_version(&latest)?;
+        let unified = DiffEngine::unified_diff(&latest_diff_content, current_content, 3);
+        let changes = DiffEngine::changes(&latest_diff_content, current_content);
+        let is_identical = DiffEngine::is_identical(&latest_diff_content, current_content);
 
         Ok(Some(CurrentDiff {
             latest_version: latest,
@@ -346,9 +353,65 @@ impl VersionRepository {
         current_content: &str,
     ) -> Result<bool> {
         match self.storage.get_latest_version(connection_id, object_id)? {
-            Some(latest) => Ok(!DiffEngine::is_identical(&latest.content, current_content)),
+            Some(latest) => {
+                let latest_diff_content = self.diff_content_for_version(&latest)?;
+                Ok(!DiffEngine::is_identical(
+                    &latest_diff_content,
+                    current_content,
+                ))
+            }
             None => Ok(true), // No version exists, so there are "changes" (new content)
         }
+    }
+
+    fn diff_content_for_version(&self, version: &VersionEntry) -> Result<String> {
+        match version.object_type {
+            DatabaseObjectType::Table => {
+                match serde_json::from_str::<TableDetails>(&version.content) {
+                    Ok(table_details) => Ok(serde_json::to_string_pretty(&table_details)?),
+                    Err(error) => {
+                        tracing::warn!(%error, table = %version.object_name, "Failed to parse stored table snapshot; falling back to raw content diff");
+                        Ok(version.content.clone())
+                    }
+                }
+            }
+            _ => Ok(version.content.clone()),
+        }
+    }
+
+    fn schema_diff_for_versions(
+        &self,
+        from: &VersionEntry,
+        to: &VersionEntry,
+    ) -> Result<Option<SchemaDiff>> {
+        if from.object_type != DatabaseObjectType::Table
+            || to.object_type != DatabaseObjectType::Table
+        {
+            return Ok(None);
+        }
+
+        let from_table: TableDetails = match serde_json::from_str(&from.content) {
+            Ok(table) => table,
+            Err(error) => {
+                tracing::warn!(%error, table = %from.object_name, "Failed to parse older table snapshot for schema diff");
+                return Ok(None);
+            }
+        };
+        let to_table: TableDetails = match serde_json::from_str(&to.content) {
+            Ok(table) => table,
+            Err(error) => {
+                tracing::warn!(%error, table = %to.object_name, "Failed to parse newer table snapshot for schema diff");
+                return Ok(None);
+            }
+        };
+        let comparator = SchemaComparator::new();
+        let Some(table_diff) = comparator.compare_table_details(&to_table, &from_table) else {
+            return Ok(None);
+        };
+
+        let mut schema_diff = SchemaDiff::new();
+        schema_diff.modified_tables.push(table_diff);
+        Ok(Some(schema_diff))
     }
 }
 
@@ -371,6 +434,8 @@ pub struct VersionDiff {
     pub changes: Vec<crate::diff::Change>,
     /// Whether the versions are identical
     pub is_identical: bool,
+    /// Structured schema diff when the versions represent table snapshots
+    pub schema_diff: Option<SchemaDiff>,
 }
 
 /// Result of comparing current content with the latest saved version
@@ -393,6 +458,7 @@ mod tests {
     use super::*;
     use crate::storage::VersionStorage;
     use tempfile::{TempDir, tempdir};
+    use zqlz_core::{ColumnInfo, TableInfo, TableType};
 
     fn create_test_repo() -> (VersionRepository, TempDir) {
         let dir = tempdir().unwrap();
@@ -520,6 +586,106 @@ mod tests {
         assert!(
             repo.has_changes(conn_id, "public.my_func", "modified content")
                 .unwrap()
+        );
+    }
+
+    #[test]
+    fn test_table_diff_includes_schema_diff() {
+        let (repo, _dir) = create_test_repo();
+        let conn_id = Uuid::new_v4();
+
+        let original = TableDetails {
+            info: TableInfo {
+                schema: None,
+                name: "users".to_string(),
+                table_type: TableType::Table,
+                owner: None,
+                row_count: None,
+                size_bytes: None,
+                comment: None,
+                index_count: None,
+                trigger_count: None,
+                key_value_info: None,
+            },
+            columns: vec![ColumnInfo {
+                name: "id".to_string(),
+                ordinal: 0,
+                data_type: "INTEGER".to_string(),
+                nullable: false,
+                default_value: None,
+                max_length: None,
+                precision: None,
+                scale: None,
+                is_primary_key: true,
+                is_auto_increment: false,
+                is_unique: true,
+                foreign_key: None,
+                comment: None,
+                generation_expression: None,
+                is_generated_stored: false,
+                enum_values: None,
+            }],
+            primary_key: None,
+            foreign_keys: Vec::new(),
+            indexes: Vec::new(),
+            constraints: Vec::new(),
+            triggers: Vec::new(),
+        };
+
+        let modified = TableDetails {
+            columns: vec![
+                original.columns[0].clone(),
+                ColumnInfo {
+                    name: "email".to_string(),
+                    ordinal: 1,
+                    data_type: "TEXT".to_string(),
+                    nullable: false,
+                    default_value: None,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_primary_key: false,
+                    is_auto_increment: false,
+                    is_unique: false,
+                    foreign_key: None,
+                    comment: None,
+                    generation_expression: None,
+                    is_generated_stored: false,
+                    enum_values: None,
+                },
+            ],
+            ..original.clone()
+        };
+
+        let v1 = repo
+            .commit(
+                conn_id,
+                DatabaseObjectType::Table,
+                None,
+                "users".to_string(),
+                serde_json::to_string_pretty(&original).expect("serialize original table snapshot"),
+                "Initial table snapshot".to_string(),
+            )
+            .expect("commit original table snapshot");
+
+        let v2 = repo
+            .commit(
+                conn_id,
+                DatabaseObjectType::Table,
+                None,
+                "users".to_string(),
+                serde_json::to_string_pretty(&modified).expect("serialize modified table snapshot"),
+                "Add email column".to_string(),
+            )
+            .expect("commit modified table snapshot");
+
+        let diff = repo.diff(v1.id, v2.id).expect("generate table diff");
+        let schema_diff = diff.schema_diff.expect("schema diff for table versions");
+        assert_eq!(schema_diff.modified_tables.len(), 1);
+        assert_eq!(schema_diff.modified_tables[0].added_columns.len(), 1);
+        assert_eq!(
+            schema_diff.modified_tables[0].added_columns[0].name,
+            "email"
         );
     }
 }

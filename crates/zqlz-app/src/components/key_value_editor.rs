@@ -11,7 +11,7 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_core::{ColumnMeta, Value};
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, Icon, IndexPath, Sizable, ZqlzIcon,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
     checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
@@ -476,12 +476,15 @@ pub struct KeyValueEditorPanel {
     row_fields: Vec<RowField>,
     /// Which field is currently focused in the SQL row editor (for highlighting)
     focused_field_index: Option<usize>,
+    /// Only one field expands at a time so the form stays scannable in the sidebar.
+    expanded_row_field: Option<usize>,
     /// Subscriptions to InputEvent::Change on each row field input
     _field_subscriptions: Vec<Subscription>,
 
     // --- Shared fields ---
     validation_error: Option<String>,
     is_modified: bool,
+    value_editor_expanded: bool,
     word_wrap: bool,
     _subscriptions: Vec<Subscription>,
 }
@@ -537,9 +540,11 @@ impl KeyValueEditorPanel {
             row_data: None,
             row_fields: Vec::new(),
             focused_field_index: None,
+            expanded_row_field: None,
             _field_subscriptions: Vec::new(),
             validation_error: None,
             is_modified: false,
+            value_editor_expanded: false,
             word_wrap: true,
             _subscriptions: subscriptions,
         }
@@ -549,6 +554,8 @@ impl KeyValueEditorPanel {
         self.mode = RowEditorMode::RedisKey;
         self.row_data = None;
         self.row_fields.clear();
+        self.expanded_row_field = None;
+        self.value_editor_expanded = false;
 
         tracing::info!(
             "Loading key for editing: key={}, type={:?}, ttl={}",
@@ -858,11 +865,13 @@ impl KeyValueEditorPanel {
         self.row_data = None;
         self.row_fields.clear();
         self.focused_field_index = None;
+        self.expanded_row_field = None;
         self._field_subscriptions.clear();
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
         self.is_modified = false;
+        self.value_editor_expanded = false;
         self.validation_error = None;
         cx.notify();
     }
@@ -899,6 +908,8 @@ impl KeyValueEditorPanel {
         self.hash_fields.clear();
         self.zset_members.clear();
         self.focused_field_index = None;
+        self.expanded_row_field = None;
+        self.value_editor_expanded = false;
         self._field_subscriptions.clear();
 
         self.row_fields = data
@@ -1056,6 +1067,98 @@ impl KeyValueEditorPanel {
             });
         }
         cx.notify();
+    }
+
+    fn is_row_field_expanded(&self, index: usize) -> bool {
+        self.expanded_row_field == Some(index)
+    }
+
+    fn toggle_value_editor_expansion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.value_editor_expanded = !self.value_editor_expanded;
+        self.value_input.update(cx, |input, cx| {
+            input.focus(window, cx);
+        });
+        cx.notify();
+    }
+
+    fn toggle_row_field_expansion(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.expanded_row_field = if self.is_row_field_expanded(index) {
+            None
+        } else {
+            Some(index)
+        };
+        self.focus_field(index, window, cx);
+    }
+
+    fn toggle_row_field_null(&mut self, field_index: usize, cx: &mut Context<Self>) {
+        if let Some(field) = self.row_fields.get_mut(field_index) {
+            field.is_null = !field.is_null;
+            self.is_modified = true;
+        }
+
+        if let Some(field) = self.row_fields.get(field_index) {
+            let new_value = field.input.read(cx).text().to_string();
+            let is_null = field.is_null;
+            let typed_value = if is_null {
+                Value::Null
+            } else {
+                parse_row_field_value(
+                    Some(new_value.clone()),
+                    self.row_data
+                        .as_ref()
+                        .and_then(|data| data.column_meta.get(field_index))
+                        .map(|column| column.data_type.as_str())
+                        .unwrap_or("text"),
+                )
+            };
+            let row_index = self.row_data.as_ref().and_then(|data| data.row_index);
+            let source_viewer = self
+                .row_data
+                .as_ref()
+                .and_then(|data| data.source_viewer.clone());
+
+            cx.emit(KeyValueEditorEvent::FieldChanged {
+                col_index: field_index,
+                new_value,
+                typed_value,
+                is_null,
+                row_index,
+                source_viewer,
+            });
+            cx.notify();
+        }
+    }
+
+    fn render_sql_row_null_toggle(
+        &self,
+        field_index: usize,
+        is_null: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+
+        h_flex()
+            .gap_0p5()
+            .items_center()
+            .child(
+                Checkbox::new(("null-checkbox", field_index))
+                    .checked(is_null)
+                    .animated(false)
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        this.toggle_row_field_null(field_index, cx);
+                    })),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("NULL"),
+            )
     }
 
     /// Update a specific field's value from an external source (e.g., inline cell edit).
@@ -2040,9 +2143,13 @@ impl KeyValueEditorPanel {
 
     /// Render the string/JSON value editor (textarea)
     fn render_string_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        const COLLAPSED_VALUE_EDITOR_MIN_HEIGHT: f32 = 100.0;
+        const EXPANDED_VALUE_EDITOR_HEIGHT: f32 = 280.0;
+
         let theme = cx.theme();
         let is_json = matches!(self.selected_redis_value_type(cx), RedisValueType::Json);
         let word_wrap = self.word_wrap;
+        let is_expanded = self.value_editor_expanded;
 
         v_flex()
             .gap_1()
@@ -2073,6 +2180,24 @@ impl KeyValueEditorPanel {
                                 )
                             })
                             .child(
+                                Button::new("toggle-value-editor-expand")
+                                    .icon(Icon::new(if is_expanded {
+                                        IconName::Minimize
+                                    } else {
+                                        IconName::Maximize
+                                    }))
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(if is_expanded {
+                                        "Collapse value editor"
+                                    } else {
+                                        "Expand value editor"
+                                    })
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.toggle_value_editor_expansion(window, cx);
+                                    })),
+                            )
+                            .child(
                                 Button::new("word-wrap")
                                     .icon(Icon::new(ZqlzIcon::TextWrap).size_3())
                                     // This toggle chooses its variant from state, so a dynamic
@@ -2101,7 +2226,10 @@ impl KeyValueEditorPanel {
             .child(
                 div()
                     .flex_1()
-                    .min_h(px(100.))
+                    .when(is_expanded, |this| this.h(px(EXPANDED_VALUE_EDITOR_HEIGHT)))
+                    .when(!is_expanded, |this| {
+                        this.min_h(px(COLLAPSED_VALUE_EDITOR_MIN_HEIGHT))
+                    })
                     .child(Input::new(&self.value_input).w_full().h_full()),
             )
     }
@@ -2148,7 +2276,7 @@ impl KeyValueEditorPanel {
                     .gap_1p5()
                     .child(
                         Button::new("cancel-edit")
-                            .secondary()
+                            .secondary_primary()
                             .label("Discard")
                             .small()
                             .on_click(cx.listener(|this, _, _window, cx| {
@@ -2199,128 +2327,116 @@ impl KeyValueEditorPanel {
         field: &RowField,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        const EXPANDED_ROW_FIELD_HEIGHT: f32 = 160.0;
+
         let theme = cx.theme();
         let is_auto = col.auto_increment;
         let is_nullable = col.nullable;
         let is_null = field.is_null;
+        let is_disabled = is_auto || is_null;
         let field_index = index;
+        let is_expanded = self.is_row_field_expanded(index);
 
         v_flex()
             .gap_0p5()
             .pb_2()
             .child(
                 h_flex()
-                    .gap_1()
                     .items_center()
+                    .justify_between()
                     .child(
-                        div()
-                            .text_xs()
-                            .font_weight(FontWeight::MEDIUM)
-                            .text_color(theme.foreground)
-                            .child(col.name.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .px_1()
-                            .py_px()
-                            .rounded(px(3.))
-                            .bg(theme.muted)
-                            .text_color(theme.muted_foreground)
-                            .child(col.data_type.clone()),
-                    )
-                    .when(is_auto, |this| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .px_1()
-                                .py_px()
-                                .rounded(px(3.))
-                                .bg(theme.primary)
-                                .text_color(theme.primary_foreground)
-                                .child("auto"),
-                        )
-                    })
-                    .when(!is_nullable && !is_auto, |this| {
-                        this.child(div().text_xs().text_color(theme.danger).child("*"))
-                    }),
-            )
-            .child(
-                h_flex()
-                    .gap_1()
-                    .items_center()
-                    .child(
-                        div().flex_1().child(
-                            Input::new(&field.input)
-                                .w_full()
-                                .small()
-                                .disabled(is_auto || is_null),
-                        ),
-                    )
-                    .when(is_nullable, |this| {
-                        this.child(
-                            h_flex()
-                                .gap_0p5()
-                                .items_center()
-                                .child(
-                                    Checkbox::new(("null-checkbox", field_index))
-                                        .checked(is_null)
-                                        .animated(false)
-                                        .on_click(cx.listener(move |this, _, _window, cx| {
-                                            if let Some(field) =
-                                                this.row_fields.get_mut(field_index)
-                                            {
-                                                field.is_null = !field.is_null;
-                                                this.is_modified = true;
-                                            }
-
-                                            if let Some(field) = this.row_fields.get(field_index) {
-                                                let new_value =
-                                                    field.input.read(cx).text().to_string();
-                                                let is_null = field.is_null;
-                                                let typed_value = if is_null {
-                                                    Value::Null
-                                                } else {
-                                                    parse_row_field_value(
-                                                        Some(new_value.clone()),
-                                                        this.row_data
-                                                            .as_ref()
-                                                            .and_then(|data| {
-                                                                data.column_meta.get(field_index)
-                                                            })
-                                                            .map(|column| column.data_type.as_str())
-                                                            .unwrap_or("text"),
-                                                    )
-                                                };
-                                                let row_index = this
-                                                    .row_data
-                                                    .as_ref()
-                                                    .and_then(|data| data.row_index);
-                                                let source_viewer = this
-                                                    .row_data
-                                                    .as_ref()
-                                                    .and_then(|data| data.source_viewer.clone());
-                                                cx.emit(KeyValueEditorEvent::FieldChanged {
-                                                    col_index: field_index,
-                                                    new_value,
-                                                    typed_value,
-                                                    is_null,
-                                                    row_index,
-                                                    source_viewer,
-                                                });
-                                                cx.notify();
-                                            }
-                                        })),
-                                )
-                                .child(
+                        h_flex()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(theme.foreground)
+                                    .child(col.name.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .px_1()
+                                    .py_px()
+                                    .rounded(px(3.))
+                                    .bg(theme.muted)
+                                    .text_color(theme.muted_foreground)
+                                    .child(col.data_type.clone()),
+                            )
+                            .when(is_auto, |this| {
+                                this.child(
                                     div()
                                         .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child("NULL"),
-                                ),
-                        )
-                    }),
+                                        .px_1()
+                                        .py_px()
+                                        .rounded(px(3.))
+                                        .bg(theme.primary)
+                                        .text_color(theme.primary_foreground)
+                                        .child("auto"),
+                                )
+                            })
+                            .when(!is_nullable && !is_auto, |this| {
+                                this.child(div().text_xs().text_color(theme.danger).child("*"))
+                            }),
+                    )
+                    .child(
+                        Button::new(("toggle-row-field-expand", field_index))
+                            .icon(Icon::new(if is_expanded {
+                                IconName::Minimize
+                            } else {
+                                IconName::Maximize
+                            }))
+                            .ghost()
+                            .xsmall()
+                            .disabled(is_disabled)
+                            .tooltip(if is_expanded {
+                                "Collapse field editor"
+                            } else {
+                                "Expand field editor"
+                            })
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.toggle_row_field_expansion(field_index, window, cx);
+                            })),
+                    ),
             )
+            .when(is_expanded, |this| {
+                this.child(
+                    v_flex()
+                        .gap_1()
+                        .child(
+                            div().h(px(EXPANDED_ROW_FIELD_HEIGHT)).child(
+                                Input::new(&field.input)
+                                    .w_full()
+                                    .h_full()
+                                    .small()
+                                    .disabled(is_disabled),
+                            ),
+                        )
+                        .when(is_nullable, |this| {
+                            this.child(self.render_sql_row_null_toggle(field_index, is_null, cx))
+                        }),
+                )
+            })
+            .when(!is_expanded, |this| {
+                this.child(
+                    h_flex()
+                        .gap_1()
+                        .items_center()
+                        .child(
+                            div().flex_1().child(
+                                Input::new(&field.input)
+                                    .w_full()
+                                    .small()
+                                    .disabled(is_disabled),
+                            ),
+                        )
+                        .when(is_nullable, |this| {
+                            this.child(self.render_sql_row_null_toggle(field_index, is_null, cx))
+                        }),
+                )
+            })
     }
 
     /// Render the SQL row editor form
@@ -2384,7 +2500,7 @@ impl KeyValueEditorPanel {
                     .justify_end()
                     .child(
                         Button::new("cancel-row")
-                            .secondary()
+                            .secondary_primary()
                             .label("Discard")
                             .small()
                             .on_click(cx.listener(|this, _, _window, cx| {

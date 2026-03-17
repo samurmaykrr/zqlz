@@ -982,6 +982,7 @@ impl SchemaIntrospection for SqliteConnection {
 
             rows.push(ObjectsPanelRow {
                 name,
+                schema: None,
                 object_type: obj_type,
                 values,
                 redis_database_index: None,
