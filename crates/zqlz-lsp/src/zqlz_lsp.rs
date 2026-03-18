@@ -164,6 +164,11 @@ pub struct SqlLsp {
     /// Cached schema information
     pub(crate) schema_cache: SchemaCache,
 
+    /// Active database selected by the user for multi-database drivers
+    /// (for example MySQL where schema introspection can target databases
+    /// other than the connection default).
+    active_database: Option<String>,
+
     /// Schema service for cached schema introspection
     schema_service: Arc<SchemaService>,
 
@@ -334,6 +339,7 @@ impl SqlLsp {
             driver_type: "generic".to_string(),
             dialect: SqlDialect::Generic,
             schema_cache: SchemaCache::default(),
+            active_database: None,
             schema_service,
             context_analyzer: ContextAnalyzer::new().ok(),
             schema_validator: SchemaValidator::new(),
@@ -358,6 +364,7 @@ impl SqlLsp {
             driver_type,
             dialect,
             schema_cache: SchemaCache::default(),
+            active_database: None,
             schema_service,
             context_analyzer: ContextAnalyzer::new().ok(),
             schema_validator: SchemaValidator::new(),
@@ -389,6 +396,16 @@ impl SqlLsp {
 
         self.schema_cache = SchemaCache::default();
         self.schema_loading = true;
+    }
+
+    /// Set the active logical database for schema introspection.
+    pub fn set_active_database(&mut self, database: Option<String>) {
+        self.active_database = database;
+    }
+
+    /// Returns the active logical database selected for this LSP instance.
+    pub fn active_database(&self) -> Option<String> {
+        self.active_database.clone()
     }
 
     /// Get the appropriate SQL dialect for parsing
@@ -424,10 +441,15 @@ impl SqlLsp {
     pub async fn fetch_schema_cache(
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
+        active_database: Option<String>,
         schema_service: &SchemaService,
     ) -> Result<SchemaCache> {
         let db_schema = schema_service
-            .load_database_schema(connection.clone(), connection_id)
+            .load_database_schema_for_database(
+                connection.clone(),
+                connection_id,
+                active_database.as_deref(),
+            )
             .await?;
 
         tracing::info!(
@@ -476,15 +498,28 @@ impl SqlLsp {
         // each call is a network round-trip, so serial fetching multiplies latency by
         // the number of tables. Firing them in parallel reduces total time to roughly
         // one round-trip regardless of schema size.
+        let details_schema = match connection.driver_name() {
+            "mysql" | "mariadb" | "mssql" | "clickhouse" => active_database
+                .clone()
+                .or_else(|| db_schema.database_name.clone()),
+            _ => db_schema.schema_name.clone(),
+        };
+
         let table_detail_futures: Vec<_> = db_schema
             .tables
             .iter()
             .map(|table_name| {
                 let connection = connection.clone();
                 let table_name = table_name.clone();
+                let details_schema = details_schema.clone();
                 async move {
                     let result = schema_service
-                        .get_table_details(connection, connection_id, &table_name, None)
+                        .get_table_details(
+                            connection,
+                            connection_id,
+                            &table_name,
+                            details_schema.as_deref(),
+                        )
                         .await;
                     (table_name, result)
                 }
@@ -705,7 +740,13 @@ impl SqlLsp {
             return Ok(());
         };
 
-        let cache = Self::fetch_schema_cache(conn, conn_id, &self.schema_service).await?;
+        let cache = Self::fetch_schema_cache(
+            conn,
+            conn_id,
+            self.active_database.clone(),
+            &self.schema_service,
+        )
+        .await?;
         self.apply_schema_cache(cache);
         Ok(())
     }
@@ -4709,6 +4750,7 @@ impl SqlLsp {
             table_indexes,
             database_name: None,
             schema_name: None,
+            schema_names: Vec::new(),
         }
     }
 }

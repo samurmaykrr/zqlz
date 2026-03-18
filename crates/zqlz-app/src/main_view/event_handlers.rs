@@ -167,8 +167,25 @@ impl MainView {
                 self.handle_new_query(&NewQuery, window, cx);
             }
             ConnectionSidebarEvent::RefreshConnections => {
-                tracing::debug!("Refreshing connections list (preserving active connections)");
+                tracing::debug!("Refreshing connections list and connected schemas");
                 self.refresh_connections_list_preserving_state(cx);
+
+                let connected_connection_ids: Vec<uuid::Uuid> = self
+                    .connection_sidebar
+                    .read(cx)
+                    .connections()
+                    .iter()
+                    .filter(|connection| connection.is_connected)
+                    .map(|connection| connection.id)
+                    .collect();
+
+                for connection_id in connected_connection_ids {
+                    self.refresh_connection_surfaces(
+                        RefreshTarget::Connection(connection_id),
+                        SurfaceRefreshOptions::MANUAL,
+                        cx,
+                    );
+                }
             }
             ConnectionSidebarEvent::OpenTable {
                 connection_id,

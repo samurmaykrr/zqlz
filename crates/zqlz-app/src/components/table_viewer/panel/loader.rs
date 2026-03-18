@@ -1,6 +1,91 @@
 use super::*;
 
 impl TableViewerPanel {
+    fn capture_current_column_widths(&self, cx: &App) -> std::collections::HashMap<String, Pixels> {
+        let Some(table_state) = &self.table_state else {
+            return std::collections::HashMap::new();
+        };
+
+        table_state.read_with(cx, |table, _cx| {
+            let delegate = table.delegate();
+            let mut widths = std::collections::HashMap::new();
+
+            for (data_index, metadata) in delegate.column_meta.iter().enumerate() {
+                if let Some(column) = delegate.columns().get(data_index + 1) {
+                    widths.insert(metadata.name.clone(), column.width);
+                }
+            }
+
+            widths
+        })
+    }
+
+    fn apply_preserved_column_widths(
+        &self,
+        delegate: &mut TableViewerDelegate,
+        widths_by_column_name: &std::collections::HashMap<String, Pixels>,
+    ) {
+        if widths_by_column_name.is_empty() {
+            return;
+        }
+
+        let column_names: Vec<String> = delegate
+            .column_meta
+            .iter()
+            .map(|metadata| metadata.name.clone())
+            .collect();
+
+        for (data_index, column_name) in column_names.iter().enumerate() {
+            let Some(width) = widths_by_column_name.get(column_name) else {
+                continue;
+            };
+
+            if let Some(column) = delegate.columns_mut().get_mut(data_index + 1) {
+                *column = column.clone().width(*width);
+            }
+        }
+    }
+
+    fn apply_active_sort_to_delegate_columns(&self, delegate: &mut TableViewerDelegate, cx: &App) {
+        use crate::components::table_viewer::filter_types::SortDirection;
+        use zqlz_ui::widgets::table::ColumnSort;
+
+        for column_index in 1..delegate.columns().len() {
+            if let Some(column) = delegate.columns_mut().get_mut(column_index) {
+                *column = column.clone().sort(ColumnSort::Default);
+            }
+        }
+
+        let Some(filter_state) = &self.filter_panel_state else {
+            return;
+        };
+
+        let active_sort = filter_state.read_with(cx, |state, _cx| {
+            state.get_sort_criteria().into_iter().next()
+        });
+
+        let Some(active_sort) = active_sort else {
+            return;
+        };
+
+        let Some(data_index) = delegate
+            .column_meta
+            .iter()
+            .position(|metadata| metadata.name == active_sort.column)
+        else {
+            return;
+        };
+
+        let sort = match active_sort.direction {
+            SortDirection::Ascending => ColumnSort::Ascending,
+            SortDirection::Descending => ColumnSort::Descending,
+        };
+
+        if let Some(column) = delegate.columns_mut().get_mut(data_index + 1) {
+            *column = column.clone().sort(sort);
+        }
+    }
+
     fn apply_column_visibility_to_result(&self, result: &mut QueryResult, cx: &App) {
         let Some(column_visibility_state) = &self.column_visibility_state else {
             return;
@@ -107,6 +192,12 @@ impl TableViewerPanel {
             self.apply_column_visibility_to_result(&mut result, cx);
         }
 
+        let preserved_widths = if is_same_table {
+            self.capture_current_column_widths(cx)
+        } else {
+            std::collections::HashMap::new()
+        };
+
         self.connection_id = Some(connection_id);
         self.connection_name = Some(connection_name);
         self.table_name = Some(table_name.clone());
@@ -133,6 +224,8 @@ impl TableViewerPanel {
         delegate.set_auto_commit_mode(self.auto_commit_mode);
         delegate.set_driver_category(driver_category);
         delegate.set_primary_key_columns(self.primary_key_columns.clone());
+        self.apply_preserved_column_widths(&mut delegate, &preserved_widths);
+        self.apply_active_sort_to_delegate_columns(&mut delegate, cx);
 
         let table_state = cx.new(|cx| {
             TableState::new(delegate, window, cx)
@@ -310,6 +403,28 @@ impl TableViewerPanel {
                             })
                             .detach();
                         }
+                    }
+                    TableEvent::ColumnWidthsChanged(widths) => {
+                        let widths = widths.clone();
+                        let table_state_weak = table_state_weak.clone();
+                        cx.spawn_in(window, async move |_this, cx| {
+                            if let Err(error) = table_state_weak.update(cx, |table, _cx| {
+                                let columns = table.delegate_mut().columns_mut();
+                                for (column_index, width) in widths.iter().enumerate() {
+                                    if let Some(column) = columns.get_mut(column_index) {
+                                        *column = column.clone().width(*width);
+                                    }
+                                }
+                            }) {
+                                tracing::debug!(
+                                    error = %error,
+                                    "Failed to persist resized column widths"
+                                );
+                            }
+
+                            anyhow::Ok(())
+                        })
+                        .detach();
                     }
                     _ => {}
                 }

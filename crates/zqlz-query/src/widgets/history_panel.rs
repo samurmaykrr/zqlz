@@ -4,12 +4,12 @@ use chrono::{DateTime, Utc};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    ActiveTheme, Disableable, Icon, Sizable, VirtualListScrollHandle, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex, v_virtual_list, ActiveTheme, Disableable, Icon, Sizable, VirtualListScrollHandle,
-    ZqlzIcon,
+    v_flex, v_virtual_list,
 };
 
 use crate::history::QueryHistoryEntry;

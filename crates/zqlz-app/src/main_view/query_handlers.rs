@@ -954,8 +954,29 @@ impl MainView {
                         tracing::info!("Switch connection requested for editor {} to connection {}", editor_id.0, connection_id);
                     }
                     QueryEditorEvent::SwitchDatabase { database_name } => {
-                        // TODO: Implement database switching for dock-based editor
-                        tracing::info!("Switch database requested for editor {} to database {}", editor_id.0, database_name);
+                        let Some(editor) = query_editor_weak.upgrade() else {
+                            return;
+                        };
+
+                        let connection_id = editor.read(cx).connection_id();
+                        let Some(connection_id) = connection_id else {
+                            tracing::warn!(
+                                "Switch database ignored for editor {} without active connection",
+                                editor_id.0
+                            );
+                            return;
+                        };
+
+                        editor.update(cx, |editor, cx| {
+                            editor.set_current_database(Some(database_name.clone()), cx);
+                        });
+
+                        tracing::info!(
+                            "Switch database requested for editor {} to database {}",
+                            editor_id.0,
+                            database_name
+                        );
+                        _this.load_database_schema(connection_id, database_name.clone(), window, cx);
                     }
                 }
             }

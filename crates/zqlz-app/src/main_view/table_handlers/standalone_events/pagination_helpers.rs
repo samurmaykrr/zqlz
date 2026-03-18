@@ -84,8 +84,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
     let driver_name = connection.driver_name().to_string();
+    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
 
     // Determine if we'll need a background count task after data is loaded.
     // This is needed when: no cached total provided, and the driver is slow-count.
@@ -103,7 +103,10 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                     (state.get_filter_conditions(), state.get_sort_criteria())
                 });
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-                order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
+                order_by_clauses = sorts
+                    .iter()
+                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .collect();
             }
 
             // Add search text as WHERE clause (same logic as handle_apply_filters_event)
@@ -316,7 +319,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let driver_name = connection.driver_name().to_string();
+    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
 
     let (where_clauses, order_by_clauses, visible_columns) =
         viewer_entity.read_with(cx, |viewer, cx| {
@@ -328,7 +332,10 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
                     (state.get_filter_conditions(), state.get_sort_criteria())
                 });
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-                order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
+                order_by_clauses = sorts
+                    .iter()
+                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .collect();
             }
 
             if !viewer.search_text.is_empty() {

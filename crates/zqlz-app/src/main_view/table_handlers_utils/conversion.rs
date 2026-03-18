@@ -75,8 +75,9 @@ pub(in crate::main_view) fn convert_to_schema_details(
 ///
 /// For MySQL/MariaDB, database_name and schema are the same concept, so
 /// database_name is used directly. For PostgreSQL, the connection is already
-/// scoped to the target database, so no schema qualifier is needed (tables
-/// default to "public"). For SQLite, schemas don't apply.
+/// scoped to the target database and schema can be included directly in table
+/// names (e.g. `marketing.orders`), so no separate schema qualifier should be
+/// injected. For SQLite, schemas don't apply.
 pub(in crate::main_view) fn resolve_schema_qualifier(
     driver_name: &str,
     database_name: &Option<String>,

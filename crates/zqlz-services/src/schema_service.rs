@@ -39,18 +39,31 @@ const PREFETCH_INTER_BATCH_DELAY: std::time::Duration = std::time::Duration::fro
 /// - UI-friendly schema models
 pub struct SchemaService {
     cache: Arc<SchemaCache>,
-    /// Per-connection, per-table cache for full TableDetails. TTL is governed
+    /// Per-connection, per-table, per-schema cache for full TableDetails. TTL is governed
     /// by `self.cache.is_valid(connection_id)` — entries are considered stale
     /// whenever the main schema cache expires or is invalidated, so they share
     /// one consistent TTL domain rather than having independent timestamps.
-    table_details_cache: RwLock<HashMap<(Uuid, String), TableDetails>>,
-    /// Per-connection, per-table cache for generated DDL strings. Keyed by
-    /// `(connection_id, table_name)` and shares the same TTL domain as
+    table_details_cache: RwLock<HashMap<(Uuid, String, Option<String>), TableDetails>>,
+    /// Per-connection, per-object, per-schema cache for generated DDL strings.
+    /// Shares the same TTL domain as
     /// `table_details_cache` — cleared together on invalidation.
-    ddl_cache: RwLock<HashMap<(Uuid, String), String>>,
+    ddl_cache: RwLock<HashMap<(Uuid, String, Option<String>), String>>,
 }
 
 impl SchemaService {
+    fn is_postgres_driver(driver_name: &str) -> bool {
+        driver_name == "postgres"
+            || driver_name == "postgresql"
+            || driver_name == "zqlz-driver-postgres"
+    }
+
+    fn normalize_scope(scope: Option<&str>) -> Option<String> {
+        scope
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    }
+
     /// Create a new schema service
     pub fn new() -> Self {
         Self {
@@ -88,12 +101,35 @@ impl SchemaService {
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> ServiceResult<DatabaseSchema> {
+        self.load_database_schema_for_database(connection, connection_id, None)
+            .await
+    }
+
+    /// Load full database schema with optional explicit database target.
+    ///
+    /// `target_database` is primarily used by MySQL/MariaDB multi-database
+    /// workflows where sidebar navigation can inspect a database different from
+    /// the connection default. When a target is provided, cache reads/writes are
+    /// bypassed to avoid mixing per-database data under a connection-only key.
+    #[tracing::instrument(skip(self, connection), fields(connection_id = %connection_id, target_database = ?target_database))]
+    pub async fn load_database_schema_for_database(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        target_database: Option<&str>,
+    ) -> ServiceResult<DatabaseSchema> {
         let schema = connection
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
+        let target_database = target_database
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
+        let bypass_cache = target_database.is_some();
+
         // Check cache validity
-        if self.cache.is_valid(connection_id) {
+        if !bypass_cache && self.cache.is_valid(connection_id) {
             if let Some(cached_tables) = self.cache.get_tables(connection_id) {
                 tracing::debug!("Schema cache hit for connection {}", connection_id);
 
@@ -126,6 +162,7 @@ impl SchemaService {
                     table_indexes,
                     database_name,
                     schema_name,
+                    schema_names: Vec::new(),
                 });
             }
         }
@@ -138,30 +175,56 @@ impl SchemaService {
         // information_schema queries with `TABLE_SCHEMA = DATABASE()` to return
         // zero rows. By resolving the name first we can pass it explicitly.
         let (db_query, schema_query) = match connection.driver_name() {
-            "mysql" => ("SELECT DATABASE()", "SELECT DATABASE()"),
+            "mysql" | "mariadb" => ("SELECT DATABASE()", "SELECT DATABASE()"),
             "mssql" => ("SELECT DB_NAME()", "SELECT SCHEMA_NAME()"),
             "sqlite" => ("SELECT 'main'", "SELECT 'main'"),
             _ => ("SELECT current_database()", "SELECT current_schema()"),
         };
-        let database_name = connection.query(db_query, &[]).await.ok().and_then(|r| {
-            r.rows
-                .first()
-                .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-        });
-        let schema_name = connection
-            .query(schema_query, &[])
-            .await
-            .ok()
-            .and_then(|r| {
+        let database_name = match connection.driver_name() {
+            "mysql" | "mariadb" | "clickhouse" => {
+                if let Some(target_database) = target_database.clone() {
+                    Some(target_database)
+                } else {
+                    connection.query(db_query, &[]).await.ok().and_then(|r| {
+                        r.rows.first().and_then(|row| {
+                            row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))
+                        })
+                    })
+                }
+            }
+            _ => connection.query(db_query, &[]).await.ok().and_then(|r| {
                 r.rows
                     .first()
                     .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-            });
+            }),
+        };
+        let schema_name = match connection.driver_name() {
+            "mysql" | "mariadb" | "clickhouse" if target_database.is_some() => {
+                target_database.clone()
+            }
+            _ => connection
+                .query(schema_query, &[])
+                .await
+                .ok()
+                .and_then(|r| {
+                    r.rows
+                        .first()
+                        .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
+                }),
+        };
+        let schema_names = schema
+            .list_schemas()
+            .await
+            .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
+            .unwrap_or_else(|_| Vec::new());
 
         // For MySQL/MSSQL the "schema" parameter to introspection methods is the
         // database name. For PostgreSQL it's the schema name (e.g. "public").
         let introspection_schema = match connection.driver_name() {
-            "mysql" | "mssql" => database_name.as_deref(),
+            "mysql" | "mariadb" | "mssql" | "clickhouse" => {
+                target_database.as_deref().or(database_name.as_deref())
+            }
+            driver_name if Self::is_postgres_driver(driver_name) => None,
             "sqlite" => None, // SQLite always uses the single attached database
             _ => schema_name.as_deref(),
         };
@@ -173,9 +236,10 @@ impl SchemaService {
         let materialized_views_result = schema.list_materialized_views(introspection_schema).await;
         // PostgreSQL triggers are table-level objects, not top-level sidebar items.
         // Skip loading them for PG to avoid cluttering the sidebar.
-        let triggers_result = match connection.driver_name() {
-            "postgres" => Ok(Vec::new()),
-            _ => schema.list_triggers(introspection_schema, None).await,
+        let triggers_result = if Self::is_postgres_driver(connection.driver_name()) {
+            Ok(Vec::new())
+        } else {
+            schema.list_triggers(introspection_schema, None).await
         };
         let functions_result = schema.list_functions(introspection_schema).await;
         let procedures_result = schema.list_procedures(introspection_schema).await;
@@ -224,7 +288,7 @@ impl SchemaService {
         }
 
         // Cache tables and all other schema objects for future use
-        if !tables.is_empty() {
+        if !tables.is_empty() && !bypass_cache {
             self.cache.set_tables(connection_id, tables.clone());
             self.cache.set_connection_names(
                 connection_id,
@@ -258,6 +322,7 @@ impl SchemaService {
             table_indexes,
             database_name,
             schema_name,
+            schema_names,
         };
 
         tracing::info!(
@@ -269,6 +334,8 @@ impl SchemaService {
             procedures = db_schema.procedures.len(),
             database_name = ?db_schema.database_name,
             schema_name = ?db_schema.schema_name,
+            schema_count = db_schema.schema_names.len(),
+            schema_names = ?db_schema.schema_names,
             "Schema loaded successfully"
         );
 
@@ -307,7 +374,7 @@ impl SchemaService {
         self.cache.set_tables(connection_id, tables.clone());
         self.table_details_cache
             .write()
-            .retain(|(conn_id, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
         tracing::debug!(
             "Cached {} tables for connection {}",
             tables.len(),
@@ -434,7 +501,7 @@ impl SchemaService {
         connection_id: Uuid,
     ) -> ServiceResult<Vec<TriggerInfo>> {
         // Skip triggers for PostgreSQL (they're table-level)
-        if connection.driver_name() == "postgres" {
+        if Self::is_postgres_driver(connection.driver_name()) {
             return Ok(Vec::new());
         }
 
@@ -513,6 +580,36 @@ impl SchemaService {
         self.cache.get_database_name(connection_id)
     }
 
+    /// Return the current schema name (e.g. `"public"`, `"dbo"`) for the
+    /// connection, using the cache to avoid redundant round-trips.
+    ///
+    /// This is intentionally separate from [`get_introspection_schema_cached`]
+    /// because that method returns a driver-specific introspection parameter
+    /// (database name for MySQL/MSSQL), while sidebar hierarchy should use the
+    /// resolved schema name when available.
+    pub async fn get_schema_name_cached(
+        &self,
+        connection: &Arc<dyn Connection>,
+        connection_id: Uuid,
+    ) -> Option<String> {
+        if connection.driver_name() == "sqlite" {
+            return None;
+        }
+
+        if self.cache.is_valid(connection_id) {
+            let cached_schema = self.cache.get_schema_name(connection_id);
+            let cached_db = self.cache.get_database_name(connection_id);
+            if cached_schema.is_some() || cached_db.is_some() {
+                return cached_schema;
+            }
+        }
+
+        let _ = self
+            .get_introspection_schema_impl(connection, Some(connection_id))
+            .await;
+        self.cache.get_schema_name(connection_id)
+    }
+
     async fn get_introspection_schema_impl(
         &self,
         connection: &Arc<dyn Connection>,
@@ -530,6 +627,7 @@ impl SchemaService {
                 if cached_db.is_some() || cached_schema.is_some() {
                     return match connection.driver_name() {
                         "mysql" | "mssql" => cached_db,
+                        driver_name if Self::is_postgres_driver(driver_name) => None,
                         _ => cached_schema,
                     };
                 }
@@ -537,7 +635,7 @@ impl SchemaService {
         }
 
         let (db_query, schema_query) = match connection.driver_name() {
-            "mysql" => ("SELECT DATABASE()", "SELECT DATABASE()"),
+            "mysql" | "mariadb" => ("SELECT DATABASE()", "SELECT DATABASE()"),
             "mssql" => ("SELECT DB_NAME()", "SELECT SCHEMA_NAME()"),
             _ => ("SELECT current_database()", "SELECT current_schema()"),
         };
@@ -563,7 +661,8 @@ impl SchemaService {
         }
 
         match connection.driver_name() {
-            "mysql" | "mssql" => database_name,
+            "mysql" | "mariadb" | "mssql" => database_name,
+            driver_name if Self::is_postgres_driver(driver_name) => None,
             _ => schema_name,
         }
     }
@@ -594,7 +693,12 @@ impl SchemaService {
         // Validity is governed by the main schema cache — if that has expired or
         // been invalidated, table details are treated as stale too, ensuring both
         // caches share a single consistent TTL domain.
-        let cache_key = (connection_id, table_name.to_string());
+        let normalized_scope = Self::normalize_scope(schema);
+        let cache_key = (
+            connection_id,
+            table_name.to_string(),
+            normalized_scope.clone(),
+        );
         if self.cache.is_valid(connection_id) {
             let cache = self.table_details_cache.read();
             if let Some(cached) = cache.get(&cache_key) {
@@ -764,10 +868,10 @@ impl SchemaService {
         self.cache.invalidate(connection_id);
         self.table_details_cache
             .write()
-            .retain(|(conn_id, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
         self.ddl_cache
             .write()
-            .retain(|(conn_id, _), _| *conn_id != connection_id);
+            .retain(|(conn_id, _, _), _| *conn_id != connection_id);
     }
 
     /// Invalidate cached TableDetails for a specific table on a connection.
@@ -775,9 +879,17 @@ impl SchemaService {
     /// Call this after schema-modifying operations (ALTER TABLE, etc.) so the
     /// next `get_table_details` call fetches fresh data.
     pub fn invalidate_table_details(&self, connection_id: Uuid, table_name: &str) {
-        let key = (connection_id, table_name.to_string());
-        self.table_details_cache.write().remove(&key);
-        self.ddl_cache.write().remove(&key);
+        self.table_details_cache
+            .write()
+            .retain(|(conn_id, cached_table_name, _), _| {
+                *conn_id != connection_id || cached_table_name != table_name
+            });
+        self.ddl_cache
+            .write()
+            .retain(|(conn_id, cache_identifier, _), _| {
+                !(*conn_id == connection_id
+                    && cache_identifier.ends_with(&format!(":{table_name}")))
+            });
     }
 
     /// Synchronous cache-only read of TableDetails — no database round-trip.
@@ -789,13 +901,15 @@ impl SchemaService {
         &self,
         connection_id: Uuid,
         table_name: &str,
+        schema: Option<&str>,
     ) -> Option<TableDetails> {
         if !self.cache.is_valid(connection_id) {
             return None;
         }
+        let normalized_scope = Self::normalize_scope(schema);
         self.table_details_cache
             .read()
-            .get(&(connection_id, table_name.to_string()))
+            .get(&(connection_id, table_name.to_string(), normalized_scope))
             .cloned()
     }
 
@@ -824,7 +938,8 @@ impl SchemaService {
             )
             .await;
         let cache_identifier = format!("{:?}:{}", object_type, object_name);
-        let cache_key = (connection_id, cache_identifier);
+        let normalized_scope = Self::normalize_scope(schema);
+        let cache_key = (connection_id, cache_identifier, normalized_scope.clone());
 
         // Fast path: return cached DDL if the main schema cache is still valid
         if self.cache.is_valid(connection_id) {
@@ -926,8 +1041,8 @@ impl SchemaService {
         let cache = self.table_details_cache.read();
         let details: HashMap<String, TableDetails> = cache
             .iter()
-            .filter(|((conn_id, _), _)| *conn_id == connection_id)
-            .map(|((_, table_name), details)| (table_name.clone(), details.clone()))
+            .filter(|((conn_id, _, _), _)| *conn_id == connection_id)
+            .map(|((_, table_name, _), details)| (table_name.clone(), details.clone()))
             .collect();
 
         if details.is_empty() {
@@ -1095,7 +1210,7 @@ impl SchemaService {
             }
         }
 
-        if connection.driver_name() == "postgres" {
+        if Self::is_postgres_driver(connection.driver_name()) {
             if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
                 if views.iter().any(|view| view.name == object_name) {
                     return Some(Self::placeholder_table_info(

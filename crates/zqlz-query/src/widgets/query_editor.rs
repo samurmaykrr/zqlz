@@ -1173,12 +1173,14 @@ impl QueryEditor {
         {
             let mut lsp = self.sql_lsp.write();
             lsp.set_connection(connection_id, connection.clone(), driver_type.clone());
+            lsp.set_active_database(self.current_database.clone());
 
             // If a cache was persisted from the last session, apply it immediately so
             // completions work from the first keystroke.  The background refresh below
             // always runs regardless (stale-while-revalidate).
             if let Some(conn_id) = connection_id
-                && let Some(cached) = load_schema_cache_from_disk(conn_id)
+                && let Some(cached) =
+                    load_schema_cache_from_disk(conn_id, self.current_database.as_deref())
             {
                 lsp.apply_schema_cache(cached);
             }
@@ -1205,6 +1207,8 @@ impl QueryEditor {
                 )
             };
 
+            let active_database_for_refresh = lsp.read().active_database();
+
             if let (Some(connection_for_refresh), Some(connection_id_for_refresh)) =
                 (connection_for_refresh, connection_id_for_refresh)
             {
@@ -1215,6 +1219,7 @@ impl QueryEditor {
                     let mut attempt = 0u32;
 
                     let result = loop {
+                        let active_database = active_database_for_refresh.clone();
                         let fetch_result = cx
                             .background_spawn({
                                 let schema_service: Arc<SchemaService> = schema_service.clone();
@@ -1223,6 +1228,7 @@ impl QueryEditor {
                                     SqlLsp::fetch_schema_cache(
                                         conn,
                                         connection_id_for_refresh,
+                                        active_database,
                                         &schema_service,
                                     )
                                     .await
@@ -1254,7 +1260,11 @@ impl QueryEditor {
 
                     match result {
                         Ok(cache) => {
-                            save_schema_cache_to_disk(connection_id_for_refresh, &cache);
+                            save_schema_cache_to_disk(
+                                connection_id_for_refresh,
+                                active_database_for_refresh.as_deref(),
+                                &cache,
+                            );
                             lsp.write().apply_schema_cache_if_current(cache, epoch);
                             tracing::debug!("SQL schema refreshed successfully");
                 _ = this.update(cx, |editor, cx| {
@@ -1301,7 +1311,7 @@ impl QueryEditor {
         self.schema_metadata = None;
         self.schema_symbol_info = None;
         if let Some(conn_id) = self.connection_id
-            && let Some(path) = schema_cache_path(conn_id)
+            && let Some(path) = schema_cache_path(conn_id, self.current_database.as_deref())
         {
             std::fs::remove_file(path).ok();
         }
@@ -1317,12 +1327,13 @@ impl QueryEditor {
     /// Called after `prefetch_all_table_details` completes so that column data already
     /// warmed into `SchemaService`'s per-table cache is picked up by the LSP immediately.
     pub fn trigger_lsp_schema_refresh(&mut self, cx: &mut Context<Self>) {
-        let (connection, connection_id, schema_service) = {
+        let (connection, connection_id, schema_service, active_database) = {
             let guard = self.sql_lsp.read();
             (
                 guard.connection(),
                 guard.connection_id(),
                 guard.schema_service(),
+                guard.active_database(),
             )
         };
 
@@ -1332,20 +1343,31 @@ impl QueryEditor {
 
         let lsp = self.sql_lsp.clone();
         let epoch = lsp.write().next_fetch_epoch();
+        let active_database_for_disk = active_database.clone();
         cx.spawn(async move |_this, cx| {
             let result = cx
                 .background_spawn({
                     let schema_service = schema_service.clone();
                     let connection = connection.clone();
                     async move {
-                        SqlLsp::fetch_schema_cache(connection, connection_id, &schema_service).await
+                        SqlLsp::fetch_schema_cache(
+                            connection,
+                            connection_id,
+                            active_database.clone(),
+                            &schema_service,
+                        )
+                        .await
                     }
                 })
                 .await;
 
             match result {
                 Ok(cache) => {
-                    save_schema_cache_to_disk(connection_id, &cache);
+                    save_schema_cache_to_disk(
+                        connection_id,
+                        active_database_for_disk.as_deref(),
+                        &cache,
+                    );
                     lsp.write().apply_schema_cache_if_current(cache, epoch);
                     tracing::debug!("Schema cache refreshed after prefetch completion");
                     _ = _this.update(cx, |this, cx| {
@@ -1379,6 +1401,9 @@ impl QueryEditor {
     /// Set the current database name
     pub fn set_current_database(&mut self, database: Option<String>, cx: &mut Context<Self>) {
         self.current_database = database;
+        self.sql_lsp
+            .write()
+            .set_active_database(self.current_database.clone());
         cx.notify();
     }
 
@@ -3843,27 +3868,47 @@ impl Panel for QueryEditor {
 ///
 /// Layout: `{data_local_dir}/zqlz/schema_cache/{connection_id}.json`
 /// This is intentionally per-connection so different databases never share cached schemas.
-fn schema_cache_path(connection_id: Uuid) -> Option<std::path::PathBuf> {
+fn schema_cache_path(connection_id: Uuid, scope: Option<&str>) -> Option<std::path::PathBuf> {
+    let scope = scope
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("__default_scope__");
+    let scope_hash = {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        let mut hasher = DefaultHasher::new();
+        scope.hash(&mut hasher);
+        hasher.finish()
+    };
+
     dirs::data_local_dir().map(|base| {
         base.join("zqlz")
             .join("schema_cache")
-            .join(format!("{connection_id}.json"))
+            .join(format!("{connection_id}_{scope_hash:016x}.json"))
     })
 }
 
 /// Attempts to read and deserialize a previously saved schema cache from disk.
 /// Returns `None` on any failure (missing file, corrupt JSON, etc.) without logging noise —
 /// a missing or invalid cache is a normal condition on first run or after a schema update.
-fn load_schema_cache_from_disk(connection_id: Uuid) -> Option<zqlz_lsp::SchemaCache> {
-    let path = schema_cache_path(connection_id)?;
+fn load_schema_cache_from_disk(
+    connection_id: Uuid,
+    scope: Option<&str>,
+) -> Option<zqlz_lsp::SchemaCache> {
+    let path = schema_cache_path(connection_id, scope)?;
     let json = std::fs::read_to_string(&path).ok()?;
     serde_json::from_str(&json).ok()
 }
 
 /// Serializes the schema cache to disk, creating parent directories as needed.
 /// Errors are logged but not propagated — a failed disk write is non-fatal.
-fn save_schema_cache_to_disk(connection_id: Uuid, cache: &zqlz_lsp::SchemaCache) {
-    let Some(path) = schema_cache_path(connection_id) else {
+fn save_schema_cache_to_disk(
+    connection_id: Uuid,
+    scope: Option<&str>,
+    cache: &zqlz_lsp::SchemaCache,
+) {
+    let Some(path) = schema_cache_path(connection_id, scope) else {
         return;
     };
     if let Some(parent) = path.parent()

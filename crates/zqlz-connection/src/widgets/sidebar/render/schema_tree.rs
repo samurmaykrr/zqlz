@@ -5,12 +5,1119 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::collections::BTreeMap;
 
 use super::SqlSchemaTreeProps;
 use crate::widgets::sidebar::ConnectionSidebar;
-use zqlz_ui::widgets::{ActiveTheme, Icon, IconName, ZqlzIcon, caption, h_flex, v_flex};
+use zqlz_ui::widgets::{caption, h_flex, v_flex, ActiveTheme, Icon, IconName, ZqlzIcon};
+
+#[derive(Default)]
+struct SchemaSectionGroup {
+    tables: Vec<String>,
+    views: Vec<String>,
+    materialized_views: Vec<String>,
+    triggers: Vec<String>,
+    functions: Vec<String>,
+    procedures: Vec<String>,
+}
 
 impl ConnectionSidebar {
+    fn split_schema_qualified_name(name: &str) -> Option<(&str, &str)> {
+        let (schema_name, object_name) = name.split_once('.')?;
+        if schema_name.is_empty() || object_name.is_empty() {
+            return None;
+        }
+
+        Some((schema_name, object_name))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn group_schema_sections(
+        tables: &[String],
+        views: &[String],
+        materialized_views: &[String],
+        triggers: &[String],
+        functions: &[String],
+        procedures: &[String],
+        schema_names: &[String],
+        fallback_schema_name: Option<&str>,
+    ) -> Option<Vec<(String, SchemaSectionGroup)>> {
+        let mut groups: BTreeMap<String, SchemaSectionGroup> = BTreeMap::new();
+        let mut saw_schema_qualified_name = false;
+
+        let fallback_schema = fallback_schema_name.unwrap_or("public").to_string();
+
+        for schema_name in schema_names {
+            groups.entry(schema_name.clone()).or_default();
+        }
+
+        for table_name in tables {
+            if let Some((schema_name, object_name)) = Self::split_schema_qualified_name(table_name)
+            {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .tables
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .tables
+                    .push(table_name.clone());
+            }
+        }
+
+        for view_name in views {
+            if let Some((schema_name, object_name)) = Self::split_schema_qualified_name(view_name) {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .views
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .views
+                    .push(view_name.clone());
+            }
+        }
+
+        for view_name in materialized_views {
+            if let Some((schema_name, object_name)) = Self::split_schema_qualified_name(view_name) {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .materialized_views
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .materialized_views
+                    .push(view_name.clone());
+            }
+        }
+
+        for trigger_name in triggers {
+            if let Some((schema_name, object_name)) =
+                Self::split_schema_qualified_name(trigger_name)
+            {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .triggers
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .triggers
+                    .push(trigger_name.clone());
+            }
+        }
+
+        for function_name in functions {
+            if let Some((schema_name, object_name)) =
+                Self::split_schema_qualified_name(function_name)
+            {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .functions
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .functions
+                    .push(function_name.clone());
+            }
+        }
+
+        for procedure_name in procedures {
+            if let Some((schema_name, object_name)) =
+                Self::split_schema_qualified_name(procedure_name)
+            {
+                saw_schema_qualified_name = true;
+                groups
+                    .entry(schema_name.to_string())
+                    .or_default()
+                    .procedures
+                    .push(object_name.to_string());
+            } else {
+                groups
+                    .entry(fallback_schema.clone())
+                    .or_default()
+                    .procedures
+                    .push(procedure_name.clone());
+            }
+        }
+
+        if !saw_schema_qualified_name {
+            return None;
+        }
+
+        Some(groups.into_iter().collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_grouped_schema_objects_tree(
+        &self,
+        conn_id: uuid::Uuid,
+        object_capabilities: crate::widgets::sidebar::SidebarObjectCapabilities,
+        id_suffix: &str,
+        database_name: Option<String>,
+        groups: &[(String, SchemaSectionGroup)],
+        queries: &[crate::widgets::sidebar::SavedQueryInfo],
+        queries_expanded: bool,
+        tables_loading: bool,
+        views_loading: bool,
+        materialized_views_loading: bool,
+        triggers_loading: bool,
+        functions_loading: bool,
+        procedures_loading: bool,
+        expanded_schema_groups: &[String],
+        expanded_schema_section_keys: &[String],
+        depth: usize,
+        toggle_schema_group: impl Fn(&mut Self, &str, &mut Context<Self>) + Clone + 'static,
+        toggle_schema_section: impl Fn(&mut Self, &str, &str, &mut Context<Self>) + Clone + 'static,
+        cx: &mut Context<Self>,
+    ) -> Div {
+        let muted_foreground = cx.theme().muted_foreground;
+        let list_hover = cx.theme().list_hover;
+        let font_family = cx.theme().font_family.clone();
+        let has_search = !self.search_query.is_empty();
+        let leaf_depth = depth + 2;
+
+        let mut tree = v_flex().w_full().gap_px().font_family(font_family);
+
+        for (schema_name, group) in groups {
+            let schema_has_matches = self.matches_search(schema_name)
+                || group.tables.iter().any(|name| self.matches_search(name))
+                || group.views.iter().any(|name| self.matches_search(name))
+                || group
+                    .materialized_views
+                    .iter()
+                    .any(|name| self.matches_search(name))
+                || group.triggers.iter().any(|name| self.matches_search(name))
+                || group.functions.iter().any(|name| self.matches_search(name))
+                || group
+                    .procedures
+                    .iter()
+                    .any(|name| self.matches_search(name));
+
+            if has_search && !schema_has_matches {
+                continue;
+            }
+
+            let schema_name_for_id = schema_name.clone();
+            let schema_name_for_toggle = schema_name.clone();
+            let schema_name_for_table_menu = schema_name.clone();
+            let schema_name_for_view_menu = schema_name.clone();
+            let schema_name_for_trigger_click = schema_name.clone();
+            let schema_name_for_trigger_menu = schema_name.clone();
+            let schema_name_for_function_click = schema_name.clone();
+            let schema_name_for_function_menu = schema_name.clone();
+            let schema_name_for_procedure_click = schema_name.clone();
+            let schema_name_for_procedure_menu = schema_name.clone();
+
+            let schema_is_expanded = expanded_schema_groups.iter().any(|s| s == schema_name)
+                || (has_search && schema_has_matches);
+            let schema_total_count = group.tables.len()
+                + group.views.len()
+                + group.materialized_views.len()
+                + group.triggers.len()
+                + group.functions.len()
+                + group.procedures.len();
+            let schema_filtered_count = self.filter_by_search(&group.tables).len()
+                + self.filter_by_search(&group.views).len()
+                + self.filter_by_search(&group.materialized_views).len()
+                + self.filter_by_search(&group.triggers).len()
+                + self.filter_by_search(&group.functions).len()
+                + self.filter_by_search(&group.procedures).len();
+
+            let schema_header = self.render_section_header(
+                super::SectionHeaderProps {
+                    element_id: SharedString::from(format!(
+                        "schema-group-{}-{}",
+                        id_suffix, schema_name_for_id
+                    )),
+                    icon: Icon::new(IconName::Folder).size_3().into_any_element(),
+                    label: schema_name,
+                    total_count: schema_total_count,
+                    filtered_count: schema_filtered_count,
+                    is_expanded: schema_is_expanded,
+                    on_click: {
+                        let toggle_schema_group = toggle_schema_group.clone();
+                        move |this: &mut Self,
+                              _: &ClickEvent,
+                              _: &mut Window,
+                              cx: &mut Context<Self>| {
+                            toggle_schema_group(this, &schema_name_for_toggle, cx);
+                        }
+                    },
+                    on_right_click: None::<
+                        fn(&mut Self, &MouseDownEvent, &mut Window, &mut Context<Self>),
+                    >,
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
+                cx,
+            );
+
+            let mut schema_tree = v_flex().w_full().child(schema_header);
+
+            if schema_is_expanded {
+                // Tables
+                let filtered_tables = self.filter_by_search(&group.tables);
+                let tables_section_key = format!("{}::tables", schema_name);
+                let tables_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &tables_section_key)
+                    || (has_search && !filtered_tables.is_empty());
+
+                if !has_search || tables_loading || !filtered_tables.is_empty() {
+                    let tables_header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "tables-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::Table).size_3().into_any_element(),
+                            label: "Tables",
+                            total_count: group.tables.len(),
+                            filtered_count: filtered_tables.len(),
+                            is_expanded: tables_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "tables",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "tables",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(tables_header);
+                    if tables_expanded {
+                        if tables_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("tables-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for table_name in &filtered_tables {
+                                let table = format!("{}.{}", schema_name, table_name);
+                                let name_for_menu = (*table_name).clone();
+                                let db_name_for_click = database_name.clone();
+                                let db_name_for_menu = database_name.clone();
+                                let object_schema_for_menu =
+                                    Some(schema_name_for_table_menu.clone());
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "table-{}-{}-{}",
+                                            id_suffix, schema_name, table_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::Table)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*table_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenTable {
+                                                connection_id: conn_id,
+                                                table_name: table.clone(),
+                                                database_name: db_name_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_table_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    object_schema_for_menu.clone(),
+                                                    db_name_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+
+                // Views
+                let filtered_views = self.filter_by_search(&group.views);
+                let views_section_key = format!("{}::views", schema_name);
+                let views_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &views_section_key)
+                    || (has_search && !filtered_views.is_empty());
+
+                if object_capabilities.supports_views
+                    && (!has_search || views_loading || !filtered_views.is_empty())
+                {
+                    let views_header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "views-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::Eye).size_3().into_any_element(),
+                            label: "Views",
+                            total_count: group.views.len(),
+                            filtered_count: filtered_views.len(),
+                            is_expanded: views_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "views",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "views",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(views_header);
+                    if views_expanded {
+                        if views_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("views-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for view_name in &filtered_views {
+                                let view = format!("{}.{}", schema_name, view_name);
+                                let name_for_menu = (*view_name).clone();
+                                let db_name_for_click = database_name.clone();
+                                let db_name_for_menu = database_name.clone();
+                                let object_schema_for_menu =
+                                    Some(schema_name_for_view_menu.clone());
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "view-{}-{}-{}",
+                                            id_suffix, schema_name, view_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::Eye)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*view_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenView {
+                                                connection_id: conn_id,
+                                                view_name: view.clone(),
+                                                database_name: db_name_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_view_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    object_schema_for_menu.clone(),
+                                                    db_name_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+
+                // Materialized views
+                let filtered_mat_views = self.filter_by_search(&group.materialized_views);
+                let mat_views_section_key = format!("{}::materialized_views", schema_name);
+                let mat_views_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &mat_views_section_key)
+                    || (has_search && !filtered_mat_views.is_empty());
+
+                if object_capabilities.supports_materialized_views
+                    && (!has_search || materialized_views_loading || !filtered_mat_views.is_empty())
+                {
+                    let header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "matviews-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::TreeStructure)
+                                .size_3()
+                                .into_any_element(),
+                            label: "Materialized Views",
+                            total_count: group.materialized_views.len(),
+                            filtered_count: filtered_mat_views.len(),
+                            is_expanded: mat_views_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "materialized_views",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "materialized_views",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(header);
+                    if mat_views_expanded {
+                        if materialized_views_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("matviews-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for view_name in &filtered_mat_views {
+                                let view = format!("{}.{}", schema_name, view_name);
+                                let name_for_menu = (*view_name).clone();
+                                let db_name_for_click = database_name.clone();
+                                let db_name_for_menu = database_name.clone();
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "matview-{}-{}-{}",
+                                            id_suffix, schema_name, view_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::TreeStructure)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*view_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenView {
+                                                connection_id: conn_id,
+                                                view_name: view.clone(),
+                                                database_name: db_name_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_materialized_view_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    db_name_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+
+                // Triggers
+                let filtered_triggers = self.filter_by_search(&group.triggers);
+                let triggers_section_key = format!("{}::triggers", schema_name);
+                let triggers_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &triggers_section_key)
+                    || (has_search && !filtered_triggers.is_empty());
+
+                if object_capabilities.supports_triggers
+                    && (!has_search || triggers_loading || !filtered_triggers.is_empty())
+                {
+                    let header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "triggers-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::LightningBolt)
+                                .size_3()
+                                .into_any_element(),
+                            label: "Triggers",
+                            total_count: group.triggers.len(),
+                            filtered_count: filtered_triggers.len(),
+                            is_expanded: triggers_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "triggers",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "triggers",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(header);
+                    if triggers_expanded {
+                        if triggers_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("triggers-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for trigger_name in &filtered_triggers {
+                                let trigger = (*trigger_name).clone();
+                                let name_for_menu = (*trigger_name).clone();
+                                let object_schema_for_click =
+                                    Some(schema_name_for_trigger_click.clone());
+                                let object_schema_for_menu =
+                                    Some(schema_name_for_trigger_menu.clone());
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "trigger-{}-{}-{}",
+                                            id_suffix, schema_name, trigger_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::LightningBolt)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*trigger_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::DesignTrigger {
+                                                connection_id: conn_id,
+                                                trigger_name: trigger.clone(),
+                                                object_schema: object_schema_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_trigger_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    object_schema_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+
+                // Functions
+                let filtered_functions = self.filter_by_search(&group.functions);
+                let functions_section_key = format!("{}::functions", schema_name);
+                let functions_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &functions_section_key)
+                    || (has_search && !filtered_functions.is_empty());
+
+                if object_capabilities.supports_functions
+                    && (!has_search || functions_loading || !filtered_functions.is_empty())
+                {
+                    let header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "functions-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::Function).size_3().into_any_element(),
+                            label: "Functions",
+                            total_count: group.functions.len(),
+                            filtered_count: filtered_functions.len(),
+                            is_expanded: functions_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "functions",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "functions",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(header);
+                    if functions_expanded {
+                        if functions_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("functions-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for function_name in &filtered_functions {
+                                let function = (*function_name).clone();
+                                let name_for_menu = (*function_name).clone();
+                                let object_schema_for_click =
+                                    Some(schema_name_for_function_click.clone());
+                                let object_schema_for_menu =
+                                    Some(schema_name_for_function_menu.clone());
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "function-{}-{}-{}",
+                                            id_suffix, schema_name, function_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::Function)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*function_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenFunction {
+                                                connection_id: conn_id,
+                                                function_name: function.clone(),
+                                                object_schema: object_schema_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_function_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    object_schema_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+
+                // Procedures
+                let filtered_procedures = self.filter_by_search(&group.procedures);
+                let procedures_section_key = format!("{}::procedures", schema_name);
+                let procedures_expanded = expanded_schema_section_keys
+                    .iter()
+                    .any(|key| key == &procedures_section_key)
+                    || (has_search && !filtered_procedures.is_empty());
+
+                if object_capabilities.supports_procedures
+                    && (!has_search || procedures_loading || !filtered_procedures.is_empty())
+                {
+                    let header = self.render_section_header(
+                        super::SectionHeaderProps {
+                            element_id: SharedString::from(format!(
+                                "procedures-header-{}-{}",
+                                id_suffix, schema_name
+                            )),
+                            icon: Icon::new(ZqlzIcon::Gear).size_3().into_any_element(),
+                            label: "Procedures",
+                            total_count: group.procedures.len(),
+                            filtered_count: filtered_procedures.len(),
+                            is_expanded: procedures_expanded,
+                            on_click: {
+                                let toggle_schema_section = toggle_schema_section.clone();
+                                let schema_name_for_section = schema_name.clone();
+                                move |this: &mut Self,
+                                      _: &ClickEvent,
+                                      _: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    toggle_schema_section(
+                                        this,
+                                        &schema_name_for_section,
+                                        "procedures",
+                                        cx,
+                                    );
+                                }
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_section_context_menu(
+                                        conn_id,
+                                        "procedures",
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            muted_foreground,
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    );
+
+                    let mut section = v_flex().w_full().child(header);
+                    if procedures_expanded {
+                        if procedures_loading {
+                            section = section.child(Self::render_loading_row(
+                                id_suffix,
+                                &format!("procedures-{schema_name}"),
+                                muted_foreground,
+                                leaf_depth,
+                            ));
+                        } else {
+                            for procedure_name in &filtered_procedures {
+                                let procedure = (*procedure_name).clone();
+                                let name_for_menu = (*procedure_name).clone();
+                                let object_schema_for_click =
+                                    Some(schema_name_for_procedure_click.clone());
+                                let object_schema_for_menu =
+                                    Some(schema_name_for_procedure_menu.clone());
+                                section = section.child(Self::render_leaf_item(
+                                    super::LeafItemProps {
+                                        element_id: SharedString::from(format!(
+                                            "procedure-{}-{}-{}",
+                                            id_suffix, schema_name, procedure_name
+                                        )),
+                                        icon: Icon::new(ZqlzIcon::Gear)
+                                            .size_3()
+                                            .text_color(muted_foreground)
+                                            .into_any_element(),
+                                        label: (*procedure_name).clone(),
+                                        on_click: move |_this: &mut Self,
+                                                        _: &ClickEvent,
+                                                        _: &mut Window,
+                                                        cx: &mut Context<Self>| {
+                                            cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenProcedure {
+                                                connection_id: conn_id,
+                                                procedure_name: procedure.clone(),
+                                                object_schema: object_schema_for_click.clone(),
+                                            });
+                                        },
+                                        on_right_click: Some(
+                                            move |this: &mut Self,
+                                                  event: &MouseDownEvent,
+                                                  window: &mut Window,
+                                                  cx: &mut Context<Self>| {
+                                                this.show_procedure_context_menu(
+                                                    conn_id,
+                                                    name_for_menu.clone(),
+                                                    object_schema_for_menu.clone(),
+                                                    event.position,
+                                                    window,
+                                                    cx,
+                                                );
+                                            },
+                                        ),
+                                        list_hover,
+                                        depth: leaf_depth,
+                                    },
+                                    cx,
+                                ));
+                            }
+                        }
+                    }
+                    schema_tree = schema_tree.child(section);
+                }
+            }
+
+            tree = tree.child(schema_tree);
+        }
+
+        let filtered_queries: Vec<_> = queries
+            .iter()
+            .filter(|query| self.matches_search(&query.name))
+            .collect();
+        let queries_expanded = queries_expanded || (has_search && !filtered_queries.is_empty());
+
+        if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
+            let queries_header = self.render_section_header(
+                super::SectionHeaderProps {
+                    element_id: SharedString::from(format!("queries-header-{}", id_suffix)),
+                    icon: Icon::new(ZqlzIcon::FileSql).size_3().into_any_element(),
+                    label: "Queries",
+                    total_count: queries.len(),
+                    filtered_count: filtered_queries.len(),
+                    is_expanded: queries_expanded,
+                    on_click: move |this: &mut Self,
+                                    _: &ClickEvent,
+                                    _: &mut Window,
+                                    cx: &mut Context<Self>| {
+                        this.toggle_queries_expand(conn_id, cx)
+                    },
+                    on_right_click: Some(
+                        move |this: &mut Self,
+                              event: &MouseDownEvent,
+                              window: &mut Window,
+                              cx: &mut Context<Self>| {
+                            this.show_section_context_menu(
+                                conn_id,
+                                "queries",
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        },
+                    ),
+                    muted_foreground,
+                    list_hover,
+                    depth,
+                },
+                cx,
+            );
+
+            let mut queries_section = v_flex().w_full().child(queries_header);
+            if queries_expanded {
+                for query in &filtered_queries {
+                    let query_id = query.id;
+                    let query_name = query.name.clone();
+                    let query_name_for_click = query.name.clone();
+                    let query_name_for_menu = query.name.clone();
+                    queries_section = queries_section.child(Self::render_leaf_item(
+                        super::LeafItemProps {
+                            element_id: SharedString::from(format!(
+                                "query-{}-{}",
+                                id_suffix, query_id
+                            )),
+                            icon: Icon::new(ZqlzIcon::FileSql)
+                                .size_3()
+                                .text_color(muted_foreground)
+                                .into_any_element(),
+                            label: query_name,
+                            on_click: move |_this: &mut Self,
+                                            _: &ClickEvent,
+                                            _: &mut Window,
+                                            cx: &mut Context<Self>| {
+                                tracing::info!(
+                                    query_id = %query_id,
+                                    query_name = %query_name_for_click,
+                                    "Sidebar query item clicked"
+                                );
+                                cx.emit(crate::widgets::sidebar::ConnectionSidebarEvent::OpenSavedQuery {
+                                    connection_id: conn_id,
+                                    query_id,
+                                    query_name: query_name_for_click.clone(),
+                                });
+                            },
+                            on_right_click: Some(
+                                move |this: &mut Self,
+                                      event: &MouseDownEvent,
+                                      window: &mut Window,
+                                      cx: &mut Context<Self>| {
+                                    this.show_query_context_menu(
+                                        conn_id,
+                                        query_id,
+                                        query_name_for_menu.clone(),
+                                        event.position,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            ),
+                            list_hover,
+                            depth: depth + 1,
+                        },
+                        cx,
+                    ));
+                }
+            }
+
+            tree = tree.child(queries_section);
+        }
+
+        tree
+    }
+
     /// Render the schema tree for SQL database connections.
     ///
     /// This function handles both simple (single-database) and complex
@@ -77,7 +1184,10 @@ impl ConnectionSidebar {
             procedures_loading,
             databases,
             schema_name,
+            schema_names,
             schema_expanded,
+            collapsed_schema_groups,
+            collapsed_schema_section_keys,
         } = props;
         // Simple case: no multi-database — render objects tree directly
         if databases.is_empty() {
@@ -238,63 +1348,168 @@ impl ConnectionSidebar {
             if is_expanded {
                 if has_schema || db.is_active {
                     let db_schema = db.schema.as_ref();
+                    let has_database_schema = db_schema.is_some();
                     let sch_name = db_schema
                         .and_then(|s| s.schema_name.clone())
                         .or_else(|| schema_name.map(|s| s.to_string()));
                     let sch_expanded = db_schema.map_or(schema_expanded, |s| s.schema_expanded);
                     let db_name_for_toggle = db.name.clone();
-
-                    let show_schema_node = sch_name.as_ref().is_some_and(|s| s != &db_name);
-                    let objects_depth: usize = if show_schema_node { 3 } else { 2 };
+                    let mut show_schema_node = sch_name.as_ref().is_some_and(|s| s != &db_name);
+                    let grouped_objects_depth: usize = 2;
+                    let non_grouped_objects_depth: usize = if show_schema_node { 3 } else { 2 };
+                    let mut tree_is_grouped = false;
 
                     let tree: Option<AnyElement> = if let Some(schema) = db_schema {
-                        let db_name_for_closure = db.name.clone();
-                        Some(
-                            self.render_objects_tree(
-                                conn_id,
-                                object_capabilities,
-                                &format!("{}-{}", conn_id, db.name),
-                                Some(db_name.clone()),
-                                &schema.tables,
-                                &schema.views,
-                                &schema.materialized_views,
-                                &schema.triggers,
-                                &schema.functions,
-                                &schema.procedures,
-                                queries,
-                                schema.tables_expanded,
-                                schema.views_expanded,
-                                schema.materialized_views_expanded,
-                                schema.triggers_expanded,
-                                schema.functions_expanded,
-                                schema.procedures_expanded,
-                                queries_expanded,
-                                schema.tables_loading,
-                                schema.views_loading,
-                                schema.materialized_views_loading,
-                                schema.triggers_loading,
-                                schema.functions_loading,
-                                schema.procedures_loading,
-                                move |this: &mut ConnectionSidebar, section, cx| {
-                                    if section == "queries" {
-                                        this.toggle_queries_expand(conn_id, cx);
-                                    } else {
-                                        this.toggle_db_section(
+                        let grouped_schema_sections = Self::group_schema_sections(
+                            &schema.tables,
+                            &schema.views,
+                            &schema.materialized_views,
+                            &schema.triggers,
+                            &schema.functions,
+                            &schema.procedures,
+                            &schema.schema_names,
+                            schema.schema_name.as_deref(),
+                        );
+
+                        if let Some(groups) = grouped_schema_sections {
+                            tree_is_grouped = true;
+                            let db_name_for_group_toggle = db.name.clone();
+                            let db_name_for_section_toggle = db.name.clone();
+                            Some(
+                                self.render_grouped_schema_objects_tree(
+                                    conn_id,
+                                    object_capabilities,
+                                    &format!("{}-{}", conn_id, db.name),
+                                    Some(db_name.clone()),
+                                    &groups,
+                                    queries,
+                                    queries_expanded,
+                                    schema.tables_loading,
+                                    schema.views_loading,
+                                    schema.materialized_views_loading,
+                                    schema.triggers_loading,
+                                    schema.functions_loading,
+                                    schema.procedures_loading,
+                                    &schema.collapsed_schema_groups,
+                                    &schema.collapsed_schema_section_keys,
+                                    grouped_objects_depth,
+                                    move |this: &mut ConnectionSidebar, group_name, cx| {
+                                        this.toggle_db_schema_group_expand(
                                             conn_id,
-                                            &db_name_for_closure,
+                                            &db_name_for_group_toggle,
+                                            group_name,
+                                            cx,
+                                        );
+                                    },
+                                    move |this: &mut ConnectionSidebar, group_name, section, cx| {
+                                        this.toggle_db_schema_section_expand(
+                                            conn_id,
+                                            &db_name_for_section_toggle,
+                                            group_name,
                                             section,
                                             cx,
                                         );
-                                    }
-                                },
-                                objects_depth,
-                                cx,
+                                    },
+                                    cx,
+                                )
+                                .into_any_element(),
                             )
-                            .into_any_element(),
-                        )
+                        } else {
+                            let db_name_for_closure = db.name.clone();
+                            Some(
+                                self.render_objects_tree(
+                                    conn_id,
+                                    object_capabilities,
+                                    &format!("{}-{}", conn_id, db.name),
+                                    Some(db_name.clone()),
+                                    &schema.tables,
+                                    &schema.views,
+                                    &schema.materialized_views,
+                                    &schema.triggers,
+                                    &schema.functions,
+                                    &schema.procedures,
+                                    queries,
+                                    schema.tables_expanded,
+                                    schema.views_expanded,
+                                    schema.materialized_views_expanded,
+                                    schema.triggers_expanded,
+                                    schema.functions_expanded,
+                                    schema.procedures_expanded,
+                                    queries_expanded,
+                                    schema.tables_loading,
+                                    schema.views_loading,
+                                    schema.materialized_views_loading,
+                                    schema.triggers_loading,
+                                    schema.functions_loading,
+                                    schema.procedures_loading,
+                                    move |this: &mut ConnectionSidebar, section, cx| {
+                                        if section == "queries" {
+                                            this.toggle_queries_expand(conn_id, cx);
+                                        } else {
+                                            this.toggle_db_section(
+                                                conn_id,
+                                                &db_name_for_closure,
+                                                section,
+                                                cx,
+                                            );
+                                        }
+                                    },
+                                    non_grouped_objects_depth,
+                                    cx,
+                                )
+                                .into_any_element(),
+                            )
+                        }
                     } else {
-                        fallback_tree.take()
+                        if let Some(groups) = Self::group_schema_sections(
+                            tables,
+                            views,
+                            materialized_views,
+                            triggers,
+                            functions,
+                            procedures,
+                            schema_names,
+                            schema_name,
+                        ) {
+                            tree_is_grouped = true;
+                            Some(
+                                self.render_grouped_schema_objects_tree(
+                                    conn_id,
+                                    object_capabilities,
+                                    &conn_id.to_string(),
+                                    Some(db_name.clone()),
+                                    &groups,
+                                    queries,
+                                    queries_expanded,
+                                    tables_loading,
+                                    views_loading,
+                                    materialized_views_loading,
+                                    triggers_loading,
+                                    functions_loading,
+                                    procedures_loading,
+                                    collapsed_schema_groups,
+                                    collapsed_schema_section_keys,
+                                    grouped_objects_depth,
+                                    move |this: &mut ConnectionSidebar, group_name, cx| {
+                                        this.toggle_schema_group_expand(conn_id, group_name, cx);
+                                    },
+                                    move |this: &mut ConnectionSidebar, group_name, section, cx| {
+                                        this.toggle_schema_section_expand(
+                                            conn_id, group_name, section, cx,
+                                        );
+                                    },
+                                    cx,
+                                )
+                                .into_any_element(),
+                            )
+                        } else {
+                            fallback_tree.take()
+                        }
                     };
+
+                    if tree_is_grouped {
+                        show_schema_node = false;
+                    }
 
                     if show_schema_node {
                         node = node.child(
@@ -318,12 +1533,16 @@ impl ConnectionSidebar {
                                             .cursor_pointer()
                                             .hover(|el| el.bg(list_hover))
                                             .on_click(cx.listener(move |this, _, _, cx| {
-                                                this.toggle_db_section(
-                                                    conn_id,
-                                                    &db_name_for_toggle,
-                                                    "schema",
-                                                    cx,
-                                                );
+                                                if has_database_schema {
+                                                    this.toggle_db_section(
+                                                        conn_id,
+                                                        &db_name_for_toggle,
+                                                        "schema",
+                                                        cx,
+                                                    );
+                                                } else {
+                                                    this.toggle_schema_expand(conn_id, cx);
+                                                }
                                             }))
                                             .child(
                                                 Icon::new(if sch_expanded {

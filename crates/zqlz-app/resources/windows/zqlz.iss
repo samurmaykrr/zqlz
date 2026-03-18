@@ -32,11 +32,15 @@ WizardStyle=modern
 
 CloseApplications=force
 
+#if GetEnv("CI") != ""
+SignTool=Defaultsign
+#endif
+
 DefaultDirName={autopf}\{#AppName}
 PrivilegesRequired=lowest
 
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+ArchitecturesAllowed={#ArchitecturesAllowed}
+ArchitecturesInstallIn64BitMode={#ArchitecturesInstallIn64BitMode}
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl,{#ResourcesDir}\messages\en.isl"

@@ -86,10 +86,10 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
+        let result = if let Some(schema) = schema {
+            self.query(
                 "SELECT
+                    n.nspname,
                     c.relname,
                     c.relkind,
                     CASE WHEN c.relkind IN ('v', 'm') THEN NULL ELSE s.n_live_tup END AS row_count,
@@ -103,21 +103,47 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY c.relname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT
+                    n.nspname,
+                    c.relname,
+                    c.relkind,
+                    CASE WHEN c.relkind IN ('v', 'm') THEN NULL ELSE s.n_live_tup END AS row_count,
+                    CASE WHEN c.relkind IN ('v', 'm') THEN NULL ELSE pg_total_relation_size(c.oid) END AS size_bytes,
+                    obj_description(c.oid, 'pg_class') AS comment
+                 FROM pg_catalog.pg_class c
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg_temp_%'
+                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                   AND c.relkind IN ('r', 'p', 'f')
+                 ORDER BY n.nspname, c.relname",
+                &[],
+            )
+            .await?
+        };
 
         let tables = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public")
+                    .to_string();
+                let name = row
+                    .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let relkind = row.get(1).and_then(|v| v.as_str()).unwrap_or("r");
-                let row_count = row.get(2).and_then(|v| v.as_i64());
-                let size_bytes = row.get(3).and_then(|v| v.as_i64());
-                let comment = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let relkind = row.get(2).and_then(|v| v.as_str()).unwrap_or("r");
+                let row_count = row.get(3).and_then(|v| v.as_i64());
+                let size_bytes = row.get(4).and_then(|v| v.as_i64());
+                let comment = row.get(5).and_then(|v| v.as_str()).map(|s| s.to_string());
 
                 let table_type = match relkind {
                     "p" => TableType::PartitionedTable,
@@ -125,9 +151,15 @@ impl SchemaIntrospection for PostgresConnection {
                     _ => TableType::Table,
                 };
 
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
+
                 TableInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     table_type,
                     owner: None,
                     row_count,
@@ -145,31 +177,53 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn list_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT table_name, view_definition 
-                 FROM information_schema.views 
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT table_schema, table_name, view_definition
+                 FROM information_schema.views
                  WHERE table_schema = $1
                  ORDER BY table_name",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT table_schema, table_name, view_definition
+                 FROM information_schema.views
+                 WHERE table_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND table_schema NOT LIKE 'pg_temp_%'
+                   AND table_schema NOT LIKE 'pg_toast_temp_%'
+                 ORDER BY table_schema, table_name",
+                &[],
+            )
+            .await?
+        };
 
         let views = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public")
+                    .to_string();
+                let name = row
+                    .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
 
                 ViewInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     is_materialized: false,
                     definition,
                     owner: None,
@@ -183,31 +237,53 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn list_materialized_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT matviewname, definition
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT schemaname, matviewname, definition
                  FROM pg_matviews
                  WHERE schemaname = $1
                  ORDER BY matviewname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT schemaname, matviewname, definition
+                 FROM pg_matviews
+                 WHERE schemaname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND schemaname NOT LIKE 'pg_temp_%'
+                   AND schemaname NOT LIKE 'pg_toast_temp_%'
+                 ORDER BY schemaname, matviewname",
+                &[],
+            )
+            .await?
+        };
 
         let views = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public")
+                    .to_string();
+                let name = row
+                    .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
+                let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
+
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
 
                 ViewInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     is_materialized: true,
                     definition,
                     owner: None,
@@ -221,17 +297,25 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let schema = schema.unwrap_or("public");
-        let tables = self.list_tables(Some(schema)).await?;
+        let (schema, table_name) = resolve_relation_identifiers(schema, name, "public");
+        let tables = self.list_tables(Some(schema.as_str())).await?;
         let info = tables
             .into_iter()
-            .find(|t| t.name == name)
+            .find(|table| table.name == table_name)
             .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
 
-        let columns = self.get_columns(Some(schema), name).await?;
-        let indexes = self.get_indexes(Some(schema), name).await?;
-        let foreign_keys = self.get_foreign_keys(Some(schema), name).await?;
-        let primary_key = self.get_primary_key(Some(schema), name).await?;
+        let columns = self
+            .get_columns(Some(schema.as_str()), table_name.as_str())
+            .await?;
+        let indexes = self
+            .get_indexes(Some(schema.as_str()), table_name.as_str())
+            .await?;
+        let foreign_keys = self
+            .get_foreign_keys(Some(schema.as_str()), table_name.as_str())
+            .await?;
+        let primary_key = self
+            .get_primary_key(Some(schema.as_str()), table_name.as_str())
+            .await?;
 
         Ok(TableDetails {
             info,
@@ -246,7 +330,7 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let schema = schema.unwrap_or("public");
+        let (schema, table_name) = resolve_relation_identifiers(schema, table, "public");
         let result = self
             .query(
                 "SELECT 
@@ -274,8 +358,8 @@ impl SchemaIntrospection for PostgresConnection {
                  WHERE c.table_schema = $1 AND c.table_name = $2
                  ORDER BY ordinal_position",
                 &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
+                    zqlz_core::Value::String(schema.clone()),
+                    zqlz_core::Value::String(table_name),
                 ],
             )
             .await?;
@@ -333,7 +417,7 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let schema = schema.unwrap_or("public");
+        let (schema, table_name) = resolve_relation_identifiers(schema, table, "public");
         // indnkeyatts is the number of key columns (introduced in PostgreSQL 11).
         // Columns beyond that index are non-key INCLUDE columns.  We use a fallback
         // of array_length(ix.indkey, 1) so the query works on older PostgreSQL versions.
@@ -368,8 +452,8 @@ impl SchemaIntrospection for PostgresConnection {
                           ix.indkey, ix.indpred, ix.indrelid, am.amname
                  ORDER BY i.relname",
                 &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
+                    zqlz_core::Value::String(schema),
+                    zqlz_core::Value::String(table_name),
                 ],
             )
             .await?;
@@ -419,7 +503,7 @@ impl SchemaIntrospection for PostgresConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let schema = schema.unwrap_or("public");
+        let (schema, table_name) = resolve_relation_identifiers(schema, table, "public");
         let result = self
             .query(
                 "SELECT 
@@ -442,8 +526,8 @@ impl SchemaIntrospection for PostgresConnection {
                    AND tc.table_schema = $1
                    AND tc.table_name = $2",
                 &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
+                    zqlz_core::Value::String(schema.clone()),
+                    zqlz_core::Value::String(table_name),
                 ],
             )
             .await?;
@@ -497,7 +581,7 @@ impl SchemaIntrospection for PostgresConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Option<PrimaryKeyInfo>> {
-        let schema = schema.unwrap_or("public");
+        let (schema, table_name) = resolve_relation_identifiers(schema, table, "public");
         let result = self
             .query(
                 "SELECT 
@@ -512,8 +596,8 @@ impl SchemaIntrospection for PostgresConnection {
                    AND tc.table_name = $2
                  GROUP BY tc.constraint_name",
                 &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
+                    zqlz_core::Value::String(schema),
+                    zqlz_core::Value::String(table_name),
                 ],
             )
             .await?;
@@ -537,7 +621,7 @@ impl SchemaIntrospection for PostgresConnection {
         schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        let schema = schema.unwrap_or("public");
+        let (schema, table_name) = resolve_relation_identifiers(schema, table, "public");
         // pg_get_constraintdef returns the full constraint definition including the CHECK keyword;
         // we store it as-is so importers have the verbatim expression without needing to
         // reconstruct it from raw column-level data.
@@ -559,8 +643,8 @@ impl SchemaIntrospection for PostgresConnection {
                  GROUP BY con.conname, con.oid
                  ORDER BY con.conname",
                 &[
-                    zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(table.to_string()),
+                    zqlz_core::Value::String(schema),
+                    zqlz_core::Value::String(table_name),
                 ],
             )
             .await?;
@@ -589,10 +673,10 @@ impl SchemaIntrospection for PostgresConnection {
     }
 
     async fn list_functions(&self, schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT 
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT
+                    n.nspname,
                     p.proname as function_name,
                     pg_get_function_identity_arguments(p.oid) as arguments,
                     t.typname as return_type
@@ -604,31 +688,61 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY p.proname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT
+                    n.nspname,
+                    p.proname as function_name,
+                    pg_get_function_identity_arguments(p.oid) as arguments,
+                    t.typname as return_type
+                 FROM pg_proc p
+                 JOIN pg_namespace n ON p.pronamespace = n.oid
+                 JOIN pg_type t ON p.prorettype = t.oid
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg_temp_%'
+                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                   AND p.prokind = 'f'
+                 ORDER BY n.nspname, p.proname",
+                &[],
+            )
+            .await?
+        };
 
         let functions = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .unwrap_or("public")
                     .to_string();
-                let _arguments = row
+                let name = row
                     .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                let return_type = row
+                let _arguments = row
                     .get(2)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let return_type = row
+                    .get(3)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
 
                 FunctionInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     language: "sql".to_string(), // Default to SQL
                     return_type,
                     parameters: vec![], // TODO: Parse parameters properly
@@ -643,10 +757,10 @@ impl SchemaIntrospection for PostgresConnection {
     }
 
     async fn list_procedures(&self, schema: Option<&str>) -> Result<Vec<ProcedureInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT 
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT
+                    n.nspname,
                     p.proname as procedure_name,
                     pg_get_function_identity_arguments(p.oid) as arguments
                  FROM pg_proc p
@@ -656,26 +770,54 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY p.proname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT
+                    n.nspname,
+                    p.proname as procedure_name,
+                    pg_get_function_identity_arguments(p.oid) as arguments
+                 FROM pg_proc p
+                 JOIN pg_namespace n ON p.pronamespace = n.oid
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg_temp_%'
+                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                   AND p.prokind = 'p'
+                 ORDER BY n.nspname, p.proname",
+                &[],
+            )
+            .await?
+        };
 
         let procedures = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
                     .and_then(|v| v.as_str())
-                    .unwrap_or("")
+                    .unwrap_or("public")
                     .to_string();
-                let _arguments = row
+                let name = row
                     .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
+                let _arguments = row
+                    .get(2)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
 
                 ProcedureInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     language: "sql".to_string(), // Default to SQL
                     parameters: vec![],          // TODO: Parse parameters properly
                     definition: None,
@@ -693,9 +835,17 @@ impl SchemaIntrospection for PostgresConnection {
         schema: Option<&str>,
         table: Option<&str>,
     ) -> Result<Vec<TriggerInfo>> {
-        let schema = schema.unwrap_or("public");
+        let default_schema = schema.unwrap_or("public");
+        let (schema, table_name_filter) = table
+            .map(|table_name| resolve_relation_identifiers(schema, table_name, default_schema))
+            .map_or_else(
+                || (default_schema.to_string(), None),
+                |(resolved_schema, resolved_table_name)| {
+                    (resolved_schema, Some(resolved_table_name))
+                },
+            );
 
-        let result = if let Some(tbl) = table {
+        let result = if let Some(tbl) = table_name_filter {
             self.query(
                 "SELECT 
                     t.tgname as trigger_name,
@@ -709,7 +859,7 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY t.tgname",
                 &[
                     zqlz_core::Value::String(schema.to_string()),
-                    zqlz_core::Value::String(tbl.to_string()),
+                    zqlz_core::Value::String(tbl),
                 ],
             )
             .await?
@@ -764,30 +914,52 @@ impl SchemaIntrospection for PostgresConnection {
     }
 
     async fn list_sequences(&self, schema: Option<&str>) -> Result<Vec<SequenceInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT sequence_name 
-                 FROM information_schema.sequences 
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT sequence_schema, sequence_name
+                 FROM information_schema.sequences
                  WHERE sequence_schema = $1
                  ORDER BY sequence_name",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT sequence_schema, sequence_name
+                 FROM information_schema.sequences
+                 WHERE sequence_schema NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND sequence_schema NOT LIKE 'pg_temp_%'
+                   AND sequence_schema NOT LIKE 'pg_toast_temp_%'
+                 ORDER BY sequence_schema, sequence_name",
+                &[],
+            )
+            .await?
+        };
 
         let sequences = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public")
+                    .to_string();
+                let name = row
+                    .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
 
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
+
                 SequenceInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     data_type: "bigint".to_string(),
                     start_value: 1,
                     min_value: 1,
@@ -804,10 +976,9 @@ impl SchemaIntrospection for PostgresConnection {
     }
 
     async fn list_types(&self, schema: Option<&str>) -> Result<Vec<TypeInfo>> {
-        let schema = schema.unwrap_or("public");
-        let result = self
-            .query(
-                "SELECT typname, typtype
+        let result = if let Some(schema) = schema {
+            self.query(
+                "SELECT n.nspname, typname, typtype
                  FROM pg_type t
                  JOIN pg_namespace n ON t.typnamespace = n.oid
                  WHERE n.nspname = $1
@@ -815,21 +986,46 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY typname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT n.nspname, typname, typtype
+                 FROM pg_type t
+                 JOIN pg_namespace n ON t.typnamespace = n.oid
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg_temp_%'
+                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                   AND typtype = 'e'
+                 ORDER BY n.nspname, typname",
+                &[],
+            )
+            .await?
+        };
 
         let types = result
             .rows
             .iter()
             .map(|row| {
-                let name = row
+                let schema_name = row
                     .get(0)
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("public")
+                    .to_string();
+                let name = row
+                    .get(1)
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
 
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
+
                 TypeInfo {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     type_kind: TypeKind::Enum,
                     values: None, // TODO: Fetch enum values
                     definition: None,
@@ -843,8 +1039,9 @@ impl SchemaIntrospection for PostgresConnection {
     }
 
     async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
-        let schema = object.schema.as_deref().unwrap_or("public");
-        let name = object.name.as_str();
+        let (schema, relation_name) =
+            resolve_relation_identifiers(object.schema.as_deref(), object.name.as_str(), "public");
+        let name = relation_name.as_str();
         let schema_param = zqlz_core::Value::String(schema.to_string());
         let name_param = zqlz_core::Value::String(name.to_string());
 
@@ -1219,11 +1416,10 @@ impl SchemaIntrospection for PostgresConnection {
 
     #[tracing::instrument(skip(self))]
     async fn list_tables_extended(&self, schema: Option<&str>) -> Result<ObjectsPanelData> {
-        let schema = schema.unwrap_or("public");
-
-        let result = self
-            .query(
+        let result = if let Some(schema) = schema {
+            self.query(
                 "SELECT
+                    n.nspname AS schema_name,
                     c.oid,
                     c.relname AS name,
                     r.rolname AS owner,
@@ -1271,7 +1467,62 @@ impl SchemaIntrospection for PostgresConnection {
                  ORDER BY c.relname",
                 &[zqlz_core::Value::String(schema.to_string())],
             )
-            .await?;
+            .await?
+        } else {
+            self.query(
+                "SELECT
+                    n.nspname AS schema_name,
+                    c.oid,
+                    c.relname AS name,
+                    r.rolname AS owner,
+                    CASE c.relkind
+                        WHEN 'r' THEN 'Table'
+                        WHEN 'v' THEN 'View'
+                        WHEN 'm' THEN 'Materialized View'
+                        WHEN 'f' THEN 'Foreign Table'
+                        WHEN 'p' THEN 'Partitioned Table'
+                        ELSE 'Other'
+                    END AS table_type,
+                    CASE WHEN c.relkind = 'p' THEN 'Yes' ELSE 'No' END AS partitioned,
+                    COALESCE(s.n_live_tup, 0) AS row_count,
+                    CASE WHEN c.relkind IN ('v', 'm') THEN '-'
+                         ELSE pg_size_pretty(pg_total_relation_size(c.oid))
+                    END AS size,
+                    COALESCE(
+                        (SELECT string_agg(a.attname, ', ' ORDER BY array_position(i.indkey, a.attnum))
+                         FROM pg_index i
+                         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                         WHERE i.indrelid = c.oid AND i.indisprimary),
+                        '-'
+                    ) AS primary_key,
+                    COALESCE(fs.srvname, '-') AS foreign_server,
+                    COALESCE(array_to_string(c.reloptions, ', '), '-') AS options,
+                    COALESCE(
+                        (SELECT string_agg(p.relname, ', ')
+                         FROM pg_inherits inh
+                         JOIN pg_class p ON p.oid = inh.inhparent
+                         WHERE inh.inhrelid = c.oid),
+                        '-'
+                    ) AS inherits_tables,
+                    (SELECT count(*) FROM pg_inherits inh WHERE inh.inhparent = c.oid) AS inherited_tables_count,
+                    CASE WHEN c.relpersistence = 'u' THEN 'Yes' ELSE 'No' END AS unlogged,
+                    CASE WHEN n.nspname IN ('pg_catalog', 'information_schema') THEN 'Yes' ELSE 'No' END AS system_table,
+                    COALESCE(obj_description(c.oid, 'pg_class'), '-') AS comment
+                 FROM pg_class c
+                 JOIN pg_namespace n ON n.oid = c.relnamespace
+                 LEFT JOIN pg_roles r ON r.oid = c.relowner
+                 LEFT JOIN pg_stat_user_tables s ON s.relid = c.oid
+                 LEFT JOIN pg_foreign_table ft ON ft.ftrelid = c.oid
+                 LEFT JOIN pg_foreign_server fs ON fs.oid = ft.ftserver
+                 WHERE n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                   AND n.nspname NOT LIKE 'pg_temp_%'
+                   AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                   AND c.relkind IN ('r', 'v', 'm', 'f', 'p')
+                 ORDER BY n.nspname, c.relname",
+                &[],
+            )
+            .await?
+        };
 
         let columns = vec![
             ObjectsPanelColumn::new("name", "Name")
@@ -1349,6 +1600,7 @@ impl SchemaIntrospection for PostgresConnection {
 
         // Column indices in the query result
         let col_ids = [
+            "schema_name",
             "oid",
             "name",
             "owner",
@@ -1388,6 +1640,16 @@ impl SchemaIntrospection for PostgresConnection {
                 }
 
                 let name = values.get("name").cloned().unwrap_or_default();
+                let schema_name = values
+                    .get("schema_name")
+                    .cloned()
+                    .unwrap_or_else(|| "public".to_string());
+
+                let display_name = if schema.is_some() {
+                    name
+                } else {
+                    schema_qualified_name(&schema_name, &name)
+                };
 
                 let table_type_str = values.get("table_type").map(|s| s.as_str()).unwrap_or("");
                 let object_type = match table_type_str {
@@ -1396,8 +1658,8 @@ impl SchemaIntrospection for PostgresConnection {
                 };
 
                 ObjectsPanelRow {
-                    name,
-                    schema: Some(schema.to_string()),
+                    name: display_name,
+                    schema: Some(schema_name),
                     object_type: object_type.to_string(),
                     values,
                     redis_database_index: None,
@@ -1408,6 +1670,29 @@ impl SchemaIntrospection for PostgresConnection {
 
         Ok(ObjectsPanelData { columns, rows })
     }
+}
+
+fn schema_qualified_name(schema_name: &str, object_name: &str) -> String {
+    format!("{schema_name}.{object_name}")
+}
+
+fn resolve_relation_identifiers(
+    schema: Option<&str>,
+    relation_name: &str,
+    default_schema: &str,
+) -> (String, String) {
+    if let Some((schema_name, object_name)) = relation_name.split_once('.')
+        && !schema_name.is_empty()
+        && !object_name.is_empty()
+    {
+        return (schema_name.to_string(), object_name.to_string());
+    }
+
+    if let Some(schema_name) = schema {
+        return (schema_name.to_string(), relation_name.to_string());
+    }
+
+    (default_schema.to_string(), relation_name.to_string())
 }
 
 fn parse_fk_action(action: &str) -> ForeignKeyAction {

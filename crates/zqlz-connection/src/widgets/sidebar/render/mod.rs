@@ -107,7 +107,10 @@ pub(super) struct SqlSchemaTreeProps<'a> {
     pub procedures_loading: bool,
     pub databases: &'a [SidebarDatabaseInfo],
     pub schema_name: Option<&'a str>,
+    pub schema_names: &'a [String],
     pub schema_expanded: bool,
+    pub collapsed_schema_groups: &'a [String],
+    pub collapsed_schema_section_keys: &'a [String],
 }
 
 pub(super) struct RedisSchemaTreeProps<'a> {

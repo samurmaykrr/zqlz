@@ -825,7 +825,7 @@ impl MainView {
         // Only show a loading spinner in the schema panel when the details are not
         // already warm in the cache — avoids a flicker for repeat opens.
         let details_already_cached = schema_service
-            .peek_table_details_cache(connection_id, &table_name)
+            .peek_table_details_cache(connection_id, &table_name, schema_qualifier.as_deref())
             .is_some();
         if !details_already_cached {
             self.schema_details_panel.update(cx, |panel, cx| {
