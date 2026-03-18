@@ -60,6 +60,17 @@ Set-Location $ProjectRoot
 
 $TargetTriple = "$Architecture-pc-windows-msvc"
 
+switch ($Architecture) {
+    "x86_64" {
+        $ArchitecturesAllowed = "x64compatible"
+        $ArchitecturesInstallIn64BitMode = "x64compatible"
+    }
+    "aarch64" {
+        $ArchitecturesAllowed = "arm64"
+        $ArchitecturesInstallIn64BitMode = "arm64"
+    }
+}
+
 Write-Host "==> Building ZQLZ for $TargetTriple (channel: $Channel)" -ForegroundColor Cyan
 
 # Determine build flags
@@ -155,7 +166,7 @@ $Defines = @(
     "/DAppId=$AppIdentifier",
     "/DAppName=$AppName$AppSuffix",
     "/DAppDisplayName=$AppDisplayName",
-    "/DAppExeName=ZQLZ.exe",
+    "/DAppExeName=ZQLZ",
     "/DAppMutex=$AppIdentifier",
     "/DAppUserId=$AppIdentifier",
     "/DRegValueName=ZQLZ$AppSuffix",
@@ -164,7 +175,9 @@ $Defines = @(
     "/DAppSetupName=$SetupName",
     "/DSourceDir=$ProjectRoot",
     "/DResourcesDir=$StagingDir",
-    "/DAppIconName=$IconName"
+    "/DAppIconName=$IconName",
+    "/DArchitecturesAllowed=$ArchitecturesAllowed",
+    "/DArchitecturesInstallIn64BitMode=$ArchitecturesInstallIn64BitMode"
 )
 
 # Run Inno Setup
