@@ -26,7 +26,7 @@ mod driver_metadata_tests {
     #[test]
     fn test_mongodb_driver_version() {
         let driver = MongoDbDriver::new();
-        assert_eq!(driver.version(), "0.1.0");
+        assert_eq!(driver.version(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

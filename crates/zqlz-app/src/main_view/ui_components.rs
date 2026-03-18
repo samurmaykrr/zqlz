@@ -5,11 +5,11 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, Sizable, TitleBar, ZqlzIcon,
     animation::cubic_bezier,
     button::{Button, ButtonVariants},
     caption, h_flex,
     tooltip::Tooltip,
+    ActiveTheme, Icon, Sizable, TitleBar, ZqlzIcon,
 };
 
 use crate::actions::NewQuery;
@@ -280,7 +280,11 @@ impl MainView {
                         active_view,
                         cx,
                     ))
-                    .child(caption("ZQLZ v0.1.0").color(muted_fg).ml_2()),
+                    .child(
+                        caption(format!("ZQLZ v{}", env!("CARGO_PKG_VERSION")))
+                            .color(muted_fg)
+                            .ml_2(),
+                    ),
             )
     }
 

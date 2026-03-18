@@ -12,6 +12,7 @@ pub use types::*;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use menus::state::ContextMenuState;
+use std::time::Duration;
 use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
@@ -258,11 +259,20 @@ pub struct ConnectionSidebar {
     /// Currently selected connection
     selected_connection: Option<Uuid>,
 
+    /// Shared scroll handle for the virtualized connections list.
+    connection_list_scroll_handle: UniformListScrollHandle,
+
     /// Search query for filtering schema objects
     search_query: String,
 
+    /// Lowercased search query cached for repeated per-item matching.
+    search_query_lowercase: String,
+
     /// Input state for search field (lazily initialized)
     search_input_state: Option<Entity<InputState>>,
+
+    /// Debounce task for expensive search recomputation.
+    search_debounce_task: Option<Task<()>>,
 
     /// Context menu for the sidebar background (New Connection, Close All, New Group, Refresh)
     sidebar_context_menu: Option<Entity<ContextMenuState>>,
@@ -307,8 +317,11 @@ impl ConnectionSidebar {
             focus_handle: cx.focus_handle(),
             connections: Vec::new(),
             selected_connection: None,
+            connection_list_scroll_handle: UniformListScrollHandle::new(),
             search_query: String::new(),
+            search_query_lowercase: String::new(),
             search_input_state: None,
+            search_debounce_task: None,
             sidebar_context_menu: None,
             connection_context_menu: None,
             table_context_menu: None,
@@ -339,8 +352,35 @@ impl ConnectionSidebar {
                     if let InputEvent::Change = event {
                         if let Some(input) = &this.search_input_state {
                             this.search_query = input.read(cx).value().to_string();
+                            let next_lowercase = this.search_query.to_lowercase();
+
+                            if this.search_query.is_empty() {
+                                this.search_query_lowercase.clear();
+                                this.search_debounce_task = None;
+                                cx.notify();
+                                return;
+                            }
+
+                            this.search_debounce_task = Some(cx.spawn({
+                                let next_lowercase = next_lowercase.clone();
+                                async move |this, cx| {
+                                    cx.background_executor()
+                                        .timer(Duration::from_millis(150))
+                                        .await;
+
+                                    if let Err(error) = this.update(cx, |sidebar, cx| {
+                                        sidebar.search_query_lowercase = next_lowercase.clone();
+                                        sidebar.search_debounce_task = None;
+                                        cx.notify();
+                                    }) {
+                                        tracing::debug!(
+                                            error = %error,
+                                            "Sidebar search debounce update skipped"
+                                        );
+                                    }
+                                }
+                            }));
                         }
-                        cx.notify();
                     }
                 },
             ));
@@ -621,14 +661,10 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
-            if let Some(index) = conn
-                .collapsed_schema_groups
-                .iter()
-                .position(|group| group == schema_name)
-            {
-                conn.collapsed_schema_groups.remove(index);
+            if conn.collapsed_schema_groups.contains(schema_name) {
+                conn.collapsed_schema_groups.remove(schema_name);
             } else {
-                conn.collapsed_schema_groups.push(schema_name.to_string());
+                conn.collapsed_schema_groups.insert(schema_name.to_string());
             }
         }
         cx.notify();
@@ -645,14 +681,10 @@ impl ConnectionSidebar {
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             let section_key = format!("{schema_name}::{section}");
-            if let Some(index) = conn
-                .collapsed_schema_section_keys
-                .iter()
-                .position(|key| key == &section_key)
-            {
-                conn.collapsed_schema_section_keys.remove(index);
+            if conn.collapsed_schema_section_keys.contains(&section_key) {
+                conn.collapsed_schema_section_keys.remove(&section_key);
             } else {
-                conn.collapsed_schema_section_keys.push(section_key);
+                conn.collapsed_schema_section_keys.insert(section_key);
             }
         }
         cx.notify();
@@ -673,14 +705,10 @@ impl ConnectionSidebar {
                 .find(|database| database.name == database_name)
             && let Some(schema) = &mut database.schema
         {
-            if let Some(index) = schema
-                .collapsed_schema_groups
-                .iter()
-                .position(|group| group == schema_name)
-            {
-                schema.collapsed_schema_groups.remove(index);
+            if schema.collapsed_schema_groups.contains(schema_name) {
+                schema.collapsed_schema_groups.remove(schema_name);
             } else {
-                schema.collapsed_schema_groups.push(schema_name.to_string());
+                schema.collapsed_schema_groups.insert(schema_name.to_string());
             }
         }
         cx.notify();
@@ -703,14 +731,10 @@ impl ConnectionSidebar {
             && let Some(schema) = &mut database.schema
         {
             let section_key = format!("{schema_name}::{section}");
-            if let Some(index) = schema
-                .collapsed_schema_section_keys
-                .iter()
-                .position(|key| key == &section_key)
-            {
-                schema.collapsed_schema_section_keys.remove(index);
+            if schema.collapsed_schema_section_keys.contains(&section_key) {
+                schema.collapsed_schema_section_keys.remove(&section_key);
             } else {
-                schema.collapsed_schema_section_keys.push(section_key);
+                schema.collapsed_schema_section_keys.insert(section_key);
             }
         }
         cx.notify();
@@ -794,11 +818,17 @@ impl ConnectionSidebar {
 
     /// Check if an object name matches the search query (case-insensitive)
     fn matches_search(&self, name: &str) -> bool {
-        if self.search_query.is_empty() {
+        if self.search_query_lowercase.is_empty() {
             return true;
         }
-        name.to_lowercase()
-            .contains(&self.search_query.to_lowercase())
+        if name.contains(&self.search_query_lowercase) {
+            return true;
+        }
+
+        // Most DB object names are already lower-case snake_case. The fast-path
+        // above avoids allocation in the common case; we only normalize when
+        // mixed-case identifiers are present.
+        name.to_lowercase().contains(&self.search_query_lowercase)
     }
 
     /// Filter a list of names by the search query
@@ -818,8 +848,7 @@ impl ConnectionSidebar {
 
 impl Render for ConnectionSidebar {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let connections: Vec<_> = self.connections.clone();
-        let has_connections = !connections.is_empty();
+        let has_connections = !self.connections.is_empty();
         let has_search_query = !self.search_query.is_empty();
         let search_query = self.search_query.clone();
 
@@ -831,21 +860,9 @@ impl Render for ConnectionSidebar {
         // Clone the search input state for use in closures
         let search_input_state = self.search_input_state.clone();
 
-        // Pre-render connection elements to avoid borrow issues in closure
-        let connection_elements: Vec<_> = if !connections.is_empty() {
-            let total = connections.len();
-            connections
-                .iter()
-                .enumerate()
-                .map(|(i, conn)| self.render_connection(conn, i == total - 1, window, cx))
-                .collect()
-        } else {
-            vec![]
-        };
-
         // Pre-calculate if any matches exist (for "no results" message)
         let any_matches = if has_search_query && has_connections {
-            connections.iter().any(|conn| {
+            self.connections.iter().any(|conn| {
                 let capabilities = conn.object_capabilities;
                 conn.is_expanded
                     && conn.is_connected
@@ -863,6 +880,37 @@ impl Render for ConnectionSidebar {
         } else {
             true // No search query, so "matches" is irrelevant
         };
+
+        // Prepare virtualized connection rows after mutable-side effects above.
+        let connection_count = self.connections.len();
+        let connection_rows = uniform_list(
+            "sidebar-connections",
+            connection_count,
+            cx.processor(move |sidebar: &mut ConnectionSidebar,
+                              visible_range: std::ops::Range<usize>,
+                              window,
+                              cx| {
+                let mut rows = Vec::with_capacity(visible_range.len());
+                let total = sidebar.connections.len();
+
+                for index in visible_range {
+                    let Some(connection) = sidebar.connections.get(index).cloned() else {
+                        continue;
+                    };
+
+                    rows.push(sidebar.render_connection(
+                        &connection,
+                        index + 1 == total,
+                        window,
+                        cx,
+                    ));
+                }
+
+                rows
+            }),
+        )
+        .with_sizing_behavior(ListSizingBehavior::Auto)
+        .track_scroll(&self.connection_list_scroll_handle);
 
         // Now get theme after all &mut self operations are done
         let theme = cx.theme();
@@ -911,7 +959,7 @@ impl Render for ConnectionSidebar {
                     .id("connection-list")
                     .flex_1()
                     .w_full()
-                    .overflow_y_scroll()
+                    .overflow_hidden()
                     .py_1()
                     .drag_over::<ExternalPaths>(|this, _, _, cx| this.bg(cx.theme().drop_target))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -924,7 +972,7 @@ impl Render for ConnectionSidebar {
                             this.show_sidebar_context_menu(event.position, window, cx);
                         }),
                     )
-                    .when(connections.is_empty(), |this| {
+                    .when(!has_connections, |this| {
                         this.child(
                             v_flex()
                                 .size_full()
@@ -948,9 +996,7 @@ impl Render for ConnectionSidebar {
                                 ),
                         )
                     })
-                    .when(!connections.is_empty(), |this| {
-                        this.children(connection_elements)
-                    })
+                    .when(has_connections, |this| this.child(connection_rows))
                     // Show "no results" message when searching with no matches
                     .when(
                         has_search_query && has_connections && !any_matches,
