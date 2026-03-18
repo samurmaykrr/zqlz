@@ -405,11 +405,6 @@ impl SortCriterion {
         }
     }
 
-    /// Convert to SQL ORDER BY fragment
-    pub fn to_sql(&self) -> String {
-        self.to_sql_for_driver("postgresql")
-    }
-
     /// Convert to SQL ORDER BY fragment for the given database driver.
     ///
     /// Runtime query paths should use this method so identifier quoting matches
@@ -599,12 +594,15 @@ mod tests {
     #[test]
     fn test_sort_criterion_to_sql() {
         let sort = SortCriterion::new(1, "name".to_string());
-        assert_eq!(sort.to_sql(), "\"name\" ASC");
+        assert_eq!(sort.to_sql_for_driver("postgresql"), "\"name\" ASC");
         assert_eq!(sort.to_sql_for_driver("mysql"), "`name` ASC");
 
         let mut sort_desc = SortCriterion::new(2, "created_at".to_string());
         sort_desc.direction = SortDirection::Descending;
-        assert_eq!(sort_desc.to_sql(), "\"created_at\" DESC");
+        assert_eq!(
+            sort_desc.to_sql_for_driver("postgresql"),
+            "\"created_at\" DESC"
+        );
         assert_eq!(sort_desc.to_sql_for_driver("mysql"), "`created_at` DESC");
     }
 }
