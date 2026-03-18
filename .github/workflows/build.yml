@@ -4,10 +4,11 @@ on:
   push:
     branches:
       - main
+  workflow_dispatch:
 
-# Every job skips itself when the triggering commit is the bot's version-bump
-# commit (identified by the "chore: bump version" prefix), which prevents the
-# workflow from re-entering itself after the bump-version job pushes to main.
+    # Every job skips itself when the triggering commit is the bot's version-bump
+    # commit (identified by the "chore: bump version" prefix), which prevents the
+    # workflow from re-entering itself after the bump-version job pushes to main.
 
 jobs:
   create-release:
@@ -42,6 +43,7 @@ jobs:
     env:
       RELEASE_CHANNEL: stable
       ZQLZ_VERSION: ${{ needs.create-release.outputs.version }}
+      CARGO_INCREMENTAL: 0
 
     strategy:
       fail-fast: false
@@ -82,14 +84,21 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      - name: Cache cargo
-        uses: actions/cache@v4
+      - name: Cache Rust dependencies and build output
+        uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          prefix-key: ${{ runner.os }}-${{ matrix.target }}
+          shared-key: zqlz-release-build
+          cache-directories: |
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/index
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            C:\Users\runneradmin\AppData\Local\cargo\registry\cache
+            C:\Users\runneradmin\AppData\Local\cargo\registry\index
+            C:\Users\runneradmin\AppData\Local\cargo\git\db
+            C:\Users\runneradmin\AppData\Local\cargo\git\checkouts
+          cache-on-failure: true
 
       - name: Make bundle scripts executable
         if: runner.os != 'Windows'
@@ -148,12 +157,11 @@ jobs:
   #
   # The commit uses the GITHUB_TOKEN bot identity. GitHub Actions does not
   # re-trigger workflows for pushes made with GITHUB_TOKEN, so there is no
-  # infinite loop — the guard above is a belt-and-suspenders measure.
+  # infinite loop - the guard above is a belt-and-suspenders measure.
   bump-version:
     needs: build
     if: >-
-      !startsWith(github.event.head_commit.message, 'chore: bump version') &&
-      needs.build.result == 'success'
+      !startsWith(github.event.head_commit.message, 'chore: bump version') && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
