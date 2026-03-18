@@ -8,8 +8,8 @@ use gpui::*;
 use super::{RedisSchemaTreeProps, SqlSchemaTreeProps};
 use crate::widgets::sidebar::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent};
 use zqlz_ui::widgets::{
-    ActiveTheme, Colorize as _, Icon, IconName, Sizable, ZqlzIcon, caption, h_flex,
-    tooltip::Tooltip, typography::body_small, v_flex,
+    caption, h_flex, tooltip::Tooltip, typography::body_small, v_flex, ActiveTheme, Colorize as _,
+    Icon, IconName, Sizable, ZqlzIcon,
 };
 
 impl ConnectionSidebar {
@@ -47,7 +47,7 @@ impl ConnectionSidebar {
         &self,
         conn: &ConnectionEntry,
         is_last: bool,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let is_selected = self.selected_connection == Some(conn.id);
@@ -59,13 +59,6 @@ impl ConnectionSidebar {
         let is_expanded = conn.is_expanded;
         let is_redis = conn.is_redis();
         let object_capabilities = conn.object_capabilities;
-        let tables = conn.tables.clone();
-        let views = conn.views.clone();
-        let materialized_views = conn.materialized_views.clone();
-        let triggers = conn.triggers.clone();
-        let functions = conn.functions.clone();
-        let procedures = conn.procedures.clone();
-        let queries = conn.queries.clone();
         let tables_expanded = conn.tables_expanded;
         let views_expanded = conn.views_expanded;
         let materialized_views_expanded = conn.materialized_views_expanded;
@@ -79,17 +72,70 @@ impl ConnectionSidebar {
         let triggers_loading = conn.triggers_loading;
         let functions_loading = conn.functions_loading;
         let procedures_loading = conn.procedures_loading;
-        let redis_databases = conn.redis_databases.clone();
         let redis_databases_expanded = conn.redis_databases_expanded;
-        let databases = conn.databases.clone();
-        let schema_name = conn.schema_name.clone();
-        let schema_names = conn.schema_names.clone();
         let schema_expanded = conn.schema_expanded;
-        let collapsed_schema_groups = conn.collapsed_schema_groups.clone();
-        let collapsed_schema_section_keys = conn.collapsed_schema_section_keys.clone();
+        let collapsed_schema_groups = &conn.collapsed_schema_groups;
+        let collapsed_schema_section_keys = &conn.collapsed_schema_section_keys;
 
         let db_icon = self.get_db_icon(&db_type);
         let db_logo = self.get_db_logo(&db_type);
+        let redis_schema_tree = if is_expanded && is_connected && is_redis {
+            Some(
+                self.render_redis_schema_tree(
+                    RedisSchemaTreeProps {
+                        conn_id,
+                        databases: &conn.redis_databases,
+                        databases_expanded: redis_databases_expanded,
+                        queries: &conn.queries,
+                        queries_expanded,
+                    },
+                    cx,
+                )
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
+        let sql_schema_tree = if is_expanded && is_connected && !is_redis {
+            Some(
+                self.render_schema_tree(
+                    SqlSchemaTreeProps {
+                        conn_id,
+                        object_capabilities,
+                        tables: &conn.tables,
+                        views: &conn.views,
+                        materialized_views: &conn.materialized_views,
+                        triggers: &conn.triggers,
+                        functions: &conn.functions,
+                        procedures: &conn.procedures,
+                        queries: &conn.queries,
+                        tables_expanded,
+                        views_expanded,
+                        materialized_views_expanded,
+                        triggers_expanded,
+                        functions_expanded,
+                        procedures_expanded,
+                        queries_expanded,
+                        tables_loading,
+                        views_loading,
+                        materialized_views_loading,
+                        triggers_loading,
+                        functions_loading,
+                        procedures_loading,
+                        databases: &conn.databases,
+                        schema_name: conn.schema_name.as_deref(),
+                        schema_names: &conn.schema_names,
+                        schema_expanded,
+                        collapsed_schema_groups,
+                        collapsed_schema_section_keys,
+                    },
+                    cx,
+                )
+                .into_any_element(),
+            )
+        } else {
+            None
+        };
         let theme = cx.theme();
         let border_color = theme.border.opacity(0.5);
 
@@ -280,54 +326,8 @@ impl ConnectionSidebar {
                             }),
                     ),
             )
-            .when(is_expanded && is_connected && is_redis, |this| {
-                this.child(self.render_redis_schema_tree(
-                    RedisSchemaTreeProps {
-                        conn_id,
-                        databases: &redis_databases,
-                        databases_expanded: redis_databases_expanded,
-                        queries: &queries,
-                        queries_expanded,
-                    },
-                    cx,
-                ))
-            })
-            .when(is_expanded && is_connected && !is_redis, |this| {
-                let _ = window;
-                this.child(self.render_schema_tree(
-                    SqlSchemaTreeProps {
-                        conn_id,
-                        object_capabilities,
-                        tables: &tables,
-                        views: &views,
-                        materialized_views: &materialized_views,
-                        triggers: &triggers,
-                        functions: &functions,
-                        procedures: &procedures,
-                        queries: &queries,
-                        tables_expanded,
-                        views_expanded,
-                        materialized_views_expanded,
-                        triggers_expanded,
-                        functions_expanded,
-                        procedures_expanded,
-                        queries_expanded,
-                        tables_loading,
-                        views_loading,
-                        materialized_views_loading,
-                        triggers_loading,
-                        functions_loading,
-                        procedures_loading,
-                        databases: &databases,
-                        schema_name: schema_name.as_deref(),
-                        schema_names: &schema_names,
-                        schema_expanded,
-                        collapsed_schema_groups: &collapsed_schema_groups,
-                        collapsed_schema_section_keys: &collapsed_schema_section_keys,
-                    },
-                    cx,
-                ))
-            })
+            .when_some(redis_schema_tree, |this, tree| this.child(tree))
+            .when_some(sql_schema_tree, |this, tree| this.child(tree))
             .when(!is_last, |this| {
                 if is_expanded && is_connected {
                     this.pb_2().mb_1().border_b_1().border_color(border_color)

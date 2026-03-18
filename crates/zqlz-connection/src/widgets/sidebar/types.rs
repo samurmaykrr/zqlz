@@ -1,5 +1,6 @@
 //! Type definitions for sidebar data structures
 
+use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use uuid::Uuid;
@@ -139,12 +140,12 @@ pub struct DatabaseSchemaData {
     ///
     /// Legacy field name retained for backward compatibility with persisted
     /// state; semantically this now stores expanded groups.
-    pub collapsed_schema_groups: Vec<String>,
+    pub collapsed_schema_groups: HashSet<String>,
     /// Expanded section keys for grouped schemas.
     ///
     /// Legacy field name retained for backward compatibility.
     /// Keys are encoded as `<schema>::<section>`.
-    pub collapsed_schema_section_keys: Vec<String>,
+    pub collapsed_schema_section_keys: HashSet<String>,
     pub tables: Vec<String>,
     pub views: Vec<String>,
     pub materialized_views: Vec<String>,
@@ -223,12 +224,12 @@ pub struct ConnectionEntry {
     ///
     /// Legacy field name retained for backward compatibility with persisted
     /// state; semantically this now stores expanded groups.
-    pub collapsed_schema_groups: Vec<String>,
+    pub collapsed_schema_groups: HashSet<String>,
     /// Expanded section keys for grouped schemas.
     ///
     /// Legacy field name retained for backward compatibility.
     /// Keys are encoded as `<schema>::<section>`.
-    pub collapsed_schema_section_keys: Vec<String>,
+    pub collapsed_schema_section_keys: HashSet<String>,
 }
 
 impl ConnectionEntry {
@@ -268,8 +269,8 @@ impl ConnectionEntry {
             schema_name: None,
             schema_names: Vec::new(),
             schema_expanded: false,
-            collapsed_schema_groups: Vec::new(),
-            collapsed_schema_section_keys: Vec::new(),
+            collapsed_schema_groups: HashSet::new(),
+            collapsed_schema_section_keys: HashSet::new(),
         }
     }
 

@@ -47,7 +47,7 @@ impl DatabaseDriver for DuckDbDriver {
     }
 
     fn version(&self) -> &'static str {
-        "0.1.0"
+        env!("CARGO_PKG_VERSION")
     }
 
     fn default_port(&self) -> Option<u16> {

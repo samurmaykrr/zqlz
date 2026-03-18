@@ -6,7 +6,7 @@ use gpui::*;
 
 use super::SectionHeaderProps;
 use crate::widgets::sidebar::ConnectionSidebar;
-use zqlz_ui::widgets::{Icon, IconName, h_flex};
+use zqlz_ui::widgets::{h_flex, Icon, IconName};
 
 impl ConnectionSidebar {
     /// Render a collapsible section header with count indicator.

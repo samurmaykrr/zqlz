@@ -235,7 +235,7 @@ fn test_duckdb_aggregate_functions() {
 #[test]
 fn test_duckdb_version() {
     let driver = DuckDbDriver::new();
-    assert_eq!(driver.version(), "0.1.0");
+    assert_eq!(driver.version(), env!("CARGO_PKG_VERSION"));
 }
 
 #[test]

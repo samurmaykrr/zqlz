@@ -6,6 +6,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::BTreeMap;
+use std::collections::HashSet;
 
 use super::SqlSchemaTreeProps;
 use crate::widgets::sidebar::ConnectionSidebar;
@@ -183,8 +184,8 @@ impl ConnectionSidebar {
         triggers_loading: bool,
         functions_loading: bool,
         procedures_loading: bool,
-        expanded_schema_groups: &[String],
-        expanded_schema_section_keys: &[String],
+        expanded_schema_groups: &HashSet<String>,
+        expanded_schema_section_keys: &HashSet<String>,
         depth: usize,
         toggle_schema_group: impl Fn(&mut Self, &str, &mut Context<Self>) + Clone + 'static,
         toggle_schema_section: impl Fn(&mut Self, &str, &str, &mut Context<Self>) + Clone + 'static,
@@ -199,19 +200,19 @@ impl ConnectionSidebar {
         let mut tree = v_flex().w_full().gap_px().font_family(font_family);
 
         for (schema_name, group) in groups {
+            let filtered_tables = self.filter_by_search(&group.tables);
+            let filtered_views = self.filter_by_search(&group.views);
+            let filtered_materialized_views = self.filter_by_search(&group.materialized_views);
+            let filtered_triggers = self.filter_by_search(&group.triggers);
+            let filtered_functions = self.filter_by_search(&group.functions);
+            let filtered_procedures = self.filter_by_search(&group.procedures);
             let schema_has_matches = self.matches_search(schema_name)
-                || group.tables.iter().any(|name| self.matches_search(name))
-                || group.views.iter().any(|name| self.matches_search(name))
-                || group
-                    .materialized_views
-                    .iter()
-                    .any(|name| self.matches_search(name))
-                || group.triggers.iter().any(|name| self.matches_search(name))
-                || group.functions.iter().any(|name| self.matches_search(name))
-                || group
-                    .procedures
-                    .iter()
-                    .any(|name| self.matches_search(name));
+                || !filtered_tables.is_empty()
+                || !filtered_views.is_empty()
+                || !filtered_materialized_views.is_empty()
+                || !filtered_triggers.is_empty()
+                || !filtered_functions.is_empty()
+                || !filtered_procedures.is_empty();
 
             if has_search && !schema_has_matches {
                 continue;
@@ -228,20 +229,20 @@ impl ConnectionSidebar {
             let schema_name_for_procedure_click = schema_name.clone();
             let schema_name_for_procedure_menu = schema_name.clone();
 
-            let schema_is_expanded = expanded_schema_groups.iter().any(|s| s == schema_name)
-                || (has_search && schema_has_matches);
+            let schema_is_expanded =
+                expanded_schema_groups.contains(schema_name) || (has_search && schema_has_matches);
             let schema_total_count = group.tables.len()
                 + group.views.len()
                 + group.materialized_views.len()
                 + group.triggers.len()
                 + group.functions.len()
                 + group.procedures.len();
-            let schema_filtered_count = self.filter_by_search(&group.tables).len()
-                + self.filter_by_search(&group.views).len()
-                + self.filter_by_search(&group.materialized_views).len()
-                + self.filter_by_search(&group.triggers).len()
-                + self.filter_by_search(&group.functions).len()
-                + self.filter_by_search(&group.procedures).len();
+            let schema_filtered_count = filtered_tables.len()
+                + filtered_views.len()
+                + filtered_materialized_views.len()
+                + filtered_triggers.len()
+                + filtered_functions.len()
+                + filtered_procedures.len();
 
             let schema_header = self.render_section_header(
                 super::SectionHeaderProps {
@@ -277,11 +278,8 @@ impl ConnectionSidebar {
 
             if schema_is_expanded {
                 // Tables
-                let filtered_tables = self.filter_by_search(&group.tables);
                 let tables_section_key = format!("{}::tables", schema_name);
-                let tables_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &tables_section_key)
+                let tables_expanded = expanded_schema_section_keys.contains(&tables_section_key)
                     || (has_search && !filtered_tables.is_empty());
 
                 if !has_search || tables_loading || !filtered_tables.is_empty() {
@@ -398,11 +396,8 @@ impl ConnectionSidebar {
                 }
 
                 // Views
-                let filtered_views = self.filter_by_search(&group.views);
                 let views_section_key = format!("{}::views", schema_name);
-                let views_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &views_section_key)
+                let views_expanded = expanded_schema_section_keys.contains(&views_section_key)
                     || (has_search && !filtered_views.is_empty());
 
                 if object_capabilities.supports_views
@@ -521,15 +516,15 @@ impl ConnectionSidebar {
                 }
 
                 // Materialized views
-                let filtered_mat_views = self.filter_by_search(&group.materialized_views);
                 let mat_views_section_key = format!("{}::materialized_views", schema_name);
                 let mat_views_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &mat_views_section_key)
-                    || (has_search && !filtered_mat_views.is_empty());
+                    .contains(&mat_views_section_key)
+                    || (has_search && !filtered_materialized_views.is_empty());
 
                 if object_capabilities.supports_materialized_views
-                    && (!has_search || materialized_views_loading || !filtered_mat_views.is_empty())
+                    && (!has_search
+                        || materialized_views_loading
+                        || !filtered_materialized_views.is_empty())
                 {
                     let header = self.render_section_header(
                         super::SectionHeaderProps {
@@ -542,7 +537,7 @@ impl ConnectionSidebar {
                                 .into_any_element(),
                             label: "Materialized Views",
                             total_count: group.materialized_views.len(),
-                            filtered_count: filtered_mat_views.len(),
+                            filtered_count: filtered_materialized_views.len(),
                             is_expanded: mat_views_expanded,
                             on_click: {
                                 let toggle_schema_section = toggle_schema_section.clone();
@@ -590,7 +585,7 @@ impl ConnectionSidebar {
                                 leaf_depth,
                             ));
                         } else {
-                            for view_name in &filtered_mat_views {
+                            for view_name in &filtered_materialized_views {
                                 let view = format!("{}.{}", schema_name, view_name);
                                 let name_for_menu = (*view_name).clone();
                                 let db_name_for_click = database_name.clone();
@@ -643,11 +638,9 @@ impl ConnectionSidebar {
                 }
 
                 // Triggers
-                let filtered_triggers = self.filter_by_search(&group.triggers);
                 let triggers_section_key = format!("{}::triggers", schema_name);
                 let triggers_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &triggers_section_key)
+                    .contains(&triggers_section_key)
                     || (has_search && !filtered_triggers.is_empty());
 
                 if object_capabilities.supports_triggers
@@ -767,11 +760,9 @@ impl ConnectionSidebar {
                 }
 
                 // Functions
-                let filtered_functions = self.filter_by_search(&group.functions);
                 let functions_section_key = format!("{}::functions", schema_name);
                 let functions_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &functions_section_key)
+                    .contains(&functions_section_key)
                     || (has_search && !filtered_functions.is_empty());
 
                 if object_capabilities.supports_functions
@@ -889,11 +880,9 @@ impl ConnectionSidebar {
                 }
 
                 // Procedures
-                let filtered_procedures = self.filter_by_search(&group.procedures);
                 let procedures_section_key = format!("{}::procedures", schema_name);
                 let procedures_expanded = expanded_schema_section_keys
-                    .iter()
-                    .any(|key| key == &procedures_section_key)
+                    .contains(&procedures_section_key)
                     || (has_search && !filtered_procedures.is_empty());
 
                 if object_capabilities.supports_procedures

@@ -6,7 +6,7 @@ use gpui::*;
 
 use super::{LeafItemProps, RedisSchemaTreeProps, SectionHeaderProps};
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
-use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, caption, v_flex};
+use zqlz_ui::widgets::{caption, v_flex, ActiveTheme, Icon, ZqlzIcon};
 
 impl ConnectionSidebar {
     /// Render the Redis-specific schema tree.
@@ -68,7 +68,7 @@ impl ConnectionSidebar {
         let font_family = cx.theme().font_family.clone();
 
         let has_search = !self.search_query.is_empty();
-        let search_lower = self.search_query.to_lowercase();
+        let search_lower = self.search_query_lowercase.as_str();
 
         let filtered_databases: Vec<_> = databases
             .iter()
@@ -77,12 +77,12 @@ impl ConnectionSidebar {
                     return true;
                 }
                 let db_name = format!("db{}", db.index);
-                if db_name.contains(&search_lower) {
+                if db_name.contains(search_lower) {
                     return true;
                 }
                 db.keys
                     .iter()
-                    .any(|k| k.to_lowercase().contains(&search_lower))
+                    .any(|k| k.to_lowercase().contains(search_lower))
             })
             .collect();
 

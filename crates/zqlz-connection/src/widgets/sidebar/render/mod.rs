@@ -52,6 +52,7 @@
 //! - Populated: Multi-database mode - intermediate database nodes appear in tree
 
 use gpui::{Hsla, SharedString};
+use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::widgets::sidebar::{
@@ -109,8 +110,8 @@ pub(super) struct SqlSchemaTreeProps<'a> {
     pub schema_name: Option<&'a str>,
     pub schema_names: &'a [String],
     pub schema_expanded: bool,
-    pub collapsed_schema_groups: &'a [String],
-    pub collapsed_schema_section_keys: &'a [String],
+    pub collapsed_schema_groups: &'a HashSet<String>,
+    pub collapsed_schema_section_keys: &'a HashSet<String>,
 }
 
 pub(super) struct RedisSchemaTreeProps<'a> {

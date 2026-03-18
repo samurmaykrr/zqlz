@@ -28,7 +28,7 @@ mod driver_metadata_tests {
     #[test]
     fn test_clickhouse_version() {
         let driver = ClickHouseDriver::new();
-        assert_eq!(driver.version(), "0.1.0");
+        assert_eq!(driver.version(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]
@@ -235,24 +235,18 @@ mod dialect_tests {
             .iter()
             .find(|o| o.key == "engine")
             .unwrap();
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "MergeTree")
-        );
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "ReplacingMergeTree")
-        );
-        assert!(
-            engine_option
-                .choices
-                .iter()
-                .any(|c| c.as_ref() == "Distributed")
-        );
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "MergeTree"));
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "ReplacingMergeTree"));
+        assert!(engine_option
+            .choices
+            .iter()
+            .any(|c| c.as_ref() == "Distributed"));
     }
 }
 
