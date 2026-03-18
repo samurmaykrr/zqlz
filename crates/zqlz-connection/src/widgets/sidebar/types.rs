@@ -126,13 +126,25 @@ pub struct SchemaObjects {
     pub functions: Vec<String>,
     pub procedures: Vec<String>,
     pub schema_name: Option<String>,
+    pub schema_names: Vec<String>,
 }
 
 /// Schema objects for a single database, used in the sidebar tree
 #[derive(Clone, Debug, Default)]
 pub struct DatabaseSchemaData {
     pub schema_name: Option<String>,
+    pub schema_names: Vec<String>,
     pub schema_expanded: bool,
+    /// Expanded schema-group folders for grouped-schema rendering.
+    ///
+    /// Legacy field name retained for backward compatibility with persisted
+    /// state; semantically this now stores expanded groups.
+    pub collapsed_schema_groups: Vec<String>,
+    /// Expanded section keys for grouped schemas.
+    ///
+    /// Legacy field name retained for backward compatibility.
+    /// Keys are encoded as `<schema>::<section>`.
+    pub collapsed_schema_section_keys: Vec<String>,
     pub tables: Vec<String>,
     pub views: Vec<String>,
     pub materialized_views: Vec<String>,
@@ -203,8 +215,20 @@ pub struct ConnectionEntry {
     pub databases: Vec<SidebarDatabaseInfo>,
     /// The schema name for hierarchy display (e.g. "public")
     pub schema_name: Option<String>,
+    /// Known schema names for the active database.
+    pub schema_names: Vec<String>,
     /// Whether the schema-level node is expanded
     pub schema_expanded: bool,
+    /// Expanded schema-group folders for grouped-schema rendering.
+    ///
+    /// Legacy field name retained for backward compatibility with persisted
+    /// state; semantically this now stores expanded groups.
+    pub collapsed_schema_groups: Vec<String>,
+    /// Expanded section keys for grouped schemas.
+    ///
+    /// Legacy field name retained for backward compatibility.
+    /// Keys are encoded as `<schema>::<section>`.
+    pub collapsed_schema_section_keys: Vec<String>,
 }
 
 impl ConnectionEntry {
@@ -242,7 +266,10 @@ impl ConnectionEntry {
             redis_databases_expanded: false,
             databases: Vec::new(),
             schema_name: None,
+            schema_names: Vec::new(),
             schema_expanded: false,
+            collapsed_schema_groups: Vec::new(),
+            collapsed_schema_section_keys: Vec::new(),
         }
     }
 

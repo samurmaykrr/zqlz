@@ -93,15 +93,22 @@ pub(in crate::main_view) fn handle_apply_filters_event(
         }
     }
 
-    // Convert SortCriterion to SQL ORDER BY fragments
-    let order_by_clauses: Vec<String> = request.sorts.iter().map(|s| s.to_sql()).collect();
+    let driver_name = connection.driver_name().to_string();
+
+    // Convert SortCriterion to SQL ORDER BY fragments using driver-specific
+    // identifier escaping so MySQL/MariaDB sorts work reliably.
+    let order_by_clauses: Vec<String> = request
+        .sorts
+        .iter()
+        .map(|sort| sort.to_sql_for_driver(&driver_name))
+        .collect();
 
     let visible_columns = request.visible_columns;
 
     // Capture the is_view state and database_name before loading
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
 
     let filter_count = where_clauses.len();
     let sort_count = order_by_clauses.len();

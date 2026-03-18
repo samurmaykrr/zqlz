@@ -149,7 +149,8 @@ fn handle_refresh_sql_table(
         is_view,
     } = table;
 
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let driver_name = connection.driver_name().to_string();
+    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
 
     // Determine if we need a background count after the data loads.
     let needs_background_count = !TableService::supports_fast_count(connection.driver_name());
@@ -210,7 +211,10 @@ fn handle_refresh_sql_table(
     }
 
     // Build ORDER BY clauses from sorts
-    let order_by_clauses: Vec<String> = sorts.iter().map(|s| s.to_sql()).collect();
+    let order_by_clauses: Vec<String> = sorts
+        .iter()
+        .map(|sort| sort.to_sql_for_driver(&driver_name))
+        .collect();
 
     let filter_count = where_clauses.len();
     let sort_count = order_by_clauses.len();

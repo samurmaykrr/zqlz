@@ -132,6 +132,12 @@ impl DatabaseType {
 }
 
 impl MainView {
+    fn is_postgres_driver(driver_name: &str) -> bool {
+        driver_name == "postgres"
+            || driver_name == "postgresql"
+            || driver_name == "zqlz-driver-postgres"
+    }
+
     /// Connect to a database
     pub(super) fn connect_to_database(
         &mut self,
@@ -370,11 +376,38 @@ impl MainView {
                                 tracing::info!("Loaded {} tables", tables.len());
 
                                 let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
+                                let resolved_schema_name = schema_service
+                                    .get_schema_name_cached(&conn, conn_id)
+                                    .await;
+                                let schema_names = if Self::is_postgres_driver(conn.driver_name()) {
+                                    if let Some(introspection) = conn.as_schema_introspection() {
+                                        introspection
+                                            .list_schemas()
+                                            .await
+                                            .map(|schemas| {
+                                                schemas
+                                                    .into_iter()
+                                                    .map(|schema| schema.name)
+                                                    .collect::<Vec<_>>()
+                                            })
+                                            .unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    }
+                                } else {
+                                    Vec::new()
+                                };
 
                                 // Clear the tables spinner and the database-level loading
                                 // indicator now that we have actual data.
                                 _ = sidebar.update_in(cx, |sidebar, _window, cx| {
-                                    sidebar.set_tables_only(conn_id, table_names.clone(), cx);
+                                    sidebar.set_tables_only(
+                                        conn_id,
+                                        table_names.clone(),
+                                        resolved_schema_name.clone(),
+                                        schema_names.clone(),
+                                        cx,
+                                    );
                                     if let Some(ref db_name) = active_db_from_config {
                                         sidebar.set_database_loading(conn_id, db_name, false, cx);
                                     }
@@ -653,7 +686,7 @@ impl MainView {
             };
 
             match result {
-                Ok((tables, views, materialized_views, triggers, functions, procedures, schema_name, objects_panel_data)) => {
+                Ok((tables, views, materialized_views, triggers, functions, procedures, schema_name, schema_names, objects_panel_data)) => {
                     tracing::info!(
                         "Loaded schema for '{}': {} tables, {} views, {} mat_views, {} triggers, {} functions, {} procedures",
                         database_name,
@@ -663,6 +696,12 @@ impl MainView {
                         triggers.len(),
                         functions.len(),
                         procedures.len(),
+                    );
+                    tracing::info!(
+                        database = %database_name,
+                        schema_count = schema_names.len(),
+                        schema_names = ?schema_names,
+                        "Loaded schema names for target database"
                     );
 
                     // Update the Objects Panel with extended data for this database
@@ -684,6 +723,7 @@ impl MainView {
                         });
                     }
 
+                    let schema_names_for_sidebar = schema_names.clone();
                     _ = sidebar.update_in(cx, |sidebar, _window, cx| {
                         sidebar.set_database_schema(
                             connection_id,
@@ -696,9 +736,23 @@ impl MainView {
                                 functions,
                                 procedures,
                                 schema_name,
+                                schema_names: schema_names_for_sidebar,
                             },
                             cx,
                         );
+                    });
+
+                    _ = _this.update(cx, |main_view, cx| {
+                        for weak_editor in &main_view.query_editors {
+                            if let Some(editor) = weak_editor.upgrade() {
+                                editor.update(cx, |ed, cx| {
+                                    if ed.connection_id() == Some(connection_id) {
+                                        ed.set_current_database(Some(database_name.clone()), cx);
+                                        ed.trigger_lsp_schema_refresh(cx);
+                                    }
+                                });
+                            }
+                        }
                     });
                 }
                 Err(e) => {
@@ -723,6 +777,8 @@ impl MainView {
     /// Load schema objects using the existing connection's SchemaIntrospection,
     /// passing the database name as the schema parameter.
     /// Works for MySQL/ClickHouse where information_schema spans all databases.
+    /// For PostgreSQL this intentionally uses `None` schema filter so we can
+    /// collect objects from all schemas in the target database.
     async fn load_schema_via_existing_connection(
         connection: &std::sync::Arc<dyn zqlz_core::Connection>,
         database_name: &str,
@@ -734,13 +790,24 @@ impl MainView {
         Vec<String>,
         Vec<String>,
         Option<String>,
+        Vec<String>,
         Option<ObjectsPanelData>,
     )> {
         let introspection = connection
             .as_schema_introspection()
             .ok_or_else(|| anyhow::anyhow!("Connection does not support schema introspection"))?;
 
-        let schema_param = Some(database_name);
+        let is_postgres = Self::is_postgres_driver(connection.driver_name());
+        let schema_names = introspection
+            .list_schemas()
+            .await
+            .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
+            .unwrap_or_else(|_| Vec::new());
+        let schema_param = if is_postgres {
+            None
+        } else {
+            Some(database_name)
+        };
 
         // All schema queries are independent reads — fire them all concurrently.
         let (
@@ -776,7 +843,12 @@ impl MainView {
             triggers,
             functions,
             procedures,
-            Some(database_name.to_string()),
+            if is_postgres {
+                None
+            } else {
+                Some(database_name.to_string())
+            },
+            schema_names,
             objects_panel_data,
         ))
     }
@@ -794,6 +866,7 @@ impl MainView {
         Vec<String>,
         Vec<String>,
         Option<String>,
+        Vec<String>,
         Option<ObjectsPanelData>,
     )> {
         let registry = zqlz_drivers::DriverRegistry::with_defaults();
@@ -810,15 +883,27 @@ impl MainView {
             anyhow::anyhow!("Temp connection does not support schema introspection")
         })?;
 
-        let schema_name = introspection.list_schemas().await.ok().and_then(|schemas| {
-            schemas
-                .into_iter()
-                .find(|s| s.name == "public")
-                .map(|s| s.name)
-        });
+        let is_postgres = Self::is_postgres_driver(saved.driver.as_str());
+        let schema_names: Vec<String> = introspection
+            .list_schemas()
+            .await
+            .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
+            .unwrap_or_else(|_| Vec::new());
+        let schema_name = if is_postgres {
+            None
+        } else {
+            schema_names
+                .iter()
+                .find(|schema| schema.as_str() == "public")
+                .cloned()
+                .or_else(|| schema_names.first().cloned())
+        };
 
-        let schema_param = schema_name.as_deref();
-        let is_postgres = saved.driver == "postgres";
+        let schema_param = if is_postgres {
+            None
+        } else {
+            schema_name.as_deref()
+        };
 
         // All schema queries are independent reads — fire them all concurrently.
         let (
@@ -870,6 +955,7 @@ impl MainView {
             functions,
             procedures,
             schema_name,
+            schema_names,
             objects_panel_data,
         ))
     }

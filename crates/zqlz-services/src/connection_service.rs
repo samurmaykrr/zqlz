@@ -108,6 +108,68 @@ impl ConnectionService {
         })
     }
 
+    /// Connect to a database and load initial schema for a specific target database.
+    ///
+    /// This is useful when the caller already knows the intended logical database
+    /// differs from the connection's current default and needs deterministic
+    /// introspection for that target.
+    #[tracing::instrument(skip(self, saved_connection), fields(connection_name = %saved_connection.name, target_database = ?target_database))]
+    pub async fn connect_and_initialize_for_database(
+        &self,
+        saved_connection: &SavedConnection,
+        target_database: Option<&str>,
+    ) -> ServiceResult<ConnectionInfo> {
+        tracing::info!("Connecting to database: {}", saved_connection.name);
+
+        let connection_id = self.manager.connect(saved_connection).await.map_err(|e| {
+            tracing::error!("Connection failed: {}", e);
+            ServiceError::ConnectionFailed(e.to_string())
+        })?;
+
+        tracing::info!("Connection established with ID: {}", connection_id);
+
+        let connection = self.manager.get(connection_id).ok_or_else(|| {
+            tracing::error!("Connection {} not found after establishment", connection_id);
+            ServiceError::ConnectionNotFound
+        })?;
+
+        let is_redis = connection.driver_name() == "redis";
+        let schema = if is_redis {
+            tracing::info!("Skipping schema load for Redis connection");
+            None
+        } else {
+            match self
+                .schema_service
+                .load_database_schema_for_database(
+                    connection.clone(),
+                    connection_id,
+                    target_database,
+                )
+                .await
+            {
+                Ok(s) => {
+                    tracing::info!(
+                        tables = s.tables.len(),
+                        views = s.views.len(),
+                        "Schema loaded successfully"
+                    );
+                    Some(s)
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load schema (non-fatal): {}", e);
+                    None
+                }
+            }
+        };
+
+        Ok(ConnectionInfo {
+            id: connection_id,
+            name: saved_connection.name.clone(),
+            driver: saved_connection.driver.clone(),
+            schema,
+        })
+    }
+
     /// Connect to a database quickly without loading schema
     ///
     /// This method only establishes the connection and returns immediately.
@@ -156,6 +218,16 @@ impl ConnectionService {
     /// A `DatabaseSchema` containing all discovered objects
     #[tracing::instrument(skip(self), fields(connection_id = %connection_id))]
     pub async fn load_schema(&self, connection_id: Uuid) -> ServiceResult<DatabaseSchema> {
+        self.load_schema_for_database(connection_id, None).await
+    }
+
+    /// Load schema for an existing connection using an explicit target database.
+    #[tracing::instrument(skip(self), fields(connection_id = %connection_id, target_database = ?target_database))]
+    pub async fn load_schema_for_database(
+        &self,
+        connection_id: Uuid,
+        target_database: Option<&str>,
+    ) -> ServiceResult<DatabaseSchema> {
         tracing::info!("Loading schema for connection: {}", connection_id);
 
         let connection = self.manager.get(connection_id).ok_or_else(|| {
@@ -170,7 +242,7 @@ impl ConnectionService {
         }
 
         self.schema_service
-            .load_database_schema(connection, connection_id)
+            .load_database_schema_for_database(connection, connection_id, target_database)
             .await
     }
 

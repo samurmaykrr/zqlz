@@ -1031,13 +1031,45 @@ impl TableService {
     /// When `schema` is provided (e.g. a MySQL database name), the result is
     /// `schema`.`table`; otherwise just the escaped table name.
     fn qualified_table_name(table_name: &str, schema: Option<&str>, driver_name: &str) -> String {
-        match schema {
-            Some(s) => format!(
+        let parsed = table_name
+            .split_once('.')
+            .and_then(|(schema_name, relation_name)| {
+                if schema_name.is_empty() || relation_name.is_empty() {
+                    None
+                } else {
+                    Some((schema_name, relation_name))
+                }
+            });
+
+        let (effective_schema, effective_table_name) = match (schema, parsed) {
+            // For PostgreSQL we prefer the schema embedded in the object name,
+            // because the sidebar now shows cross-schema objects as `schema.table`.
+            (Some(_), Some((embedded_schema, embedded_table)))
+                if driver_name == "postgres" || driver_name == "postgresql" =>
+            {
+                (Some(embedded_schema), embedded_table)
+            }
+            // If both schema arg and table name include the same schema, avoid
+            // producing `<schema>."schema.table"`.
+            (Some(explicit_schema), Some((embedded_schema, embedded_table)))
+                if explicit_schema == embedded_schema =>
+            {
+                (Some(explicit_schema), embedded_table)
+            }
+            (Some(explicit_schema), _) => (Some(explicit_schema), table_name),
+            (None, Some((embedded_schema, embedded_table))) => {
+                (Some(embedded_schema), embedded_table)
+            }
+            (None, None) => (None, table_name),
+        };
+
+        match effective_schema {
+            Some(schema_name) => format!(
                 "{}.{}",
-                Self::escape_identifier_for(s, driver_name),
-                Self::escape_identifier_for(table_name, driver_name)
+                Self::escape_identifier_for(schema_name, driver_name),
+                Self::escape_identifier_for(effective_table_name, driver_name)
             ),
-            None => Self::escape_identifier_for(table_name, driver_name),
+            None => Self::escape_identifier_for(effective_table_name, driver_name),
         }
     }
 

@@ -186,7 +186,8 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
 
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let driver_name = connection.driver_name().to_string();
+    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
 
     // Extract everything we need from the viewer in a single read so we
     // don't need to borrow it again before spawning the async task.
@@ -199,7 +200,10 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
                 (state.get_filter_conditions(), state.get_sort_criteria())
             });
             where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-            order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
+            order_by_clauses = sorts
+                .iter()
+                .map(|sort| sort.to_sql_for_driver(&driver_name))
+                .collect();
         }
 
         if !viewer.search_text.is_empty() {

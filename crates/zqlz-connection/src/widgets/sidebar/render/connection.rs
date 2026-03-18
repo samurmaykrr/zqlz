@@ -83,7 +83,10 @@ impl ConnectionSidebar {
         let redis_databases_expanded = conn.redis_databases_expanded;
         let databases = conn.databases.clone();
         let schema_name = conn.schema_name.clone();
+        let schema_names = conn.schema_names.clone();
         let schema_expanded = conn.schema_expanded;
+        let collapsed_schema_groups = conn.collapsed_schema_groups.clone();
+        let collapsed_schema_section_keys = conn.collapsed_schema_section_keys.clone();
 
         let db_icon = self.get_db_icon(&db_type);
         let db_logo = self.get_db_logo(&db_type);
@@ -317,7 +320,10 @@ impl ConnectionSidebar {
                         procedures_loading,
                         databases: &databases,
                         schema_name: schema_name.as_deref(),
+                        schema_names: &schema_names,
                         schema_expanded,
+                        collapsed_schema_groups: &collapsed_schema_groups,
+                        collapsed_schema_section_keys: &collapsed_schema_section_keys,
                     },
                     cx,
                 ))

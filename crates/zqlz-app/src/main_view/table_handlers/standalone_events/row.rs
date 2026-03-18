@@ -313,6 +313,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let driver_name = connection.driver_name().to_string();
 
     // Extract active filter/sort/search state so the post-delete refresh preserves it
     let (where_clauses, order_by_clauses, visible_columns) =
@@ -325,7 +326,10 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                     (state.get_filter_conditions(), state.get_sort_criteria())
                 });
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-                order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
+                order_by_clauses = sorts
+                    .iter()
+                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .collect();
             }
 
             let all_column_names: Vec<String> =

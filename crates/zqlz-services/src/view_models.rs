@@ -20,6 +20,8 @@ pub struct DatabaseSchema {
     pub database_name: Option<String>,
     /// The schema name these objects belong to (e.g. "public")
     pub schema_name: Option<String>,
+    /// All schemas visible to the current connection context.
+    pub schema_names: Vec<String>,
 }
 
 /// Table details for UI (enriched with additional metadata)

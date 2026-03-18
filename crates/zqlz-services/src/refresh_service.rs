@@ -14,12 +14,17 @@ use zqlz_core::{Connection, DriverCategory};
 use crate::{DatabaseSchema, SchemaService, ServiceError, ServiceResult};
 
 /// A refresh request for a connected data source.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct RefreshRequest {
     /// Connection whose metadata-backed UI should be refreshed.
     pub connection_id: Uuid,
     /// Whether schema caches should be invalidated before reloading.
     pub invalidate_schema_cache: bool,
+    /// Optional database/schema target for multi-database drivers.
+    ///
+    /// When present, schema loading is performed against this explicit target
+    /// instead of whatever the connection reports as its current default.
+    pub target_database: Option<String>,
 }
 
 /// The fully refreshed state for a connection.
@@ -96,19 +101,24 @@ impl RefreshService {
             return self.refresh_redis(connection, request.connection_id).await;
         }
 
-        self.refresh_relational(connection, request.connection_id)
-            .await
+        self.refresh_relational(
+            connection,
+            request.connection_id,
+            request.target_database.as_deref(),
+        )
+        .await
     }
 
     async fn refresh_relational(
         &self,
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
+        target_database: Option<&str>,
     ) -> ServiceResult<ConnectionRefresh> {
         let driver_category = driver_category_for(connection.driver_name());
         let schema = self
             .schema_service
-            .load_database_schema(connection.clone(), connection_id)
+            .load_database_schema_for_database(connection.clone(), connection_id, target_database)
             .await?;
 
         let databases = if let Some(schema_introspection) = connection.as_schema_introspection() {

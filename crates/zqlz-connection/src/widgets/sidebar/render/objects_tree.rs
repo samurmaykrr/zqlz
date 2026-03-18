@@ -836,7 +836,7 @@ impl ConnectionSidebar {
     }
 
     /// Render a "Loading..." placeholder row for a section that is being fetched.
-    fn render_loading_row(
+    pub(super) fn render_loading_row(
         id_suffix: &str,
         section: &str,
         muted_foreground: gpui::Hsla,

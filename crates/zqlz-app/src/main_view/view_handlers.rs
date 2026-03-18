@@ -6,6 +6,7 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
+use zqlz_core::{DatabaseObject, ObjectType};
 use zqlz_query::EditorObjectType;
 use zqlz_trigger_designer::{
     DatabaseDialect as TriggerDialect, TriggerDesign, TriggerDesignerEvent, TriggerDesignerPanel,
@@ -139,48 +140,18 @@ pub(in crate::main_view) async fn fetch_view_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     view_name: &str,
-    driver_type: &str,
 ) -> Result<String, String> {
-    // Different databases store view definitions differently
-    let sql = if driver_type.contains("postgres") {
-        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
-        format!(
-            "SELECT definition FROM pg_views WHERE schemaname = '{}' AND viewname = '{}'",
-            schema_name,
-            view_name.replace("'", "''")
-        )
-    } else {
-        // SQLite: query sqlite_master
-        format!(
-            "SELECT sql FROM sqlite_master WHERE type = 'view' AND name = '{}'",
-            view_name.replace("'", "''")
-        )
-    };
+    let ddl =
+        fetch_database_object_definition(connection, schema_name, view_name, ObjectType::View)
+            .await
+            .map_err(|error| format!("Failed to fetch view definition: {}", error))?;
 
-    match connection.query(&sql, &[]).await {
-        Ok(result) => {
-            if let Some(row) = result.rows.first()
-                && let Some(value) = row.values.first()
-            {
-                let definition = value.to_string();
-
-                // For PostgreSQL, the definition is just the SELECT part
-                // For SQLite, it's the full CREATE VIEW statement, so extract the SELECT
-                if driver_type.contains("sqlite") {
-                    // SQLite returns: CREATE VIEW name AS SELECT ...
-                    // We need to extract just the SELECT part
-                    if let Some(as_pos) = definition.to_uppercase().find(" AS ") {
-                        let select_part = definition[as_pos + 4..].trim();
-                        return Ok(select_part.to_string());
-                    }
-                }
-
-                return Ok(definition);
-            }
-            Err(format!("View '{}' not found", view_name))
-        }
-        Err(e) => Err(format!("Failed to fetch view definition: {}", e)),
+    if let Some(as_position) = ddl.to_uppercase().find(" AS ") {
+        let select_part = ddl[as_position + 4..].trim().trim_end_matches(';').trim();
+        return Ok(select_part.to_string());
     }
+
+    Ok(ddl)
 }
 
 fn normalize_schema_name(schema_name: Option<&str>) -> Option<String> {
@@ -237,6 +208,130 @@ fn version_target_from_editor_object(
     })
 }
 
+fn object_type_label(object_type: ObjectType) -> &'static str {
+    match object_type {
+        ObjectType::Function => "Function",
+        ObjectType::Procedure => "Procedure",
+        ObjectType::Trigger => "Trigger",
+        ObjectType::View => "View",
+        ObjectType::Table => "Table",
+        ObjectType::Database => "Database",
+        ObjectType::Schema => "Schema",
+        ObjectType::MaterializedView => "Materialized view",
+        ObjectType::Index => "Index",
+        ObjectType::Constraint => "Constraint",
+        ObjectType::Sequence => "Sequence",
+        ObjectType::Type => "Type",
+    }
+}
+
+fn quote_identifier_for_connection(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    identifier: &str,
+) -> String {
+    if matches!(connection.dialect_id(), Some("mysql")) {
+        format!("`{}`", identifier.replace('`', "``"))
+    } else {
+        format!("\"{}\"", identifier.replace('"', "\"\""))
+    }
+}
+
+fn supports_create_or_replace_view(connection: &Arc<dyn zqlz_core::Connection>) -> bool {
+    matches!(connection.dialect_id(), Some("postgresql") | Some("mysql"))
+}
+
+pub(in crate::main_view) fn build_create_view_statement(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    view_name: &str,
+    definition: &str,
+) -> String {
+    let quoted_name = quote_identifier_for_connection(connection, view_name);
+    format!("CREATE VIEW {} AS {}", quoted_name, definition)
+}
+
+pub(in crate::main_view) fn build_drop_view_statement(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    view_name: &str,
+    include_if_exists: bool,
+) -> String {
+    let quoted_name = quote_identifier_for_connection(connection, view_name);
+    if include_if_exists {
+        format!("DROP VIEW IF EXISTS {}", quoted_name)
+    } else {
+        format!("DROP VIEW {}", quoted_name)
+    }
+}
+
+pub(in crate::main_view) fn build_rename_table_statement(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    old_name: &str,
+    new_name: &str,
+) -> String {
+    let quoted_old_name = quote_identifier_for_connection(connection, old_name);
+    let quoted_new_name = quote_identifier_for_connection(connection, new_name);
+
+    if matches!(connection.dialect_id(), Some("mysql")) {
+        format!("RENAME TABLE {} TO {}", quoted_old_name, quoted_new_name)
+    } else {
+        format!(
+            "ALTER TABLE {} RENAME TO {}",
+            quoted_old_name, quoted_new_name
+        )
+    }
+}
+
+fn build_replace_view_statements(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    view_name: &str,
+    definition: &str,
+) -> Vec<String> {
+    if supports_create_or_replace_view(connection) {
+        let quoted_name = quote_identifier_for_connection(connection, view_name);
+        vec![format!(
+            "CREATE OR REPLACE VIEW {} AS {}",
+            quoted_name, definition
+        )]
+    } else {
+        vec![
+            build_drop_view_statement(connection, view_name, true),
+            build_create_view_statement(connection, view_name, definition),
+        ]
+    }
+}
+
+fn trigger_dialect_for_connection(connection: &Arc<dyn zqlz_core::Connection>) -> TriggerDialect {
+    if connection.driver_name().contains("postgres") {
+        TriggerDialect::Postgres
+    } else if connection.driver_name().contains("mysql") {
+        TriggerDialect::Mysql
+    } else {
+        TriggerDialect::Sqlite
+    }
+}
+
+fn build_drop_trigger_statement(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    trigger_name: &str,
+    table_name: Option<&str>,
+) -> Result<String, String> {
+    let quoted_trigger_name = quote_identifier_for_connection(connection, trigger_name);
+
+    if connection.driver_name().contains("postgres") {
+        let table_name = table_name
+            .filter(|table_name| !table_name.is_empty())
+            .ok_or_else(|| {
+                "Trigger table name is required to drop triggers in PostgreSQL".to_string()
+            })?;
+        let quoted_table_name = quote_identifier_for_connection(connection, table_name);
+        Ok(format!(
+            "DROP TRIGGER IF EXISTS {} ON {} CASCADE",
+            quoted_trigger_name, quoted_table_name
+        ))
+    } else {
+        Ok(format!("DROP TRIGGER IF EXISTS {}", quoted_trigger_name))
+    }
+}
+
 fn record_sql_object_version(
     version_repository: &VersionRepository,
     target: &SqlObjectVersionTarget,
@@ -259,43 +354,10 @@ async fn fetch_function_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     function_name: &str,
-    driver_type: &str,
 ) -> Result<String, String> {
-    let sql = if driver_type.contains("postgres") {
-        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
-        // PostgreSQL: get function definition using pg_get_functiondef
-        format!(
-            r#"
-            SELECT pg_get_functiondef(p.oid)
-            FROM pg_proc p
-            JOIN pg_namespace n ON p.pronamespace = n.oid
-            WHERE p.proname = '{}'
-            AND n.nspname = '{}'
-            LIMIT 1
-            "#,
-            schema_name,
-            function_name.replace("'", "''")
-        )
-    } else {
-        // SQLite doesn't have stored functions, so this is a placeholder
-        // In practice, SQLite uses user-defined functions which are created in code
-        format!(
-            "SELECT sql FROM sqlite_master WHERE type = 'function' AND name = '{}'",
-            function_name.replace("'", "''")
-        )
-    };
-
-    match connection.query(&sql, &[]).await {
-        Ok(result) => {
-            if let Some(row) = result.rows.first()
-                && let Some(value) = row.values.first()
-            {
-                return Ok(value.to_string());
-            }
-            Err(format!("Function '{}' not found", function_name))
-        }
-        Err(e) => Err(format!("Failed to fetch function definition: {}", e)),
-    }
+    fetch_database_object_definition(connection, schema_name, function_name, ObjectType::Function)
+        .await
+        .map_err(|error| format!("Failed to fetch function definition: {}", error))
 }
 
 /// Fetches the definition of a stored procedure from the database.
@@ -303,44 +365,49 @@ async fn fetch_procedure_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     procedure_name: &str,
-    driver_type: &str,
 ) -> Result<String, String> {
-    let sql = if driver_type.contains("postgres") {
-        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
-        // PostgreSQL: procedures are functions with prorettype = 0 (void) in newer versions
-        // or use pg_get_functiondef for functions marked as procedures
-        format!(
-            r#"
-            SELECT pg_get_functiondef(p.oid)
-            FROM pg_proc p
-            JOIN pg_namespace n ON p.pronamespace = n.oid
-            WHERE p.proname = '{}'
-            AND n.nspname = '{}'
-            AND p.prokind = 'p'
-            LIMIT 1
-            "#,
-            schema_name,
-            procedure_name.replace("'", "''")
-        )
-    } else {
-        // SQLite doesn't have stored procedures
-        format!(
-            "SELECT sql FROM sqlite_master WHERE type = 'procedure' AND name = '{}'",
-            procedure_name.replace("'", "''")
-        )
+    fetch_database_object_definition(
+        connection,
+        schema_name,
+        procedure_name,
+        ObjectType::Procedure,
+    )
+    .await
+    .map_err(|error| format!("Failed to fetch procedure definition: {}", error))
+}
+
+async fn fetch_database_object_definition(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
+    object_name: &str,
+    object_type: ObjectType,
+) -> Result<String, String> {
+    let Some(schema_introspection) = connection.as_schema_introspection() else {
+        return Err("This connection does not support schema introspection".to_string());
     };
 
-    match connection.query(&sql, &[]).await {
-        Ok(result) => {
-            if let Some(row) = result.rows.first()
-                && let Some(value) = row.values.first()
+    let object = DatabaseObject {
+        object_type,
+        schema: normalize_schema_name(schema_name),
+        name: object_name.to_string(),
+    };
+
+    schema_introspection
+        .generate_ddl(&object)
+        .await
+        .map_err(|error| {
+            let error_text = error.to_string();
+            if matches!(object_type, ObjectType::Function | ObjectType::Procedure)
+                && connection.driver_name() == "sqlite"
             {
-                return Ok(value.to_string());
+                return format!(
+                    "{} definitions are not supported by the '{}' driver",
+                    object_type_label(object_type),
+                    connection.driver_name()
+                );
             }
-            Err(format!("Procedure '{}' not found", procedure_name))
-        }
-        Err(e) => Err(format!("Failed to fetch procedure definition: {}", e)),
-    }
+            error_text
+        })
 }
 
 struct ObjectEditorConnection {
@@ -524,13 +591,8 @@ impl MainView {
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the view definition
-            match fetch_view_definition(
-                &connection,
-                object_schema.as_deref(),
-                &view_name_for_spawn,
-                &driver_name,
-            )
-            .await
+            match fetch_view_definition(&connection, object_schema.as_deref(), &view_name_for_spawn)
+                .await
             {
                 Ok(definition) => {
                     cx.update(|window, cx| {
@@ -691,7 +753,7 @@ impl MainView {
                     let view_name = view_name.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = format!("DROP VIEW \"{}\"", view_name);
+                        let sql = build_drop_view_statement(&connection, &view_name, false);
                         match connection.execute(&sql, &[]).await {
                             Ok(_) => {
                                 tracing::info!("View '{}' deleted successfully", view_name);
@@ -743,13 +805,6 @@ impl MainView {
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let window_handle = window.window_handle();
@@ -789,7 +844,6 @@ impl MainView {
                 let window_handle = window_handle;
                 let main_view = main_view.clone();
                 let source_view_name = source_view_name.clone();
-                let driver_name = driver_name.clone();
                 let name_input = name_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
@@ -843,7 +897,6 @@ impl MainView {
                         let window_handle = window_handle;
                         let main_view = main_view.clone();
                         let source_view_name = source_view_name.clone();
-                        let driver_name = driver_name.clone();
 
                         cx.spawn(async move |cx| {
                             // First, fetch the original view definition
@@ -851,14 +904,14 @@ impl MainView {
                                 &connection,
                                 None,
                                 &source_view_name,
-                                &driver_name,
                             )
                             .await {
                                 Ok(definition) => {
                                     // Create the new view with the same definition
-                                    let create_sql = format!(
-                                        "CREATE VIEW \"{}\" AS {}",
-                                        new_view_name, definition
+                                    let create_sql = build_create_view_statement(
+                                        &connection,
+                                        &new_view_name,
+                                        &definition,
                                     );
 
                                     match connection.execute(&create_sql, &[]).await {
@@ -1141,13 +1194,6 @@ impl MainView {
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
         let schema_service = app_state.schema_service.clone();
         let version_repository = self.version_repository.clone();
 
@@ -1181,25 +1227,12 @@ impl MainView {
             object_schema: object_schema.clone(),
         };
 
-        // Generate the appropriate DDL based on database type
-        let ddl = if driver_name.contains("postgres") {
-            // PostgreSQL supports CREATE OR REPLACE VIEW
-            format!("CREATE OR REPLACE VIEW \"{}\" AS {}", view_name, definition)
-        } else {
-            // SQLite doesn't support CREATE OR REPLACE, so we DROP and CREATE
-            format!(
-                "DROP VIEW IF EXISTS \"{}\"; CREATE VIEW \"{}\" AS {}",
-                view_name, view_name, definition
-            )
-        };
+        let statements = build_replace_view_statements(&connection, &view_name, &definition);
 
         cx.spawn_in(window, async move |_this, cx| {
-            // For SQLite, we need to execute multiple statements
-            let statements: Vec<&str> = ddl.split(';').filter(|s| !s.trim().is_empty()).collect();
-
             let mut success = true;
             for stmt in statements {
-                if let Err(e) = connection.execute(stmt.trim(), &[]).await {
+                if let Err(e) = connection.execute(&stmt, &[]).await {
                     tracing::error!("Failed to save view: {}", e);
                     success = false;
 
@@ -1417,7 +1450,7 @@ impl MainView {
 
                         cx.spawn(async move |cx| {
                             let create_sql =
-                                format!("CREATE VIEW \"{}\" AS {}", view_name, definition);
+                                build_create_view_statement(&connection, &view_name, &definition);
 
                             match connection.execute(&create_sql, &[]).await {
                                 Ok(_) => {
@@ -1517,7 +1550,6 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &function_name_for_spawn,
-                &driver_name,
             )
             .await
             {
@@ -1612,7 +1644,6 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &procedure_name_for_spawn,
-                &driver_name,
             )
             .await
             {
@@ -1712,7 +1743,6 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &trigger_name_for_spawn,
-                &driver_name,
             )
             .await
             {
@@ -1862,12 +1892,14 @@ END;"#
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
+        let trigger_table_name = app_state
+            .schema_service
+            .cache()
+            .get_triggers(connection_id)
+            .unwrap_or_default()
             .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
+            .find(|trigger| trigger.name == trigger_name)
+            .map(|trigger| trigger.table_name);
 
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
@@ -1877,7 +1909,7 @@ END;"#
             let connection = connection.clone();
             let connection_sidebar = connection_sidebar.clone();
             let trigger_name = trigger_name_for_dialog.clone();
-            let driver_name = driver_name.clone();
+            let trigger_table_name_for_ok = trigger_table_name.clone();
 
             dialog
                 .title("Delete Trigger")
@@ -1906,16 +1938,23 @@ END;"#
                     let connection = connection.clone();
                     let connection_sidebar = connection_sidebar.clone();
                     let trigger_name = trigger_name.clone();
-                    let driver_name = driver_name.clone();
+                    let trigger_table_name = trigger_table_name_for_ok.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = if driver_name.contains("postgres") {
-                            format!(
-                                "DROP TRIGGER IF EXISTS \"{}\" ON table_name CASCADE",
-                                trigger_name
-                            )
-                        } else {
-                            format!("DROP TRIGGER IF EXISTS \"{}\"", trigger_name)
+                        let sql = match build_drop_trigger_statement(
+                            &connection,
+                            &trigger_name,
+                            trigger_table_name.as_deref(),
+                        ) {
+                            Ok(sql) => sql,
+                            Err(error) => {
+                                tracing::error!(
+                                    trigger = %trigger_name,
+                                    %error,
+                                    "Failed to build trigger drop SQL"
+                                );
+                                return;
+                            }
                         };
 
                         match connection.execute(&sql, &[]).await {
@@ -1965,23 +2004,15 @@ END;"#
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
-        let dialect = if driver_name.contains("postgres") {
-            TriggerDialect::Postgres
-        } else if driver_name.contains("mysql") {
-            TriggerDialect::Mysql
-        } else {
-            TriggerDialect::Sqlite
-        };
+        let dialect = trigger_dialect_for_connection(&connection);
 
         // Get available tables for the table dropdown
         let schema_service = app_state.schema_service.clone();
+        let target_database = app_state
+            .connection_manager()
+            .get_saved(connection_id)
+            .and_then(|saved| saved.params.get("database").cloned())
+            .or_else(|| app_state.active_database());
 
         if let Some(trigger_name) = trigger_name {
             // Editing an existing trigger - need to load its definition first
@@ -1995,13 +2026,16 @@ END;"#
                     &connection,
                     object_schema.as_deref(),
                     &trigger_name_for_spawn,
-                    &driver_name,
                 )
                 .await;
 
                 // Get available tables
                 let tables = match schema_service
-                    .load_database_schema(connection.clone(), connection_id)
+                    .load_database_schema_for_database(
+                        connection.clone(),
+                        connection_id,
+                        target_database.as_deref(),
+                    )
                     .await
                 {
                     Ok(schema) => schema.tables,
@@ -2073,7 +2107,11 @@ END;"#
             cx.spawn_in(window, async move |this, cx| {
                 // Get available tables
                 let tables = match schema_service
-                    .load_database_schema(connection.clone(), connection_id)
+                    .load_database_schema_for_database(
+                        connection.clone(),
+                        connection_id,
+                        target_database.as_deref(),
+                    )
                     .await
                 {
                     Ok(schema) => schema.tables,
@@ -2205,13 +2243,6 @@ END;"#
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
         let trigger_name = design.name.clone();
@@ -2231,10 +2262,20 @@ END;"#
             // If editing an existing trigger, drop it first (for SQLite/MySQL)
             // Postgres uses CREATE OR REPLACE
             if !is_new
-                && !driver_name.contains("postgres")
+                && !connection.driver_name().contains("postgres")
                 && let Some(orig_name) = &original_name
             {
-                let drop_sql = format!("DROP TRIGGER IF EXISTS \"{}\"", orig_name);
+                let drop_sql = match build_drop_trigger_statement(&connection, orig_name, None) {
+                    Ok(drop_sql) => drop_sql,
+                    Err(error) => {
+                        tracing::warn!(
+                            trigger = %orig_name,
+                            %error,
+                            "Unable to build trigger drop SQL"
+                        );
+                        return anyhow::Ok(());
+                    }
+                };
                 if let Err(e) = connection.execute(&drop_sql, &[]).await {
                     tracing::warn!("Failed to drop old trigger: {}", e);
                     // Continue anyway - the create might still work
@@ -2377,13 +2418,6 @@ END;"#
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
         let schema_service = app_state.schema_service.clone();
@@ -2474,8 +2508,18 @@ END;"#
             // SQLite doesn't support CREATE OR REPLACE TRIGGER
             cx.spawn_in(window, async move |_this, cx| {
                 // For non-PostgreSQL databases, drop the trigger first
-                if !driver_name.contains("postgres") {
-                    let drop_sql = format!("DROP TRIGGER IF EXISTS \"{}\"", trigger_name);
+                if !connection.driver_name().contains("postgres") {
+                    let drop_sql = match build_drop_trigger_statement(&connection, &trigger_name, None) {
+                        Ok(drop_sql) => drop_sql,
+                        Err(error) => {
+                            tracing::warn!(
+                                trigger = %trigger_name,
+                                %error,
+                                "Unable to build trigger drop SQL"
+                            );
+                            return anyhow::Ok(());
+                        }
+                    };
                     if let Err(e) = connection.execute(&drop_sql, &[]).await {
                         tracing::warn!("Failed to drop trigger before recreate: {}", e);
                     }
@@ -2660,7 +2704,7 @@ END;"#
                         let mut deleted_views: Vec<String> = Vec::new();
 
                         for view_name in &view_names {
-                            let sql = format!("DROP VIEW \"{}\"", view_name);
+                            let sql = build_drop_view_statement(&connection, view_name, false);
                             match connection.execute(&sql, &[]).await {
                                 Ok(_) => {
                                     tracing::info!("View '{}' deleted successfully", view_name);
@@ -2759,13 +2803,6 @@ END;"#
             return;
         };
 
-        let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
-
         let connection = connection.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
@@ -2779,7 +2816,6 @@ END;"#
             let main_view = main_view.clone();
             let schema_service = schema_service.clone();
             let view_names = view_names.clone();
-            let driver_name = driver_name.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
 
@@ -2815,7 +2851,6 @@ END;"#
                     let main_view = main_view.clone();
                     let schema_service = schema_service.clone();
                     let view_names = view_names.clone();
-                    let driver_name = driver_name.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |cx| {
@@ -2826,12 +2861,13 @@ END;"#
                             let new_name = format!("{}_copy", view_name);
 
                             // Fetch the source view definition, then create with new name
-                            match fetch_view_definition(&connection, None, view_name, &driver_name)
-                                .await
-                            {
+                            match fetch_view_definition(&connection, None, view_name).await {
                                 Ok(definition) => {
-                                    let create_sql =
-                                        format!("CREATE VIEW \"{}\" AS {}", new_name, definition);
+                                    let create_sql = build_create_view_statement(
+                                        &connection,
+                                        &new_name,
+                                        &definition,
+                                    );
 
                                     match connection.execute(&create_sql, &[]).await {
                                         Ok(_) => {
@@ -2985,51 +3021,10 @@ async fn fetch_trigger_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     trigger_name: &str,
-    driver_type: &str,
 ) -> Result<String, String> {
-    let sql = if driver_type.contains("postgres") {
-        let schema_name = schema_name.unwrap_or("public").replace("'", "''");
-        format!(
-            r#"
-            SELECT pg_get_triggerdef(t.oid, true)
-            FROM pg_trigger t
-            JOIN pg_namespace n ON c.relnamespace = n.oid
-            JOIN pg_class c ON t.tgrelid = c.oid
-            WHERE t.tgname = '{}'
-            AND n.nspname = '{}'
-            LIMIT 1
-            "#,
-            trigger_name.replace("'", "''"),
-            schema_name,
-        )
-    } else if driver_type.contains("mysql") {
-        format!("SHOW CREATE TRIGGER `{}`", trigger_name.replace("`", "``"))
-    } else {
-        // SQLite
-        format!(
-            "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = '{}'",
-            trigger_name.replace("'", "''")
-        )
-    };
-
-    match connection.query(&sql, &[]).await {
-        Ok(result) => {
-            if let Some(row) = result.rows.first() {
-                // For MySQL SHOW CREATE TRIGGER, the SQL is in the 3rd column
-                let value = if driver_type.contains("mysql") {
-                    row.values.get(2).map(|v| v.to_string())
-                } else {
-                    row.values.first().map(|v| v.to_string())
-                };
-
-                if let Some(definition) = value {
-                    return Ok(definition);
-                }
-            }
-            Err(format!("Trigger '{}' not found", trigger_name))
-        }
-        Err(e) => Err(format!("Failed to fetch trigger definition: {}", e)),
-    }
+    fetch_database_object_definition(connection, schema_name, trigger_name, ObjectType::Trigger)
+        .await
+        .map_err(|error| format!("Failed to fetch trigger definition: {}", error))
 }
 
 /// Extracts trigger name from a CREATE TRIGGER statement

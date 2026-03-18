@@ -16,7 +16,10 @@ use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 
 use super::{
     table_handlers_utils::validation::validate_table_name,
-    view_handlers::{fetch_view_definition, validate_view_name},
+    view_handlers::{
+        build_create_view_statement, build_drop_view_statement, build_rename_table_statement,
+        fetch_view_definition, validate_view_name,
+    },
 };
 
 #[derive(Clone)]
@@ -24,14 +27,12 @@ enum RenameTarget {
     Table {
         connection_id: Uuid,
         old_name: String,
-        driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
         main_view: WeakEntity<MainView>,
     },
     View {
         connection_id: Uuid,
         old_name: String,
-        driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
         main_view: WeakEntity<MainView>,
     },
@@ -83,17 +84,10 @@ impl RenameTarget {
         match self {
             Self::Table {
                 old_name,
-                driver_name,
                 connection,
                 ..
             } => {
-                let sql = if driver_name.contains("postgres") {
-                    format!("ALTER TABLE \"{}\" RENAME TO \"{}\"", old_name, new_name)
-                } else if driver_name.contains("mysql") || driver_name.contains("mariadb") {
-                    format!("RENAME TABLE `{}` TO `{}`", old_name, new_name)
-                } else {
-                    format!("ALTER TABLE \"{}\" RENAME TO \"{}\"", old_name, new_name)
-                };
+                let sql = build_rename_table_statement(connection, old_name, new_name);
 
                 connection
                     .execute(&sql, &[])
@@ -103,24 +97,23 @@ impl RenameTarget {
             }
             Self::View {
                 old_name,
-                driver_name,
                 connection,
                 ..
             } => {
-                let definition =
-                    fetch_view_definition(connection, None, old_name, driver_name).await?;
+                let definition = fetch_view_definition(connection, None, old_name).await?;
 
-                let drop_sql = format!("DROP VIEW \"{}\"", old_name);
+                let drop_sql = build_drop_view_statement(connection, old_name, false);
                 connection
                     .execute(&drop_sql, &[])
                     .await
                     .map_err(|error| format!("Failed to drop old view: {error}"))?;
 
-                let create_sql = format!("CREATE VIEW \"{}\" AS {}", new_name, definition);
+                let create_sql = build_create_view_statement(connection, new_name, &definition);
                 match connection.execute(&create_sql, &[]).await {
                     Ok(_) => Ok(()),
                     Err(error) => {
-                        let restore_sql = format!("CREATE VIEW \"{}\" AS {}", old_name, definition);
+                        let restore_sql =
+                            build_create_view_statement(connection, old_name, &definition);
                         match connection.execute(&restore_sql, &[]).await {
                             Ok(_) => Err(format!("Failed to create renamed view: {error}")),
                             Err(restore_error) => Err(format!(
@@ -182,7 +175,7 @@ impl RenameWindow {
     pub(super) fn open_table(
         connection_id: Uuid,
         table_name: String,
-        driver_name: String,
+        _driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
         main_view: WeakEntity<MainView>,
         cx: &mut App,
@@ -191,7 +184,6 @@ impl RenameWindow {
             RenameTarget::Table {
                 connection_id,
                 old_name: table_name,
-                driver_name,
                 connection,
                 main_view,
             },
@@ -202,7 +194,7 @@ impl RenameWindow {
     pub(super) fn open_view(
         connection_id: Uuid,
         view_name: String,
-        driver_name: String,
+        _driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
         main_view: WeakEntity<MainView>,
         cx: &mut App,
@@ -211,7 +203,6 @@ impl RenameWindow {
             RenameTarget::View {
                 connection_id,
                 old_name: view_name,
-                driver_name,
                 connection,
                 main_view,
             },

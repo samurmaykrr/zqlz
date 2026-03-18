@@ -31,14 +31,14 @@ pub(in crate::main_view) fn handle_load_more_event(
 
         // Extract filter/sort/search state so LoadMore preserves them
         let mut where_clauses: Vec<String> = Vec::new();
-        let mut order_by_clauses: Vec<String> = Vec::new();
+        let mut sorts = Vec::new();
 
         if let Some(filter_state) = &viewer.filter_panel_state {
-            let (filters, sorts) = filter_state.read_with(cx, |state, _cx| {
+            let (filters, current_sorts) = filter_state.read_with(cx, |state, _cx| {
                 (state.get_filter_conditions(), state.get_sort_criteria())
             });
             where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
-            order_by_clauses = sorts.iter().map(|s| s.to_sql()).collect();
+            sorts = current_sorts;
         }
 
         if !viewer.search_text.is_empty() {
@@ -76,7 +76,7 @@ pub(in crate::main_view) fn handle_load_more_event(
             table_name,
             limit,
             where_clauses,
-            order_by_clauses,
+            sorts,
             visible_columns,
             viewer.database_name.clone(),
         ))
@@ -87,7 +87,7 @@ pub(in crate::main_view) fn handle_load_more_event(
         table_name,
         limit,
         where_clauses,
-        order_by_clauses,
+        sorts,
         visible_columns,
         database_name,
     )) = viewer_info
@@ -116,6 +116,10 @@ pub(in crate::main_view) fn handle_load_more_event(
 
     let connection = connection.clone();
     let table_service = app_state.table_service.clone();
+    let order_by_clauses: Vec<String> = sorts
+        .iter()
+        .map(|sort| sort.to_sql_for_driver(connection.driver_name()))
+        .collect();
     let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
 
     window

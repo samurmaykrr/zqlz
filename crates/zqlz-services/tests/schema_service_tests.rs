@@ -72,6 +72,32 @@ async fn mysql_queries_database_name_via_select_database() {
     );
 }
 
+#[tokio::test]
+async fn mysql_explicit_target_database_skips_select_database_query() {
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    let schema = service
+        .load_database_schema_for_database(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            Some("analytics_db"),
+        )
+        .await
+        .expect("should load schema");
+
+    assert_eq!(schema.database_name.as_deref(), Some("analytics_db"));
+    assert!(schema.tables.contains(&"users".to_string()));
+
+    let log = conn.query_log();
+    assert!(
+        !log.iter().any(|q| q.contains("SELECT DATABASE()")),
+        "explicit target database should not query DATABASE(). Log: {:?}",
+        log
+    );
+}
+
 // ============ PostgreSQL Driver Path Tests ============
 
 #[tokio::test]
@@ -512,6 +538,84 @@ async fn get_table_details_uses_cached_columns() {
 
     assert_eq!(details.columns.len(), 1);
     assert_eq!(details.columns[0].name, "cached_col");
+}
+
+#[tokio::test]
+async fn table_details_cache_is_scoped_by_schema() {
+    let conn = mysql_connection("scope_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("schema load");
+
+    let schema_a_details = service
+        .get_table_details(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            "users",
+            Some("schema_a"),
+        )
+        .await
+        .expect("details load for schema_a");
+    let schema_b_details = service
+        .get_table_details(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            "users",
+            Some("schema_b"),
+        )
+        .await
+        .expect("details load for schema_b");
+
+    assert_eq!(schema_a_details.name, "users");
+    assert_eq!(schema_b_details.name, "users");
+
+    assert!(service
+        .peek_table_details_cache(conn_id, "users", Some("schema_a"))
+        .is_some());
+    assert!(service
+        .peek_table_details_cache(conn_id, "users", Some("schema_b"))
+        .is_some());
+    assert!(service
+        .peek_table_details_cache(conn_id, "users", Some("schema_c"))
+        .is_none());
+}
+
+#[tokio::test]
+async fn ddl_cache_is_scoped_by_schema() {
+    let conn = mysql_connection("scope_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("schema load");
+
+    let ddl_a = service
+        .get_or_generate_ddl(
+            &(conn.clone() as Arc<dyn Connection>),
+            conn_id,
+            "users",
+            Some("schema_a"),
+            Some(ObjectType::Table),
+        )
+        .await;
+    let ddl_b = service
+        .get_or_generate_ddl(
+            &(conn.clone() as Arc<dyn Connection>),
+            conn_id,
+            "users",
+            Some("schema_b"),
+            Some(ObjectType::Table),
+        )
+        .await;
+
+    assert!(ddl_a.is_some());
+    assert!(ddl_b.is_some());
 }
 
 #[tokio::test]

@@ -612,6 +612,110 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
+    /// Toggle schema-group expansion for a multi-schema active database that
+    /// still uses connection-level fallback data.
+    fn toggle_schema_group_expand(
+        &mut self,
+        conn_id: Uuid,
+        schema_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(index) = conn
+                .collapsed_schema_groups
+                .iter()
+                .position(|group| group == schema_name)
+            {
+                conn.collapsed_schema_groups.remove(index);
+            } else {
+                conn.collapsed_schema_groups.push(schema_name.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle a section expansion for a grouped schema in the connection-level
+    /// fallback data set.
+    fn toggle_schema_section_expand(
+        &mut self,
+        conn_id: Uuid,
+        schema_name: &str,
+        section: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            let section_key = format!("{schema_name}::{section}");
+            if let Some(index) = conn
+                .collapsed_schema_section_keys
+                .iter()
+                .position(|key| key == &section_key)
+            {
+                conn.collapsed_schema_section_keys.remove(index);
+            } else {
+                conn.collapsed_schema_section_keys.push(section_key);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle schema-group expansion within a specific database node.
+    fn toggle_db_schema_group_expand(
+        &mut self,
+        conn_id: Uuid,
+        database_name: &str,
+        schema_name: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(database) = conn
+                .databases
+                .iter_mut()
+                .find(|database| database.name == database_name)
+            && let Some(schema) = &mut database.schema
+        {
+            if let Some(index) = schema
+                .collapsed_schema_groups
+                .iter()
+                .position(|group| group == schema_name)
+            {
+                schema.collapsed_schema_groups.remove(index);
+            } else {
+                schema.collapsed_schema_groups.push(schema_name.to_string());
+            }
+        }
+        cx.notify();
+    }
+
+    /// Toggle a section expansion within a grouped schema inside a database node.
+    fn toggle_db_schema_section_expand(
+        &mut self,
+        conn_id: Uuid,
+        database_name: &str,
+        schema_name: &str,
+        section: &str,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(database) = conn
+                .databases
+                .iter_mut()
+                .find(|database| database.name == database_name)
+            && let Some(schema) = &mut database.schema
+        {
+            let section_key = format!("{schema_name}::{section}");
+            if let Some(index) = schema
+                .collapsed_schema_section_keys
+                .iter()
+                .position(|key| key == &section_key)
+            {
+                schema.collapsed_schema_section_keys.remove(index);
+            } else {
+                schema.collapsed_schema_section_keys.push(section_key);
+            }
+        }
+        cx.notify();
+    }
+
     /// Toggle queries section expand/collapse
     fn toggle_queries_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {

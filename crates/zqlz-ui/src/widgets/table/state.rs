@@ -1249,6 +1249,8 @@ where
         // Only update if it actually changed
         if col_group.width != new_width {
             col_group.width = new_width;
+            let new_widths = self.col_groups.iter().map(|group| group.width).collect();
+            cx.emit(TableEvent::ColumnWidthsChanged(new_widths));
             cx.notify();
         }
     }

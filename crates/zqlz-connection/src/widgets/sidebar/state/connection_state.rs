@@ -46,6 +46,9 @@ impl ConnectionSidebar {
                 conn.redis_databases.clear();
                 conn.databases.clear();
                 conn.schema_name = None;
+                conn.schema_names.clear();
+                conn.collapsed_schema_groups.clear();
+                conn.collapsed_schema_section_keys.clear();
                 conn.tables_loading = false;
                 conn.views_loading = false;
                 conn.materialized_views_loading = false;
@@ -66,11 +69,19 @@ impl ConnectionSidebar {
     }
 
     /// Update tables only (progressive loading - step 1)
-    pub fn set_tables_only(&mut self, id: Uuid, tables: Vec<String>, cx: &mut Context<Self>) {
+    pub fn set_tables_only(
+        &mut self,
+        id: Uuid,
+        tables: Vec<String>,
+        schema_name: Option<String>,
+        schema_names: Vec<String>,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.tables = tables;
+            conn.schema_name = schema_name;
+            conn.schema_names = schema_names;
             conn.tables_loading = false;
-            conn.is_expanded = true;
         }
         cx.notify();
     }
@@ -158,6 +169,7 @@ impl ConnectionSidebar {
             functions,
             procedures,
             schema_name,
+            schema_names,
         } = schema;
 
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
@@ -168,9 +180,8 @@ impl ConnectionSidebar {
             conn.functions = functions;
             conn.procedures = procedures;
             conn.schema_name = schema_name;
-            conn.is_expanded = true;
-            conn.schema_expanded = true;
-            conn.tables_expanded = true;
+            conn.schema_names = schema_names;
+            conn.schema_expanded = false;
         }
         cx.notify();
     }
@@ -182,12 +193,11 @@ impl ConnectionSidebar {
     /// right away, preventing the jarring flat-tables → database-nodes transition.
     pub fn init_database_view(&mut self, id: Uuid, active_db_name: &str, cx: &mut Context<Self>) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
-            conn.is_expanded = true;
             conn.databases = vec![SidebarDatabaseInfo {
                 name: active_db_name.to_string(),
                 size_bytes: None,
                 is_active: true,
-                is_expanded: true,
+                is_expanded: false,
                 is_loading: true,
                 schema: None,
             }];
@@ -229,7 +239,7 @@ impl ConnectionSidebar {
                             name,
                             size_bytes,
                             is_active,
-                            is_expanded: is_active,
+                            is_expanded: false,
                             is_loading: false,
                             schema: None,
                         }
@@ -254,7 +264,10 @@ impl ConnectionSidebar {
             // connection-level fields that were populated by set_schema
             let active_schema = DatabaseSchemaData {
                 schema_name: conn.schema_name.clone(),
+                schema_names: conn.schema_names.clone(),
                 schema_expanded: conn.schema_expanded,
+                collapsed_schema_groups: conn.collapsed_schema_groups.clone(),
+                collapsed_schema_section_keys: conn.collapsed_schema_section_keys.clone(),
                 tables: conn.tables.clone(),
                 views: conn.views.clone(),
                 materialized_views: conn.materialized_views.clone(),
@@ -283,7 +296,7 @@ impl ConnectionSidebar {
                         name,
                         size_bytes,
                         is_active,
-                        is_expanded: is_active,
+                        is_expanded: false,
                         is_loading: false,
                         schema: if is_active {
                             Some(active_schema.clone())
@@ -314,6 +327,7 @@ impl ConnectionSidebar {
             functions,
             procedures,
             schema_name,
+            schema_names,
         } = schema;
 
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
@@ -322,14 +336,17 @@ impl ConnectionSidebar {
             db.is_loading = false;
             db.schema = Some(DatabaseSchemaData {
                 schema_name,
-                schema_expanded: true,
+                schema_names,
+                schema_expanded: false,
+                collapsed_schema_groups: Vec::new(),
+                collapsed_schema_section_keys: Vec::new(),
                 tables,
                 views,
                 materialized_views,
                 triggers,
                 functions,
                 procedures,
-                tables_expanded: true,
+                tables_expanded: false,
                 views_expanded: false,
                 materialized_views_expanded: false,
                 triggers_expanded: false,
@@ -505,8 +522,7 @@ impl ConnectionSidebar {
                 .into_iter()
                 .map(|(index, key_count)| RedisDatabaseInfo::new(index, key_count))
                 .collect();
-            conn.is_expanded = true;
-            conn.redis_databases_expanded = true;
+            conn.redis_databases_expanded = false;
         }
         cx.notify();
     }

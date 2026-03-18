@@ -43,6 +43,13 @@ impl SurfaceRefreshOptions {
 }
 
 impl MainView {
+    fn resolve_objects_panel_database_name(
+        panel_database_name: Option<String>,
+        schema_database_name: Option<String>,
+    ) -> Option<String> {
+        schema_database_name.or(panel_database_name)
+    }
+
     pub(super) fn refresh_connection_surfaces(
         &mut self,
         target: RefreshTarget,
@@ -68,6 +75,7 @@ impl MainView {
         };
 
         let refresh_service = app_state.refresh_service.clone();
+        let target_database = app_state.active_database();
         let connection_name = app_state
             .connection_manager()
             .get_saved(connection_id)
@@ -88,6 +96,7 @@ impl MainView {
                 .refresh_connection(RefreshRequest {
                     connection_id,
                     invalidate_schema_cache: options.invalidate_schema_cache,
+                    target_database: target_database.clone(),
                 })
                 .await;
 
@@ -112,6 +121,7 @@ impl MainView {
                                         functions: schema.functions.clone(),
                                         procedures: schema.procedures.clone(),
                                         schema_name: schema.schema_name.clone(),
+                                        schema_names: schema.schema_names.clone(),
                                     },
                                     cx,
                                 );
@@ -138,6 +148,7 @@ impl MainView {
                                                 functions: schema.functions.clone(),
                                                 procedures: schema.procedures.clone(),
                                                 schema_name: schema.schema_name.clone(),
+                                                schema_names: schema.schema_names.clone(),
                                             },
                                             cx,
                                         );
@@ -158,8 +169,10 @@ impl MainView {
                                 ObjectsPanelData::from_table_infos(schema.table_infos)
                             });
                             objects_panel.update(cx, |panel, cx| {
-                                let database_name =
-                                    panel.database_name().or(schema.database_name.clone());
+                                let database_name = Self::resolve_objects_panel_database_name(
+                                    panel.database_name(),
+                                    schema.database_name.clone(),
+                                );
                                 panel.load_objects(
                                     connection_id,
                                     connection_name.clone(),
