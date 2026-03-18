@@ -174,10 +174,17 @@ impl Global for AppMenuBarGlobal {}
 fn open_main_window(cx: &mut App, launch_paths: Arc<Mutex<Vec<PathBuf>>>) -> anyhow::Result<()> {
     use zqlz_ui::widgets::TitleBar;
 
+    let initial_window_size = if cfg!(target_os = "windows") {
+        size(px(1100.0), px(720.0))
+    } else {
+        size(px(1280.0), px(800.0))
+    };
+
     let window_options = WindowOptions {
         titlebar: Some(TitleBar::title_bar_options()),
-        window_bounds: Some(WindowBounds::centered(size(px(1280.0), px(800.0)), cx)),
+        window_bounds: Some(WindowBounds::centered(initial_window_size, cx)),
         window_min_size: Some(size(px(800.0), px(600.0))),
+        kind: WindowKind::Normal,
         ..Default::default()
     };
 

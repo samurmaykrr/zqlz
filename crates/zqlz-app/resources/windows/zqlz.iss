@@ -32,7 +32,7 @@ WizardStyle=modern
 
 CloseApplications=force
 
-#if GetEnv("CI") != ""
+#if GetEnv("CI") != "" && GetEnv("AZURE_SIGNING_ENDPOINT") != ""
 SignTool=Defaultsign
 #endif
 

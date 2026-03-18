@@ -259,9 +259,6 @@ pub struct ConnectionSidebar {
     /// Currently selected connection
     selected_connection: Option<Uuid>,
 
-    /// Shared scroll handle for the virtualized connections list.
-    connection_list_scroll_handle: UniformListScrollHandle,
-
     /// Search query for filtering schema objects
     search_query: String,
 
@@ -317,7 +314,6 @@ impl ConnectionSidebar {
             focus_handle: cx.focus_handle(),
             connections: Vec::new(),
             selected_connection: None,
-            connection_list_scroll_handle: UniformListScrollHandle::new(),
             search_query: String::new(),
             search_query_lowercase: String::new(),
             search_input_state: None,
@@ -881,36 +877,21 @@ impl Render for ConnectionSidebar {
             true // No search query, so "matches" is irrelevant
         };
 
-        // Prepare virtualized connection rows after mutable-side effects above.
-        let connection_count = self.connections.len();
-        let connection_rows = uniform_list(
-            "sidebar-connections",
-            connection_count,
-            cx.processor(move |sidebar: &mut ConnectionSidebar,
-                              visible_range: std::ops::Range<usize>,
-                              window,
-                              cx| {
-                let mut rows = Vec::with_capacity(visible_range.len());
-                let total = sidebar.connections.len();
-
-                for index in visible_range {
-                    let Some(connection) = sidebar.connections.get(index).cloned() else {
-                        continue;
-                    };
-
-                    rows.push(sidebar.render_connection(
-                        &connection,
-                        index + 1 == total,
-                        window,
-                        cx,
-                    ));
-                }
-
-                rows
-            }),
-        )
-        .with_sizing_behavior(ListSizingBehavior::Auto)
-        .track_scroll(&self.connection_list_scroll_handle);
+        // Pre-render connection elements (non-virtualized). Connection rows have
+        // variable heights when expanded, which does not work with uniform row
+        // virtualization.
+        let connection_elements: Vec<_> = if has_connections {
+            let total = self.connections.len();
+            self.connections
+                .iter()
+                .enumerate()
+                .map(|(index, connection)| {
+                    self.render_connection(connection, index + 1 == total, window, cx)
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Now get theme after all &mut self operations are done
         let theme = cx.theme();
@@ -959,7 +940,7 @@ impl Render for ConnectionSidebar {
                     .id("connection-list")
                     .flex_1()
                     .w_full()
-                    .overflow_hidden()
+                    .overflow_y_scroll()
                     .py_1()
                     .drag_over::<ExternalPaths>(|this, _, _, cx| this.bg(cx.theme().drop_target))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
@@ -996,7 +977,7 @@ impl Render for ConnectionSidebar {
                                 ),
                         )
                     })
-                    .when(has_connections, |this| this.child(connection_rows))
+                    .when(has_connections, |this| this.children(connection_elements))
                     // Show "no results" message when searching with no matches
                     .when(
                         has_search_query && has_connections && !any_matches,
