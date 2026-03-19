@@ -21,10 +21,13 @@ param(
     [string]$Architecture = "x86_64",
     
     [ValidateSet("stable", "nightly", "dev")]
-    [string]$Channel = "dev"
+    [string]$Channel = "dev",
+
+    [switch]$Install
 )
 
 $ErrorActionPreference = "Stop"
+$PSNativeCommandUseErrorActionPreference = $true
 
 # Configuration
 $AppName = "ZQLZ"
@@ -60,18 +63,82 @@ Set-Location $ProjectRoot
 
 $TargetTriple = "$Architecture-pc-windows-msvc"
 
-switch ($Architecture) {
-    "x86_64" {
-        $ArchitecturesAllowed = "x64compatible"
-        $ArchitecturesInstallIn64BitMode = "x64compatible"
-    }
-    "aarch64" {
-        $ArchitecturesAllowed = "arm64"
-        $ArchitecturesInstallIn64BitMode = "arm64"
+Write-Host "==> Building ZQLZ for $TargetTriple (channel: $Channel)" -ForegroundColor Cyan
+
+function Get-ArchitectureSettings {
+    param([string]$Arch)
+
+    switch ($Arch) {
+        "x86_64" {
+            return @{
+                TargetTriple = "x86_64-pc-windows-msvc"
+                ArchitecturesAllowed = "x64compatible"
+                ArchitecturesInstallIn64BitMode = "x64compatible"
+            }
+        }
+        "aarch64" {
+            return @{
+                TargetTriple = "aarch64-pc-windows-msvc"
+                ArchitecturesAllowed = "arm64"
+                ArchitecturesInstallIn64BitMode = "arm64"
+            }
+        }
+        default {
+            throw "Unsupported architecture '$Arch'"
+        }
     }
 }
 
-Write-Host "==> Building ZQLZ for $TargetTriple (channel: $Channel)" -ForegroundColor Cyan
+function Enter-VsDevShell {
+    param([string]$Arch)
+
+    $vsDevShellPath = "C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1"
+    if (-not (Test-Path $vsDevShellPath)) {
+        return
+    }
+
+    $vsArch = if ($Arch -eq "aarch64") { "arm64" } else { "amd64" }
+    Push-Location
+    & $vsDevShellPath -Arch $vsArch -HostArch $vsArch | Out-Null
+    Pop-Location
+}
+
+function Test-CiSigningEnvironment {
+    if (-not $env:CI) {
+        return
+    }
+
+    $requiresSigning = $env:ZQLZ_REQUIRE_SIGNING -eq "1" -or (Get-Item "env:AZURE_SIGNING_ENDPOINT" -ErrorAction SilentlyContinue)
+    if (-not $requiresSigning) {
+        return
+    }
+
+    $requiredVars = @(
+        "AZURE_TENANT_ID",
+        "AZURE_CLIENT_ID",
+        "AZURE_CLIENT_SECRET",
+        "AZURE_SIGNING_ENDPOINT",
+        "AZURE_SIGNING_ACCOUNT",
+        "AZURE_SIGNING_CERT_PROFILE"
+    )
+
+    $missingVars = @()
+    foreach ($var in $requiredVars) {
+        if (-not (Get-Item "env:$var" -ErrorAction SilentlyContinue)) {
+            $missingVars += $var
+        }
+    }
+
+    if ($missingVars.Count -gt 0) {
+        throw "Missing required signing environment variables in CI: $($missingVars -join ', ')"
+    }
+}
+
+$ArchitectureSettings = Get-ArchitectureSettings -Arch $Architecture
+$TargetTriple = $ArchitectureSettings.TargetTriple
+Enter-VsDevShell -Arch $Architecture
+Test-CiSigningEnvironment
+rustup target add $TargetTriple
 
 # Determine build flags
 if ($Channel -eq "dev") {
@@ -92,7 +159,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # Create staging directory for installer
-$StagingDir = Join-Path "target" $TargetTriple $Profile "installer-staging"
+$StagingDir = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, "installer-staging")
 $BinDir = Join-Path $StagingDir "bin"
 
 Write-Host "==> Creating staging directory at $StagingDir" -ForegroundColor Cyan
@@ -103,7 +170,7 @@ New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
 # Copy binary
-$SourceBinary = Join-Path "target" $TargetTriple $Profile "zqlz.exe"
+$SourceBinary = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, "zqlz.exe")
 $DestBinary = Join-Path $StagingDir "ZQLZ.exe"
 Copy-Item $SourceBinary $DestBinary
 
@@ -120,29 +187,59 @@ if (-not (Test-Path $IconPath)) {
 
 # Copy resources needed by installer
 Copy-Item $IconPath (Join-Path $StagingDir "$IconName.ico")
+$MessagesSourceDir = Join-Path $WindowsResourcesDir "messages"
+$MessagesDestDir = Join-Path $StagingDir "messages"
+if (Test-Path $MessagesSourceDir) {
+    Copy-Item $MessagesSourceDir $MessagesDestDir -Recurse -Force
+}
+
+# Copy installer language/messages files expected by zqlz.iss
+$MessagesSourceDir = Join-Path $WindowsResourcesDir "messages"
+if (Test-Path $MessagesSourceDir) {
+    $MessagesDestDir = Join-Path $StagingDir "messages"
+    New-Item -ItemType Directory -Force -Path $MessagesDestDir | Out-Null
+    Copy-Item (Join-Path $MessagesSourceDir "*") -Destination $MessagesDestDir -Recurse -Force
+}
 
 # Check if Inno Setup is available
 $ISCC = $null
+$IsccCommand = Get-Command "iscc.exe" -ErrorAction SilentlyContinue
+if (-not $IsccCommand) {
+    $IsccCommand = Get-Command "iscc" -ErrorAction SilentlyContinue
+}
+
+if ($IsccCommand) {
+    $ISCC = $IsccCommand.Source
+}
+
 $InnoSetupPaths = @(
     "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
     "${env:ProgramFiles}\Inno Setup 6\ISCC.exe",
+    "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe",
     "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
     "C:\Program Files\Inno Setup 6\ISCC.exe"
 )
 
-foreach ($path in $InnoSetupPaths) {
-    if (Test-Path $path) {
-        $ISCC = $path
-        break
+if (-not $ISCC) {
+    foreach ($path in $InnoSetupPaths) {
+        if (Test-Path $path) {
+            $ISCC = $path
+            break
+        }
     }
 }
 
 if (-not $ISCC) {
+    if ($env:CI) {
+        Write-Error "Inno Setup not found in CI environment"
+        exit 1
+    }
+
     Write-Warning "Inno Setup not found. Creating portable ZIP instead."
     
     # Create portable ZIP
     $ZipName = "ZQLZ-$Architecture.zip"
-    $ZipPath = Join-Path "target" $TargetTriple $Profile $ZipName
+    $ZipPath = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, $ZipName)
     
     Write-Host "==> Creating portable ZIP at $ZipPath" -ForegroundColor Cyan
     Compress-Archive -Path $StagingDir\* -DestinationPath $ZipPath -Force
@@ -158,30 +255,50 @@ Write-Host "==> Creating installer with Inno Setup..." -ForegroundColor Cyan
 
 # Inno Setup parameters
 $IssFile = Join-Path $WindowsResourcesDir "zqlz.iss"
-$OutputDir = Join-Path "target" $TargetTriple $Profile
+$OutputDir = [System.IO.Path]::Combine("target", $TargetTriple, $Profile)
 $SetupName = "ZQLZ-$Architecture"
+$InstallerArchitecture = if ($Architecture -eq "aarch64") { "arm64" } else { "x64compatible" }
 
 # Create Inno Setup defines
-$Defines = @(
-    "/DAppId=$AppIdentifier",
-    "/DAppName=$AppName$AppSuffix",
-    "/DAppDisplayName=$AppDisplayName",
-    "/DAppExeName=ZQLZ",
-    "/DAppMutex=$AppIdentifier",
-    "/DAppUserId=$AppIdentifier",
-    "/DRegValueName=ZQLZ$AppSuffix",
-    "/DVersion=$Version",
-    "/DOutputDir=$OutputDir",
-    "/DAppSetupName=$SetupName",
-    "/DSourceDir=$ProjectRoot",
-    "/DResourcesDir=$StagingDir",
-    "/DAppIconName=$IconName",
-    "/DArchitecturesAllowed=$ArchitecturesAllowed",
-    "/DArchitecturesInstallIn64BitMode=$ArchitecturesInstallIn64BitMode"
-)
+$Definitions = @{
+    "AppId" = $AppIdentifier
+    "AppName" = "$AppName$AppSuffix"
+    "AppDisplayName" = $AppDisplayName
+    "AppExeName" = "ZQLZ"
+    "AppMutex" = $AppIdentifier
+    "AppUserId" = $AppIdentifier
+    "RegValueName" = "ZQLZ$AppSuffix"
+    "Version" = $Version
+    "OutputDir" = $OutputDir
+    "AppSetupName" = $SetupName
+    "SourceDir" = $ProjectRoot
+    "ResourcesDir" = $StagingDir
+    "AppIconName" = $IconName
+    "ArchitecturesAllowed" = $ArchitectureSettings.ArchitecturesAllowed
+    "ArchitecturesInstallIn64BitMode" = $ArchitectureSettings.ArchitecturesInstallIn64BitMode
+}
+
+$Defines = @()
+foreach ($key in $Definitions.Keys) {
+    $value = $Definitions[$key]
+    $Defines += "/D$key=$value"
+}
 
 # Run Inno Setup
 $ISCCArgs = $Defines + @($IssFile)
+if (
+    $env:CI -and
+    (Test-Path (Join-Path $WindowsResourcesDir "sign.ps1")) -and
+    $env:AZURE_TENANT_ID -and
+    $env:AZURE_CLIENT_ID -and
+    $env:AZURE_CLIENT_SECRET -and
+    $env:AZURE_SIGNING_ENDPOINT -and
+    $env:AZURE_SIGNING_ACCOUNT -and
+    $env:AZURE_SIGNING_CERT_PROFILE
+) {
+    $signTool = "powershell.exe -ExecutionPolicy Bypass -File $WindowsResourcesDir\sign.ps1 -FilePath `$f"
+    $ISCCArgs += "/sDefaultsign=`"$signTool`""
+}
 & $ISCC @ISCCArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Inno Setup failed"
@@ -190,8 +307,15 @@ if ($LASTEXITCODE -ne 0) {
 
 $InstallerPath = Join-Path $OutputDir "$SetupName.exe"
 
-# Sign the installer if credentials are available
-if ($env:AZURE_TENANT_ID -and $env:AZURE_CLIENT_ID -and $env:AZURE_CLIENT_SECRET) {
+# Sign the installer if all signing credentials are available
+if (
+    $env:AZURE_TENANT_ID -and
+    $env:AZURE_CLIENT_ID -and
+    $env:AZURE_CLIENT_SECRET -and
+    $env:AZURE_SIGNING_ENDPOINT -and
+    $env:AZURE_SIGNING_ACCOUNT -and
+    $env:AZURE_SIGNING_CERT_PROFILE
+) {
     $SignScript = Join-Path $WindowsResourcesDir "sign.ps1"
     if (Test-Path $SignScript) {
         Write-Host "==> Signing installer..." -ForegroundColor Cyan
@@ -203,3 +327,8 @@ Write-Host ""
 Write-Host "==> Build complete!" -ForegroundColor Green
 Write-Host "    Installer: $InstallerPath"
 Write-Host ""
+
+if ($Install) {
+    Write-Host "==> Launching installer..." -ForegroundColor Cyan
+    Start-Process -FilePath $InstallerPath
+}
