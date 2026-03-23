@@ -3,65 +3,53 @@
 //! These themes are embedded at compile time from the assets/themes directory.
 
 use gpui::App;
+use rust_embed::RustEmbed;
 use std::rc::Rc;
 use zqlz_ui::widgets::{ThemeRegistry, ThemeSet};
 
-const ADVENTURE: &str = include_str!("../assets/themes/adventure.json");
-const ALDUIN: &str = include_str!("../assets/themes/alduin.json");
-const AYU: &str = include_str!("../assets/themes/ayu.json");
-const CATPPUCCIN: &str = include_str!("../assets/themes/catppuccin.json");
-const CYBERPUNK_SCARLET: &str = include_str!("../assets/themes/cyberpunk-scarlet.json");
-const EVERFOREST: &str = include_str!("../assets/themes/everforest.json");
-const FAHRENHEIT: &str = include_str!("../assets/themes/fahrenheit.json");
-const FLEXOKI: &str = include_str!("../assets/themes/flexoki.json");
-const GRUVBOX: &str = include_str!("../assets/themes/gruvbox.json");
-const HARPER: &str = include_str!("../assets/themes/harper.json");
-const HYBRID: &str = include_str!("../assets/themes/hybrid.json");
-const JELLYBEANS: &str = include_str!("../assets/themes/jellybeans.json");
-const KIBBLE: &str = include_str!("../assets/themes/kibble.json");
-const MACOS_CLASSIC: &str = include_str!("../assets/themes/macos-classic.json");
-const MATRIX: &str = include_str!("../assets/themes/matrix.json");
-const MELLIFLUOUS: &str = include_str!("../assets/themes/mellifluous.json");
-const MOLOKAI: &str = include_str!("../assets/themes/molokai.json");
-const SOLARIZED: &str = include_str!("../assets/themes/solarized.json");
-const SPACEDUCK: &str = include_str!("../assets/themes/spaceduck.json");
-const TOKYONIGHT: &str = include_str!("../assets/themes/tokyonight.json");
-const TWILIGHT: &str = include_str!("../assets/themes/twilight.json");
+#[derive(RustEmbed)]
+#[folder = "assets/themes"]
+#[include = "*.json"]
+struct BundledThemeAssets;
 
-const BUNDLED_THEMES: &[(&str, &str)] = &[
-    ("adventure", ADVENTURE),
-    ("alduin", ALDUIN),
-    ("ayu", AYU),
-    ("catppuccin", CATPPUCCIN),
-    ("cyberpunk-scarlet", CYBERPUNK_SCARLET),
-    ("everforest", EVERFOREST),
-    ("fahrenheit", FAHRENHEIT),
-    ("flexoki", FLEXOKI),
-    ("gruvbox", GRUVBOX),
-    ("harper", HARPER),
-    ("hybrid", HYBRID),
-    ("jellybeans", JELLYBEANS),
-    ("kibble", KIBBLE),
-    ("macos-classic", MACOS_CLASSIC),
-    ("matrix", MATRIX),
-    ("mellifluous", MELLIFLUOUS),
-    ("molokai", MOLOKAI),
-    ("solarized", SOLARIZED),
-    ("spaceduck", SPACEDUCK),
-    ("tokyonight", TOKYONIGHT),
-    ("twilight", TWILIGHT),
-];
+fn bundled_theme_files() -> Vec<String> {
+    let mut files: Vec<String> = BundledThemeAssets::iter()
+        .filter(|path| path.as_ref().ends_with(".json"))
+        .map(|path| path.to_string())
+        .collect();
+    files.sort_unstable();
+    files
+}
 
 pub fn load_bundled_themes(cx: &mut App) {
     let registry = ThemeRegistry::global_mut(cx);
     let mut total_themes_loaded = 0;
+    let mut total_theme_files_loaded = 0;
 
-    for (name, content) in BUNDLED_THEMES {
+    for file_name in bundled_theme_files() {
+        let Some(file) = BundledThemeAssets::get(&file_name) else {
+            tracing::warn!("Missing embedded bundled theme file: {}", file_name);
+            continue;
+        };
+
+        let content = match std::str::from_utf8(file.data.as_ref()) {
+            Ok(content) => content,
+            Err(err) => {
+                tracing::warn!(
+                    "Failed to decode bundled theme '{}' as UTF-8: {}",
+                    file_name,
+                    err
+                );
+                continue;
+            }
+        };
+
         match serde_json::from_str::<ThemeSet>(content) {
             Ok(theme_set) => {
+                total_theme_files_loaded += 1;
                 tracing::debug!(
                     "Parsed theme file '{}' with {} themes",
-                    name,
+                    file_name,
                     theme_set.themes.len()
                 );
                 for theme in theme_set.themes {
@@ -76,7 +64,7 @@ pub fn load_bundled_themes(cx: &mut App) {
                 }
             }
             Err(err) => {
-                tracing::warn!("Failed to parse bundled theme '{}': {}", name, err);
+                tracing::warn!("Failed to parse bundled theme '{}': {}", file_name, err);
             }
         }
     }
@@ -84,7 +72,7 @@ pub fn load_bundled_themes(cx: &mut App) {
     tracing::info!(
         "Loaded {} bundled themes from {} theme files",
         total_themes_loaded,
-        BUNDLED_THEMES.len()
+        total_theme_files_loaded
     );
 }
 
@@ -94,29 +82,40 @@ mod tests {
 
     #[test]
     fn all_bundled_themes_parse_without_error() {
+        let bundled_files = bundled_theme_files();
+        assert!(
+            !bundled_files.is_empty(),
+            "No bundled theme files were found in embedded assets"
+        );
+
         let mut total = 0;
-        for (name, content) in BUNDLED_THEMES {
+        for file_name in bundled_files {
+            let file = BundledThemeAssets::get(&file_name).unwrap_or_else(|| {
+                panic!("Missing embedded theme file '{}': not found", file_name)
+            });
+            let content = std::str::from_utf8(file.data.as_ref())
+                .unwrap_or_else(|err| panic!("Theme '{}' is not valid UTF-8: {}", file_name, err));
             let theme_set = serde_json::from_str::<ThemeSet>(content)
-                .unwrap_or_else(|err| panic!("Theme '{}' failed to parse: {}", name, err));
+                .unwrap_or_else(|err| panic!("Theme '{}' failed to parse: {}", file_name, err));
 
             assert!(
                 !theme_set.themes.is_empty(),
                 "Theme file '{}' contains no theme entries",
-                name
+                file_name
             );
 
             for theme in &theme_set.themes {
                 assert!(
                     !theme.name.is_empty(),
                     "A theme entry in '{}' has an empty name",
-                    name
+                    file_name
                 );
                 // All Zed themes must be parsed with a non-default background color.
                 assert!(
                     theme.colors.background.is_some(),
                     "Theme '{}' in '{}' has no background color — style mapping may be broken",
                     theme.name,
-                    name
+                    file_name
                 );
             }
 

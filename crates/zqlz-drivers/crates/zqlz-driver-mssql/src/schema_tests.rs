@@ -554,3 +554,45 @@ fn test_table_type_mapping() {
     assert_eq!(TableType::View, TableType::View);
     assert_ne!(TableType::Table, TableType::View);
 }
+
+#[test]
+fn test_mssql_function_ddl_query_uses_authoritative_metadata() {
+    assert!(MSSQL_FUNCTION_DDL_SQL.contains("OBJECT_DEFINITION"));
+    assert!(MSSQL_FUNCTION_DDL_SQL.contains("FROM sys.objects"));
+    assert!(MSSQL_FUNCTION_DDL_SQL.contains("INNER JOIN sys.schemas"));
+    assert!(MSSQL_FUNCTION_DDL_SQL.contains("s.name = @P1"));
+    assert!(MSSQL_FUNCTION_DDL_SQL.contains("o.name = @P2"));
+}
+
+#[test]
+fn test_mssql_procedure_ddl_query_uses_authoritative_metadata() {
+    assert!(MSSQL_PROCEDURE_DDL_SQL.contains("OBJECT_DEFINITION"));
+    assert!(MSSQL_PROCEDURE_DDL_SQL.contains("FROM sys.procedures"));
+    assert!(MSSQL_PROCEDURE_DDL_SQL.contains("INNER JOIN sys.schemas"));
+    assert!(MSSQL_PROCEDURE_DDL_SQL.contains("s.name = @P1"));
+    assert!(MSSQL_PROCEDURE_DDL_SQL.contains("p.name = @P2"));
+}
+
+#[test]
+fn test_mssql_trigger_ddl_query_uses_authoritative_metadata() {
+    assert!(MSSQL_TRIGGER_DDL_SQL.contains("OBJECT_DEFINITION"));
+    assert!(MSSQL_TRIGGER_DDL_SQL.contains("FROM sys.triggers"));
+    assert!(MSSQL_TRIGGER_DDL_SQL.contains("INNER JOIN sys.schemas"));
+    assert!(MSSQL_TRIGGER_DDL_SQL.contains("s.name = @P1"));
+    assert!(MSSQL_TRIGGER_DDL_SQL.contains("tr.name = @P2"));
+}
+
+#[test]
+fn test_generate_ddl_not_found_message_includes_schema_and_name() {
+    let message = generate_ddl_not_found_message("Function", "dbo", "calculate_total");
+    assert_eq!(message, "Function '[dbo].[calculate_total]' not found");
+}
+
+#[test]
+fn test_generate_ddl_definition_unavailable_message_includes_schema_and_name() {
+    let message = generate_ddl_definition_unavailable_message("Trigger", "audit", "log_change");
+    assert_eq!(
+        message,
+        "DDL definition for Trigger '[audit].[log_change]' is unavailable"
+    );
+}

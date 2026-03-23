@@ -692,8 +692,8 @@ impl MigrationGenerator {
                     )
                 }
                 _ => (
-                    format!("-- Nullable change not directly supported"),
-                    format!("-- Nullable change not directly supported"),
+                    "-- Nullable change not directly supported".to_string(),
+                    "-- Nullable change not directly supported".to_string(),
                 ),
             };
             migration.add_up(up);

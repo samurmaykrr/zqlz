@@ -11,6 +11,24 @@ use zqlz_core::{
 
 use super::MssqlConnection;
 
+pub(crate) const MSSQL_FUNCTION_DDL_SQL: &str = "SELECT
+                    OBJECT_DEFINITION(o.object_id) AS definition
+                 FROM sys.objects o
+                 INNER JOIN sys.schemas s ON o.schema_id = s.schema_id
+                 WHERE s.name = @P1 AND o.name = @P2 AND o.type IN ('FN', 'IF', 'TF', 'FS', 'FT')";
+
+pub(crate) const MSSQL_PROCEDURE_DDL_SQL: &str = "SELECT
+                    OBJECT_DEFINITION(p.object_id) AS definition
+                 FROM sys.procedures p
+                 INNER JOIN sys.schemas s ON p.schema_id = s.schema_id
+                 WHERE s.name = @P1 AND p.name = @P2";
+
+pub(crate) const MSSQL_TRIGGER_DDL_SQL: &str = "SELECT
+                    OBJECT_DEFINITION(tr.object_id) AS definition
+                 FROM sys.triggers tr
+                 INNER JOIN sys.schemas s ON tr.schema_id = s.schema_id
+                 WHERE s.name = @P1 AND tr.name = @P2";
+
 #[async_trait]
 impl SchemaIntrospection for MssqlConnection {
     /// List all databases on the SQL Server instance
@@ -909,6 +927,21 @@ impl SchemaIntrospection for MssqlConnection {
                     )
                 }))
             }
+            zqlz_core::ObjectType::Function => {
+                let schema = object.schema.as_deref().unwrap_or("dbo");
+                self.fetch_object_ddl(MSSQL_FUNCTION_DDL_SQL, schema, &object.name, "Function")
+                    .await
+            }
+            zqlz_core::ObjectType::Procedure => {
+                let schema = object.schema.as_deref().unwrap_or("dbo");
+                self.fetch_object_ddl(MSSQL_PROCEDURE_DDL_SQL, schema, &object.name, "Procedure")
+                    .await
+            }
+            zqlz_core::ObjectType::Trigger => {
+                let schema = object.schema.as_deref().unwrap_or("dbo");
+                self.fetch_object_ddl(MSSQL_TRIGGER_DDL_SQL, schema, &object.name, "Trigger")
+                    .await
+            }
             _ => Err(ZqlzError::NotImplemented(format!(
                 "DDL generation not yet implemented for {:?}",
                 object.object_type
@@ -924,6 +957,46 @@ impl SchemaIntrospection for MssqlConnection {
 }
 
 impl MssqlConnection {
+    async fn fetch_object_ddl(
+        &self,
+        sql: &str,
+        schema: &str,
+        object_name: &str,
+        object_kind: &str,
+    ) -> Result<String> {
+        let result = self
+            .query(
+                sql,
+                &[
+                    zqlz_core::Value::String(schema.to_string()),
+                    zqlz_core::Value::String(object_name.to_string()),
+                ],
+            )
+            .await?;
+
+        if result.rows.is_empty() {
+            return Err(ZqlzError::NotFound(generate_ddl_not_found_message(
+                object_kind,
+                schema,
+                object_name,
+            )));
+        }
+
+        result
+            .rows
+            .first()
+            .and_then(|row| row.get(0).and_then(|value| value.as_str()))
+            .map(|definition| definition.to_string())
+            .filter(|definition| !definition.trim().is_empty())
+            .ok_or_else(|| {
+                ZqlzError::Query(generate_ddl_definition_unavailable_message(
+                    object_kind,
+                    schema,
+                    object_name,
+                ))
+            })
+    }
+
     /// Get parameters for a stored procedure
     async fn get_procedure_parameters(
         &self,
@@ -991,6 +1064,25 @@ impl MssqlConnection {
 
         Ok(params)
     }
+}
+
+pub(crate) fn generate_ddl_not_found_message(
+    object_kind: &str,
+    schema: &str,
+    object_name: &str,
+) -> String {
+    format!("{} '[{}].[{}]' not found", object_kind, schema, object_name)
+}
+
+pub(crate) fn generate_ddl_definition_unavailable_message(
+    object_kind: &str,
+    schema: &str,
+    object_name: &str,
+) -> String {
+    format!(
+        "DDL definition for {} '[{}].[{}]' is unavailable",
+        object_kind, schema, object_name
+    )
 }
 
 /// Parse SQL Server foreign key action

@@ -2,11 +2,12 @@
 //!
 //! Renders terminal nodes in the tree hierarchy (tables, views, functions, etc.).
 
+use gpui::prelude::FluentBuilder;
 use gpui::*;
 
 use super::LeafItemProps;
 use crate::widgets::sidebar::ConnectionSidebar;
-use zqlz_ui::widgets::h_flex;
+use zqlz_ui::widgets::{ActiveTheme, h_flex};
 
 impl ConnectionSidebar {
     /// Render a leaf item in the tree (a single table, view, function, etc.).
@@ -39,6 +40,7 @@ impl ConnectionSidebar {
     /// Like section headers, indentation is `8 + depth * 12` pixels.
     /// Leaf items typically render at `depth + 1` relative to their section header.
     pub(super) fn render_leaf_item<Icon, OnClick, OnRightClick>(
+        &self,
         props: LeafItemProps<Icon, OnClick, OnRightClick>,
         cx: &mut Context<Self>,
     ) -> Stateful<Div>
@@ -67,6 +69,13 @@ impl ConnectionSidebar {
             depth,
         } = props;
         let indent = px(8.0 + depth as f32 * 12.0);
+        let active_leaf_item_id = element_id.to_string();
+        let is_active = self.is_leaf_item_active(&active_leaf_item_id);
+        let text_color = if is_active {
+            cx.theme().foreground
+        } else {
+            cx.theme().muted_foreground
+        };
 
         let row = h_flex()
             .id(element_id)
@@ -78,8 +87,12 @@ impl ConnectionSidebar {
             .items_center()
             .cursor_pointer()
             .text_sm()
+            .text_color(text_color)
             .hover(|el| el.bg(list_hover))
-            .on_click(cx.listener(on_click))
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                this.set_active_leaf_item(Some(active_leaf_item_id.clone()), cx);
+                on_click(this, event, window, cx);
+            }))
             .child(icon.into())
             .child(
                 div()
@@ -87,6 +100,7 @@ impl ConnectionSidebar {
                     .overflow_hidden()
                     .text_ellipsis()
                     .whitespace_nowrap()
+                    .when(is_active, |this| this.font_weight(FontWeight::SEMIBOLD))
                     .child(label),
             );
 

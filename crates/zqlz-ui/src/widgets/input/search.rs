@@ -3,7 +3,7 @@ use rust_i18n::t;
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, Half,
+    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable,
     InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render, Styled,
     Subscription, Window, actions, div, prelude::FluentBuilder as _,
 };
@@ -77,12 +77,16 @@ impl SearchMatcher {
         let mut new_ranges = Vec::new();
         if let Some(query) = &self.query {
             let text = self.text.to_string();
-            // FIXME: Use stream find
             let matches = query.stream_find_iter(text.as_bytes());
 
-            for query_match in matches.into_iter() {
-                let query_match = query_match.expect("query match for select all action");
-                new_ranges.push(query_match.range());
+            for query_match in matches {
+                match query_match {
+                    Ok(query_match) => new_ranges.push(query_match.range()),
+                    Err(error) => {
+                        tracing::warn!(%error, "search match iteration failed");
+                        break;
+                    }
+                }
             }
         }
         self.matched_ranges = Rc::new(new_ranges);
@@ -468,8 +472,7 @@ impl Render for SearchPanel {
             .gap_1()
             .bg(cx.theme().popover)
             .border_b_1()
-            .rounded(cx.theme().radius.half())
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.25))
             .child(
                 h_flex()
                     .w_full()

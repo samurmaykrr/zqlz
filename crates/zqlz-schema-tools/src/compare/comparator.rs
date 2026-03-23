@@ -181,10 +181,9 @@ impl SchemaComparator {
                 target_details.get(&table.name),
             ) && let Some(table_diff) =
                 self.compare_table_details(source_detail, target_detail)
+                && !table_diff.is_empty()
             {
-                if !table_diff.is_empty() {
-                    diff.modified_tables.push(table_diff);
-                }
+                diff.modified_tables.push(table_diff);
             }
         }
 
@@ -246,10 +245,9 @@ impl SchemaComparator {
                 diff.added_columns.push(col.clone());
             } else if let Some(target_col) = target_map.get(&normalized)
                 && let Some(col_diff) = self.compare_column(col, target_col)
+                && !col_diff.is_empty()
             {
-                if !col_diff.is_empty() {
-                    diff.modified_columns.push(col_diff);
-                }
+                diff.modified_columns.push(col_diff);
             }
         }
 

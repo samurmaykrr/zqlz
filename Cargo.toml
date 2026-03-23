@@ -33,11 +33,12 @@ members = [
     "crates/zqlz-monitor",
     "crates/zqlz-app",
     "crates/zqlz-cli",
+    "crates/zqlz-internal-storage",
 ]
 default-members = ["crates/zqlz-app"]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.6"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/yourorg/zqlz"
@@ -291,6 +292,7 @@ take-until = "0.2"
 
 # Internal ZQLZ crates
 zqlz-core = { path = "crates/zqlz-core" }
+zqlz-internal-storage = { path = "crates/zqlz-internal-storage" }
 zqlz-schema-tools = { path = "crates/zqlz-schema-tools" }
 zqlz-drivers = { path = "crates/zqlz-drivers" }
 zqlz-driver-postgres = { path = "crates/zqlz-drivers/crates/zqlz-driver-postgres" }

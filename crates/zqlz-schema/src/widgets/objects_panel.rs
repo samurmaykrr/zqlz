@@ -114,7 +114,7 @@ pub enum ObjectsPanelEvent {
         view_names: Vec<String>,
         database_name: Option<String>,
     },
-    /// User wants to design/edit view definition(s)
+    /// User wants to edit view DDL(s)
     DesignViews {
         connection_id: Uuid,
         view_names: Vec<String>,
@@ -939,15 +939,15 @@ impl ObjectsTableDelegate {
                 ))
             })
             .separator()
-            // Design View(s)
+            // Edit DDL
             .item({
                 let panel = panel.clone();
                 let views = selected_views.clone();
                 let database_name = database_name.clone();
                 let label = if is_multi {
-                    format!("Design {} Views", count)
+                    format!("Edit DDL {} Views", count)
                 } else {
-                    "Design View".to_string()
+                    "Edit DDL".to_string()
                 };
                 PopupMenuItem::new(label).on_click(window.listener_for(
                     &menu_entity,
@@ -1435,6 +1435,7 @@ impl ObjectsPanel {
     }
 
     /// Update the objects list with driver-provided extended data
+    #[allow(clippy::too_many_arguments)]
     pub fn load_objects(
         &mut self,
         connection_id: Uuid,

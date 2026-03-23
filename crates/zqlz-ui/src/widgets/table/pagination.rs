@@ -343,7 +343,7 @@ pub fn render_pagination_controls(
         .items_center()
         .bg(theme.tab_bar)
         .border_t_1()
-        .border_color(theme.border)
+        .border_color(theme.border.opacity(0.25))
         .when(pagination_mode == PaginationMode::PageBased, |this| {
             let state_first = state_for_nav.clone();
             let state_prev = state_for_nav.clone();
@@ -377,9 +377,8 @@ pub fn render_pagination_controls(
                     .px_2()
                     .py(px(2.0))
                     .min_w(px(40.0))
-                    .rounded(px(4.0))
                     .border_1()
-                    .border_color(theme.border)
+                    .border_color(theme.border.opacity(0.25))
                     .bg(theme.background)
                     .text_xs()
                     .text_color(theme.foreground)
@@ -562,7 +561,7 @@ pub fn render_pagination_footer(
         .items_center()
         .bg(theme.tab_bar)
         .border_t_1()
-        .border_color(theme.border)
+        .border_color(theme.border.opacity(0.25))
         // Only show page-based controls when in page mode
         .when(pagination_mode == PaginationMode::PageBased, |this| {
             let state_first = state_for_nav.clone();
@@ -601,9 +600,8 @@ pub fn render_pagination_footer(
                         .px_2()
                         .py(px(2.0))
                         .min_w(px(40.0))
-                        .rounded(px(4.0))
                         .border_1()
-                        .border_color(theme.border)
+                        .border_color(theme.border.opacity(0.25))
                         .bg(theme.background)
                         .text_xs()
                         .text_color(theme.foreground)

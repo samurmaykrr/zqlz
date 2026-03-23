@@ -25,22 +25,30 @@ impl SidebarObjectCapabilities {
         Self {
             supports_views: driver_capabilities
                 .as_ref()
-                .map_or(true, |capabilities| capabilities.supports_views),
+                .is_none_or(|capabilities| capabilities.supports_views),
             supports_materialized_views: matches!(
                 normalized_driver.as_str(),
                 "postgres" | "mssql" | "clickhouse"
             ),
-            supports_triggers: driver_capabilities.as_ref().map_or(false, |capabilities| {
+            supports_triggers: driver_capabilities.as_ref().is_some_and(|capabilities| {
                 capabilities.supports_triggers && normalized_driver != "postgres"
             }),
             supports_functions: matches!(
                 normalized_driver.as_str(),
                 "postgres" | "mysql" | "mariadb" | "mssql"
             ),
-            supports_procedures: driver_capabilities.as_ref().map_or(false, |capabilities| {
-                capabilities.supports_stored_procedures
-            }),
+            supports_procedures: driver_capabilities
+                .as_ref()
+                .is_some_and(|capabilities| capabilities.supports_stored_procedures),
         }
+    }
+
+    pub fn for_connection(connection: &dyn zqlz_core::Connection) -> Self {
+        if let Some(dialect_id) = connection.dialect_id() {
+            return Self::for_driver(dialect_id);
+        }
+
+        Self::for_driver(connection.driver_name())
     }
 
     fn normalized_driver_name(driver_name: &str) -> String {

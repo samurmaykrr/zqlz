@@ -18,7 +18,7 @@ pub use history_panel::{QueryHistoryPanel, QueryHistoryPanelEvent};
 pub use problems_panel::{ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent};
 pub use query_editor::{
     DiagnosticInfo, DiagnosticInfoSeverity, EditorMode, EditorObjectType, QueryEditor,
-    QueryEditorEvent,
+    QueryEditorEvent, QueryExecutionParams,
 };
 pub use query_tabs_panel::{QueryTabsPanel, QueryTabsPanelEvent};
 pub use results_panel::{

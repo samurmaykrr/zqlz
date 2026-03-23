@@ -161,7 +161,7 @@ impl TableDelegate for TableViewerDelegate {
                                         .with_size(Size::Small)
                                         .appearance(false)
                                         .focus_border(false)
-                                        .menu_min_width(px(120.))
+                                        .menu_min_width(px(180.))
                                         .placeholder(display_value),
                                 ),
                             ),

@@ -448,8 +448,7 @@ impl RenderOnce for Dialog {
                             .id(layer_ix)
                             .bg(cx.theme().background)
                             .border_1()
-                            .border_color(cx.theme().border)
-                            .rounded(cx.theme().radius_lg)
+                            .border_color(cx.theme().border.opacity(0.25))
                             .min_h_24()
                             .pt(paddings.top)
                             .pb(paddings.bottom)
@@ -465,10 +464,8 @@ impl RenderOnce for Dialog {
                                     let on_close = on_close.clone();
                                     move |_: &Cancel, window, cx| {
                                         window.close_dialog(cx);
-                                        // FIXME:
-                                        //
-                                        // Here some Dialog have no focus_handle, so it will not work will Escape key.
-                                        // But by now, we `cx.close_dialog()` going to close the last active model, so the Escape is unexpected to work.
+                                        // Cancel action closes the top-most dialog layer, then runs
+                                        // callbacks for the dialog that handled the action.
                                         on_cancel(&ClickEvent::default(), window, cx);
                                         on_close(&ClickEvent::default(), window, cx);
                                     }

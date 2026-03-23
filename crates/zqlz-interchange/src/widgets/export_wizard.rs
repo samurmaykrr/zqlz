@@ -1238,12 +1238,7 @@ impl ExportWizard {
                             .whitespace_nowrap()
                             .child("Format:"),
                     )
-                    .child(
-                        Select::new(&self.format_select_state)
-                            .small()
-                            .w(px(280.0))
-                            .menu_width(px(280.0)),
-                    ),
+                    .child(Select::new(&self.format_select_state).small().w(px(280.0))),
             )
             // Encoding row (only shown for CSV format)
             .when(self.state.export_format == ExportFormat::Csv, |this| {
@@ -1261,12 +1256,7 @@ impl ExportWizard {
                                 .whitespace_nowrap()
                                 .child("Encoding:"),
                         )
-                        .child(
-                            Select::new(&self.encoding_state)
-                                .small()
-                                .w(px(280.0))
-                                .menu_width(px(280.0)),
-                        ),
+                        .child(Select::new(&self.encoding_state).small().w(px(280.0))),
                 )
             })
             // Timestamp row
@@ -1284,12 +1274,7 @@ impl ExportWizard {
                             .whitespace_nowrap()
                             .child("Timestamp:"),
                     )
-                    .child(
-                        Select::new(&self.timestamp_state)
-                            .small()
-                            .w(px(280.0))
-                            .menu_width(px(280.0)),
-                    ),
+                    .child(Select::new(&self.timestamp_state).small().w(px(280.0))),
             )
     }
 
@@ -1584,8 +1569,7 @@ impl ExportWizard {
                                     "Record Delimiter:",
                                     Select::new(&self.record_delimiter_state)
                                         .small()
-                                        .w(px(180.0))
-                                        .menu_width(px(180.0)),
+                                        .w(px(180.0)),
                                     cx,
                                 ),
                             )
@@ -1594,21 +1578,15 @@ impl ExportWizard {
                                     "Field Delimiter:",
                                     Select::new(&self.field_delimiter_state)
                                         .small()
-                                        .w(px(180.0))
-                                        .menu_width(px(180.0)),
+                                        .w(px(180.0)),
                                     cx,
                                 ),
                             )
-                            .child(
-                                self.render_format_row(
-                                    "Text Qualifier:",
-                                    Select::new(&self.text_qualifier_state)
-                                        .small()
-                                        .w(px(180.0))
-                                        .menu_width(px(180.0)),
-                                    cx,
-                                ),
-                            ),
+                            .child(self.render_format_row(
+                                "Text Qualifier:",
+                                Select::new(&self.text_qualifier_state).small().w(px(180.0)),
+                                cx,
+                            )),
                     )
                     // Data Formats section
                     .child(self.render_section_header("Data Formats", cx))
@@ -1634,8 +1612,7 @@ impl ExportWizard {
                                     "Binary Data Encoding:",
                                     Select::new(&self.binary_encoding_state)
                                         .small()
-                                        .w(px(180.0))
-                                        .menu_width(px(180.0)),
+                                        .w(px(180.0)),
                                     cx,
                                 ),
                             ),

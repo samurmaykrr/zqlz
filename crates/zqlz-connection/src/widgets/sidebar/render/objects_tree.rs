@@ -204,7 +204,7 @@ impl ConnectionSidebar {
                         let object_schema_for_menu = object_schema.clone();
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
-                        section = section.child(Self::render_leaf_item(
+                        section = section.child(self.render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
                                     "table-{}-{}",
@@ -306,7 +306,7 @@ impl ConnectionSidebar {
                         let object_schema_for_menu = object_schema.clone();
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
-                        section = section.child(Self::render_leaf_item(
+                        section = section.child(self.render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
                                     "view-{}-{}",
@@ -408,7 +408,7 @@ impl ConnectionSidebar {
                         let name_for_menu = (*view_name).clone();
                         let db_name_for_click = database_name.clone();
                         let db_name_for_menu = database_name.clone();
-                        section = section.child(Self::render_leaf_item(
+                        section = section.child(self.render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
                                     "matview-{}-{}",
@@ -510,7 +510,7 @@ impl ConnectionSidebar {
                         let object_schema = self.current_schema_for(database_name.as_deref());
                         let object_schema_for_click = object_schema.clone();
                         let object_schema_for_menu = object_schema.clone();
-                        section = section.child(Self::render_leaf_item(
+                        section = section.child(self.render_leaf_item(
                             LeafItemProps {
                                 element_id: SharedString::from(format!(
                                     "trigger-{}-{}",
@@ -607,99 +607,97 @@ impl ConnectionSidebar {
                         muted_foreground,
                         depth + 1,
                     ));
+                } else if has_search {
+                    for function_name in &filtered_functions {
+                        let func = (*function_name).clone();
+                        let name_for_menu = (*function_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
+                        section = section.child(self.render_leaf_item(
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "function-{}-{}",
+                                    id_suffix, function_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Function)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*function_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenFunction {
+                                        connection_id: conn_id,
+                                        function_name: func.clone(),
+                                        object_schema: object_schema_for_click.clone(),
+                                    });
+                                },
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_function_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
+                            cx,
+                        ));
+                    }
                 } else {
-                    if has_search {
-                        for function_name in &filtered_functions {
-                            let func = (*function_name).clone();
-                            let name_for_menu = (*function_name).clone();
-                            let object_schema = self.current_schema_for(database_name.as_deref());
-                            let object_schema_for_click = object_schema.clone();
-                            let object_schema_for_menu = object_schema.clone();
-                            section = section.child(Self::render_leaf_item(
-                                LeafItemProps {
-                                    element_id: SharedString::from(format!(
-                                        "function-{}-{}",
-                                        id_suffix, function_name
-                                    )),
-                                    icon: Icon::new(ZqlzIcon::Function)
-                                        .size_3()
-                                        .text_color(muted_foreground)
-                                        .into_any_element(),
-                                    label: (*function_name).clone(),
-                                    on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                                        cx.emit(ConnectionSidebarEvent::OpenFunction {
-                                            connection_id: conn_id,
-                                            function_name: func.clone(),
-                                            object_schema: object_schema_for_click.clone(),
-                                        });
-                                    },
-                                    on_right_click: Some(
-                                        move |this: &mut Self,
-                                              event: &MouseDownEvent,
-                                              window: &mut Window,
-                                              cx: &mut Context<Self>| {
-                                            this.show_function_context_menu(
-                                                conn_id,
-                                                name_for_menu.clone(),
-                                                object_schema_for_menu.clone(),
-                                                event.position,
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                    list_hover,
-                                    depth: leaf_depth,
+                    for function_name in functions {
+                        let func = function_name.clone();
+                        let name_for_menu = function_name.clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
+                        section = section.child(self.render_leaf_item(
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "function-{}-{}",
+                                    id_suffix, function_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Function)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: function_name.clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenFunction {
+                                        connection_id: conn_id,
+                                        function_name: func.clone(),
+                                        object_schema: object_schema_for_click.clone(),
+                                    });
                                 },
-                                cx,
-                            ));
-                        }
-                    } else {
-                        for function_name in functions {
-                            let func = function_name.clone();
-                            let name_for_menu = function_name.clone();
-                            let object_schema = self.current_schema_for(database_name.as_deref());
-                            let object_schema_for_click = object_schema.clone();
-                            let object_schema_for_menu = object_schema.clone();
-                            section = section.child(Self::render_leaf_item(
-                                LeafItemProps {
-                                    element_id: SharedString::from(format!(
-                                        "function-{}-{}",
-                                        id_suffix, function_name
-                                    )),
-                                    icon: Icon::new(ZqlzIcon::Function)
-                                        .size_3()
-                                        .text_color(muted_foreground)
-                                        .into_any_element(),
-                                    label: function_name.clone(),
-                                    on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                                        cx.emit(ConnectionSidebarEvent::OpenFunction {
-                                            connection_id: conn_id,
-                                            function_name: func.clone(),
-                                            object_schema: object_schema_for_click.clone(),
-                                        });
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_function_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
                                     },
-                                    on_right_click: Some(
-                                        move |this: &mut Self,
-                                              event: &MouseDownEvent,
-                                              window: &mut Window,
-                                              cx: &mut Context<Self>| {
-                                            this.show_function_context_menu(
-                                                conn_id,
-                                                name_for_menu.clone(),
-                                                object_schema_for_menu.clone(),
-                                                event.position,
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                    list_hover,
-                                    depth: leaf_depth,
-                                },
-                                cx,
-                            ));
-                        }
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
+                            cx,
+                        ));
                     }
                 }
             }
@@ -759,99 +757,97 @@ impl ConnectionSidebar {
                         muted_foreground,
                         depth + 1,
                     ));
+                } else if has_search {
+                    for procedure_name in &filtered_procedures {
+                        let proc = (*procedure_name).clone();
+                        let name_for_menu = (*procedure_name).clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
+                        section = section.child(self.render_leaf_item(
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "procedure-{}-{}",
+                                    id_suffix, procedure_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Gear)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: (*procedure_name).clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenProcedure {
+                                        connection_id: conn_id,
+                                        procedure_name: proc.clone(),
+                                        object_schema: object_schema_for_click.clone(),
+                                    });
+                                },
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_procedure_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
+                                    },
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
+                            cx,
+                        ));
+                    }
                 } else {
-                    if has_search {
-                        for procedure_name in &filtered_procedures {
-                            let proc = (*procedure_name).clone();
-                            let name_for_menu = (*procedure_name).clone();
-                            let object_schema = self.current_schema_for(database_name.as_deref());
-                            let object_schema_for_click = object_schema.clone();
-                            let object_schema_for_menu = object_schema.clone();
-                            section = section.child(Self::render_leaf_item(
-                                LeafItemProps {
-                                    element_id: SharedString::from(format!(
-                                        "procedure-{}-{}",
-                                        id_suffix, procedure_name
-                                    )),
-                                    icon: Icon::new(ZqlzIcon::Gear)
-                                        .size_3()
-                                        .text_color(muted_foreground)
-                                        .into_any_element(),
-                                    label: (*procedure_name).clone(),
-                                    on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                                        cx.emit(ConnectionSidebarEvent::OpenProcedure {
-                                            connection_id: conn_id,
-                                            procedure_name: proc.clone(),
-                                            object_schema: object_schema_for_click.clone(),
-                                        });
-                                    },
-                                    on_right_click: Some(
-                                        move |this: &mut Self,
-                                              event: &MouseDownEvent,
-                                              window: &mut Window,
-                                              cx: &mut Context<Self>| {
-                                            this.show_procedure_context_menu(
-                                                conn_id,
-                                                name_for_menu.clone(),
-                                                object_schema_for_menu.clone(),
-                                                event.position,
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                    list_hover,
-                                    depth: leaf_depth,
+                    for procedure_name in procedures {
+                        let procedure = procedure_name.clone();
+                        let name_for_menu = procedure_name.clone();
+                        let object_schema = self.current_schema_for(database_name.as_deref());
+                        let object_schema_for_click = object_schema.clone();
+                        let object_schema_for_menu = object_schema.clone();
+                        section = section.child(self.render_leaf_item(
+                            LeafItemProps {
+                                element_id: SharedString::from(format!(
+                                    "procedure-{}-{}",
+                                    id_suffix, procedure_name
+                                )),
+                                icon: Icon::new(ZqlzIcon::Gear)
+                                    .size_3()
+                                    .text_color(muted_foreground)
+                                    .into_any_element(),
+                                label: procedure_name.clone(),
+                                on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
+                                    cx.emit(ConnectionSidebarEvent::OpenProcedure {
+                                        connection_id: conn_id,
+                                        procedure_name: procedure.clone(),
+                                        object_schema: object_schema_for_click.clone(),
+                                    });
                                 },
-                                cx,
-                            ));
-                        }
-                    } else {
-                        for procedure_name in procedures {
-                            let procedure = procedure_name.clone();
-                            let name_for_menu = procedure_name.clone();
-                            let object_schema = self.current_schema_for(database_name.as_deref());
-                            let object_schema_for_click = object_schema.clone();
-                            let object_schema_for_menu = object_schema.clone();
-                            section = section.child(Self::render_leaf_item(
-                                LeafItemProps {
-                                    element_id: SharedString::from(format!(
-                                        "procedure-{}-{}",
-                                        id_suffix, procedure_name
-                                    )),
-                                    icon: Icon::new(ZqlzIcon::Gear)
-                                        .size_3()
-                                        .text_color(muted_foreground)
-                                        .into_any_element(),
-                                    label: procedure_name.clone(),
-                                    on_click: move |_this: &mut Self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>| {
-                                        cx.emit(ConnectionSidebarEvent::OpenProcedure {
-                                            connection_id: conn_id,
-                                            procedure_name: procedure.clone(),
-                                            object_schema: object_schema_for_click.clone(),
-                                        });
+                                on_right_click: Some(
+                                    move |this: &mut Self,
+                                          event: &MouseDownEvent,
+                                          window: &mut Window,
+                                          cx: &mut Context<Self>| {
+                                        this.show_procedure_context_menu(
+                                            conn_id,
+                                            name_for_menu.clone(),
+                                            object_schema_for_menu.clone(),
+                                            event.position,
+                                            window,
+                                            cx,
+                                        );
                                     },
-                                    on_right_click: Some(
-                                        move |this: &mut Self,
-                                              event: &MouseDownEvent,
-                                              window: &mut Window,
-                                              cx: &mut Context<Self>| {
-                                            this.show_procedure_context_menu(
-                                                conn_id,
-                                                name_for_menu.clone(),
-                                                object_schema_for_menu.clone(),
-                                                event.position,
-                                                window,
-                                                cx,
-                                            );
-                                        },
-                                    ),
-                                    list_hover,
-                                    depth: leaf_depth,
-                                },
-                                cx,
-                            ));
-                        }
+                                ),
+                                list_hover,
+                                depth: leaf_depth,
+                            },
+                            cx,
+                        ));
                     }
                 }
             }
@@ -903,7 +899,7 @@ impl ConnectionSidebar {
                     let query_name = query.name.clone();
                     let name_for_click = query.name.clone();
                     let name_for_menu = query.name.clone();
-                    section = section.child(Self::render_leaf_item(
+                    section = section.child(self.render_leaf_item(
                         LeafItemProps {
                             element_id: SharedString::from(format!("query-{}-{}", id_suffix, query_id)),
                             icon: Icon::new(ZqlzIcon::FileSql)

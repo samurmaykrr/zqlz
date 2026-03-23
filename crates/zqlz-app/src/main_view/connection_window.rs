@@ -9,10 +9,13 @@ use zqlz_connection::SavedConnection;
 use zqlz_core::{ConnectionFieldSchema, ConnectionFieldType};
 use zqlz_drivers::DriverRegistry;
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, IconName, Root, ZqlzIcon,
+    ActiveTheme, Icon, IconName, IndexPath, Root, WindowExt, ZqlzIcon,
     button::{Button, ButtonVariants as _},
+    checkbox::Checkbox,
     h_flex,
     input::{Input, InputState},
+    notification::Notification,
+    select::{Select, SelectItem, SelectState},
     title_bar::TitleBar,
     v_flex,
 };
@@ -66,6 +69,8 @@ struct FieldInput {
     label: String,
     field_type: ConnectionFieldType,
     input: Entity<InputState>,
+    select_state: Option<Entity<SelectState<Vec<ConnectionSelectOption>>>>,
+    boolean_value: Option<bool>,
     required: bool,
     help_text: Option<String>,
     width: f32,
@@ -73,7 +78,32 @@ struct FieldInput {
     tab: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ConnectionSelectOption {
+    value: String,
+    label: String,
+}
+
+impl SelectItem for ConnectionSelectOption {
+    type Value = String;
+
+    fn title(&self) -> SharedString {
+        SharedString::from(self.label.clone())
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
 impl ConnectionWindow {
+    fn parse_bool(value: &str) -> bool {
+        matches!(
+            value.trim().to_lowercase().as_str(),
+            "true" | "1" | "yes" | "on"
+        )
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search databases..."));
@@ -240,6 +270,38 @@ impl ConnectionWindow {
                     label: field.label.to_string(),
                     field_type: field.field_type.clone(),
                     input,
+                    select_state: match &field.field_type {
+                        ConnectionFieldType::Select { options } => {
+                            let select_options: Vec<ConnectionSelectOption> = options
+                                .iter()
+                                .map(|option| ConnectionSelectOption {
+                                    value: option.value.to_string(),
+                                    label: option.label.to_string(),
+                                })
+                                .collect();
+
+                            let selected_index = field.default_value.as_ref().and_then(|default| {
+                                select_options
+                                    .iter()
+                                    .position(|option| option.value == default.as_ref())
+                                    .map(|index| IndexPath::default().row(index))
+                            });
+
+                            Some(cx.new(|cx| {
+                                SelectState::new(select_options, selected_index, window, cx)
+                            }))
+                        }
+                        _ => None,
+                    },
+                    boolean_value: match &field.field_type {
+                        ConnectionFieldType::Boolean => Some(
+                            field
+                                .default_value
+                                .as_ref()
+                                .is_some_and(|value| Self::parse_bool(value.as_ref())),
+                        ),
+                        _ => None,
+                    },
                     required: field.required,
                     help_text: field.help_text.as_ref().map(|s| s.to_string()),
                     width: field.width,
@@ -323,8 +385,9 @@ impl ConnectionWindow {
                 });
 
                 if !value.is_empty() {
+                    let value_for_input = value.clone();
                     input.update(cx, |input, cx| {
-                        input.set_value(value, window, cx);
+                        input.set_value(value_for_input, window, cx);
                     });
                 }
 
@@ -333,6 +396,35 @@ impl ConnectionWindow {
                     label: field.label.to_string(),
                     field_type: field.field_type.clone(),
                     input,
+                    select_state: match &field.field_type {
+                        ConnectionFieldType::Select { options } => {
+                            let select_options: Vec<ConnectionSelectOption> = options
+                                .iter()
+                                .map(|option| ConnectionSelectOption {
+                                    value: option.value.to_string(),
+                                    label: option.label.to_string(),
+                                })
+                                .collect();
+
+                            let selected_index = if value.is_empty() {
+                                None
+                            } else {
+                                select_options
+                                    .iter()
+                                    .position(|option| option.value == value)
+                                    .map(|index| IndexPath::default().row(index))
+                            };
+
+                            Some(cx.new(|cx| {
+                                SelectState::new(select_options, selected_index, window, cx)
+                            }))
+                        }
+                        _ => None,
+                    },
+                    boolean_value: match &field.field_type {
+                        ConnectionFieldType::Boolean => Some(Self::parse_bool(&value)),
+                        _ => None,
+                    },
                     required: field.required,
                     help_text: field.help_text.as_ref().map(|s| s.to_string()),
                     width: field.width,
@@ -378,32 +470,33 @@ impl ConnectionWindow {
 
         let name = name_input.read(cx).text().to_string().trim().to_string();
         if name.is_empty() {
-            // TODO: Show validation error
+            window.push_notification(Notification::error("Connection name cannot be empty"), cx);
             return;
         }
 
         // Collect all field values
         let mut params: HashMap<String, String> = HashMap::new();
         for field in &self.field_inputs {
-            let value = field.input.read(cx).text().to_string().trim().to_string();
+            let value = match &field.field_type {
+                ConnectionFieldType::Select { .. } => field
+                    .select_state
+                    .as_ref()
+                    .and_then(|state| state.read(cx).selected_value().cloned())
+                    .unwrap_or_default(),
+                ConnectionFieldType::Boolean => field.boolean_value.unwrap_or(false).to_string(),
+                _ => field.input.read(cx).text().to_string().trim().to_string(),
+            };
 
-            // Check required fields
-            if field.required && value.is_empty() {
-                // TODO: Show validation error
+            if field.required
+                && !matches!(field.field_type, ConnectionFieldType::Boolean)
+                && value.is_empty()
+            {
+                window.push_notification(
+                    Notification::error(format!("{} is required", field.label)),
+                    cx,
+                );
                 return;
             }
-
-            // For boolean fields, store "true" or "false"
-            let value = match &field.field_type {
-                ConnectionFieldType::Boolean => {
-                    if value.is_empty() {
-                        "false".to_string()
-                    } else {
-                        value
-                    }
-                }
-                _ => value,
-            };
 
             if !value.is_empty() {
                 params.insert(field.id.clone(), value);
@@ -984,38 +1077,39 @@ impl ConnectionWindow {
                     .when_some(help_element, |this, help| this.child(help))
             }
             ConnectionFieldType::Select { options } => {
-                // For now, render Select as a text input with placeholder showing available options
-                // TODO: Implement proper dropdown/select widget
-                let options_hint = options
-                    .iter()
-                    .map(|opt| opt.label.to_string())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                let placeholder = options
+                    .first()
+                    .map(|option| option.label.to_string())
+                    .unwrap_or_else(|| "Select option".to_string());
 
                 v_flex()
                     .gap_1()
                     .child(label_element)
-                    .child(Input::new(&field.input))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format!("Options: {}", options_hint)),
-                    )
+                    .when_some(field.select_state.as_ref(), |this, select_state| {
+                        this.child(Select::new(select_state).placeholder(placeholder))
+                    })
                     .when_some(help_element, |this, help| this.child(help))
             }
             ConnectionFieldType::Boolean => {
-                // For checkboxes, use a simple text input accepting "true" or "false"
-                // TODO: Implement proper checkbox widget
+                let checked = field.boolean_value.unwrap_or(false);
+                let field_id = field.id.clone();
+
                 v_flex()
                     .gap_1()
                     .child(label_element)
-                    .child(Input::new(&field.input))
                     .child(
-                        div()
-                            .text_xs()
-                            .text_color(cx.theme().muted_foreground)
-                            .child("Enter 'true' or 'false'"),
+                        Checkbox::new(SharedString::from(format!("connection-field-{}", field.id)))
+                            .checked(checked)
+                            .on_click(cx.listener(move |this, new_checked, _window, cx| {
+                                if let Some(field) = this
+                                    .field_inputs
+                                    .iter_mut()
+                                    .find(|field| field.id == field_id)
+                                {
+                                    field.boolean_value = Some(*new_checked);
+                                    cx.notify();
+                                }
+                            })),
                     )
                     .when_some(help_element, |this, help| this.child(help))
             }

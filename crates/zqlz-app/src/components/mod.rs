@@ -27,8 +27,8 @@ pub use zqlz_connection::{ConnectionEntry, ConnectionSidebar, ConnectionSidebarE
 pub use zqlz_query::widgets::QueryHistoryPanel;
 pub use zqlz_query::{
     ExplainResult, ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryEditor,
-    QueryEditorEvent, QueryExecution, QueryTabsPanel, ResultsPanel, ResultsPanelEvent,
-    StatementResult,
+    QueryEditorEvent, QueryExecution, QueryExecutionParams, QueryTabsPanel, ResultsPanel,
+    ResultsPanelEvent, StatementResult,
 };
 // Re-export schema widgets from zqlz-schema for backward compatibility
 pub use zqlz_schema::{

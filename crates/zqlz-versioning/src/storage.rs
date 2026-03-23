@@ -5,27 +5,24 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
 use std::path::PathBuf;
 use uuid::Uuid;
+use zqlz_internal_storage::InternalStorage;
+use zqlz_internal_storage::rusqlite::{self, Connection, params};
 
 use crate::{DatabaseObjectType, VersionEntry};
 
 /// Storage for version history using SQLite
 pub struct VersionStorage {
-    db_path: PathBuf,
+    storage: InternalStorage,
 }
 
 impl VersionStorage {
     /// Create a new version storage instance
     pub fn new() -> Result<Self> {
-        let db_path = Self::get_storage_path()?;
-
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let storage = Self { db_path };
+        let storage = Self {
+            storage: InternalStorage::for_config_file("versions.db")?,
+        };
         storage.initialize_schema()?;
 
         Ok(storage)
@@ -33,25 +30,21 @@ impl VersionStorage {
 
     /// Create storage with a custom path (for testing)
     pub fn with_path(db_path: PathBuf) -> Result<Self> {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let storage = Self { db_path };
+        let storage = Self {
+            storage: InternalStorage::open(db_path)?,
+        };
         storage.initialize_schema()?;
 
         Ok(storage)
     }
 
-    fn get_storage_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        let app_dir = config_dir.join("zqlz");
-        Ok(app_dir.join("versions.db"))
-    }
-
     fn connect(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("Failed to open version database at {:?}", self.db_path))
+        self.storage.connect().with_context(|| {
+            format!(
+                "Failed to open version database at {}",
+                self.storage.path().display()
+            )
+        })
     }
 
     fn initialize_schema(&self) -> Result<()> {

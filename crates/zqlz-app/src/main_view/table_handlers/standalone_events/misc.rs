@@ -3,7 +3,7 @@
 use gpui::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
-use zqlz_core::{ColumnMeta, Value};
+use zqlz_core::{ColumnMeta, SqlObjectName, Value};
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
@@ -12,6 +12,7 @@ use crate::components::{CellValue, PendingCellChange, TableViewerPanel};
 use crate::main_view::table_handlers_utils::formatting::{
     format_sql_value, format_sql_value_from_value,
 };
+use crate::main_view::table_handlers_utils::sql::escape_sql_like_literal;
 
 pub(in crate::main_view) fn handle_generate_sql_event(
     table_name: String,
@@ -132,10 +133,14 @@ pub(in crate::main_view) fn handle_generate_sql_event(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::main_view) fn handle_load_fk_values_event(
     connection_id: Uuid,
     referenced_table: &str,
     referenced_columns: &[String],
+    query: Option<&str>,
+    limit: usize,
+    request_id: u64,
     viewer_entity: Entity<TableViewerPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -143,9 +148,12 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
     use crate::components::table_viewer::delegate::FkSelectItem;
 
     tracing::info!(
-        "LoadFkValues event: table={}, columns={:?}",
+        "LoadFkValues event: table={}, columns={:?}, query={:?}, limit={}, request_id={}",
         referenced_table,
-        referenced_columns
+        referenced_columns,
+        query,
+        limit,
+        request_id
     );
 
     let Some(app_state) = cx.try_global::<AppState>() else {
@@ -164,37 +172,104 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
     let connection = connection.clone();
     let referenced_table = referenced_table.to_string();
     let referenced_columns = referenced_columns.to_vec();
+    let query = query.map(|value| value.to_string());
+    let effective_limit = limit.clamp(1, 10);
 
     window
         .spawn(cx, async move |cx| {
-            // Build the columns to select - typically just the PK column(s)
-            // We'll also try to get a display label if there's another column
-            let columns_to_select = if referenced_columns.is_empty() {
-                "*".to_string()
+            let table_object_name = parse_sql_object_name(&referenced_table);
+            let label_column = best_fk_label_column(
+                connection.as_schema_introspection(),
+                &referenced_table,
+                &referenced_columns,
+            )
+            .await;
+
+            let selected_columns = if referenced_columns.is_empty() {
+                if let Some(label_column) = &label_column {
+                    vec![label_column.clone()]
+                } else {
+                    vec!["id".to_string()]
+                }
             } else {
-                referenced_columns.join(", ")
+                referenced_columns.clone()
             };
 
-            // Query the referenced table for all values
-            // Using DISTINCT to avoid duplicates, ordered for better UX
-            let sql = format!(
-                "SELECT DISTINCT {} FROM {} ORDER BY {} LIMIT 1000",
-                columns_to_select,
-                referenced_table,
-                referenced_columns.first().unwrap_or(&"1".to_string())
-            );
+            let mut projected_columns = selected_columns.clone();
+
+            if let Some(label_column) = &label_column
+                && !selected_columns.iter().any(|column| column == label_column)
+            {
+                projected_columns.push(label_column.clone());
+            }
+
+            let mut where_parts = Vec::new();
+            if let Some(query) = query.as_ref().map(|q| q.trim()).filter(|q| !q.is_empty()) {
+                let escaped_like = escape_sql_like_literal(query);
+                for column in &selected_columns {
+                    let escaped_column = connection.quote_identifier(column);
+                    let searchable_expr = connection.search_text_cast_expression(&escaped_column);
+                    where_parts.push(format!(
+                        "LOWER({}) LIKE LOWER('%{}%') ESCAPE '\\'",
+                        searchable_expr, escaped_like
+                    ));
+                }
+                if let Some(label_column) = &label_column
+                    && !selected_columns.iter().any(|column| column == label_column)
+                {
+                    let escaped_column = connection.quote_identifier(label_column);
+                    let searchable_expr = connection.search_text_cast_expression(&escaped_column);
+                    where_parts.push(format!(
+                        "LOWER({}) LIKE LOWER('%{}%') ESCAPE '\\'",
+                        searchable_expr, escaped_like
+                    ));
+                }
+            }
+
+            let where_clause = if where_parts.is_empty() {
+                None
+            } else {
+                Some(where_parts.join(" OR "))
+            };
+
+            let order_columns = if let Some(label_column) = &label_column {
+                if selected_columns.iter().any(|column| column == label_column) {
+                    selected_columns.clone()
+                } else {
+                    let mut with_label = selected_columns.clone();
+                    with_label.push(label_column.clone());
+                    with_label
+                }
+            } else {
+                selected_columns.clone()
+            };
+
+            let sql = match connection.select_distinct_rows_sql(
+                &table_object_name,
+                &projected_columns,
+                where_clause.as_deref(),
+                &order_columns,
+                effective_limit as u64,
+            ) {
+                Ok(sql) => sql,
+                Err(error) => {
+                    tracing::error!(
+                        "LoadFkValues: failed to build SQL for table {}: {}",
+                        referenced_table,
+                        error
+                    );
+                    return anyhow::Ok(());
+                }
+            };
 
             match connection.query(&sql, &[]).await {
                 Ok(result) => {
-                    // Convert results to FkSelectItem with value and label
                     let values: Vec<FkSelectItem> = result
                         .rows
                         .iter()
                         .filter_map(|row| {
                             let value = row.values.first()?.to_string();
-                            // Try to build a display label from multiple columns if available
                             let label = if row.values.len() > 1 {
-                                // Format: "id - name" or similar for better UX
                                 let extra =
                                     row.values.get(1).map(|v| v.to_string()).unwrap_or_default();
                                 format!("{} - {}", value, extra)
@@ -206,14 +281,22 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
                         .collect();
 
                     tracing::info!(
-                        "LoadFkValues: Loaded {} values from {}",
+                        "LoadFkValues: Loaded {} values from {} (query={:?}, request_id={})",
                         values.len(),
-                        referenced_table
+                        referenced_table,
+                        query,
+                        request_id
                     );
 
-                    // Cache the values in the viewer and update the dropdown if open
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
-                        viewer.set_fk_values(referenced_table.clone(), values, window, cx);
+                        viewer.set_fk_values(
+                            referenced_table.clone(),
+                            values,
+                            query.clone(),
+                            request_id,
+                            window,
+                            cx,
+                        );
                     });
                 }
                 Err(e) => {
@@ -224,6 +307,66 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
             anyhow::Ok(())
         })
         .detach();
+}
+
+fn is_string_like_type(data_type: &str) -> bool {
+    let normalized = data_type.to_ascii_lowercase();
+    normalized.contains("char")
+        || normalized.contains("text")
+        || normalized.contains("name")
+        || normalized.contains("json")
+        || normalized.contains("uuid")
+        || normalized.contains("enum")
+}
+
+async fn best_fk_label_column(
+    schema_introspection: Option<&dyn zqlz_core::SchemaIntrospection>,
+    table_name: &str,
+    referenced_columns: &[String],
+) -> Option<String> {
+    let schema_introspection = schema_introspection?;
+
+    let (schema_name, relation_name) = if table_name.contains('.') {
+        let mut parts = table_name.splitn(2, '.');
+        let left = parts.next();
+        let right = parts.next();
+        match (left, right) {
+            (Some(schema), Some(table)) if !schema.is_empty() && !table.is_empty() => {
+                (Some(schema), table)
+            }
+            _ => (None, table_name),
+        }
+    } else {
+        (None, table_name)
+    };
+
+    let columns = schema_introspection
+        .get_columns(schema_name, relation_name)
+        .await
+        .ok()?;
+
+    let preferred = ["name", "title", "label", "description", "email", "username"];
+    for preferred_name in preferred {
+        if let Some(column) = columns.iter().find(|column| {
+            !referenced_columns
+                .iter()
+                .any(|fk_col| fk_col == &column.name)
+                && column.name.eq_ignore_ascii_case(preferred_name)
+                && is_string_like_type(&column.data_type)
+        }) {
+            return Some(column.name.clone());
+        }
+    }
+
+    columns
+        .iter()
+        .find(|column| {
+            !referenced_columns
+                .iter()
+                .any(|fk_col| fk_col == &column.name)
+                && is_string_like_type(&column.data_type)
+        })
+        .map(|column| column.name.clone())
 }
 
 pub(in crate::main_view) fn handle_load_distinct_values_event(
@@ -258,13 +401,27 @@ pub(in crate::main_view) fn handle_load_distinct_values_event(
 
     window
         .spawn(cx, async move |cx| {
-            let escaped_column = format!("\"{}\"", column_name.replace('"', "\"\""));
-            let escaped_table = format!("\"{}\"", table_name.replace('"', "\"\""));
-
-            let sql = format!(
-                "SELECT DISTINCT {} FROM {} WHERE {} IS NOT NULL ORDER BY {} LIMIT 500",
-                escaped_column, escaped_table, escaped_column, escaped_column
-            );
+            let table_object_name = parse_sql_object_name(&table_name);
+            let escaped_column = connection.quote_identifier(&column_name);
+            let where_clause = format!("{} IS NOT NULL", escaped_column);
+            let sql = match connection.select_distinct_rows_sql(
+                &table_object_name,
+                std::slice::from_ref(&column_name),
+                Some(&where_clause),
+                std::slice::from_ref(&column_name),
+                500,
+            ) {
+                Ok(sql) => sql,
+                Err(error) => {
+                    tracing::error!(
+                        "LoadDistinctValues: failed to build SQL for {}.{}: {}",
+                        table_name,
+                        column_name,
+                        error
+                    );
+                    return anyhow::Ok(());
+                }
+            };
 
             match connection.query(&sql, &[]).await {
                 Ok(result) => {
@@ -325,4 +482,18 @@ pub(in crate::main_view) fn handle_load_distinct_values_event(
             anyhow::Ok(())
         })
         .detach();
+}
+
+fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => SqlObjectName::new(object_name),
+        }
+    } else {
+        SqlObjectName::new(object_name)
+    }
 }

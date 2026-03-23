@@ -1,10 +1,10 @@
 //! Query bookmarks storage with SQLite backend
 
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, Result as SqliteResult, params};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 use uuid::Uuid;
+use zqlz_internal_storage::rusqlite::{self, Connection, Result as SqliteResult, params};
 
 /// A saved query bookmark
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -64,7 +64,7 @@ pub(in crate::main_view) fn handle_save_cell_event(
     let new_value_for_update = request.new_value.clone();
     let connection = connection.clone();
 
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     let cell_update_data = zqlz_services::CellUpdateData {
         column_name: column_name.clone(),

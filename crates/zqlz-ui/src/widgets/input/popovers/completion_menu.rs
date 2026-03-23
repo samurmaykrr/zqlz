@@ -386,7 +386,6 @@ impl RenderOnce for CompletionMenuItem {
             .p_2()
             .text_xs()
             .line_height(relative(1.2))
-            .rounded_sm()
             .w_full()
             .when(deprecated, |this| this.line_through())
             .hover(|this| this.bg(cx.theme().accent.opacity(0.15)))

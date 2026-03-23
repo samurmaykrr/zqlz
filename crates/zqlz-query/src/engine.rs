@@ -4,7 +4,7 @@ use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
 use std::sync::Arc;
-use zqlz_core::{Connection, QueryResult, Result, StatementResult};
+use zqlz_core::{Connection, QueryResult, Result, StatementResult, Value};
 
 /// Information about a destructive operation that requires confirmation
 #[derive(Clone, Debug)]
@@ -73,6 +73,27 @@ impl QueryEngine {
         Ok(result)
     }
 
+    /// Execute a query with bound parameter values.
+    #[tracing::instrument(skip(self, conn, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>(), param_count = params.len()))]
+    pub async fn execute_query_with_params(
+        &self,
+        conn: &Arc<dyn Connection>,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<QueryResult> {
+        tracing::info!("executing query with parameters");
+        let result = conn.query(sql, params).await.map_err(|e| {
+            tracing::error!(error = %e, "query execution failed");
+            e
+        })?;
+        tracing::info!(
+            rows = result.rows.len(),
+            execution_time_ms = result.execution_time_ms,
+            "query executed successfully"
+        );
+        Ok(result)
+    }
+
     /// Execute a statement (INSERT, UPDATE, DELETE, etc.)
     #[tracing::instrument(skip(self, conn, sql), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]
     pub async fn execute_statement(
@@ -82,6 +103,26 @@ impl QueryEngine {
     ) -> Result<StatementResult> {
         tracing::info!("executing statement");
         let result = conn.execute(sql, &[]).await.map_err(|e| {
+            tracing::error!(error = %e, "statement execution failed");
+            e
+        })?;
+        tracing::info!(
+            affected_rows = result.affected_rows,
+            "statement executed successfully"
+        );
+        Ok(result)
+    }
+
+    /// Execute a statement (INSERT, UPDATE, DELETE, etc.) with bound parameter values.
+    #[tracing::instrument(skip(self, conn, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>(), param_count = params.len()))]
+    pub async fn execute_statement_with_params(
+        &self,
+        conn: &Arc<dyn Connection>,
+        sql: &str,
+        params: &[Value],
+    ) -> Result<StatementResult> {
+        tracing::info!("executing statement with parameters");
+        let result = conn.execute(sql, params).await.map_err(|e| {
             tracing::error!(error = %e, "statement execution failed");
             e
         })?;

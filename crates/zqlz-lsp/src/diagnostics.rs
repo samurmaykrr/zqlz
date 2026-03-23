@@ -62,18 +62,34 @@ impl SqlDiagnostics {
         // syntax like `expr::type` casts, which causes false-positive errors on valid
         // PG SQL.  `get_sql_dialect_config` maps the driver id ("postgres", "mysql",
         // …) to the correct dialect object via the existing `sql_dialect` module.
-        let sqlparser_dialect: Box<dyn SqlParserDialect> = dialect_config
-            .and_then(|c| crate::sql_dialect::get_sql_dialect_config(&c.id))
+        let resolved_sql_dialect =
+            dialect_config.and_then(|c| crate::sql_dialect::get_sql_dialect_config(&c.id));
+        let using_generic_sqlparser = resolved_sql_dialect.is_none();
+        let sqlparser_dialect: Box<dyn SqlParserDialect> = resolved_sql_dialect
             .map(|sc| sc.sqlparser_dialect())
             .unwrap_or_else(|| Box::new(GenericDialect {}));
 
-        // Use sqlparser for syntax validation with error location (SQL dialects only)
-        if !skip_sql {
-            diagnostics.extend(self.check_sqlparser_syntax(&sql, text, sqlparser_dialect.as_ref()));
-        }
+        // Use sqlparser for syntax validation with error location (SQL dialects only).
+        // We keep this pass authoritative for SQL syntax because it is dialect-aware
+        // (e.g. SQLite bracketed identifiers such as `[table name]`).
+        let sqlparser_diagnostics = if skip_sql {
+            Vec::new()
+        } else {
+            self.check_sqlparser_syntax(&sql, text, sqlparser_dialect.as_ref())
+        };
+        let has_sqlparser_syntax_error = sqlparser_diagnostics.iter().any(|diagnostic| {
+            diagnostic.source.as_deref() == Some("sqlparser")
+                && diagnostic.severity == Some(DiagnosticSeverity::ERROR)
+        });
+        diagnostics.extend(sqlparser_diagnostics);
 
-        // Use tree-sitter for more detailed error detection (if grammar exists)
-        if !skip_tree_sitter {
+        // Tree-sitter is used as a secondary signal. Running it unconditionally creates
+        // false positives for valid dialect-specific syntax that sqlparser already accepted.
+        // Example: SQLite allows bracketed identifiers (`[name]`), while the SQL grammar
+        // behind tree-sitter can flag them as ERROR nodes.
+        let should_run_tree_sitter = !skip_tree_sitter
+            && (skip_sql || has_sqlparser_syntax_error || using_generic_sqlparser);
+        if should_run_tree_sitter {
             diagnostics.extend(self.check_tree_sitter_errors(&sql, text));
         }
 

@@ -67,12 +67,12 @@ impl MainView {
                 let row_index = cell_data.row_index;
                 let col_index = cell_data.col_index;
                 let original_value = cell_data.current_value.clone();
-                let is_redis = connection.driver_name() == "redis";
+                let is_redis = connection.dialect_id() == Some("redis");
                 let schema_qualifier = if !is_redis {
                     source_viewer.as_ref().and_then(|v| {
                         v.read_with(cx, |viewer, _cx| {
                             let db = viewer.database_name();
-                            resolve_schema_qualifier(connection.driver_name(), &db)
+                            resolve_schema_qualifier(&connection, &db)
                         })
                         .ok()
                         .flatten()

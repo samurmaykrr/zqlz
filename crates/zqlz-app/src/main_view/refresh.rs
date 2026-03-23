@@ -82,10 +82,9 @@ impl MainView {
             .map(|saved| saved.name)
             .unwrap_or_else(|| "Unknown".to_string());
         let object_capabilities = app_state
-            .saved_connections()
-            .iter()
-            .find(|connection| connection.id == connection_id)
-            .map(|connection| SidebarObjectCapabilities::for_driver(&connection.driver))
+            .connections
+            .get(connection_id)
+            .map(|connection| SidebarObjectCapabilities::for_connection(connection.as_ref()))
             .unwrap_or_default();
         let workspace_state = self.workspace_state.downgrade();
         let sidebar = self.connection_sidebar.clone();

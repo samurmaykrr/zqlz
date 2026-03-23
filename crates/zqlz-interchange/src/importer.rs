@@ -13,9 +13,28 @@ use crate::document::{
     CheckConstraint, ColumnDefinition, EnumDefinition, ForeignKeyAction, ForeignKeyConstraint,
     IndexDefinition, IndexMethod, PrimaryKeyConstraint, TableDefinition, UdifDocument,
 };
-use crate::type_mapping::{TypeMapper, get_type_mapper};
+use crate::type_mapping::{
+    TypeMapper, canonical_mapper_id, closest_safe_mapper_id, get_type_mapper,
+};
 use crate::value_encoding::{EncodedValue, decode_value};
-use zqlz_core::{Connection, Value, ZqlzError};
+use zqlz_core::{
+    CheckConstraintEnforcement, Connection, ImportIndexCapabilities, ImportSemanticDefault, Value,
+    ZqlzError,
+};
+
+fn parse_sql_object_name(object_name: &str) -> zqlz_core::SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                zqlz_core::SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => zqlz_core::SqlObjectName::new(object_name),
+        }
+    } else {
+        zqlz_core::SqlObjectName::new(object_name)
+    }
+}
 
 /// Errors during import
 #[derive(Debug, Error)]
@@ -472,10 +491,36 @@ pub struct GenericImporter {
     type_mapper: Box<dyn TypeMapper>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IndexMethodSupport {
+    Supported,
+    DegradeToBtree,
+    Skip,
+}
+
+fn runtime_mapper_driver_id(connection: &dyn Connection) -> String {
+    let resolved_driver_id = connection
+        .dialect_id()
+        .unwrap_or_else(|| connection.driver_name());
+    if canonical_mapper_id(resolved_driver_id).is_some() {
+        return resolved_driver_id.to_string();
+    }
+
+    let fallback_mapper = closest_safe_mapper_id(resolved_driver_id);
+    tracing::warn!(
+        dialect_id = ?connection.dialect_id(),
+        driver_name = connection.driver_name(),
+        resolved_driver_id,
+        fallback_mapper,
+        "unknown driver for type mapping; using closest safe mapper"
+    );
+    fallback_mapper.to_string()
+}
+
 impl GenericImporter {
     pub fn new(connection: Arc<dyn Connection>) -> Self {
-        let driver = connection.driver_name();
-        let type_mapper = get_type_mapper(driver);
+        let mapper_driver_id = runtime_mapper_driver_id(connection.as_ref());
+        let type_mapper = get_type_mapper(&mapper_driver_id);
         Self {
             connection,
             type_mapper,
@@ -489,6 +534,68 @@ impl GenericImporter {
         Self {
             connection,
             type_mapper,
+        }
+    }
+
+    fn supports_named_enum_types(&self) -> bool {
+        self.connection.supports_import_named_enum_types()
+    }
+
+    fn index_method_support(
+        capabilities: &ImportIndexCapabilities,
+        method: &IndexMethod,
+    ) -> IndexMethodSupport {
+        match method {
+            IndexMethod::Btree => IndexMethodSupport::Supported,
+            IndexMethod::Hash => {
+                if capabilities.supports_hash {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::DegradeToBtree
+                }
+            }
+            IndexMethod::Gin => {
+                if capabilities.supports_gin {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
+            IndexMethod::Gist => {
+                if capabilities.supports_gist {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
+            IndexMethod::SpGist => {
+                if capabilities.supports_spgist {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
+            IndexMethod::Brin => {
+                if capabilities.supports_brin {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
+            IndexMethod::Fulltext => {
+                if capabilities.supports_fulltext {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
+            IndexMethod::Spatial => {
+                if capabilities.supports_spatial {
+                    IndexMethodSupport::Supported
+                } else {
+                    IndexMethodSupport::Skip
+                }
+            }
         }
     }
 
@@ -578,12 +685,9 @@ impl GenericImporter {
     /// valid SQL on all three target drivers.  PostgreSQL-specific cast syntax
     /// (`::typename`) is stripped when targeting SQLite or MySQL.
     fn generate_check_constraint_sql(&self, check: &CheckConstraint) -> String {
-        let driver = self.connection.driver_name();
-        let expression = if driver == "postgresql" {
-            check.expression.clone()
-        } else {
-            strip_pg_casts(&check.expression)
-        };
+        let expression = self
+            .connection
+            .normalize_import_check_expression(&check.expression);
         match &check.name {
             Some(name) => format!(
                 "  CONSTRAINT {} CHECK ({})",
@@ -601,19 +705,18 @@ impl GenericImporter {
         // SQLite has no native ENUM type, so we represent it as TEXT and add an
         // inline CHECK constraint to restrict values to the declared set.
         // This must come before the NOT NULL / DEFAULT clauses.
-        if let CanonicalType::Enum { ref values, .. } = col.canonical_type {
-            let driver = self.connection.driver_name();
-            if driver == "sqlite" && !values.is_empty() {
-                let quoted_values: Vec<String> = values
-                    .iter()
-                    .map(|v| format!("'{}'", v.replace('\'', "''")))
-                    .collect();
-                sql.push_str(&format!(
-                    " CHECK ({} IN ({}))",
-                    self.quote_identifier(&col.name),
-                    quoted_values.join(", ")
-                ));
-            }
+        if let CanonicalType::Enum { ref values, .. } = col.canonical_type
+            && !self.supports_named_enum_types() && !values.is_empty()
+        {
+            let quoted_values: Vec<String> = values
+                .iter()
+                .map(|v| format!("'{}'", v.replace('\'', "''")))
+                .collect();
+            sql.push_str(&format!(
+                " CHECK ({} IN ({}))",
+                self.quote_identifier(&col.name),
+                quoted_values.join(", ")
+            ));
         }
 
         // Generated columns use GENERATED ALWAYS AS syntax instead of DEFAULT.
@@ -622,15 +725,9 @@ impl GenericImporter {
         // Cross-driver expression warnings are emitted separately via
         // generate_generated_column_warnings.
         if let Some(ref expr) = col.generation_expression {
-            let driver = self.connection.driver_name();
-            // PostgreSQL does not support VIRTUAL generated columns; STORED is
-            // the only option.  We always emit STORED for PostgreSQL regardless
-            // of the source flag.  The warning is emitted separately.
-            let storage = if col.is_generated_stored || driver == "postgresql" {
-                "STORED"
-            } else {
-                "VIRTUAL"
-            };
+            let storage = self
+                .connection
+                .generated_column_storage_keyword(col.is_generated_stored);
             sql.push_str(&format!(" GENERATED ALWAYS AS ({}) {}", expr, storage));
             return sql;
         }
@@ -640,7 +737,6 @@ impl GenericImporter {
         }
 
         if let Some(ref default) = col.default_value {
-            let driver = self.connection.driver_name();
             match default {
                 crate::document::DefaultValue::Literal(val) => {
                     if let Ok(value) = decode_value(val) {
@@ -654,21 +750,11 @@ impl GenericImporter {
                     // the auto-increment behaviour is expressed through the column flag and
                     // handled by the type mapper and sequence-restore logic.
                     if !col.auto_increment {
-                        let effective = if driver == "postgresql" {
-                            expr.clone()
+                        let normalized = self.connection.normalize_import_check_expression(expr);
+                        let effective = if normalized.contains('(') {
+                            String::new()
                         } else {
-                            // Strip PG cast syntax (`::typename`) that is illegal on
-                            // SQLite and MySQL.  If the result still contains a function
-                            // call we drop the entire DEFAULT — a driver-specific function
-                            // (e.g. `to_timestamp`, `date_trunc`) cannot be evaluated by
-                            // the target engine.  A warning is emitted separately by
-                            // `generate_column_default_warnings`.
-                            let stripped = strip_pg_casts(expr);
-                            if stripped.contains('(') {
-                                String::new()
-                            } else {
-                                stripped
-                            }
+                            normalized
                         };
                         if !effective.is_empty() {
                             sql.push_str(&format!(" DEFAULT {}", effective));
@@ -691,22 +777,28 @@ impl GenericImporter {
                 crate::document::DefaultValue::CurrentTime => {
                     sql.push_str(" DEFAULT CURRENT_TIME");
                 }
-                // CURRENT_USER is supported on PostgreSQL and MySQL but not SQLite.
-                // On SQLite we fall back to a literal NULL to keep the DDL parseable;
-                // a warning is emitted separately in generate_column_default_warnings.
-                crate::document::DefaultValue::CurrentUser => match driver {
-                    "sqlite" => sql.push_str(" DEFAULT NULL"),
-                    _ => sql.push_str(" DEFAULT CURRENT_USER"),
-                },
+                // CURRENT_USER support varies by driver. When unsupported we emit
+                // DEFAULT NULL and warn separately.
+                crate::document::DefaultValue::CurrentUser => {
+                    if let Some(default_sql) = self
+                        .connection
+                        .semantic_default_sql(ImportSemanticDefault::CurrentUser)
+                    {
+                        sql.push_str(&format!(" DEFAULT {}", default_sql));
+                    } else {
+                        sql.push_str(" DEFAULT NULL");
+                    }
+                }
                 // UUID generation syntax differs across drivers; SQLite has no built-in.
                 // Warnings for degraded cases are emitted in generate_column_default_warnings.
-                crate::document::DefaultValue::GeneratedUuid => match driver {
-                    "postgresql" => sql.push_str(" DEFAULT gen_random_uuid()"),
-                    "mysql" => sql.push_str(" DEFAULT (UUID())"),
-                    // SQLite has no built-in UUID function; emit no default so the
-                    // application layer must supply values.
-                    _ => {}
-                },
+                crate::document::DefaultValue::GeneratedUuid => {
+                    if let Some(default_sql) = self
+                        .connection
+                        .semantic_default_sql(ImportSemanticDefault::GeneratedUuid)
+                    {
+                        sql.push_str(&format!(" DEFAULT {}", default_sql));
+                    }
+                }
             }
         }
 
@@ -725,27 +817,37 @@ impl GenericImporter {
             return vec![];
         };
         match default {
-            crate::document::DefaultValue::CurrentUser if driver == "sqlite" => {
+            crate::document::DefaultValue::CurrentUser
+                if self
+                    .connection
+                    .semantic_default_sql(ImportSemanticDefault::CurrentUser)
+                    .is_none() =>
+            {
                 vec![ImportWarning {
                     table: Some(table_name.to_owned()),
                     column: Some(col.name.clone()),
                     message: format!(
                         "Column '{}' in table '{}' had DEFAULT CURRENT_USER which is not \
-                     supported on SQLite; defaulting to NULL",
-                        col.name, table_name
+                     supported on {}; defaulting to NULL",
+                        col.name, table_name, driver
                     ),
                     kind: ImportWarningKind::DefaultModified,
                 }]
             }
-            crate::document::DefaultValue::GeneratedUuid if driver == "sqlite" => {
+            crate::document::DefaultValue::GeneratedUuid
+                if self
+                    .connection
+                    .semantic_default_sql(ImportSemanticDefault::GeneratedUuid)
+                    .is_none() =>
+            {
                 vec![ImportWarning {
                     table: Some(table_name.to_owned()),
                     column: Some(col.name.clone()),
                     message: format!(
                         "Column '{}' in table '{}' had a UUID-generation default which is not \
-                         natively supported on SQLite; no default was emitted — the application \
+                         natively supported on {}; no default was emitted — the application \
                          must supply UUID values explicitly",
-                        col.name, table_name
+                        col.name, table_name, driver
                     ),
                     kind: ImportWarningKind::DefaultModified,
                 }]
@@ -757,7 +859,7 @@ impl GenericImporter {
                 if driver == "postgresql" {
                     return vec![];
                 }
-                let stripped = strip_pg_casts(expr);
+                let stripped = self.connection.normalize_import_check_expression(expr);
                 if stripped.contains('(') {
                     vec![ImportWarning {
                         table: Some(table_name.to_owned()),
@@ -831,14 +933,19 @@ impl GenericImporter {
 
         // PostgreSQL only supports STORED generated columns.  A VIRTUAL column
         // from another driver is coerced to STORED in the emitted DDL.
-        if target_driver == "postgresql" && !col.is_generated_stored {
+        if !col.is_generated_stored
+            && self.connection.generated_column_storage_keyword(false) != "VIRTUAL"
+        {
             warnings.push(ImportWarning {
                 table: Some(table_name.to_owned()),
                 column: Some(col.name.clone()),
                 message: format!(
-                    "Generated column '{}' in table '{}' was VIRTUAL in the source but PostgreSQL \
-                     only supports STORED generated columns; created as STORED instead",
-                    col.name, table_name
+                    "Generated column '{}' in table '{}' was VIRTUAL in the source but target \
+                     uses '{}' generated columns; created as '{}' instead",
+                    col.name,
+                    table_name,
+                    self.connection.generated_column_storage_keyword(false),
+                    self.connection.generated_column_storage_keyword(true)
                 ),
                 kind: ImportWarningKind::GeneratedColumnDegraded,
             });
@@ -866,11 +973,11 @@ impl GenericImporter {
         let mut enum_map: HashMap<String, EnumDefinition> = doc.schema.enums.clone();
         let mut synthesized: HashMap<(String, String), String> = HashMap::new();
 
-        let target_driver = self.connection.driver_name();
+        let target_supports_named_enums = self.supports_named_enum_types();
 
         // Anonymous enums (MySQL source) need a synthetic name on PostgreSQL targets.
         // On other targets they are handled inline by the type mapper so no synthesis needed.
-        if target_driver != "postgresql" && target_driver != "postgres" {
+        if !target_supports_named_enums {
             return (enum_map, synthesized);
         }
 
@@ -912,31 +1019,34 @@ impl GenericImporter {
             return vec![];
         };
 
-        let driver = self.connection.driver_name();
+        let supports_named_enums = self.supports_named_enum_types();
         let source_has_name = name.is_some();
 
-        match driver {
-            "sqlite" => vec![ImportWarning {
+        if !supports_named_enums {
+            return vec![ImportWarning {
                 table: Some(table_name.to_owned()),
                 column: Some(col.name.clone()),
                 message: format!(
-                    "Column '{}' in table '{}': named enum type converted to TEXT with CHECK \
-                     constraint on SQLite (no native enum type support)",
+                    "Column '{}' in table '{}': named enum type converted to inline/compat form \
+                     on target driver (no schema-level enum type support)",
                     col.name, table_name
                 ),
                 kind: ImportWarningKind::TypeConversion,
-            }],
-            "mysql" if source_has_name => vec![ImportWarning {
+            }];
+        }
+
+        if source_has_name {
+            vec![ImportWarning {
                 table: Some(table_name.to_owned()),
                 column: Some(col.name.clone()),
                 message: format!(
-                    "Column '{}' in table '{}': named PostgreSQL enum type converted to inline \
-                     MySQL ENUM column (named type dropped)",
+                    "Column '{}' in table '{}': named enum type preserved via target enum handling",
                     col.name, table_name
                 ),
                 kind: ImportWarningKind::TypeConversion,
-            }],
-            _ => vec![],
+            }]
+        } else {
+            vec![]
         }
     }
 
@@ -952,6 +1062,10 @@ impl GenericImporter {
             self.quote_identifier(&enum_def.name),
             values_sql.join(", ")
         )
+    }
+
+    fn foreign_key_checks_sql(&self) -> Option<zqlz_core::ForeignKeyChecksSql> {
+        self.connection.foreign_key_checks_sql()
     }
 
     /// Generates column SQL with an optional override of the canonical enum type name.
@@ -1003,6 +1117,7 @@ impl GenericImporter {
         index: &IndexDefinition,
     ) -> Result<String, IndexMappingOutcome> {
         let driver = self.connection.driver_name();
+        let capabilities = self.connection.import_index_capabilities();
         let unique = if index.unique { "UNIQUE " } else { "" };
 
         // Determine the effective access method and whether a degradation warning is needed.
@@ -1010,130 +1125,70 @@ impl GenericImporter {
             // BTREE is the universal default; omit USING clause for maximum portability.
             Some(IndexMethod::Btree) | None => (String::new(), None),
 
-            Some(IndexMethod::Hash) => match driver {
-                "postgresql" => (" USING HASH".to_string(), None),
-                // MySQL only supports HASH for MEMORY-engine tables; fall back to BTREE.
-                "mysql" => (
-                    String::new(),
-                    Some(format!(
-                        "Hash index '{}' on '{}' is only valid for MEMORY-engine tables on \
-                         MySQL; created as a BTREE index instead",
-                        index.name, table_name
-                    )),
-                ),
-                // SQLite has no HASH index support.
-                _ => (
-                    String::new(),
-                    Some(format!(
-                        "Hash index '{}' on '{}' has no equivalent on SQLite; \
-                         created as a BTREE index instead",
-                        index.name, table_name
-                    )),
-                ),
-            },
-
-            Some(IndexMethod::Gin) => match driver {
-                "postgresql" => (" USING GIN".to_string(), None),
-                "mysql" => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "GIN index '{}' on '{}' has no equivalent in MySQL — index dropped",
-                        index.name, table_name
-                    )));
+            Some(index_method) => {
+                let support = Self::index_method_support(&capabilities, index_method);
+                match (index_method, support) {
+                    (IndexMethod::Hash, IndexMethodSupport::Supported) => {
+                        (" USING HASH".to_string(), None)
+                    }
+                    (IndexMethod::Hash, IndexMethodSupport::DegradeToBtree) => (
+                        String::new(),
+                        Some(format!(
+                            "Hash index '{}' on '{}' is not fully supported on {}; created as a BTREE index instead",
+                            index.name, table_name, driver
+                        )),
+                    ),
+                    (IndexMethod::Gin, IndexMethodSupport::Supported) => {
+                        (" USING GIN".to_string(), None)
+                    }
+                    (IndexMethod::Gist, IndexMethodSupport::Supported) => {
+                        (" USING GIST".to_string(), None)
+                    }
+                    (IndexMethod::SpGist, IndexMethodSupport::Supported) => {
+                        (" USING SPGIST".to_string(), None)
+                    }
+                    (IndexMethod::Brin, IndexMethodSupport::Supported) => {
+                        (" USING BRIN".to_string(), None)
+                    }
+                    (IndexMethod::Fulltext, IndexMethodSupport::Supported) => {
+                        (" FULLTEXT".to_string(), None)
+                    }
+                    (IndexMethod::Spatial, IndexMethodSupport::Supported) => {
+                        (" SPATIAL".to_string(), None)
+                    }
+                    (IndexMethod::Spatial, IndexMethodSupport::DegradeToBtree)
+                        if capabilities.supports_gist =>
+                    {
+                        (
+                            " USING GIST".to_string(),
+                            Some(format!(
+                                "SPATIAL index '{}' on '{}' has been created as a GIST index on {}; verify geometry compatibility",
+                                index.name, table_name, driver
+                            )),
+                        )
+                    }
+                    (index_method, IndexMethodSupport::Skip) => {
+                        return Err(IndexMappingOutcome::Skipped(format!(
+                            "{:?} index '{}' on '{}' has no equivalent on {} — index dropped",
+                            index_method, index.name, table_name, driver
+                        )));
+                    }
+                    (_, IndexMethodSupport::DegradeToBtree) => (
+                        String::new(),
+                        Some(format!(
+                            "Index '{}' on '{}' was degraded to BTREE on {}",
+                            index.name, table_name, driver
+                        )),
+                    ),
+                    _ => (
+                        String::new(),
+                        Some(format!(
+                            "Index '{}' on '{}' has unsupported method for {}; created as BTREE",
+                            index.name, table_name, driver
+                        )),
+                    ),
                 }
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "GIN index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
-
-            Some(IndexMethod::Gist) => match driver {
-                "postgresql" => (" USING GIST".to_string(), None),
-                "mysql" => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "GIST index '{}' on '{}' has no equivalent in MySQL — index dropped",
-                        index.name, table_name
-                    )));
-                }
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "GIST index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
-
-            Some(IndexMethod::SpGist) => match driver {
-                "postgresql" => (" USING SPGIST".to_string(), None),
-                "mysql" => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "SP-GIST index '{}' on '{}' has no equivalent in MySQL — index dropped",
-                        index.name, table_name
-                    )));
-                }
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "SP-GIST index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
-
-            Some(IndexMethod::Brin) => match driver {
-                "postgresql" => (" USING BRIN".to_string(), None),
-                "mysql" => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "BRIN index '{}' on '{}' has no equivalent in MySQL — index dropped",
-                        index.name, table_name
-                    )));
-                }
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "BRIN index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
-
-            Some(IndexMethod::Fulltext) => match driver {
-                // MySQL FULLTEXT indexes use a keyword in place of USING.
-                "mysql" => (" FULLTEXT".to_string(), None),
-                "postgresql" => (
-                    String::new(),
-                    Some(format!(
-                        "FULLTEXT index '{}' on '{}': PostgreSQL uses tsvector/GIN for \
-                         full-text search — a regular BTREE index has been created as a \
-                         partial substitute; manually add a GIN index on a tsvector column",
-                        index.name, table_name
-                    )),
-                ),
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "FULLTEXT index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
-
-            Some(IndexMethod::Spatial) => match driver {
-                "mysql" => (" SPATIAL".to_string(), None),
-                // PostgreSQL uses GIST for spatial data.
-                "postgresql" => (
-                    " USING GIST".to_string(),
-                    Some(format!(
-                        "SPATIAL index '{}' on '{}' has been created as a GIST index on \
-                         PostgreSQL; verify that the column uses a geometry type (PostGIS)",
-                        index.name, table_name
-                    )),
-                ),
-                _ => {
-                    return Err(IndexMappingOutcome::Skipped(format!(
-                        "SPATIAL index '{}' on '{}' has no equivalent on this driver — index dropped",
-                        index.name, table_name
-                    )));
-                }
-            },
+            }
         };
 
         // Build the per-column list with optional ASC/DESC.
@@ -1151,10 +1206,10 @@ impl GenericImporter {
                 }
                 match c.nulls {
                     NullsOrder::Default => {}
-                    NullsOrder::First if matches!(driver, "postgresql" | "sqlite") => {
+                    NullsOrder::First if capabilities.supports_nulls_ordering => {
                         col.push_str(" NULLS FIRST")
                     }
-                    NullsOrder::Last if matches!(driver, "postgresql" | "sqlite") => {
+                    NullsOrder::Last if capabilities.supports_nulls_ordering => {
                         col.push_str(" NULLS LAST")
                     }
                     // MySQL: no NULLS ordering syntax — silently omit.
@@ -1167,17 +1222,20 @@ impl GenericImporter {
         // Partial index WHERE clause: PostgreSQL and SQLite support it.
         // On MySQL we omit it with a degradation warning so the index covers all rows.
         let (where_fragment, where_warning) = match &index.where_clause {
-            Some(clause) => match driver {
-                "postgresql" | "sqlite" => (format!(" WHERE {}", clause), None),
-                _ => (
-                    String::new(),
-                    Some(format!(
-                        "Partial index '{}' on '{}' (WHERE {}) is not supported on {}; \
+            Some(clause) => {
+                if capabilities.supports_partial {
+                    (format!(" WHERE {}", clause), None)
+                } else {
+                    (
+                        String::new(),
+                        Some(format!(
+                            "Partial index '{}' on '{}' (WHERE {}) is not supported on {}; \
                          created as a full-table index covering all rows instead",
-                        index.name, table_name, clause, driver
-                    )),
-                ),
-            },
+                            index.name, table_name, clause, driver
+                        )),
+                    )
+                }
+            }
             None => (String::new(), None),
         };
 
@@ -1186,34 +1244,32 @@ impl GenericImporter {
         // requirement) and emit a degradation warning.
         let (include_fragment, include_warning) = if index.include_columns.is_empty() {
             (String::new(), None)
+        } else if capabilities.supports_include {
+            let quoted: Vec<String> = index
+                .include_columns
+                .iter()
+                .map(|c| self.quote_identifier(c))
+                .collect();
+            (format!(" INCLUDE ({})", quoted.join(", ")), None)
         } else {
-            match driver {
-                "postgresql" => {
-                    let quoted: Vec<String> = index
-                        .include_columns
-                        .iter()
-                        .map(|c| self.quote_identifier(c))
-                        .collect();
-                    (format!(" INCLUDE ({})", quoted.join(", ")), None)
-                }
-                _ => (
-                    String::new(),
-                    Some(format!(
-                        "Covering index '{}' on '{}' has INCLUDE columns {:?} which are not \
-                         supported on {}; index created without INCLUDE columns",
-                        index.name, table_name, index.include_columns, driver
-                    )),
-                ),
-            }
+            (
+                String::new(),
+                Some(format!(
+                    "Covering index '{}' on '{}' has INCLUDE columns {:?} which are not \
+                     supported on {}; index created without INCLUDE columns",
+                    index.name, table_name, index.include_columns, driver
+                )),
+            )
         };
 
         // FULLTEXT on MySQL does not accept the UNIQUE keyword — guard defensively.
-        let unique_keyword =
-            if index.index_method == Some(IndexMethod::Fulltext) && driver == "mysql" {
-                ""
-            } else {
-                unique
-            };
+        let unique_keyword = if index.index_method == Some(IndexMethod::Fulltext)
+            && capabilities.supports_fulltext
+        {
+            ""
+        } else {
+            unique
+        };
 
         let sql = format!(
             "CREATE {}INDEX{} {} ON {} ({}){}{}",
@@ -1299,12 +1355,7 @@ impl GenericImporter {
     /// carry for the current driver.  Staying within this limit prevents
     /// "too many SQL variables" errors from the underlying driver.
     fn max_params_per_statement(&self) -> usize {
-        match self.connection.driver_name() {
-            // SQLite's compile-time default is 32766 (SQLITE_MAX_VARIABLE_NUMBER)
-            "sqlite" => 32_766,
-            // PostgreSQL and MySQL both support up to 65535 bind parameters
-            _ => 65_535,
-        }
+        self.connection.max_bind_parameters()
     }
 
     /// Calculates how many rows can fit in a single batch INSERT without
@@ -1329,19 +1380,14 @@ impl GenericImporter {
         col_names: &[String],
         row_count: usize,
     ) -> String {
-        let driver = self.connection.driver_name();
         let cols_per_row = col_names.len();
 
         let value_rows: Vec<String> = (0..row_count)
             .map(|row_idx| {
                 let placeholders: Vec<String> = (0..cols_per_row)
                     .map(|col_idx| {
-                        if driver == "postgresql" {
-                            // Globally-numbered to match the flat params slice
-                            format!("${}", row_idx * cols_per_row + col_idx + 1)
-                        } else {
-                            "?".to_string()
-                        }
+                        self.connection
+                            .format_bind_placeholder(row_idx * cols_per_row + col_idx)
                     })
                     .collect();
                 format!("({})", placeholders.join(", "))
@@ -1357,11 +1403,7 @@ impl GenericImporter {
     }
 
     fn quote_identifier(&self, name: &str) -> String {
-        match self.connection.driver_name() {
-            "mysql" => format!("`{}`", name),
-            "mssql" => format!("[{}]", name),
-            _ => format!("\"{}\"", name),
-        }
+        self.connection.quote_identifier(name)
     }
 
     fn value_to_sql(&self, value: &Value) -> String {
@@ -1431,56 +1473,34 @@ impl GenericImporter {
         table_name: &str,
         table_def: &TableDefinition,
     ) -> Result<(), ImportError> {
-        let driver = self.connection.driver_name();
-        let quoted = self.quote_identifier(table_name);
+        let object_name = parse_sql_object_name(table_name);
 
-        match driver {
-            "sqlite" => {
-                // SQLite does not support TRUNCATE; DELETE FROM achieves the same
-                // logical effect but leaves the sqlite_sequence counter intact.
-                self.connection
-                    .execute(&format!("DELETE FROM {}", quoted), &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
+        self.connection
+            .execute(&self.connection.truncate_table_sql(&object_name)?, &[])
+            .await
+            .map_err(|e| ImportError::QueryError(e.to_string()))?;
 
-                // When the table has any AUTOINCREMENT column, resetting
-                // sqlite_sequence ensures the next INSERT starts from 1 rather
-                // than continuing from the previous high-water mark.
-                let has_autoincrement = table_def.columns.iter().any(|c| {
-                    c.auto_increment
-                        || matches!(
-                            c.canonical_type,
-                            crate::CanonicalType::Serial
-                                | crate::CanonicalType::SmallSerial
-                                | crate::CanonicalType::BigSerial
-                        )
-                });
+        // When the table has any AUTOINCREMENT column and the driver exposes a
+        // reset statement, run it best-effort so next INSERT values restart.
+        let has_autoincrement = table_def.columns.iter().any(|column| {
+            column.auto_increment
+                || matches!(
+                    column.canonical_type,
+                    crate::CanonicalType::Serial
+                        | crate::CanonicalType::SmallSerial
+                        | crate::CanonicalType::BigSerial
+                )
+        });
 
-                if has_autoincrement {
-                    // sqlite_sequence may not exist if no AUTOINCREMENT table has
-                    // ever had a row inserted; ignore the error in that case.
-                    let reset_sql = format!(
-                        "DELETE FROM sqlite_sequence WHERE name = '{}'",
-                        table_name.replace('\'', "''")
-                    );
-                    if let Err(e) = self.connection.execute(&reset_sql, &[]).await {
-                        tracing::warn!(
-                            table = table_name,
-                            error = %e,
-                            "could not reset sqlite_sequence for table — sequence counter \
-                             may not start from 1 after import"
-                        );
-                    }
-                }
-            }
-            // PostgreSQL and MySQL both support TRUNCATE TABLE which is faster
-            // than DELETE FROM and resets MySQL AUTO_INCREMENT counters.
-            _ => {
-                self.connection
-                    .execute(&format!("TRUNCATE TABLE {}", quoted), &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
-            }
+        if has_autoincrement
+            && let Some(reset_sql) = self.connection.reset_table_identity_sql(&object_name)
+            && let Err(error) = self.connection.execute(&reset_sql, &[]).await
+        {
+            tracing::warn!(
+                table = table_name,
+                error = %error,
+                "could not reset table identity after truncate"
+            );
         }
 
         Ok(())
@@ -1605,8 +1625,6 @@ impl GenericImporter {
         options: &ImportOptions,
         result: &mut ImportResult,
     ) -> Result<(), ImportError> {
-        let driver = self.connection.driver_name();
-
         for seq in doc.schema.sequences.values() {
             let current_value = match seq.current_value {
                 Some(v) => v,
@@ -1615,58 +1633,22 @@ impl GenericImporter {
                 None => continue,
             };
 
-            let sql_opt: Option<String> = match driver {
-                "postgresql" | "postgres" => {
-                    // seq.name for PostgreSQL is the actual sequence object name.
-                    Some(format!(
-                        "SELECT setval('{}', {}, true)",
-                        seq.name.replace('\'', "''"),
-                        current_value
-                    ))
-                }
+            if let Some((table_name, _column_name)) = seq.name.split_once('.')
+                && !self.should_include_table(table_name, options)
+            {
+                continue;
+            }
 
-                "mysql" => {
-                    // For MySQL the key is "<table>.<column>"; extract the table
-                    // so we can issue ALTER TABLE.
-                    let table_name = match seq.name.split_once('.') {
-                        Some((table, _col)) => table,
-                        // Unexpected format — skip rather than corrupt the schema.
-                        None => continue,
-                    };
-                    let target_table = self.get_target_table_name(table_name, options);
-                    if !self.should_include_table(table_name, options) {
-                        continue;
-                    }
-                    Some(format!(
-                        "ALTER TABLE {} AUTO_INCREMENT = {}",
-                        self.quote_identifier(&target_table),
-                        // MySQL's AUTO_INCREMENT is the *next* value to assign.
-                        current_value + 1
-                    ))
-                }
-
-                "sqlite" => {
-                    let table_name = match seq.name.split_once('.') {
-                        Some((table, _col)) => table,
-                        None => continue,
-                    };
-                    let target_table = self.get_target_table_name(table_name, options);
-                    if !self.should_include_table(table_name, options) {
-                        continue;
-                    }
-                    // sqlite_sequence may not exist if no AUTOINCREMENT table has
-                    // had a row inserted yet in this session, but the row for our
-                    // table definitely does not exist — INSERT OR REPLACE is safe.
-                    Some(format!(
-                        "INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('{}', {})",
-                        target_table.replace('\'', "''"),
-                        current_value
-                    ))
-                }
-
-                // Unknown driver: nothing to do.
-                _ => None,
+            let sequence_name = if let Some((table_name, column_name)) = seq.name.split_once('.') {
+                let mapped_table_name = self.get_target_table_name(table_name, options);
+                format!("{}.{}", mapped_table_name, column_name)
+            } else {
+                seq.name.clone()
             };
+
+            let sql_opt = self
+                .connection
+                .restore_sequence_sql(&sequence_name, current_value);
 
             if let Some(sql) = sql_opt {
                 match self.connection.execute(&sql, &[]).await {
@@ -1850,37 +1832,35 @@ impl Importer for GenericImporter {
         // when the target is PostgreSQL.
         let (resolved_enums, synthesized_enum_columns) = self.resolve_enum_types(doc);
 
-        if options.create_tables && !resolved_enums.is_empty() {
-            let driver = self.connection.driver_name();
-            // Only PostgreSQL uses schema-level CREATE TYPE.  MySQL handles enums inline
-            // in column DDL; SQLite maps them to TEXT + CHECK constraint.
-            if matches!(driver, "postgresql" | "postgres") {
-                progress(ImportProgress {
-                    phase: ImportPhase::CreatingEnumTypes,
-                    current_table: None,
-                    total_tables,
-                    tables_completed: 0,
-                    rows_imported: 0,
-                    total_rows: None,
-                    current_error: None,
-                });
+        if options.create_tables
+            && !resolved_enums.is_empty()
+            && self.connection.supports_import_named_enum_types()
+        {
+            progress(ImportProgress {
+                phase: ImportPhase::CreatingEnumTypes,
+                current_table: None,
+                total_tables,
+                tables_completed: 0,
+                rows_imported: 0,
+                total_rows: None,
+                current_error: None,
+            });
 
-                for enum_def in resolved_enums.values() {
-                    let sql = self.generate_create_enum_type_sql(enum_def);
-                    match self.connection.execute(&sql, &[]).await {
-                        Ok(_) => {}
-                        Err(e) => {
-                            if options.continue_on_error {
-                                result.errors.push(format!(
-                                    "Failed to create enum type '{}': {}",
-                                    enum_def.name, e
-                                ));
-                            } else {
-                                return Err(ImportError::QueryError(format!(
-                                    "Failed to create enum type '{}': {}",
-                                    enum_def.name, e
-                                )));
-                            }
+            for enum_def in resolved_enums.values() {
+                let sql = self.generate_create_enum_type_sql(enum_def);
+                match self.connection.execute(&sql, &[]).await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        if options.continue_on_error {
+                            result.errors.push(format!(
+                                "Failed to create enum type '{}': {}",
+                                enum_def.name, e
+                            ));
+                        } else {
+                            return Err(ImportError::QueryError(format!(
+                                "Failed to create enum type '{}': {}",
+                                enum_def.name, e
+                            )));
                         }
                     }
                 }
@@ -1936,41 +1916,36 @@ impl Importer for GenericImporter {
                     result.tables_created += 1;
 
                     // Emit enforcement warnings for CHECK constraints on drivers that
-                    // may not enforce them.  MySQL < 8.0.16 parses CHECK syntax but
-                    // silently ignores it; we always warn for MySQL since we cannot
-                    // query the server version through the Connection trait.  SQLite
-                    // enforces CHECK from 3.25.2+ but we cannot verify the version
-                    // either, so we also warn for SQLite to prompt the user to verify.
-                    let driver = self.connection.driver_name();
-                    for check in &table_def.check_constraints {
-                        let message = match driver {
-                            "mysql" => format!(
-                                "CHECK constraint '{}' on table '{}' is parsed but NOT enforced \
-                                 on MySQL < 8.0.16; verify your MySQL version supports enforcement",
-                                check.name.as_deref().unwrap_or("<unnamed>"),
-                                table_name
-                            ),
-                            "sqlite" => format!(
-                                "CHECK constraint '{}' on table '{}' requires SQLite >= 3.25.2 \
-                                 for enforcement; verify your SQLite version",
-                                check.name.as_deref().unwrap_or("<unnamed>"),
-                                table_name
-                            ),
-                            _ => continue,
-                        };
-                        result.push_warning(
-                            ImportWarning {
-                                table: Some(table_name.to_string()),
-                                column: None,
-                                message,
-                                kind: ImportWarningKind::CheckConstraintNonEnforced,
-                            },
-                            DegradationCategory::CheckConstraint,
-                            check.name.clone(),
-                            "CHECK constraint",
-                            format!("not enforced on {}", driver),
-                            DegradationSeverity::Warning,
-                        );
+                    // may not enforce them.
+                    if !table_def.check_constraints.is_empty() {
+                        match self.connection.check_constraint_enforcement() {
+                            CheckConstraintEnforcement::Enforced => {}
+                            CheckConstraintEnforcement::NotEnforced
+                            | CheckConstraintEnforcement::Unknown => {
+                                let driver = self.connection.driver_name();
+                                for check in &table_def.check_constraints {
+                                    let message = format!(
+                                        "CHECK constraint '{}' on table '{}' may not be enforced on {}; verify server/version-specific behavior",
+                                        check.name.as_deref().unwrap_or("<unnamed>"),
+                                        table_name,
+                                        driver
+                                    );
+                                    result.push_warning(
+                                        ImportWarning {
+                                            table: Some(table_name.to_string()),
+                                            column: None,
+                                            message,
+                                            kind: ImportWarningKind::CheckConstraintNonEnforced,
+                                        },
+                                        DegradationCategory::CheckConstraint,
+                                        check.name.clone(),
+                                        "CHECK constraint",
+                                        format!("check enforcement unknown on {}", driver),
+                                        DegradationSeverity::Warning,
+                                    );
+                                }
+                            }
+                        }
                     }
 
                     // Emit per-column default-value degradation warnings for semantic
@@ -2302,24 +2277,14 @@ impl Importer for GenericImporter {
                 .map(|(name, _)| self.get_target_table_name(name, options))
                 .collect();
 
-            let driver = self.connection.driver_name();
+            let fk_checks_sql = self.foreign_key_checks_sql();
 
             // On MySQL, FK checks during bulk load can cause ordering failures
             // when tables reference each other.  Disable them for the duration
             // of FK creation and re-enable afterwards.
-            if driver == "mysql" {
+            if let Some(sql) = fk_checks_sql.as_ref() {
                 self.connection
-                    .execute("SET FOREIGN_KEY_CHECKS=0", &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
-            }
-
-            // On SQLite, FK enforcement must be off while we ALTER TABLE because
-            // the referenced tables may not all exist yet at the time each
-            // constraint is applied.
-            if driver == "sqlite" {
-                self.connection
-                    .execute("PRAGMA foreign_keys = OFF", &[])
+                    .execute(&sql.disable_sql, &[])
                     .await
                     .map_err(|e| ImportError::QueryError(e.to_string()))?;
             }
@@ -2379,17 +2344,8 @@ impl Importer for GenericImporter {
                             } else {
                                 // Best-effort re-enable before returning so the
                                 // connection is left in a clean state.
-                                if driver == "mysql" {
-                                    let _ = self
-                                        .connection
-                                        .execute("SET FOREIGN_KEY_CHECKS=1", &[])
-                                        .await;
-                                }
-                                if driver == "sqlite" {
-                                    let _ = self
-                                        .connection
-                                        .execute("PRAGMA foreign_keys = ON", &[])
-                                        .await;
+                                if let Some(sql) = fk_checks_sql.as_ref() {
+                                    let _ = self.connection.execute(&sql.enable_sql, &[]).await;
                                 }
                                 return Err(ImportError::QueryError(e.to_string()));
                             }
@@ -2399,15 +2355,9 @@ impl Importer for GenericImporter {
             }
 
             // Re-enable FK checks now that all constraints have been applied.
-            if driver == "mysql" {
+            if let Some(sql) = fk_checks_sql.as_ref() {
                 self.connection
-                    .execute("SET FOREIGN_KEY_CHECKS=1", &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
-            }
-            if driver == "sqlite" {
-                self.connection
-                    .execute("PRAGMA foreign_keys = ON", &[])
+                    .execute(&sql.enable_sql, &[])
                     .await
                     .map_err(|e| ImportError::QueryError(e.to_string()))?;
             }
@@ -2463,42 +2413,6 @@ pub mod helpers {
     }
 }
 
-/// Removes PostgreSQL-style cast suffixes (`::typename`) from a SQL expression string.
-///
-/// PG defaults and CHECK expressions often contain casts like `'foo'::text` or
-/// `(0)::numeric` that are syntactically invalid on SQLite and MySQL.  This helper
-/// strips the trailing `::identifier` (or `::identifier[]`) tokens so the resulting
-/// expression is at least parseable on all three drivers.  The result may still need
-/// further inspection (e.g. if function calls remain) but the cast noise is gone.
-fn strip_pg_casts(expr: &str) -> String {
-    // Repeatedly remove trailing `::word` / `::word[]` segments.
-    // We use a simple scan rather than a regex to keep the dependency footprint small.
-    let mut result = expr.to_owned();
-    loop {
-        // Find the last occurrence of `::` that is followed by an identifier.
-        let Some(cast_start) = result.rfind("::") else {
-            break;
-        };
-        let after = &result[cast_start + 2..];
-        // An identifier is [A-Za-z_][A-Za-z0-9_ ]* optionally followed by `[]`.
-        let ident_len = after
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ' ')
-            .map(char::len_utf8)
-            .sum::<usize>();
-        if ident_len == 0 {
-            break;
-        }
-        let mut end = cast_start + 2 + ident_len;
-        // Also consume a trailing `[]` if present.
-        if result[end..].starts_with("[]") {
-            end += 2;
-        }
-        result.replace_range(cast_start..end, "");
-    }
-    result
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2516,6 +2430,174 @@ mod tests {
     impl zqlz_core::Connection for MockConnection {
         fn driver_name(&self) -> &str {
             self.driver
+        }
+
+        fn rename_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &str,
+        ) -> Result<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropTableOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropViewOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &zqlz_core::SqlObjectName,
+            _table_name: Option<&zqlz_core::SqlObjectName>,
+            _options: zqlz_core::DropTriggerOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &zqlz_core::SqlObjectName,
+        ) -> Result<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+        ) -> Result<String> {
+            let projection = if projected_columns.is_empty() {
+                "*".to_string()
+            } else {
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                projection,
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            Ok(sql)
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+            order_by_columns: &[String],
+            limit: u64,
+        ) -> Result<String> {
+            let mut sql = format!(
+                "SELECT DISTINCT {} FROM {}",
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            if !order_by_columns.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(
+                    &order_by_columns
+                        .iter()
+                        .map(|column| self.quote_identifier(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            sql.push_str(&format!(" LIMIT {}", limit));
+            Ok(sql)
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> Result<String> {
+            let placeholders = (0..value_count)
+                .map(|index| self.format_bind_placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let columns = column_names
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                columns,
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> Result<String> {
+            Ok("SELECT 0 as total_queries".to_string())
         }
 
         async fn execute(&self, _sql: &str, _params: &[Value]) -> Result<StatementResult> {
@@ -2585,6 +2667,174 @@ mod tests {
     impl zqlz_core::Connection for TrackingConnection {
         fn driver_name(&self) -> &str {
             self.driver
+        }
+
+        fn rename_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &str,
+        ) -> Result<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropTableOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropViewOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &zqlz_core::SqlObjectName,
+            _table_name: Option<&zqlz_core::SqlObjectName>,
+            _options: zqlz_core::DropTriggerOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &zqlz_core::SqlObjectName,
+        ) -> Result<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+        ) -> Result<String> {
+            let projection = if projected_columns.is_empty() {
+                "*".to_string()
+            } else {
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                projection,
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            Ok(sql)
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+            order_by_columns: &[String],
+            limit: u64,
+        ) -> Result<String> {
+            let mut sql = format!(
+                "SELECT DISTINCT {} FROM {}",
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            if !order_by_columns.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(
+                    &order_by_columns
+                        .iter()
+                        .map(|column| self.quote_identifier(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            sql.push_str(&format!(" LIMIT {}", limit));
+            Ok(sql)
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> Result<String> {
+            let placeholders = (0..value_count)
+                .map(|index| self.format_bind_placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let columns = column_names
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                columns,
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> Result<String> {
+            Ok("SELECT 0 as total_queries".to_string())
         }
 
         async fn execute(&self, sql: &str, _params: &[Value]) -> Result<StatementResult> {

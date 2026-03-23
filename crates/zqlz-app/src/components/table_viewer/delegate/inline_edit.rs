@@ -224,6 +224,9 @@ impl TableViewerDelegate {
             None => return,
         };
 
+        self.fk_request_id = self.fk_request_id.saturating_add(1);
+        let request_id = self.fk_request_id;
+
         let cached_values = self
             .get_fk_values(&fk_info.referenced_table)
             .cloned()
@@ -241,15 +244,21 @@ impl TableViewerDelegate {
                 .map(|i| IndexPath::default().row(i))
         };
 
-        let searchable_items = SearchableVec::new(cached_values);
-        let fk_select = cx.new(|cx| {
-            SelectState::new(searchable_items, selected_index, window, cx).searchable(true)
-        });
+        let fk_delegate = FkSelectDelegate {
+            items: cached_values,
+            table_name: fk_info.referenced_table.clone(),
+            referenced_columns: fk_info.referenced_columns.clone(),
+            connection_id: self.connection_id,
+            viewer_panel: self.viewer_panel.clone(),
+            request_id,
+        };
+        let fk_select =
+            cx.new(|cx| SelectState::new(fk_delegate, selected_index, window, cx).searchable(true));
 
         cx.subscribe_in(
             &fk_select,
             window,
-            move |table, _select, event: &SelectEvent<SearchableVec<FkSelectItem>>, _window, cx| {
+            move |table, _select, event: &SelectEvent<FkSelectDelegate>, _window, cx| {
                 let SelectEvent::Confirm(selected_value) = event;
                 let new_value = selected_value
                     .as_ref()
@@ -281,6 +290,9 @@ impl TableViewerDelegate {
                         connection_id,
                         referenced_table,
                         referenced_columns,
+                        query: None,
+                        limit: 10,
+                        request_id,
                     });
                 }) {
                     tracing::error!("Failed to emit LoadFkValues: {:?}", error);

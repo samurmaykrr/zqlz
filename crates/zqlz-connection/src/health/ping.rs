@@ -63,28 +63,11 @@ pub async fn ping_database(conn: &dyn Connection) -> PingResult {
     // Execute a minimal query and time it
     let start = Instant::now();
 
-    // Use driver-appropriate ping query
-    let ping_query = get_ping_query(conn.driver_name());
+    // Use the connection-provided ping query
+    let ping_query = conn.ping_query_sql();
 
     match conn.query(ping_query, &[]).await {
         Ok(_) => Ok(start.elapsed()),
         Err(e) => Err(PingError::QueryFailed(e.to_string())),
-    }
-}
-
-/// Get the appropriate ping query for a given driver.
-///
-/// Different databases have different optimal ping queries:
-/// - PostgreSQL: `SELECT 1` or `;` (empty statement)
-/// - MySQL: `SELECT 1` or `DO 1`
-/// - SQLite: `SELECT 1`
-/// - MS SQL: `SELECT 1`
-pub(super) fn get_ping_query(driver_name: &str) -> &'static str {
-    match driver_name {
-        "mysql" => "SELECT 1",
-        "postgresql" | "postgres" => "SELECT 1",
-        "sqlite" => "SELECT 1",
-        "mssql" => "SELECT 1",
-        _ => "SELECT 1", // Generic fallback
     }
 }

@@ -2,6 +2,7 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
+use zqlz_core::SqlObjectName;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, checkbox::Checkbox,
     dialog::DialogButtonProps, v_flex,
@@ -77,7 +78,17 @@ impl MainView {
                     let table_name = table_name.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = format!("DELETE FROM \"{}\"", table_name);
+                        let sql = match connection.truncate_table_sql(&SqlObjectName::new(&table_name)) {
+                            Ok(sql) => sql,
+                            Err(error) => {
+                                tracing::error!(
+                                    table = %table_name,
+                                    %error,
+                                    "Failed to build truncate table SQL"
+                                );
+                                return;
+                            }
+                        };
                         match connection.execute(&sql, &[]).await {
                             Ok(result) => {
                                 let rows_deleted = result.affected_rows;
@@ -217,7 +228,21 @@ impl MainView {
                         let mut total_rows = 0u64;
 
                         for table_name in &table_names {
-                            let sql = format!("DELETE FROM \"{}\"", table_name);
+                            let sql = match connection.truncate_table_sql(&SqlObjectName::new(table_name)) {
+                                Ok(sql) => sql,
+                                Err(error) => {
+                                    let error_msg = format!(
+                                        "'{}': failed to build truncate SQL ({})",
+                                        table_name, error
+                                    );
+                                    tracing::error!("{}", error_msg);
+                                    if continue_on_error {
+                                        errors.push(error_msg);
+                                        continue;
+                                    }
+                                    return;
+                                }
+                            };
                             match connection.execute(&sql, &[]).await {
                                 Ok(result) => {
                                     let rows_deleted = result.affected_rows;

@@ -5,13 +5,39 @@ use parking_lot::Mutex;
 use rusqlite::{Connection as RusqliteConnection, InterruptHandle, OpenFlags, params_from_iter};
 use std::sync::Arc;
 use zqlz_core::{
-    ColumnInfo, ColumnMeta, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
-    ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectsPanelColumn,
+    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnInfo, ColumnMeta, Connection,
+    ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency, DropTableOptions, DropTriggerOptions,
+    DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyAction, ForeignKeyChecksSql,
+    ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities, IndexInfo, ObjectsPanelColumn,
     ObjectsPanelData, ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle,
-    QueryResult, Result, Row, SchemaInfo, SchemaIntrospection, SequenceInfo, StatementResult,
-    TableDetails, TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value, ViewInfo,
-    ZqlzError,
+    QueryResult, Result, Row, SchemaInfo, SchemaIntrospection, SequenceInfo, SqlObjectName,
+    StatementResult, TableDetails, TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value,
+    ViewInfo, ZqlzError,
 };
+
+fn strip_pg_casts(expr: &str) -> String {
+    let mut result = expr.to_owned();
+    loop {
+        let Some(cast_start) = result.rfind("::") else {
+            break;
+        };
+        let after = &result[cast_start + 2..];
+        let ident_len = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ' ')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if ident_len == 0 {
+            break;
+        }
+        let mut end = cast_start + 2 + ident_len;
+        if result[end..].starts_with("[]") {
+            end += 2;
+        }
+        result.replace_range(cast_start..end, "");
+    }
+    result
+}
 
 /// Cancel handle for SQLite queries.
 ///
@@ -337,6 +363,368 @@ impl Connection for SqliteConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("sqlite")
+    }
+
+    fn explain_config(&self) -> ExplainConfig {
+        ExplainConfig::sqlite()
+    }
+
+    fn explain_parser_kind(&self) -> ExplainParserKind {
+        ExplainParserKind::Sqlite
+    }
+
+    fn quote_identifier(&self, identifier: &str) -> String {
+        format!("\"{}\"", Self::sqlite_identifier_literal(identifier))
+    }
+
+    fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+        BindPlaceholderPolicy::QuestionMark
+    }
+
+    fn max_bind_parameters(&self) -> usize {
+        32_766
+    }
+
+    fn search_text_cast_expression(&self, expression_sql: &str) -> String {
+        format!("CAST({} AS TEXT)", expression_sql)
+    }
+
+    fn normalize_import_check_expression(&self, expression_sql: &str) -> String {
+        strip_pg_casts(expression_sql)
+    }
+
+    fn supports_partial_indexes(&self) -> bool {
+        true
+    }
+
+    fn supports_include_indexes(&self) -> bool {
+        false
+    }
+
+    fn supports_nulls_ordering_in_indexes(&self) -> bool {
+        true
+    }
+
+    fn import_index_capabilities(&self) -> ImportIndexCapabilities {
+        ImportIndexCapabilities {
+            supports_hash: false,
+            supports_gin: false,
+            supports_gist: false,
+            supports_spgist: false,
+            supports_brin: false,
+            supports_fulltext: false,
+            supports_spatial: false,
+            supports_partial: true,
+            supports_include: false,
+            supports_nulls_ordering: true,
+        }
+    }
+
+    fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
+        if table_name.namespace.is_some() {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support schema-qualified RENAME TABLE".to_string(),
+            ));
+        }
+
+        Ok(format!(
+            "ALTER TABLE {} RENAME TO {}",
+            self.quote_identifier(&table_name.name),
+            self.quote_identifier(new_table_name)
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        table_name: &SqlObjectName,
+        options: DropTableOptions,
+    ) -> Result<String> {
+        if table_name.namespace.is_some() {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support schema-qualified DROP TABLE".to_string(),
+            ));
+        }
+
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support DROP TABLE ... CASCADE".to_string(),
+            ));
+        }
+
+        let mut sql = String::from("DROP TABLE");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.quote_identifier(&table_name.name));
+        Ok(sql)
+    }
+
+    fn drop_view_sql(&self, view_name: &SqlObjectName, options: DropViewOptions) -> Result<String> {
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support DROP VIEW ... CASCADE".to_string(),
+            ));
+        }
+
+        if view_name.namespace.is_some() {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support schema-qualified DROP VIEW".to_string(),
+            ));
+        }
+
+        let mut sql = String::from("DROP VIEW");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.quote_identifier(&view_name.name));
+        Ok(sql)
+    }
+
+    fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "DELETE FROM {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        options: DropTriggerOptions,
+    ) -> Result<String> {
+        if trigger_name.namespace.is_some() {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support schema-qualified DROP TRIGGER".to_string(),
+            ));
+        }
+
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support DROP TRIGGER ... CASCADE".to_string(),
+            ));
+        }
+
+        let mut sql = String::from("DROP TRIGGER");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.quote_identifier(&trigger_name.name));
+        Ok(sql)
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        source_table_name: &SqlObjectName,
+        new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        if source_table_name.namespace.is_some() || new_table_name.namespace.is_some() {
+            return Err(ZqlzError::NotSupported(
+                "SQLite does not support schema-qualified table duplication".to_string(),
+            ));
+        }
+
+        Ok(format!(
+            "CREATE TABLE {} AS SELECT * FROM {}",
+            self.quote_identifier(&new_table_name.name),
+            self.quote_identifier(&source_table_name.name)
+        ))
+    }
+
+    fn clear_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "DELETE FROM {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn table_has_rows_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "SELECT 1 FROM {} LIMIT 1",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        let projection = if projected_columns.is_empty() {
+            "*".to_string()
+        } else {
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut sql = format!(
+            "SELECT {} FROM {}",
+            projection,
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        Ok(sql)
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+        order_by_columns: &[String],
+        limit: u64,
+    ) -> Result<String> {
+        let mut sql = format!(
+            "SELECT DISTINCT {} FROM {}",
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        if !order_by_columns.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(
+                &order_by_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+
+        sql.push_str(&format!(" LIMIT {}", limit));
+        Ok(sql)
+    }
+
+    fn insert_row_sql(
+        &self,
+        table_name: &SqlObjectName,
+        column_names: &[String],
+        value_count: usize,
+    ) -> Result<String> {
+        let placeholders = (0..value_count)
+            .map(|index| self.format_bind_placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = column_names
+            .iter()
+            .map(|column| self.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Ok(format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.render_qualified_name(table_name),
+            columns,
+            placeholders
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Ok("SELECT 0 as total_queries".to_string())
+    }
+
+    fn reset_table_identity_sql(&self, table_name: &SqlObjectName) -> Option<String> {
+        Some(format!(
+            "DELETE FROM sqlite_sequence WHERE name = '{}'",
+            table_name.name.replace('\'', "''")
+        ))
+    }
+
+    fn restore_sequence_sql(&self, sequence_name: &str, current_value: i64) -> Option<String> {
+        let table_name = sequence_name
+            .split_once('.')
+            .map(|(table, _)| table)
+            .unwrap_or(sequence_name);
+        Some(format!(
+            "INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('{}', {})",
+            table_name.replace('\'', "''"),
+            current_value
+        ))
+    }
+
+    async fn export_sequence_current_value(
+        &self,
+        table_name: &str,
+        _column_name: &str,
+    ) -> Result<Option<i64>> {
+        let sql = format!(
+            "SELECT seq FROM sqlite_sequence WHERE name = '{}'",
+            table_name.replace('\'', "''")
+        );
+        let result = self.query(&sql, &[]).await?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.values.first())
+            .and_then(|value| value.as_i64())
+            .filter(|value| *value > 0))
+    }
+
+    async fn resolve_session_namespace(&self) -> Result<Option<String>> {
+        Ok(Some("main".to_string()))
+    }
+
+    fn has_session_namespace(&self) -> bool {
+        false
+    }
+
+    fn supports_fast_exact_count(&self) -> bool {
+        true
+    }
+
+    fn check_constraint_enforcement(&self) -> CheckConstraintEnforcement {
+        CheckConstraintEnforcement::Unknown
+    }
+
+    fn foreign_key_checks_sql(&self) -> Option<ForeignKeyChecksSql> {
+        Some(ForeignKeyChecksSql {
+            disable_sql: "PRAGMA foreign_keys = OFF".to_string(),
+            enable_sql: "PRAGMA foreign_keys = ON".to_string(),
+        })
+    }
+
+    async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
+        if table_name
+            .namespace
+            .as_deref()
+            .is_some_and(|namespace| namespace != "main")
+        {
+            return Ok(None);
+        }
+
+        let sql = format!(
+            "SELECT COALESCE(CAST(stat AS INTEGER), 0) FROM sqlite_stat1 WHERE tbl = '{}' LIMIT 1",
+            Self::sqlite_string_literal(&table_name.name)
+        );
+        let result = self.query(&sql, &[]).await?;
+
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .and_then(|value| u64::try_from(value).ok()))
     }
 
     #[tracing::instrument(skip(self, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]
@@ -871,12 +1259,13 @@ impl SchemaIntrospection for SqliteConnection {
     }
 
     async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
+        let sqlite_object_type = object_type_to_sqlite(&object.object_type)?;
         let result = self
             .query(
                 "SELECT sql FROM sqlite_master WHERE name = ? AND type = ?",
                 &[
                     Value::String(object.name.clone()),
-                    Value::String(object_type_to_sqlite(&object.object_type)),
+                    Value::String(sqlite_object_type.to_string()),
                 ],
             )
             .await?;
@@ -1159,15 +1548,17 @@ fn parse_fk_action(action: &str) -> ForeignKeyAction {
     }
 }
 
-fn object_type_to_sqlite(obj_type: &zqlz_core::ObjectType) -> String {
+fn object_type_to_sqlite(obj_type: &zqlz_core::ObjectType) -> Result<&'static str> {
     match obj_type {
-        zqlz_core::ObjectType::Table => "table",
-        zqlz_core::ObjectType::View => "view",
-        zqlz_core::ObjectType::Index => "index",
-        zqlz_core::ObjectType::Trigger => "trigger",
-        _ => "table",
+        zqlz_core::ObjectType::Table => Ok("table"),
+        zqlz_core::ObjectType::View => Ok("view"),
+        zqlz_core::ObjectType::Index => Ok("index"),
+        zqlz_core::ObjectType::Trigger => Ok("trigger"),
+        unsupported => Err(ZqlzError::NotImplemented(format!(
+            "SQLite DDL generation is not supported for {:?}",
+            unsupported
+        ))),
     }
-    .to_string()
 }
 
 /// Convert our Value types to rusqlite-compatible types
@@ -1223,4 +1614,33 @@ fn rusqlite_to_value(row: &rusqlite::Row, idx: usize) -> Result<Value> {
     };
 
     Ok(value)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::object_type_to_sqlite;
+    use zqlz_core::{ObjectType, ZqlzError};
+
+    #[test]
+    fn object_type_to_sqlite_maps_supported_types() {
+        assert_eq!(object_type_to_sqlite(&ObjectType::Table).unwrap(), "table");
+        assert_eq!(object_type_to_sqlite(&ObjectType::View).unwrap(), "view");
+        assert_eq!(object_type_to_sqlite(&ObjectType::Index).unwrap(), "index");
+        assert_eq!(
+            object_type_to_sqlite(&ObjectType::Trigger).unwrap(),
+            "trigger"
+        );
+    }
+
+    #[test]
+    fn object_type_to_sqlite_rejects_unsupported_types() {
+        let error = object_type_to_sqlite(&ObjectType::Function).unwrap_err();
+        match error {
+            ZqlzError::NotImplemented(message) => {
+                assert!(message.contains("Function"));
+                assert!(message.contains("not supported"));
+            }
+            other => panic!("Expected NotImplemented, got {:?}", other),
+        }
+    }
 }

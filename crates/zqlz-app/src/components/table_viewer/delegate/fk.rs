@@ -39,32 +39,60 @@ impl TableViewerDelegate {
         &mut self,
         table_name: String,
         values: Vec<FkSelectItem>,
+        query: Option<String>,
+        request_id: u64,
         window: &mut Window,
         cx: &mut App,
     ) {
-        self.fk_values_cache
-            .insert(table_name.clone(), values.clone());
+        if request_id != self.fk_request_id {
+            tracing::debug!(
+                "Ignoring stale FK values for table {} (request_id={}, current={})",
+                table_name,
+                request_id,
+                self.fk_request_id
+            );
+            return;
+        }
+
+        if query
+            .as_ref()
+            .map(|search| search.trim().is_empty())
+            .unwrap_or(true)
+        {
+            self.fk_values_cache
+                .insert(table_name.clone(), values.clone());
+        }
         self.fk_loading = false;
 
         if let Some(select_state) = &self.fk_select_state {
             let current_value = select_state.read(cx).selected_value().cloned();
-            let searchable_items = SearchableVec::new(values.clone());
+            let expected_query = query.clone().unwrap_or_default();
             select_state.update(cx, |state, cx| {
-                state.set_items(searchable_items, window, cx);
+                let active_query = state.search_query(cx);
+                if active_query.trim() != expected_query.trim() {
+                    return;
+                }
+
+                state.update_delegate(
+                    |delegate| {
+                        delegate.items = values.clone();
+                    },
+                    window,
+                    cx,
+                );
                 if let Some(ref current) = current_value {
                     let selected_index = values
                         .iter()
                         .position(|item| &item.value == current)
                         .map(|i| zqlz_ui::widgets::IndexPath::default().row(i));
-                    if let Some(index) = selected_index {
-                        state.set_selected_index(Some(index), window, cx);
-                    }
+                    state.set_selected_index(selected_index, window, cx);
                 }
             });
             tracing::info!(
-                "Updated FK dropdown with {} values for table {}",
+                "Updated FK dropdown with {} values for table {} (query={:?})",
                 values.len(),
-                table_name
+                table_name,
+                query
             );
         }
     }

@@ -160,6 +160,11 @@ impl DatabaseDriver for MssqlDriver {
                     .required()
                     .width(0.5)
                     .row_group(2),
+                ConnectionField::boolean("use_windows_auth", "Use Windows Authentication")
+                    .help_text(
+                        "Use integrated Windows credentials instead of SQL username/password",
+                    )
+                    .default_value("false"),
                 ConnectionField::boolean("trust_certificate", "Trust Server Certificate")
                     .help_text("Trust the server certificate without validation (for development)"),
             ],

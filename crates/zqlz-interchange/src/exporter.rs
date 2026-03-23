@@ -12,11 +12,13 @@ use crate::document::{
     ForeignKeyConstraint, IndexColumn, IndexDefinition, IndexMethod, PrimaryKeyConstraint,
     SequenceDefinition, SourceInfo, TableData, TableDefinition, UdifDocument,
 };
-use crate::type_mapping::{TypeMapper, get_type_mapper};
+use crate::type_mapping::{
+    TypeMapper, canonical_mapper_id, closest_safe_mapper_id, get_type_mapper,
+};
 use crate::value_encoding::encode_value;
 use zqlz_core::{
     ColumnInfo, Connection, ConstraintType, ForeignKeyAction as CoreForeignKeyAction,
-    ForeignKeyInfo, IndexInfo, SchemaIntrospection, TableInfo, ZqlzError,
+    ForeignKeyInfo, IndexInfo, SchemaIntrospection, SqlObjectName, TableInfo, ZqlzError,
 };
 
 /// Errors during export
@@ -199,11 +201,29 @@ pub struct GenericExporter {
 
 impl GenericExporter {
     pub fn new(connection: Arc<dyn Connection>, driver_name: &str) -> Self {
-        let type_mapper = get_type_mapper(driver_name);
+        let resolved_driver_id = connection
+            .dialect_id()
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let mapper_driver_id = if canonical_mapper_id(&resolved_driver_id).is_some() {
+            resolved_driver_id.clone()
+        } else {
+            let fallback_mapper = closest_safe_mapper_id(&resolved_driver_id);
+            tracing::warn!(
+                dialect_id = ?connection.dialect_id(),
+                driver_name = connection.driver_name(),
+                provided_driver_name = driver_name,
+                resolved_driver_id = resolved_driver_id.as_str(),
+                fallback_mapper,
+                "unknown driver for type mapping; using closest safe mapper"
+            );
+            fallback_mapper.to_string()
+        };
+        let type_mapper = get_type_mapper(&mapper_driver_id);
         Self {
             connection,
             type_mapper,
-            driver_name: driver_name.to_string(),
+            driver_name: resolved_driver_id,
         }
     }
 
@@ -442,31 +462,27 @@ impl GenericExporter {
         let mut table_data = TableData::default();
 
         let column_names: Vec<&str> = table_def.columns.iter().map(|c| c.name.as_str()).collect();
-        let columns_sql = if column_names.is_empty() {
-            "*".to_string()
-        } else {
-            column_names
-                .iter()
-                .map(|c| self.quote_identifier(c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
         let filter = options.filters.get(table_name);
+        let table_object_name = parse_sql_object_name(table_name);
         let base_sql = if let Some(where_clause) = filter {
             table_data.filter = Some(where_clause.clone());
-            format!(
-                "SELECT {} FROM {} WHERE {}",
-                columns_sql,
-                self.quote_identifier(table_name),
-                where_clause
-            )
+            self.connection.select_rows_sql(
+                &table_object_name,
+                &column_names
+                    .iter()
+                    .map(|column| (*column).to_string())
+                    .collect::<Vec<_>>(),
+                Some(where_clause),
+            )?
         } else {
-            format!(
-                "SELECT {} FROM {}",
-                columns_sql,
-                self.quote_identifier(table_name)
-            )
+            self.connection.select_rows_sql(
+                &table_object_name,
+                &column_names
+                    .iter()
+                    .map(|column| (*column).to_string())
+                    .collect::<Vec<_>>(),
+                None,
+            )?
         };
 
         let page_size = u64::from(options.batch_size);
@@ -487,7 +503,9 @@ impl GenericExporter {
                 None => page_size,
             };
 
-            let page_sql = format!("{} LIMIT {} OFFSET {}", base_sql, fetch_count, offset);
+            let page_sql = self
+                .connection
+                .paginated_select_sql(&base_sql, fetch_count, offset);
             let result = self
                 .connection
                 .query(&page_sql, &[])
@@ -520,14 +538,6 @@ impl GenericExporter {
         Ok(table_data)
     }
 
-    fn quote_identifier(&self, name: &str) -> String {
-        match self.driver_name.as_str() {
-            "mysql" => format!("`{}`", name),
-            "mssql" => format!("[{}]", name),
-            _ => format!("\"{}\"", name),
-        }
-    }
-
     /// Populate `doc.schema.sequences` with the high-water mark for every
     /// auto-increment column across all tables that were exported.
     ///
@@ -540,8 +550,6 @@ impl GenericExporter {
     /// A missing or zero counter is silently skipped — it just means the table
     /// has never had a row inserted and `current_value` stays `None`.
     async fn export_sequences(&self, doc: &mut UdifDocument) -> Result<(), ExportError> {
-        let driver = self.driver_name.as_str();
-
         // Collect the list of tables and their auto-increment columns from what
         // was already exported so we only query sequences we actually care about.
         let tables: Vec<(String, Vec<String>)> = doc
@@ -560,197 +568,31 @@ impl GenericExporter {
             .filter(|(_, cols)| !cols.is_empty())
             .collect();
 
-        match driver {
-            "postgresql" | "postgres" => {
-                for (table_name, columns) in &tables {
-                    for column_name in columns {
-                        // By convention PostgreSQL names the backing sequence
-                        // `<table>_<column>_seq` when the column is a Serial type.
-                        // `pg_get_serial_sequence` is the canonical way to look up
-                        // the actual sequence name even if it was renamed.
-                        let seq_name_sql = format!(
-                            "SELECT pg_get_serial_sequence('{}', '{}')",
-                            table_name.replace('\'', "''"),
-                            column_name.replace('\'', "''")
-                        );
+        for (table_name, columns) in &tables {
+            for column_name in columns {
+                let Some(current_value) = self
+                    .connection
+                    .export_sequence_current_value(table_name, column_name)
+                    .await
+                    .map_err(|error| ExportError::QueryError(error.to_string()))?
+                else {
+                    continue;
+                };
 
-                        let seq_name_result = self
-                            .connection
-                            .query(&seq_name_sql, &[])
-                            .await
-                            .map_err(|e| ExportError::QueryError(e.to_string()))?;
-
-                        let seq_name = seq_name_result
-                            .rows
-                            .first()
-                            .and_then(|row| row.values.first())
-                            .and_then(|val| match val {
-                                zqlz_core::Value::String(s) => Some(s.clone()),
-                                _ => None,
-                            });
-
-                        let seq_name = match seq_name {
-                            Some(name) if !name.is_empty() => name,
-                            // Column has no backing sequence (e.g. GENERATED ALWAYS AS IDENTITY
-                            // without a separate sequence, or identity column).
-                            _ => continue,
-                        };
-
-                        let current_sql = format!(
-                            "SELECT last_value, is_called FROM {}",
-                            self.quote_identifier(&seq_name)
-                        );
-                        let current_result = self
-                            .connection
-                            .query(&current_sql, &[])
-                            .await
-                            .map_err(|e| ExportError::QueryError(e.to_string()))?;
-
-                        let (last_value, is_called) = match current_result.rows.first() {
-                            Some(row) if row.values.len() >= 2 => {
-                                let last = match &row.values[0] {
-                                    zqlz_core::Value::Int32(n) => i64::from(*n),
-                                    zqlz_core::Value::Int64(n) => *n,
-                                    _ => continue,
-                                };
-                                let called = match &row.values[1] {
-                                    zqlz_core::Value::Bool(b) => *b,
-                                    // Some drivers return "t"/"f" as text
-                                    zqlz_core::Value::String(s) => s == "t" || s == "true",
-                                    _ => false,
-                                };
-                                (last, called)
-                            }
-                            _ => continue,
-                        };
-
-                        // is_called=false means the sequence has never been advanced;
-                        // in that case last_value is the start value, not a used value.
-                        let current_value = if is_called { Some(last_value) } else { None };
-
-                        doc.schema.sequences.insert(
-                            seq_name.clone(),
-                            SequenceDefinition {
-                                name: seq_name,
-                                start_value: 1,
-                                increment: 1,
-                                min_value: None,
-                                max_value: None,
-                                current_value,
-                                cycle: false,
-                            },
-                        );
-                    }
-                }
+                let key = format!("{}.{}", table_name, column_name);
+                doc.schema.sequences.insert(
+                    key.clone(),
+                    SequenceDefinition {
+                        name: key,
+                        start_value: 1,
+                        increment: 1,
+                        min_value: None,
+                        max_value: None,
+                        current_value: Some(current_value),
+                        cycle: false,
+                    },
+                );
             }
-
-            "mysql" => {
-                for (table_name, columns) in &tables {
-                    // MySQL stores one AUTO_INCREMENT counter per table (the next
-                    // value to be assigned), so we only need one query per table.
-                    let sql = format!(
-                        "SELECT AUTO_INCREMENT FROM information_schema.TABLES \
-                         WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}'",
-                        table_name.replace('\'', "''")
-                    );
-                    let result = self
-                        .connection
-                        .query(&sql, &[])
-                        .await
-                        .map_err(|e| ExportError::QueryError(e.to_string()))?;
-
-                    let next_auto_increment: Option<i64> = result
-                        .rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|val| match val {
-                            zqlz_core::Value::Int32(n) => Some(i64::from(*n)),
-                            zqlz_core::Value::Int64(n) => Some(*n),
-                            _ => None,
-                        });
-
-                    if let Some(next) = next_auto_increment {
-                        // AUTO_INCREMENT holds the *next* value; subtract 1 to get
-                        // the highest value that was actually assigned.
-                        let last_used = next - 1;
-                        // A value of 0 means the table is empty — skip to avoid
-                        // confusing importers into resetting the counter to 0.
-                        if last_used <= 0 {
-                            continue;
-                        }
-
-                        // For MySQL we store one entry per auto-increment column,
-                        // keyed by "<table>.<column>" so the importer can find them.
-                        for column_name in columns {
-                            let key = format!("{}.{}", table_name, column_name);
-                            doc.schema.sequences.insert(
-                                key.clone(),
-                                SequenceDefinition {
-                                    name: key,
-                                    start_value: 1,
-                                    increment: 1,
-                                    min_value: None,
-                                    max_value: None,
-                                    current_value: Some(last_used),
-                                    cycle: false,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            "sqlite" => {
-                for (table_name, columns) in &tables {
-                    // sqlite_sequence only exists when at least one AUTOINCREMENT
-                    // table has had a row inserted; the query may fail if the table
-                    // does not exist yet — treat that as "no data".
-                    let sql = format!(
-                        "SELECT seq FROM sqlite_sequence WHERE name = '{}'",
-                        table_name.replace('\'', "''")
-                    );
-                    let result = match self.connection.query(&sql, &[]).await {
-                        Ok(r) => r,
-                        // sqlite_sequence missing entirely means no rows were ever inserted.
-                        Err(_) => continue,
-                    };
-
-                    let current_seq: Option<i64> = result
-                        .rows
-                        .first()
-                        .and_then(|row| row.values.first())
-                        .and_then(|val| match val {
-                            zqlz_core::Value::Int32(n) => Some(i64::from(*n)),
-                            zqlz_core::Value::Int64(n) => Some(*n),
-                            _ => None,
-                        });
-
-                    if let Some(seq) = current_seq {
-                        if seq <= 0 {
-                            continue;
-                        }
-                        for column_name in columns {
-                            let key = format!("{}.{}", table_name, column_name);
-                            doc.schema.sequences.insert(
-                                key.clone(),
-                                SequenceDefinition {
-                                    name: key,
-                                    start_value: 1,
-                                    increment: 1,
-                                    min_value: None,
-                                    max_value: None,
-                                    current_value: Some(seq),
-                                    cycle: false,
-                                },
-                            );
-                        }
-                    }
-                }
-            }
-
-            // Other drivers do not have a standardised sequence mechanism that
-            // this exporter knows how to query.
-            _ => {}
         }
 
         Ok(())
@@ -763,62 +605,21 @@ impl GenericExporter {
     /// method is a no-op so the importer can synthesize appropriate representations on the
     /// target side.
     async fn export_enums(&self, doc: &mut UdifDocument) -> Result<(), ExportError> {
-        match self.driver_name.as_str() {
-            "postgresql" | "postgres" => {
-                // Join pg_type (one row per type) with pg_enum (one row per label) and
-                // pg_namespace so we only return types from the current search-path schema.
-                // enumsortorder ensures labels come back in the order they were defined.
-                let sql = "SELECT t.typname, e.enumlabel \
-                           FROM pg_type t \
-                           JOIN pg_enum e ON t.oid = e.enumtypid \
-                           JOIN pg_namespace n ON t.typnamespace = n.oid \
-                           WHERE n.nspname = current_schema() \
-                           ORDER BY t.typname, e.enumsortorder";
+        let named_enums = self
+            .connection
+            .export_named_enum_definitions()
+            .await
+            .map_err(|error| ExportError::QueryError(error.to_string()))?;
 
-                let result = self
-                    .connection
-                    .query(sql, &[])
-                    .await
-                    .map_err(|e| ExportError::QueryError(e.to_string()))?;
-
-                // Group labels by type name, preserving declaration order.
-                let mut enum_values: std::collections::HashMap<String, Vec<String>> =
-                    std::collections::HashMap::new();
-                let mut insertion_order: Vec<String> = Vec::new();
-
-                for row in result.rows {
-                    if row.values.len() < 2 {
-                        continue;
-                    }
-                    let type_name = match &row.values[0] {
-                        zqlz_core::Value::String(s) => s.clone(),
-                        _ => continue,
-                    };
-                    let label = match &row.values[1] {
-                        zqlz_core::Value::String(s) => s.clone(),
-                        _ => continue,
-                    };
-                    if !enum_values.contains_key(&type_name) {
-                        insertion_order.push(type_name.clone());
-                    }
-                    enum_values.entry(type_name).or_default().push(label);
-                }
-
-                for type_name in insertion_order {
-                    let values = enum_values.remove(&type_name).unwrap_or_default();
-                    doc.schema.enums.insert(
-                        type_name.clone(),
-                        EnumDefinition {
-                            name: type_name,
-                            schema: None,
-                            values,
-                        },
-                    );
-                }
-            }
-            // MySQL: enum values live inline in the column DDL; no schema-level type to export.
-            // SQLite: has no enum concept at all.
-            _ => {}
+        for (type_name, values) in named_enums {
+            doc.schema.enums.insert(
+                type_name.clone(),
+                EnumDefinition {
+                    name: type_name,
+                    schema: None,
+                    values,
+                },
+            );
         }
 
         Ok(())
@@ -851,6 +652,20 @@ impl GenericExporter {
                 }
             }
         }
+    }
+}
+
+fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => SqlObjectName::new(object_name),
+        }
+    } else {
+        SqlObjectName::new(object_name)
     }
 }
 
@@ -1089,6 +904,174 @@ mod tests {
     impl zqlz_core::Connection for StubConnection {
         fn driver_name(&self) -> &str {
             "sqlite"
+        }
+
+        fn rename_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &str,
+        ) -> Result<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropTableOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropViewOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &zqlz_core::SqlObjectName,
+            _table_name: Option<&zqlz_core::SqlObjectName>,
+            _options: zqlz_core::DropTriggerOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &zqlz_core::SqlObjectName,
+        ) -> Result<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+        ) -> Result<String> {
+            let projection = if projected_columns.is_empty() {
+                "*".to_string()
+            } else {
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                projection,
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            Ok(sql)
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+            order_by_columns: &[String],
+            limit: u64,
+        ) -> Result<String> {
+            let mut sql = format!(
+                "SELECT DISTINCT {} FROM {}",
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            if !order_by_columns.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(
+                    &order_by_columns
+                        .iter()
+                        .map(|column| self.quote_identifier(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            sql.push_str(&format!(" LIMIT {}", limit));
+            Ok(sql)
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> Result<String> {
+            let placeholders = (0..value_count)
+                .map(|index| self.format_bind_placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let columns = column_names
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                columns,
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> Result<String> {
+            Ok("SELECT 0 as total_queries".to_string())
         }
 
         async fn execute(
@@ -1428,6 +1411,174 @@ mod tests {
     impl zqlz_core::Connection for PaginatingConnection {
         fn driver_name(&self) -> &str {
             "sqlite"
+        }
+
+        fn rename_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &str,
+        ) -> Result<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropTableOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropViewOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &zqlz_core::SqlObjectName,
+            _table_name: Option<&zqlz_core::SqlObjectName>,
+            _options: zqlz_core::DropTriggerOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &zqlz_core::SqlObjectName,
+        ) -> Result<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+        ) -> Result<String> {
+            let projection = if projected_columns.is_empty() {
+                "*".to_string()
+            } else {
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                projection,
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            Ok(sql)
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+            order_by_columns: &[String],
+            limit: u64,
+        ) -> Result<String> {
+            let mut sql = format!(
+                "SELECT DISTINCT {} FROM {}",
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            if !order_by_columns.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(
+                    &order_by_columns
+                        .iter()
+                        .map(|column| self.quote_identifier(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            sql.push_str(&format!(" LIMIT {}", limit));
+            Ok(sql)
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> Result<String> {
+            let placeholders = (0..value_count)
+                .map(|index| self.format_bind_placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let columns = column_names
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                columns,
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> Result<String> {
+            Ok("SELECT 0 as total_queries".to_string())
         }
 
         async fn execute(

@@ -1,12 +1,12 @@
 use gpui::{
-    AnyElement, App, AppContext as _, Context, Empty, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _,
-    Render, RenderOnce, SharedString, Styled as _, Subscription, Window, div,
-    prelude::FluentBuilder, px,
+    div, prelude::FluentBuilder, px, AnyElement, App, AppContext as _, Context, Empty, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
+    MouseButton, MouseDownEvent, ParentElement as _, Render, RenderOnce, SharedString, Styled as _,
+    Subscription, Window,
 };
 
-use super::{InputEvent, blink_cursor::BlinkCursor};
-use crate::widgets::{ActiveTheme, Disableable, Icon, IconName, Sizable, Size, h_flex, v_flex};
+use super::{blink_cursor::BlinkCursor, InputEvent};
+use crate::widgets::{h_flex, v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable, Size};
 
 pub struct OtpState {
     focus_handle: FocusHandle,
@@ -255,7 +255,7 @@ impl RenderOnce for OtpInput {
                 h_flex()
                     .id(ix)
                     .border_1()
-                    .border_color(cx.theme().input)
+                    .border_color(cx.theme().border.opacity(0.25))
                     .bg(cx.theme().background)
                     .when(self.disabled, |this| {
                         this.bg(cx.theme().muted)
@@ -265,7 +265,6 @@ impl RenderOnce for OtpInput {
                     .when(cx.theme().shadow, |this| this.shadow_xs())
                     .items_center()
                     .justify_center()
-                    .rounded(cx.theme().radius)
                     .text_size(text_size)
                     .map(|this| match self.size {
                         Size::XSmall => this.w_6().h_6(),

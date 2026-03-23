@@ -1,13 +1,5 @@
 use gpui::SharedString;
-
-// NOTE: The Zed markdown crate API has changed significantly (moved from mdast to pulldown_cmark).
-// This is a temporary stub to allow compilation. Full markdown parsing needs to be rewritten
-// to use the new parser::parse_markdown() API from the markdown crate.
-// See: task-1.2 notes in PRD - markdown API migration is deferred to Phase 2.
-//
-// The old API used markdown::mdast and markdown::to_mdast().
-// The new API uses markdown::parser::parse_markdown() which returns pull down_cmark events.
-// This requires a complete rewrite of the parsing logic.
+use pulldown_cmark::{Event, Options, Parser, Tag, TagEnd};
 
 use crate::widgets::{
     highlighter::HighlightTheme,
@@ -19,23 +11,77 @@ use crate::widgets::{
 
 /// Parse Markdown into a tree of nodes.
 ///
-/// TODO: Rewrite to use new markdown crate API (pulldown_cmark-based)
-/// The new API is: markdown::parser::parse_markdown(text) -> Vec<(Range<usize>, MarkdownEvent)>
-/// See: ~/.cargo/git/checkouts/zed-a70e2ad075855582/0ce484e/crates/markdown/src/parser.rs
+/// This intentionally builds a plain-text paragraph from markdown events.
 ///
-/// TODO: Remove `highlight_theme` option, this should be in render stage.
+/// It is a narrow compatibility layer that avoids rendering raw markdown source
+/// while we keep the previous node-based renderer stable. A full AST-level
+/// markdown renderer is still deferred because it requires a larger rewrite.
 pub(crate) fn parse(
     source: &str,
     _cx: &mut crate::widgets::text::node::NodeContext,
     _highlight_theme: &HighlightTheme,
 ) -> Result<ParsedDocument, SharedString> {
-    // Temporary stub: return plain text document until markdown parser is rewritten
-    // This allows compilation to succeed while we complete Zed dependency setup (Phase 1, Task 1.2)
-    //
-    // Impact: Markdown formatting in hover popovers, diagnostic messages, and completion
-    // documentation will display as plain text until this is properly implemented.
+    let plain_text = markdown_to_plain_text(source);
+
     Ok(ParsedDocument {
         source: source.to_string().into(),
-        blocks: vec![BlockNode::Paragraph(Paragraph::new(source.to_string()))],
+        blocks: vec![BlockNode::Paragraph(Paragraph::new(plain_text))],
     })
+}
+
+fn markdown_to_plain_text(source: &str) -> String {
+    let mut output = String::new();
+    let mut list_depth = 0usize;
+    let parser = Parser::new_ext(source, Options::all());
+
+    for event in parser {
+        match event {
+            Event::Text(text) | Event::Code(text) => output.push_str(text.as_ref()),
+            Event::SoftBreak | Event::HardBreak => output.push('\n'),
+            Event::Rule => {
+                if !output.ends_with('\n') && !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str("---\n");
+            }
+            Event::Start(Tag::Item) => {
+                if !output.is_empty() && !output.ends_with('\n') {
+                    output.push('\n');
+                }
+                output.push_str(&"  ".repeat(list_depth));
+                output.push_str("- ");
+            }
+            Event::Start(Tag::List(_)) => {
+                list_depth = list_depth.saturating_add(1);
+            }
+            Event::End(TagEnd::List(_)) => {
+                list_depth = list_depth.saturating_sub(1);
+                if !output.ends_with('\n') && !output.is_empty() {
+                    output.push('\n');
+                }
+            }
+            Event::End(TagEnd::Paragraph)
+            | Event::End(TagEnd::Heading(_))
+            | Event::End(TagEnd::Item)
+            | Event::End(TagEnd::BlockQuote(_))
+            | Event::End(TagEnd::CodeBlock) => {
+                if !output.ends_with('\n') && !output.is_empty() {
+                    output.push('\n');
+                }
+            }
+            Event::FootnoteReference(label) => {
+                output.push('[');
+                output.push_str(label.as_ref());
+                output.push(']');
+            }
+            Event::InlineMath(text) | Event::DisplayMath(text) => output.push_str(text.as_ref()),
+            Event::InlineHtml(_)
+            | Event::Html(_)
+            | Event::TaskListMarker(_)
+            | Event::Start(_)
+            | Event::End(_) => {}
+        }
+    }
+
+    output.trim().to_string()
 }

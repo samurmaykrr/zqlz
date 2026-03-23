@@ -1,7 +1,7 @@
 use gpui::{
-    AnyElement, App, Corner, Div, Edges, ElementId, InteractiveElement, IntoElement, ParentElement,
-    Pixels, RenderOnce, ScrollHandle, Stateful, StatefulInteractiveElement as _, StyleRefinement,
-    Styled, Window, div, prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, App, Corner, Div, Edges, ElementId,
+    InteractiveElement, IntoElement, ParentElement, Pixels, RenderOnce, ScrollHandle, Stateful,
+    StatefulInteractiveElement as _, StyleRefinement, Styled, Window,
 };
 use smallvec::SmallVec;
 use std::rc::Rc;
@@ -9,7 +9,7 @@ use std::rc::Rc;
 use super::{Tab, TabVariant};
 use crate::widgets::button::{Button, ButtonVariants as _};
 use crate::widgets::menu::{DropdownMenu as _, PopupMenuItem};
-use crate::widgets::{ActiveTheme, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, IconName, Selectable, Sizable, Size, StyledExt};
 
 type TabBarClickHandler = Rc<dyn Fn(&usize, &mut Window, &mut App) + 'static>;
 
@@ -230,11 +230,10 @@ impl RenderOnce for TabBar {
                             .bottom_0()
                             .size_full()
                             .border_b_1()
-                            .border_color(cx.theme().border),
+                            .border_color(cx.theme().border.opacity(0.25)),
                     )
                 },
             )
-            .rounded(self.variant.tab_bar_radius(self.size, cx))
             .paddings(paddings)
             .refine_style(&self.style)
             .when_some(self.prefix, |this, prefix| this.child(prefix))

@@ -193,6 +193,8 @@ impl TableViewerPanel {
         &mut self,
         table_name: String,
         values: Vec<crate::components::table_viewer::delegate::FkSelectItem>,
+        query: Option<String>,
+        request_id: u64,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -200,7 +202,7 @@ impl TableViewerPanel {
             table_state.update(cx, |table, cx| {
                 table
                     .delegate_mut()
-                    .set_fk_values(table_name, values, window, cx);
+                    .set_fk_values(table_name, values, query, request_id, window, cx);
             });
         }
     }

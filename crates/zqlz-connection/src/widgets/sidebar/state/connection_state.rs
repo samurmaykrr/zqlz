@@ -35,6 +35,11 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.is_connected = connected;
             conn.is_connecting = false; // Clear connecting state when connection status changes
+            if connected {
+                // Show the immediate children (sections / database nodes) as soon as
+                // the connection succeeds so users can start navigating immediately.
+                conn.is_expanded = true;
+            }
             if !connected {
                 conn.is_expanded = false;
                 conn.tables.clear();

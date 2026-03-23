@@ -27,10 +27,10 @@ pub use widgets::{
     AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, DiagnosticInfo,
     DiagnosticInfoSeverity, DismissInlineSuggestion, EditorMode, EditorObjectType, ExplainResult,
     FormatQuery, NextProblem, PreviousProblem, ProblemEntry, ProblemSeverity, ProblemsPanel,
-    ProblemsPanelEvent, QueryEditor, QueryEditorEvent, QueryExecution, QueryHistoryPanel,
-    QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel, ResultsPanelEvent,
-    SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult, ToggleProblemsPanel,
-    TriggerCompletion, TriggerParameterHints,
+    ProblemsPanelEvent, QueryEditor, QueryEditorEvent, QueryExecution, QueryExecutionParams,
+    QueryHistoryPanel, QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel,
+    ResultsPanelEvent, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult,
+    ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints,
 };
 
 // Re-export batch execution types

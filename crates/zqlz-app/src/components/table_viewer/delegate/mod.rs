@@ -5,6 +5,7 @@
 // the original large `delegate.rs` file.
 
 use std::collections::HashMap;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -16,7 +17,7 @@ use zqlz_ui::widgets::{
     date_picker::{DatePickerInline, DatePickerMode, DatePickerPopover, DatePickerState},
     input::{Input, InputEvent, InputState},
     menu::PopupMenu,
-    select::{SearchableVec, Select, SelectEvent, SelectState},
+    select::{Select, SelectDelegate, SelectEvent, SelectState},
     table::{Column, ColumnFixed, ColumnSort, TableDelegate, TableState},
     tooltip::Tooltip,
 };
@@ -41,6 +42,69 @@ pub mod types;
 
 pub use types::PendingCellChange;
 pub use types::*; // ensure public re-export
+
+#[derive(Clone, Debug)]
+pub(super) struct FkSelectDelegate {
+    pub(super) items: Vec<FkSelectItem>,
+    pub(super) table_name: String,
+    pub(super) referenced_columns: Vec<String>,
+    pub(super) connection_id: Uuid,
+    pub(super) viewer_panel: WeakEntity<TableViewerPanel>,
+    pub(super) request_id: u64,
+}
+
+impl SelectDelegate for FkSelectDelegate {
+    type Item = FkSelectItem;
+
+    fn items_count(&self, _: usize) -> usize {
+        self.items.len()
+    }
+
+    fn item(&self, ix: IndexPath) -> Option<&Self::Item> {
+        self.items.get(ix.row)
+    }
+
+    fn position<V>(&self, value: &V) -> Option<IndexPath>
+    where
+        Self::Item: zqlz_ui::widgets::select::SelectItem<Value = V>,
+        V: PartialEq,
+    {
+        self.items
+            .iter()
+            .position(|item| zqlz_ui::widgets::select::SelectItem::value(item) == value)
+            .map(|index| IndexPath::default().row(index))
+    }
+
+    fn perform_search(
+        &mut self,
+        query: &str,
+        window: &mut Window,
+        cx: &mut Context<SelectState<Self>>,
+    ) -> Task<()> {
+        let query = query.trim().to_string();
+        let viewer_panel = self.viewer_panel.clone();
+        let connection_id = self.connection_id;
+        let referenced_table = self.table_name.clone();
+        let referenced_columns = self.referenced_columns.clone();
+        let request_id = self.request_id;
+
+        cx.spawn_in(window, async move |_this, cx| {
+            smol::Timer::after(Duration::from_millis(120)).await;
+            if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
+                cx.emit(TableViewerEvent::LoadFkValues {
+                    connection_id,
+                    referenced_table,
+                    referenced_columns,
+                    query: if query.is_empty() { None } else { Some(query) },
+                    limit: 10,
+                    request_id,
+                });
+            }) {
+                tracing::error!("Failed to emit FK typeahead search request: {:?}", error);
+            }
+        })
+    }
+}
 
 /// Table viewer delegate - implements the TableDelegate trait
 ///
@@ -145,10 +209,13 @@ pub struct TableViewerDelegate {
     pub(super) fk_values_cache: HashMap<String, Vec<FkSelectItem>>,
 
     /// Select state for editing foreign key columns (searchable)
-    pub(super) fk_select_state: Option<Entity<SelectState<SearchableVec<FkSelectItem>>>>,
+    pub(super) fk_select_state: Option<Entity<SelectState<FkSelectDelegate>>>,
 
     /// Whether FK values are currently being loaded
     pub(super) fk_loading: bool,
+
+    /// Incrementing request id for FK typeahead calls
+    pub(super) fk_request_id: u64,
 
     /// Last filter conditions applied via apply_advanced_filters.
     /// Stored so that recompute_filtered_indices can re-apply them after a sort.

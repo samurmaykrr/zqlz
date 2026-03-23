@@ -10,7 +10,7 @@ use gpui::{
     ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
     Styled, WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
 };
-use gpui::{ClickEvent, Half, MouseDownEvent, OwnedMenuItem, Subscription};
+use gpui::{ClickEvent, MouseDownEvent, OwnedMenuItem, Subscription};
 use std::rc::Rc;
 
 type PopupMenuItemClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App)>;
@@ -1128,11 +1128,12 @@ impl PopupMenu {
         const INNER_PADDING: Pixels = px(8.);
 
         let is_submenu = matches!(item, PopupMenuItem::Submenu { .. });
+        let menu_is_scrollable = self.scrollable;
         let group_name = format!("{}:item-{}", cx.entity().entity_id(), ix);
 
-        let (item_height, radius) = match self.size {
-            Size::Small => (px(20.), options.radius.half()),
-            _ => (px(26.), options.radius),
+        let item_height = match self.size {
+            Size::Small => px(20.),
+            _ => px(26.),
         };
 
         let this = MenuItemElement::new(ix, &group_name)
@@ -1140,15 +1141,16 @@ impl PopupMenu {
             .text_sm()
             .py_0()
             .px(INNER_PADDING)
-            .rounded(radius)
             .items_center()
             .selected(selected)
             .on_hover(cx.listener(move |this, hovered, _, cx| {
                 if *hovered {
                     this.selected_index = Some(ix);
-                } else if !is_submenu && this.selected_index == Some(ix) {
-                    // TODO: Better handle the submenu unselection when hover out
-                    this.selected_index = None;
+                } else if this.selected_index == Some(ix) {
+                    let should_keep_selected = is_submenu && !menu_is_scrollable;
+                    if !should_keep_selected {
+                        this.selected_index = None;
+                    }
                 }
 
                 cx.notify();
@@ -1258,7 +1260,7 @@ impl PopupMenu {
                 disabled,
             } => this
                 .selected(selected)
-                .disabled(*disabled)
+                .disabled(*disabled || self.scrollable)
                 .items_start()
                 .child(
                     h_flex()
@@ -1287,7 +1289,7 @@ impl PopupMenu {
                                 ),
                         ),
                 )
-                .when(selected, |this| {
+                .when(selected && !self.scrollable, |this| {
                     this.child({
                         let (anchor, left) = self.submenu_anchor;
                         let is_bottom_pos =
@@ -1322,7 +1324,6 @@ impl Focusable for PopupMenu {
 struct RenderOptions {
     has_left_icon: bool,
     check_side: Side,
-    radius: Pixels,
 }
 
 impl Render for PopupMenu {
@@ -1346,7 +1347,6 @@ impl Render for PopupMenu {
         let options = RenderOptions {
             has_left_icon,
             check_side: self.check_side,
-            radius: cx.theme().radius.min(px(8.)),
         };
 
         v_flex()
@@ -1401,7 +1401,6 @@ impl Render for PopupMenu {
                     .on_prepaint(move |bounds, _, cx| view.update(cx, |r, _| r.bounds = bounds)),
             )
             .when(self.scrollable, |this| {
-                // TODO: When the menu is limited by `overflow_y_scroll`, the sub-menu will cannot be displayed.
                 this.vertical_scrollbar(&self.scroll_handle)
             })
     }

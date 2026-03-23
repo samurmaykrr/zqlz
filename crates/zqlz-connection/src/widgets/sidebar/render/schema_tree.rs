@@ -347,7 +347,7 @@ impl ConnectionSidebar {
                                 let db_name_for_menu = database_name.clone();
                                 let object_schema_for_menu =
                                     Some(schema_name_for_table_menu.clone());
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "table-{}-{}-{}",
@@ -467,7 +467,7 @@ impl ConnectionSidebar {
                                 let db_name_for_menu = database_name.clone();
                                 let object_schema_for_menu =
                                     Some(schema_name_for_view_menu.clone());
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "view-{}-{}-{}",
@@ -590,7 +590,7 @@ impl ConnectionSidebar {
                                 let name_for_menu = (*view_name).clone();
                                 let db_name_for_click = database_name.clone();
                                 let db_name_for_menu = database_name.clone();
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "matview-{}-{}-{}",
@@ -712,7 +712,7 @@ impl ConnectionSidebar {
                                     Some(schema_name_for_trigger_click.clone());
                                 let object_schema_for_menu =
                                     Some(schema_name_for_trigger_menu.clone());
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "trigger-{}-{}-{}",
@@ -832,7 +832,7 @@ impl ConnectionSidebar {
                                     Some(schema_name_for_function_click.clone());
                                 let object_schema_for_menu =
                                     Some(schema_name_for_function_menu.clone());
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "function-{}-{}-{}",
@@ -952,7 +952,7 @@ impl ConnectionSidebar {
                                     Some(schema_name_for_procedure_click.clone());
                                 let object_schema_for_menu =
                                     Some(schema_name_for_procedure_menu.clone());
-                                section = section.child(Self::render_leaf_item(
+                                section = section.child(self.render_leaf_item(
                                     super::LeafItemProps {
                                         element_id: SharedString::from(format!(
                                             "procedure-{}-{}-{}",
@@ -1052,7 +1052,7 @@ impl ConnectionSidebar {
                     let query_name = query.name.clone();
                     let query_name_for_click = query.name.clone();
                     let query_name_for_menu = query.name.clone();
-                    queries_section = queries_section.child(Self::render_leaf_item(
+                    queries_section = queries_section.child(self.render_leaf_item(
                         super::LeafItemProps {
                             element_id: SharedString::from(format!(
                                 "query-{}-{}",
@@ -1284,6 +1284,7 @@ impl ConnectionSidebar {
             let db_name_click = db.name.clone();
             let is_expanded = db.is_expanded;
             let has_schema = db.schema.is_some();
+            let is_active_database = db.is_active;
             let size_label = db.size_bytes.map(Self::format_database_size);
 
             let mut node = v_flex().w_full();
@@ -1301,7 +1302,11 @@ impl ConnectionSidebar {
                 .gap_1p5()
                 .items_center()
                 .text_xs()
-                .text_color(if has_schema { muted_fg } else { muted_fg_half })
+                .text_color(if is_expanded || is_active_database {
+                    muted_fg
+                } else {
+                    muted_fg_half
+                })
                 .cursor_pointer()
                 .hover(|el| el.bg(list_hover))
                 .on_click(cx.listener(move |this, _, _, cx| {
@@ -1318,7 +1323,9 @@ impl ConnectionSidebar {
                 .child(
                     Icon::new(ZqlzIcon::Database)
                         .size_3()
-                        .when(!has_schema, |el| el.text_color(muted_fg_half)),
+                        .when(!has_schema && !is_expanded && !is_active_database, |el| {
+                            el.text_color(muted_fg_half)
+                        }),
                 )
                 .child(
                     div()
@@ -1449,51 +1456,49 @@ impl ConnectionSidebar {
                                 .into_any_element(),
                             )
                         }
-                    } else {
-                        if let Some(groups) = Self::group_schema_sections(
-                            tables,
-                            views,
-                            materialized_views,
-                            triggers,
-                            functions,
-                            procedures,
-                            schema_names,
-                            schema_name,
-                        ) {
-                            tree_is_grouped = true;
-                            Some(
-                                self.render_grouped_schema_objects_tree(
-                                    conn_id,
-                                    object_capabilities,
-                                    &conn_id.to_string(),
-                                    Some(db_name.clone()),
-                                    &groups,
-                                    queries,
-                                    queries_expanded,
-                                    tables_loading,
-                                    views_loading,
-                                    materialized_views_loading,
-                                    triggers_loading,
-                                    functions_loading,
-                                    procedures_loading,
-                                    collapsed_schema_groups,
-                                    collapsed_schema_section_keys,
-                                    grouped_objects_depth,
-                                    move |this: &mut ConnectionSidebar, group_name, cx| {
-                                        this.toggle_schema_group_expand(conn_id, group_name, cx);
-                                    },
-                                    move |this: &mut ConnectionSidebar, group_name, section, cx| {
-                                        this.toggle_schema_section_expand(
-                                            conn_id, group_name, section, cx,
-                                        );
-                                    },
-                                    cx,
-                                )
-                                .into_any_element(),
+                    } else if let Some(groups) = Self::group_schema_sections(
+                        tables,
+                        views,
+                        materialized_views,
+                        triggers,
+                        functions,
+                        procedures,
+                        schema_names,
+                        schema_name,
+                    ) {
+                        tree_is_grouped = true;
+                        Some(
+                            self.render_grouped_schema_objects_tree(
+                                conn_id,
+                                object_capabilities,
+                                &conn_id.to_string(),
+                                Some(db_name.clone()),
+                                &groups,
+                                queries,
+                                queries_expanded,
+                                tables_loading,
+                                views_loading,
+                                materialized_views_loading,
+                                triggers_loading,
+                                functions_loading,
+                                procedures_loading,
+                                collapsed_schema_groups,
+                                collapsed_schema_section_keys,
+                                grouped_objects_depth,
+                                move |this: &mut ConnectionSidebar, group_name, cx| {
+                                    this.toggle_schema_group_expand(conn_id, group_name, cx);
+                                },
+                                move |this: &mut ConnectionSidebar, group_name, section, cx| {
+                                    this.toggle_schema_section_expand(
+                                        conn_id, group_name, section, cx,
+                                    );
+                                },
+                                cx,
                             )
-                        } else {
-                            fallback_tree.take()
-                        }
+                            .into_any_element(),
+                        )
+                    } else {
+                        fallback_tree.take()
                     };
 
                     if tree_is_grouped {
@@ -1518,7 +1523,11 @@ impl ConnectionSidebar {
                                             .gap_1p5()
                                             .items_center()
                                             .text_xs()
-                                            .text_color(muted_fg)
+                                            .text_color(if sch_expanded {
+                                                muted_fg
+                                            } else {
+                                                muted_fg_half
+                                            })
                                             .cursor_pointer()
                                             .hover(|el| el.bg(list_hover))
                                             .on_click(cx.listener(move |this, _, _, cx| {

@@ -1,7 +1,7 @@
 use crate::widgets::{ActiveTheme, PixelsExt as _};
 use gpui::{
-    App, BoxShadow, Corners, DefiniteLength, Div, Edges, FocusHandle, Hsla, ParentElement, Pixels,
-    Refineable, StyleRefinement, Styled, Window, div, point, px,
+    div, point, px, App, BoxShadow, Corners, DefiniteLength, Div, Edges, FocusHandle, Hsla,
+    ParentElement, Pixels, Refineable, StyleRefinement, Styled, Window,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -174,9 +174,8 @@ pub trait StyledExt: Styled + Sized {
         self.bg(cx.theme().popover)
             .text_color(cx.theme().popover_foreground)
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.25))
             .shadow_lg()
-            .rounded(cx.theme().radius)
     }
 
     /// Set corner radii for the element.

@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 
-use zqlz_core::Connection;
+use zqlz_core::{Connection, SqlObjectName};
 
 use crate::widgets::{
     ExportWizardState, FieldDelimiter, LogLevel, RecordDelimiter, TableExportConfig, TextQualifier,
@@ -150,21 +150,15 @@ impl CsvExporter {
             .map(|c| c.name.as_str())
             .collect();
 
-        // Build query
-        let column_list = if selected_columns.is_empty() {
-            "*".to_string()
-        } else {
-            selected_columns
-                .iter()
-                .map(|c| format!("\"{}\"", c))
-                .collect::<Vec<_>>()
-                .join(", ")
-        };
-
-        let sql = format!(
-            "SELECT {} FROM \"{}\"",
-            column_list, table_config.table_name
-        );
+        let projected_columns = selected_columns
+            .iter()
+            .map(|column| (*column).to_string())
+            .collect::<Vec<_>>();
+        let table_name = parse_sql_object_name(&table_config.table_name);
+        let sql = self
+            .connection
+            .select_rows_sql(&table_name, &projected_columns, None)
+            .map_err(|e| CsvExportError::QueryError(e.to_string()))?;
 
         // Execute query
         let result = self
@@ -261,6 +255,20 @@ impl CsvExporter {
             }
             None => value.to_string(),
         }
+    }
+}
+
+fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => SqlObjectName::new(object_name),
+        }
+    } else {
+        SqlObjectName::new(object_name)
     }
 }
 

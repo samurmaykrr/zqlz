@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, InteractiveElement as _,
-    IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement,
-    Styled, Window, div, px, relative,
+    div, px, relative, AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity,
+    InteractiveElement as _, IntoElement, IsZero, MouseButton, ParentElement as _, Rems,
+    RenderOnce, StyleRefinement, Styled, Window,
 };
 
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -10,9 +10,9 @@ use crate::widgets::input::clear_button;
 use crate::widgets::input::element::{LINE_NUMBER_RIGHT_MARGIN, RIGHT_MARGIN};
 use crate::widgets::scroll::Scrollbar;
 use crate::widgets::spinner::Spinner;
-use crate::widgets::{ActiveTheme, v_flex};
+use crate::widgets::{h_flex, Selectable, StyledExt};
+use crate::widgets::{v_flex, ActiveTheme};
 use crate::widgets::{IconName, Size};
-use crate::widgets::{Selectable, StyledExt, h_flex};
 use crate::widgets::{Sizable, StyleSized};
 
 use super::InputState;
@@ -373,16 +373,14 @@ impl RenderOnce for Input {
                     .when_some(self.height, |this, height| this.h(height))
             })
             .when(self.appearance, |this| {
-                this.bg(bg)
-                    .rounded(cx.theme().radius)
-                    .when(self.bordered, |this| {
-                        this.border_color(cx.theme().input)
-                            .border_1()
-                            .when(cx.theme().shadow, |this| this.shadow_xs())
-                            .when(focused && self.focus_bordered, |this| {
-                                this.focused_border(cx)
-                            })
-                    })
+                this.bg(bg).when(self.bordered, |this| {
+                    this.border_color(cx.theme().border.opacity(0.25))
+                        .border_1()
+                        .when(cx.theme().shadow, |this| this.shadow_xs())
+                        .when(focused && self.focus_bordered, |this| {
+                            this.focused_border(cx)
+                        })
+                })
             })
             .items_center()
             .gap(gap_x)

@@ -3,6 +3,7 @@
 //! Shared data structures for filtering, sorting, column visibility, and profile management.
 
 use gpui::SharedString;
+use zqlz_core::Connection;
 
 /// Filter operators for WHERE clause generation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -406,15 +407,21 @@ impl SortCriterion {
     }
 
     /// Convert to SQL ORDER BY fragment for the given database driver.
-    ///
-    /// Runtime query paths should use this method so identifier quoting matches
-    /// the connected database engine (for example, backticks for MySQL).
+    #[allow(dead_code)]
     pub fn to_sql_for_driver(&self, driver_name: &str) -> String {
         let escaped_col = escape_identifier_for_driver(&self.column, driver_name);
         format!("{} {}", escaped_col, self.direction.label())
     }
+
+    /// Convert to SQL ORDER BY fragment using the active connection's
+    /// driver-owned identifier quoting behavior.
+    pub fn to_sql_for_connection(&self, connection: &dyn Connection) -> String {
+        let escaped_col = connection.quote_identifier(&self.column);
+        format!("{} {}", escaped_col, self.direction.label())
+    }
 }
 
+#[allow(dead_code)]
 fn escape_identifier_for_driver(identifier: &str, driver_name: &str) -> String {
     match driver_name {
         "mysql" | "mariadb" => format!("`{}`", identifier.replace('`', "``")),

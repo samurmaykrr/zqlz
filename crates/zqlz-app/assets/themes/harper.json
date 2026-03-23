@@ -42,7 +42,7 @@
         "element.background": "#1b1b1b",
         "element.hover": "#232323",
         "element.active": "#B196C6",
-        "element.selected": "#B196C622",
+        "element.selected": "#2F2B32",
         "element.disabled": "#726E69",
         "ghost_element.hover": "#B196C622",
         "ghost_element.active": "#B196C622",

@@ -248,7 +248,7 @@ pub enum SchemaTreeEvent {
         connection_id: Uuid,
         view_name: String,
     },
-    /// Design/edit a view definition
+    /// Edit a view's full DDL
     DesignView {
         connection_id: Uuid,
         view_name: String,
@@ -263,7 +263,7 @@ pub enum SchemaTreeEvent {
     // ============================================
     // Function-related events
     // ============================================
-    /// Open/view a function definition
+    /// Edit a function's full DDL
     OpenFunction {
         connection_id: Uuid,
         function_name: String,
@@ -277,7 +277,7 @@ pub enum SchemaTreeEvent {
     // ============================================
     // Procedure-related events
     // ============================================
-    /// Open/view a procedure definition
+    /// Edit a procedure's full DDL
     OpenProcedure {
         connection_id: Uuid,
         procedure_name: String,
@@ -291,7 +291,7 @@ pub enum SchemaTreeEvent {
     // ============================================
     // Trigger-related events
     // ============================================
-    /// Open/view a trigger definition
+    /// Edit a trigger's full DDL
     OpenTrigger {
         connection_id: Uuid,
         trigger_name: String,
@@ -670,7 +670,7 @@ impl SchemaTreePanel {
                     }
                 }))
                 .separator()
-                .item(PopupMenuItem::new("Design View").on_click({
+                .item(PopupMenuItem::new("Edit DDL").on_click({
                     let panel = panel.clone();
                     let name = view_name_design.clone();
                     move |_event, _window, cx| {
@@ -717,7 +717,7 @@ impl SchemaTreePanel {
 
         PopupMenu::build(window, cx, move |menu, _, _| {
             menu.action_context(action_context.clone())
-                .item(PopupMenuItem::new("View Definition").on_click({
+                .item(PopupMenuItem::new("Edit DDL").on_click({
                     let panel = panel.clone();
                     let name = function_name_open.clone();
                     move |_event, _window, cx| {
@@ -778,7 +778,7 @@ impl SchemaTreePanel {
 
         PopupMenu::build(window, cx, move |menu, _, _| {
             menu.action_context(action_context.clone())
-                .item(PopupMenuItem::new("View Definition").on_click({
+                .item(PopupMenuItem::new("Edit DDL").on_click({
                     let panel = panel.clone();
                     let name = procedure_name_open.clone();
                     move |_event, _window, cx| {
@@ -839,7 +839,7 @@ impl SchemaTreePanel {
 
         PopupMenu::build(window, cx, move |menu, _, _| {
             menu.action_context(action_context.clone())
-                .item(PopupMenuItem::new("View Definition").on_click({
+                .item(PopupMenuItem::new("Edit DDL").on_click({
                     let panel = panel.clone();
                     let name = trigger_name_open.clone();
                     move |_event, _window, cx| {

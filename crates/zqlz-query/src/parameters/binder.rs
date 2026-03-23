@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use regex::Regex;
 use std::sync::LazyLock;
 use thiserror::Error;
-use zqlz_core::Value;
+use zqlz_core::{BindPlaceholderPolicy, Value};
 
 use super::{Parameter, extract_parameters_with_style};
 
@@ -40,6 +40,24 @@ pub struct BoundQuery {
     pub values: Vec<Value>,
 }
 
+/// Detailed result of named parameter binding for a concrete placeholder policy.
+#[derive(Debug, Clone)]
+pub struct BoundNamedQuery {
+    /// SQL rewritten with placeholders formatted for the target policy.
+    pub sql: String,
+    /// Bound values in execution order.
+    pub values: Vec<Value>,
+}
+
+/// Result of binding positional parameters for a concrete placeholder policy.
+#[derive(Debug, Clone)]
+pub struct BoundPositionalQuery {
+    /// SQL rewritten with placeholders formatted for the target policy.
+    pub sql: String,
+    /// Bound values in execution order.
+    pub values: Vec<Value>,
+}
+
 // Regex patterns for parameter replacement
 static COLON_NAMED_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
@@ -49,6 +67,9 @@ static AT_NAMED_REGEX: LazyLock<Regex> =
 
 static DOLLAR_NAMED_REGEX: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
+
+static DOLLAR_POSITIONAL_REGEX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\$(\d+)").expect("valid regex"));
 
 static STRING_LITERAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"'(?:[^'\\]|\\.)*'|--[^\n]*|/\*[\s\S]*?\*/").expect("valid regex")
@@ -93,6 +114,19 @@ static STRING_LITERAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 /// assert_eq!(result.values.len(), 2);
 /// ```
 pub fn bind_named(sql: &str, params: &HashMap<String, Value>) -> BindResult<BoundQuery> {
+    let bound = bind_named_with_policy(sql, params, BindPlaceholderPolicy::DollarNumbered)?;
+    Ok(BoundQuery {
+        sql: bound.sql,
+        values: bound.values,
+    })
+}
+
+/// Binds named parameters to SQL using the provided placeholder policy.
+pub fn bind_named_with_policy(
+    sql: &str,
+    params: &HashMap<String, Value>,
+    placeholder_policy: BindPlaceholderPolicy,
+) -> BindResult<BoundNamedQuery> {
     // First extract all parameters to validate they exist
     let extraction = extract_parameters_with_style(sql);
     for param in &extraction.parameters {
@@ -136,7 +170,7 @@ pub fn bind_named(sql: &str, params: &HashMap<String, Value>) -> BindResult<Boun
 
         // Get position for this parameter
         let pos = get_or_assign_position(&name);
-        result.push_str(&format!("${}", pos));
+        result.push_str(&placeholder_policy.format(pos - 1));
 
         last_end = end;
     }
@@ -144,7 +178,7 @@ pub fn bind_named(sql: &str, params: &HashMap<String, Value>) -> BindResult<Boun
     // Append remaining text
     result.push_str(&sql[last_end..]);
 
-    Ok(BoundQuery {
+    Ok(BoundNamedQuery {
         sql: result,
         values,
     })
@@ -185,7 +219,31 @@ pub fn bind_named(sql: &str, params: &HashMap<String, Value>) -> BindResult<Boun
 /// assert_eq!(result.len(), 2);
 /// ```
 pub fn bind_positional(sql: &str, params: &[Value]) -> BindResult<Vec<Value>> {
+    Ok(bind_positional_with_policy(sql, params, BindPlaceholderPolicy::DollarNumbered)?.values)
+}
+
+/// Binds positional parameters and rewrites placeholders for the target policy.
+pub fn bind_positional_with_policy(
+    sql: &str,
+    params: &[Value],
+    placeholder_policy: BindPlaceholderPolicy,
+) -> BindResult<BoundPositionalQuery> {
     let extraction = extract_parameters_with_style(sql);
+
+    let rewritten_sql = match extraction.style {
+        Some(super::ParameterStyle::QuestionMark)
+            if matches!(placeholder_policy, BindPlaceholderPolicy::QuestionMark) =>
+        {
+            sql.to_string()
+        }
+        Some(super::ParameterStyle::QuestionMark) => {
+            rewrite_question_mark_placeholders(sql, placeholder_policy)
+        }
+        Some(super::ParameterStyle::DollarPositional) => {
+            rewrite_dollar_positional_placeholders(sql, placeholder_policy)
+        }
+        _ => sql.to_string(),
+    };
 
     // For ? style params, just validate count matches
     // (? params are converted to Positional(1), Positional(2), etc. by the extractor)
@@ -197,7 +255,10 @@ pub fn bind_positional(sql: &str, params: &[Value]) -> BindResult<Vec<Value>> {
                 actual: params.len(),
             });
         }
-        return Ok(params.to_vec());
+        return Ok(BoundPositionalQuery {
+            sql: rewritten_sql,
+            values: params.to_vec(),
+        });
     }
 
     // Find all positional parameters and get the maximum position
@@ -236,7 +297,10 @@ pub fn bind_positional(sql: &str, params: &[Value]) -> BindResult<Vec<Value>> {
             }
             result.push(params[pos - 1].clone());
         }
-        return Ok(result);
+        return Ok(BoundPositionalQuery {
+            sql: rewritten_sql,
+            values: result,
+        });
     }
 
     // No parameters found
@@ -247,7 +311,60 @@ pub fn bind_positional(sql: &str, params: &[Value]) -> BindResult<Vec<Value>> {
         });
     }
 
-    Ok(params.to_vec())
+    Ok(BoundPositionalQuery {
+        sql: rewritten_sql,
+        values: params.to_vec(),
+    })
+}
+
+fn rewrite_question_mark_placeholders(sql: &str, policy: BindPlaceholderPolicy) -> String {
+    let skip_ranges = build_skip_ranges(sql);
+    let mut result = String::with_capacity(sql.len());
+    let mut parameter_index = 0usize;
+
+    for (index, ch) in sql.char_indices() {
+        if ch == '?' && !is_position_in_ranges(index, &skip_ranges) {
+            result.push_str(&policy.format(parameter_index));
+            parameter_index += 1;
+        } else {
+            result.push(ch);
+        }
+    }
+
+    result
+}
+
+fn rewrite_dollar_positional_placeholders(sql: &str, policy: BindPlaceholderPolicy) -> String {
+    let skip_ranges = build_skip_ranges(sql);
+    let mut result = String::with_capacity(sql.len());
+    let mut last_end = 0usize;
+
+    for capture in DOLLAR_POSITIONAL_REGEX.captures_iter(sql) {
+        let (Some(full_match), Some(position_match)) = (capture.get(0), capture.get(1)) else {
+            continue;
+        };
+
+        if is_position_in_ranges(full_match.start(), &skip_ranges) {
+            continue;
+        }
+
+        let Ok(position) = position_match.as_str().parse::<usize>() else {
+            continue;
+        };
+
+        result.push_str(&sql[last_end..full_match.start()]);
+        result.push_str(&policy.format(position.saturating_sub(1)));
+        last_end = full_match.end();
+    }
+
+    result.push_str(&sql[last_end..]);
+    result
+}
+
+fn is_position_in_ranges(position: usize, ranges: &[(usize, usize)]) -> bool {
+    ranges
+        .iter()
+        .any(|(start, end)| position >= *start && position < *end)
 }
 
 /// Find all named parameter matches in SQL, excluding those in strings/comments.

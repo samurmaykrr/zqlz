@@ -20,6 +20,7 @@ pub fn create_test_lsp() -> SqlLsp {
             schema: None,
             comment: Some("User accounts".to_string()),
             row_count: Some(100),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 
@@ -30,6 +31,7 @@ pub fn create_test_lsp() -> SqlLsp {
             schema: None,
             comment: Some("Audit trail".to_string()),
             row_count: Some(1000),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 
@@ -40,6 +42,7 @@ pub fn create_test_lsp() -> SqlLsp {
             schema: None,
             comment: None,
             row_count: Some(50),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 
@@ -177,6 +180,7 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
             schema: None,
             comment: Some("User accounts".to_string()),
             row_count: Some(100),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 
@@ -187,6 +191,7 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
             schema: None,
             comment: Some("Audit trail".to_string()),
             row_count: Some(1000),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 
@@ -197,6 +202,7 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
             schema: None,
             comment: None,
             row_count: Some(50),
+            table_type: zqlz_core::TableType::Table,
         },
     );
 

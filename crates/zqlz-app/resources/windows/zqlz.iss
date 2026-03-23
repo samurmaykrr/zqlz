@@ -108,6 +108,13 @@ Root: HKCU; Subkey: "Software\Classes\.csv\OpenWithProgids"; ValueType: string; 
 Root: HKCU; Subkey: "Software\Classes\{#RegValueName}.csv"; ValueType: string; ValueName: ""; ValueData: "{cm:SourceFile,CSV}"; Flags: uninsdeletekey; Tasks: associatewithfiles
 Root: HKCU; Subkey: "Software\Classes\{#RegValueName}.csv\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""; Tasks: associatewithfiles
 
+; ZQLZ protocol handler (zqlz://)
+Root: HKCU; Subkey: "Software\Classes\zqlz"; ValueType: string; ValueName: ""; ValueData: "URL:ZQLZ Protocol"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\zqlz"; ValueType: string; ValueName: "URL Protocol"; ValueData: ""; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\zqlz"; ValueType: string; ValueName: "AppUserModelID"; ValueData: "{#AppUserId}"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\zqlz\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"",0"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\zqlz\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExeName}.exe"" ""%1"""; Flags: uninsdeletekey
+
 ; PATH environment variable
 Root: HKCU; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueData: "{olddata};{app}"; Tasks: addtopath; Check: NeedsAddPath(ExpandConstant('{app}'))
 

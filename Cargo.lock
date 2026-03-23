@@ -141,7 +141,7 @@ version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40c48f72fd53cd289104fc64099abca73db4166ad86ea0b4341abe65af83dadc"
 dependencies = [
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -152,7 +152,7 @@ checksum = "291e6a250ff86cd4a820112fb8898808a366d8f9f58ce16d1f538353ad55747d"
 dependencies = [
  "anstyle",
  "once_cell_polyfill",
- "windows-sys 0.60.2",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -6046,6 +6046,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "pulldown-cmark"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f86ba2052aebccc42cbbb3ed234b8b13ce76f75c3551a303cb2bcffcff12bb14"
+dependencies = [
+ "bitflags 2.10.0",
+ "memchr",
+ "unicase",
+]
+
+[[package]]
 name = "pulley-interpreter"
 version = "33.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8541,16 +8552,6 @@ dependencies = [
 
 [[package]]
 name = "tree-sitter"
-version = "0.20.10"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e747b1f9b7b931ed39a548c1fae149101497de3c1fc8d9e18c62c1a66c683d3d"
-dependencies = [
- "cc",
- "regex",
-]
-
-[[package]]
-name = "tree-sitter"
 version = "0.26.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "12987371f54efc9b9306a20dc87ed5aaee9f320c8a8b115e28515c412b2efe39"
@@ -8562,36 +8563,6 @@ dependencies = [
  "streaming-iterator",
  "tree-sitter-language",
  "wasmtime-c-api-impl",
-]
-
-[[package]]
-name = "tree-sitter-c"
-version = "0.23.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "afd2b1bf1585dc2ef6d69e87d01db8adb059006649dd5f96f31aa789ee6e9c71"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-cpp"
-version = "0.23.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "df2196ea9d47b4ab4a31b9297eaa5a5d19a0b121dceb9f118f6790ad0ab94743"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-go"
-version = "0.23.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b13d476345220dbe600147dd444165c5791bf85ef53e28acbedd46112ee18431"
-dependencies = [
- "cc",
- "tree-sitter-language",
 ]
 
 [[package]]
@@ -8611,48 +8582,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ae62f7eae5eb549c71b76658648b72cc6111f2d87d24a1e31fa907f4943e3ce"
 
 [[package]]
-name = "tree-sitter-md"
-version = "0.3.2"
-source = "git+https://github.com/tree-sitter-grammars/tree-sitter-markdown?rev=9a23c1a96c0513d8fc6520972beedd419a973539#9a23c1a96c0513d8fc6520972beedd419a973539"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-rust"
-version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4b9b18034c684a2420722be8b2a91c9c44f2546b631c039edf575ccba8c61be1"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
 name = "tree-sitter-sequel"
 version = "0.3.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9d198ad3c319c02e43c21efa1ec796b837afcb96ffaef1a40c1978fbdcec7d17"
-dependencies = [
- "cc",
- "tree-sitter-language",
-]
-
-[[package]]
-name = "tree-sitter-toml"
-version = "0.20.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ca517f578a98b23d20780247cc2688407fa81effad5b627a5a364ec3339b53e8"
-dependencies = [
- "cc",
- "tree-sitter 0.20.10",
-]
-
-[[package]]
-name = "tree-sitter-yaml"
-version = "0.6.1"
-source = "git+https://github.com/zed-industries/tree-sitter-yaml?rev=baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a#baff0b51c64ef6a1fb1f8390f3ad6015b83ec13a"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -10596,7 +10529,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-admin"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -10608,7 +10541,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-analyzer"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -10621,7 +10554,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-app"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -10633,7 +10566,6 @@ dependencies = [
  "objc",
  "parking_lot",
  "regex",
- "rusqlite",
  "rust-embed",
  "serde",
  "serde_json",
@@ -10644,7 +10576,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
- "tree-sitter 0.26.5",
+ "tree-sitter",
  "tree-sitter-sequel",
  "url",
  "uuid",
@@ -10654,6 +10586,7 @@ dependencies = [
  "zqlz-core",
  "zqlz-drivers",
  "zqlz-interchange",
+ "zqlz-internal-storage",
  "zqlz-lsp",
  "zqlz-query",
  "zqlz-schema",
@@ -10670,14 +10603,13 @@ dependencies = [
 
 [[package]]
 name = "zqlz-cli"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
  "clap",
  "comfy-table",
  "dirs 4.0.0",
- "rusqlite",
  "serde",
  "serde_json",
  "tokio",
@@ -10686,11 +10618,12 @@ dependencies = [
  "uuid",
  "zqlz-core",
  "zqlz-drivers",
+ "zqlz-internal-storage",
 ]
 
 [[package]]
 name = "zqlz-command-palette"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "gpui",
  "uuid",
@@ -10701,7 +10634,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-connection"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10722,7 +10655,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-core"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10738,7 +10671,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-clickhouse"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10754,7 +10687,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-duckdb"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10770,7 +10703,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mongodb"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "bson",
@@ -10787,7 +10720,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mssql"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10804,7 +10737,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mysql"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10823,7 +10756,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-postgres"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10845,7 +10778,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-redis"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "redis",
@@ -10861,7 +10794,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-sqlite"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10879,7 +10812,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-drivers"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10901,11 +10834,11 @@ dependencies = [
 
 [[package]]
 name = "zqlz-fuzzy"
-version = "0.0.5"
+version = "0.0.6"
 
 [[package]]
 name = "zqlz-interchange"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10927,8 +10860,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zqlz-internal-storage"
+version = "0.0.6"
+dependencies = [
+ "anyhow",
+ "dirs 4.0.0",
+ "rusqlite",
+]
+
+[[package]]
 name = "zqlz-lsp"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10942,7 +10884,7 @@ dependencies = [
  "thiserror 2.0.17",
  "tokio",
  "tracing",
- "tree-sitter 0.26.5",
+ "tree-sitter",
  "tree-sitter-sequel",
  "url",
  "uuid",
@@ -10955,7 +10897,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-monitor"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10968,7 +10910,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-objects"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -10981,7 +10923,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-query"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11016,7 +10958,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-schema"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11036,7 +10978,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-schema-tools"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "async-trait",
  "serde",
@@ -11084,7 +11026,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-table-designer"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11103,7 +11045,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-templates"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11116,7 +11058,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-text-editor"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11127,23 +11069,23 @@ dependencies = [
  "lsp-types",
  "regex",
  "ropey 1.6.1",
- "rusqlite",
  "serde",
  "serde_json",
  "sqlformat",
  "sqlparser",
  "thiserror 2.0.17",
  "tracing",
- "tree-sitter 0.26.5",
+ "tree-sitter",
  "tree-sitter-sequel",
  "url",
  "uuid",
+ "zqlz-internal-storage",
  "zqlz-ui",
 ]
 
 [[package]]
 name = "zqlz-trigger-designer"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11162,7 +11104,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-ui"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -11181,6 +11123,7 @@ dependencies = [
  "once_cell",
  "parking_lot",
  "paste",
+ "pulldown-cmark",
  "regex",
  "ropey 2.0.0-beta.1",
  "rusqlite",
@@ -11196,16 +11139,9 @@ dependencies = [
  "sum_tree",
  "tokio",
  "tracing",
- "tree-sitter 0.26.5",
- "tree-sitter-c",
- "tree-sitter-cpp",
- "tree-sitter-go",
+ "tree-sitter",
  "tree-sitter-json",
- "tree-sitter-md",
- "tree-sitter-rust",
  "tree-sitter-sequel",
- "tree-sitter-toml",
- "tree-sitter-yaml",
  "unicode-segmentation",
  "uuid",
  "zqlz-core",
@@ -11214,14 +11150,12 @@ dependencies = [
 
 [[package]]
 name = "zqlz-versioning"
-version = "0.0.5"
+version = "0.0.6"
 dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "dirs 4.0.0",
  "gpui",
- "rusqlite",
  "serde",
  "serde_json",
  "similar",
@@ -11231,6 +11165,7 @@ dependencies = [
  "tracing",
  "uuid",
  "zqlz-core",
+ "zqlz-internal-storage",
  "zqlz-schema-tools",
  "zqlz-ui",
 ]

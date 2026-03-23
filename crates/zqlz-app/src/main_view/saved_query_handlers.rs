@@ -6,14 +6,13 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
     button::ButtonVariant,
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputState},
     notification::Notification,
     typography::body_small,
-    v_flex,
+    v_flex, ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
 };
 
 use crate::app::AppState;
@@ -63,7 +62,7 @@ fn rename_open_saved_query_editors(
             continue;
         }
 
-        _ = query_editor.update(cx, |query_editor, cx| {
+        query_editor.update(cx, |query_editor, cx| {
             query_editor.set_name(new_name, cx);
         });
     }

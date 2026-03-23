@@ -1,0 +1,139 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Bubblegum",
+  "author": "koalefant",
+  "themes": [
+    {
+      "name": "Bubblegum",
+      "appearance": "dark",
+      "style": {
+        "background": "#303030",
+        "syntax": {
+          "string": {
+            "color": "#d7d7a7"
+          },
+          "string.escape": {
+            "color": "#D78787"
+          },
+          "string.special": {
+            "color": "#D78787"
+          },
+          "string.special.symbol": {
+            "color": "#D78787"
+          },
+          "type": {
+            "color": "#AFAFD7"
+          },
+          "number": {
+            "color": "#D7AF5F"
+          },
+          "operator": {
+            "color": "#87AFD7"
+          },
+          "preproc": {
+            "color": "#AFD787"
+          },
+          "punctuation.bracket": {
+            "color": "#878787"
+          },
+          "keyword": {
+            "color": "#87AFD7"
+          },
+          "comment": {
+            "color": "#808080"
+          },
+          "comment.doc": {
+            "color": "#808080"
+          },
+          "boolean": {
+            "color": "#D7D7AF"
+          },
+          "constant": {
+            "color": "#D7D787"
+          },
+          "function": {
+            "color": "#D7AFD7"
+          },
+          "function.method": {
+            "color": "#D7AFD7"
+          },
+          "label": {
+            "color": "#87AFD7"
+          },
+          "variable": {
+            "color": "#AFAFAF"
+          },
+          "attribute": {
+            "color": "#AFD787"
+          }
+        },
+        "players": [
+          {
+            "cursor": "",
+            "selection": "#87D7FF"
+          }
+        ],
+        "border.variant": "#656565",
+        "border": "#151515",
+        "editor.active_line.background": "#3A3A3A",
+        "editor.active_line_number": "#E2E2E2",
+        "editor.background": "#303030",
+        "editor.foreground": "#A7A7A7",
+        "editor.gutter.background": "#303030",
+        "editor.indent_guide": "#454545",
+        "editor.indent_guide_active": "#656565",
+        "editor.line_number": "#808080",
+        "editor.subheader.background": "#3A3A3A",
+        "elevated_surface.background": "#252525",
+        "error": "#D78787",
+        "error.background": "#402020",
+        "error.border": "#3f3f3f",
+        "hint": "#808080",
+        "hint.background": "#2f2f2f",
+        "hint.border": "#3f3f3f",
+        "info": "#7fc5c5",
+        "info.background": "#2f2f2f",
+        "info.border": "#3f3f3f",
+        "modified": "#d7d780",
+        "panel.background": "#2a2a2a",
+        "predictive": "#7fc5c5",
+        "predictive.background": "#2f2f2f",
+        "predictive.border": "#3f3f3f",
+        "renamed.background": "#2f2f2f",
+        "renamed.border": "#3f3f3f",
+        "search.match_background": "#4f3f30",
+        "status_bar.background": "#2a2a2a",
+        "success.background": "#2f2f2f",
+        "success.border": "#3f3f3f",
+        "tab.active_background": "#3A3A3A",
+        "tab.inactive_background": "#303030",
+        "tab_bar.background": "#303030",
+        "text": "#d7d7d7",
+        "title_bar.background": "#2a2a2a",
+        "toolbar.background": "#3A3A3A",
+        "unreachable.background": "#2f2f2f",
+        "unreachable.border": "#3f3f3f",
+        "version_control.added": "#208720ba",
+        "version_control.deleted": "#872020ba",
+        "version_control.modified": "#878720ba",
+        "version_control.untracked": "#208720",
+        "warning": "#D7AF87",
+        "warning.background": "#4f3f30",
+        "warning.border": "#3f3f3f",
+        "element.background": "#2A2A2A",
+        "surface.background": "#2A2A2A",
+        "element.active": "#A0A0A0",
+        "icon.accent": "#A0A0A0",
+        "border.focused": "#A0A0A0",
+        "panel.focused_border": "#A0A0A0",
+        "element.hover": "#3A3A3A",
+        "ghost_element.hover": "#3A3A3A",
+        "element.selected": "#444444",
+        "ghost_element.selected": "#444444",
+        "ghost_element.active": "#444444",
+        "text.muted": "#848484",
+        "icon.muted": "#848484"
+      }
+    }
+  ]
+}

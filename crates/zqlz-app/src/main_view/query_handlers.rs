@@ -5,7 +5,8 @@ use uuid::Uuid;
 
 use crate::app::AppState;
 use crate::components::{
-    ExplainResult, QueryEditor, QueryEditorEvent, QueryExecution, StatementResult,
+    ExplainResult, QueryEditor, QueryEditorEvent, QueryExecution, QueryExecutionParams,
+    StatementResult,
 };
 use crate::workspace_state::{DiagnosticSeverity, EditorDiagnostic, EditorId};
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
@@ -32,6 +33,99 @@ fn convert_diagnostic(info: &DiagnosticInfo) -> EditorDiagnostic {
 }
 
 impl MainView {
+    fn connected_connection_options(cx: &App) -> Vec<(Uuid, String)> {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return Vec::new();
+        };
+
+        app_state
+            .saved_connections()
+            .into_iter()
+            .filter(|saved| app_state.connections.is_connected(saved.id))
+            .map(|saved| (saved.id, saved.name))
+            .collect()
+    }
+
+    fn configure_query_editor_switchers(
+        &self,
+        query_editor: &Entity<QueryEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let available_connections = Self::connected_connection_options(cx);
+        query_editor.update(cx, |editor, cx| {
+            editor.set_available_connections(available_connections, cx);
+        });
+
+        let connection_id = query_editor.read(cx).connection_id();
+        let Some(connection_id) = connection_id else {
+            query_editor.update(cx, |editor, cx| {
+                editor.set_available_databases(Vec::new(), cx);
+                editor.set_current_database(None, cx);
+            });
+            return;
+        };
+
+        let (default_database, connection) = {
+            let Some(app_state) = cx.try_global::<AppState>() else {
+                return;
+            };
+
+            let saved = app_state
+                .saved_connections()
+                .into_iter()
+                .find(|saved| saved.id == connection_id);
+            let default_database = saved.as_ref().and_then(|saved| {
+                saved
+                    .params
+                    .get("database")
+                    .or_else(|| saved.params.get("path"))
+                    .cloned()
+            });
+            let connection = app_state.connections.get(connection_id);
+            (default_database, connection)
+        };
+
+        query_editor.update(cx, |editor, cx| {
+            editor.set_current_database(default_database, cx);
+        });
+
+        let Some(connection) = connection else {
+            query_editor.update(cx, |editor, cx| {
+                editor.set_available_databases(Vec::new(), cx);
+            });
+            return;
+        };
+
+        let query_editor_weak = query_editor.downgrade();
+        cx.spawn_in(window, async move |_main_view, cx| {
+            let databases = if let Some(schema_introspection) = connection.as_schema_introspection()
+            {
+                match schema_introspection.list_databases().await {
+                    Ok(databases) => databases
+                        .into_iter()
+                        .map(|database| database.name)
+                        .collect(),
+                    Err(error) => {
+                        tracing::debug!(
+                            connection_id = %connection_id,
+                            error = %error,
+                            "failed to list databases for query editor switcher"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+
+            let _ = query_editor_weak.update(cx, |editor, cx| {
+                editor.set_available_databases(databases, cx);
+            });
+        })
+        .detach();
+    }
+
     pub(super) fn finalize_query_editor_open(
         &mut self,
         query_editor: Entity<QueryEditor>,
@@ -67,6 +161,8 @@ impl MainView {
                 cx,
             );
         });
+
+        self.configure_query_editor_switchers(&query_editor, window, cx);
 
         let focus_handle = query_editor.read(cx).editor_focus_handle(cx);
         window.focus(&focus_handle, cx);
@@ -317,7 +413,11 @@ impl MainView {
         cx.subscribe_in(query_editor, window, {
             move |_this, _editor, event: &QueryEditorEvent, window, cx| {
                 match event {
-                    QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
+                    QueryEditorEvent::ExecuteQuery {
+                        sql,
+                        connection_id,
+                        params,
+                    } => {
                         let Some(editor) = query_editor_weak.upgrade() else {
                             return;
                         };
@@ -369,6 +469,7 @@ impl MainView {
                         });
 
                         let sql = sql.clone();
+                        let execution_params = params.clone();
 
                         // Track query in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade()
@@ -387,7 +488,29 @@ impl MainView {
                             tracing::debug!(sql = %sql, "Executing query");
 
                             // ✅ Use QueryService - all logic encapsulated
-                            let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
+                            let service_execution = match execution_params.as_ref() {
+                                Some(QueryExecutionParams::Positional(params)) => {
+                                    query_service
+                                        .execute_query_with_positional_params(
+                                            conn,
+                                            conn_id,
+                                            &sql,
+                                            params,
+                                        )
+                                        .await
+                                }
+                                Some(QueryExecutionParams::Named(params)) => {
+                                    query_service
+                                        .execute_query_with_named_params(
+                                            conn,
+                                            conn_id,
+                                            &sql,
+                                            params,
+                                        )
+                                        .await
+                                }
+                                None => query_service.execute_query(conn, conn_id, &sql).await,
+                            };
                             let query_success = service_execution.is_ok();
 
                             // Keep a copy for the DDL check below; `sql` may be moved
@@ -472,7 +595,11 @@ impl MainView {
                             anyhow::Ok(())
                         }).detach();
                     }
-                    QueryEditorEvent::ExecuteSelection { sql, connection_id } => {
+                    QueryEditorEvent::ExecuteSelection {
+                        sql,
+                        connection_id,
+                        params,
+                    } => {
                         // ExecuteSelection is the same as ExecuteQuery, just with different SQL
                         // (selected text vs. full content)
                         let Some(editor) = query_editor_weak.upgrade() else {
@@ -525,6 +652,7 @@ impl MainView {
                         });
 
                         let sql = sql.clone();
+                        let execution_params = params.clone();
 
                         // Track query in WorkspaceState (after extracting values from app_state)
                         if let Some(state) = workspace_state.upgrade()
@@ -542,7 +670,29 @@ impl MainView {
                         cx.spawn_in(window, async move |this, cx| {
                             tracing::debug!(sql = %sql, "Executing selection");
 
-                            let service_execution = query_service.execute_query(conn, conn_id, &sql).await;
+                            let service_execution = match execution_params.as_ref() {
+                                Some(QueryExecutionParams::Positional(params)) => {
+                                    query_service
+                                        .execute_query_with_positional_params(
+                                            conn,
+                                            conn_id,
+                                            &sql,
+                                            params,
+                                        )
+                                        .await
+                                }
+                                Some(QueryExecutionParams::Named(params)) => {
+                                    query_service
+                                        .execute_query_with_named_params(
+                                            conn,
+                                            conn_id,
+                                            &sql,
+                                            params,
+                                        )
+                                        .await
+                                }
+                                None => query_service.execute_query(conn, conn_id, &sql).await,
+                            };
                             let query_success = service_execution.is_ok();
 
                             // Keep a copy for the DDL check below; `sql` may be moved
@@ -950,8 +1100,82 @@ impl MainView {
                         );
                     }
                     QueryEditorEvent::SwitchConnection { connection_id } => {
-                        // TODO: Implement connection switching for dock-based editor
-                        tracing::info!("Switch connection requested for editor {} to connection {}", editor_id.0, connection_id);
+                        let Some(editor) = query_editor_weak.upgrade() else {
+                            return;
+                        };
+
+                        if editor.read(cx).connection_id() == Some(*connection_id) {
+                            return;
+                        }
+
+                        let Some(app_state) = cx.try_global::<AppState>() else {
+                            tracing::error!("No AppState available for connection switching");
+                            return;
+                        };
+
+                        let Some(saved) = app_state
+                            .saved_connections()
+                            .into_iter()
+                            .find(|saved| saved.id == *connection_id)
+                        else {
+                            use zqlz_ui::widgets::{WindowExt, notification::Notification};
+                            window.push_notification(
+                                Notification::warning("Selected connection was not found"),
+                                cx,
+                            );
+                            return;
+                        };
+
+                        let Some(connection) = app_state.connections.get(*connection_id) else {
+                            use zqlz_ui::widgets::{WindowExt, notification::Notification};
+                            window.push_notification(
+                                Notification::warning(
+                                    "Connection is not active. Connect it from the sidebar first.",
+                                ),
+                                cx,
+                            );
+                            return;
+                        };
+
+                        let connection_name = saved.name.clone();
+                        let driver_type = saved.driver.clone();
+                        let default_database = saved
+                            .params
+                            .get("database")
+                            .or_else(|| saved.params.get("path"))
+                            .cloned();
+
+                        editor.update(cx, |editor, cx| {
+                            editor.set_connection(
+                                Some(*connection_id),
+                                Some(connection_name),
+                                Some(connection),
+                                Some(driver_type),
+                                cx,
+                            );
+                            editor.set_current_database(default_database.clone(), cx);
+                        });
+
+                        _this.workspace_state.update(cx, |state, cx| {
+                            state.update_editor(
+                                editor_id,
+                                |editor_state| {
+                                    editor_state.connection_id = Some(*connection_id);
+                                },
+                                cx,
+                            );
+                        });
+
+                        if let Some(database_name) = default_database {
+                            _this.load_database_schema(*connection_id, database_name, window, cx);
+                        }
+
+                        tracing::info!(
+                            "Switched connection for editor {} to {}",
+                            editor_id.0,
+                            connection_id
+                        );
+                        _this.configure_query_editor_switchers(&editor, window, cx);
                     }
                     QueryEditorEvent::SwitchDatabase { database_name } => {
                         let Some(editor) = query_editor_weak.upgrade() else {

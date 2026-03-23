@@ -5,6 +5,7 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
+use zqlz_core::SqlObjectName;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     checkbox::Checkbox,
@@ -132,10 +133,21 @@ impl MainView {
                         let source_table_name = source_table_name.clone();
 
                         cx.spawn(async move |cx| {
-                            let sql = format!(
-                                "CREATE TABLE \"{}\" AS SELECT * FROM \"{}\"",
-                                new_table_name, source_table_name
-                            );
+                            let sql = match connection.duplicate_table_sql(
+                                &SqlObjectName::new(&source_table_name),
+                                &SqlObjectName::new(&new_table_name),
+                            ) {
+                                Ok(sql) => sql,
+                                Err(error) => {
+                                    tracing::error!(
+                                        source = %source_table_name,
+                                        target = %new_table_name,
+                                        %error,
+                                        "Failed to build duplicate table SQL"
+                                    );
+                                    return;
+                                }
+                            };
 
                             match connection.execute(&sql, &[]).await {
                                 Ok(_) => {
@@ -268,10 +280,24 @@ impl MainView {
                         for table_name in &table_names {
                             let new_name = format!("{}_copy", table_name);
 
-                            let sql = format!(
-                                "CREATE TABLE \"{}\" AS SELECT * FROM \"{}\"",
-                                new_name, table_name
-                            );
+                            let sql = match connection.duplicate_table_sql(
+                                &SqlObjectName::new(table_name),
+                                &SqlObjectName::new(&new_name),
+                            ) {
+                                Ok(sql) => sql,
+                                Err(error) => {
+                                    let error_msg = format!(
+                                        "'{}': failed to build duplicate SQL ({})",
+                                        table_name, error
+                                    );
+                                    tracing::error!("{}", error_msg);
+                                    if continue_on_error {
+                                        errors.push(error_msg);
+                                        continue;
+                                    }
+                                    return;
+                                }
+                            };
 
                             match connection.execute(&sql, &[]).await {
                                 Ok(_) => {

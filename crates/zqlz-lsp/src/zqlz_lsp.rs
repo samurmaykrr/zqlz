@@ -753,278 +753,118 @@ impl SqlLsp {
 
     /// Fetch stored procedures (driver-specific)
     async fn fetch_procedures(&self, conn: &dyn Connection) -> Result<Vec<ProcedureInfo>> {
-        let mut procedures = Vec::new();
-
-        match self.driver_type.to_lowercase().as_str() {
-            "mysql" | "mariadb" => {
-                // MySQL: SELECT name, type FROM mysql.proc WHERE db = DATABASE() AND type = 'PROCEDURE'
-                let result = conn
-                    .query(
-                        "SELECT ROUTINE_NAME, ROUTINE_DEFINITION, ROUTINE_COMMENT
-                     FROM INFORMATION_SCHEMA.ROUTINES
-                     WHERE ROUTINE_TYPE = 'PROCEDURE' AND ROUTINE_SCHEMA = DATABASE()",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let comment = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let Some(name) = name {
-                        procedures.push(ProcedureInfo {
-                            name,
-                            schema: None,
-                            parameters: vec![], // TODO: Parse parameters
-                            return_type: None,
-                            definition,
-                            comment,
-                        });
-                    }
-                }
-            }
-            "postgres" | "postgresql" => {
-                // PostgreSQL: Query pg_proc for procedures
-                let result = conn
-                    .query(
-                        "SELECT proname, prosrc, obj_description(oid, 'pg_proc')
-                     FROM pg_proc
-                     WHERE prokind = 'p'",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let comment = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let Some(name) = name {
-                        procedures.push(ProcedureInfo {
-                            name,
-                            schema: None,
-                            parameters: vec![],
-                            return_type: None,
-                            definition,
-                            comment,
-                        });
-                    }
-                }
-            }
-            _ => {
-                // SQLite and others don't have stored procedures
-            }
-        }
-
-        Ok(procedures)
+        let introspection = conn
+            .as_schema_introspection()
+            .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
+        let procedures = introspection.list_procedures(None).await?;
+        Ok(procedures
+            .into_iter()
+            .map(|procedure| ProcedureInfo {
+                name: procedure.name,
+                schema: procedure.schema,
+                parameters: procedure
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| ParameterInfo {
+                        name: parameter.name.unwrap_or_default(),
+                        data_type: parameter.data_type,
+                        direction: match parameter.mode {
+                            zqlz_core::ParameterMode::Out => ParameterDirection::Out,
+                            zqlz_core::ParameterMode::InOut => ParameterDirection::InOut,
+                            _ => ParameterDirection::In,
+                        },
+                    })
+                    .collect(),
+                return_type: None,
+                definition: procedure.definition,
+                comment: procedure.comment,
+            })
+            .collect())
     }
 
     /// Fetch functions (driver-specific)
     async fn fetch_functions(&self, conn: &dyn Connection) -> Result<Vec<FunctionInfo>> {
-        let mut functions = Vec::new();
-
-        match self.driver_type.to_lowercase().as_str() {
-            "mysql" | "mariadb" => {
-                let result = conn
-                    .query(
-                        "SELECT ROUTINE_NAME, DTD_IDENTIFIER, ROUTINE_DEFINITION, ROUTINE_COMMENT
-                     FROM INFORMATION_SCHEMA.ROUTINES
-                     WHERE ROUTINE_TYPE = 'FUNCTION' AND ROUTINE_SCHEMA = DATABASE()",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let return_type = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let comment = row.get(3).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let Some(name) = name {
-                        functions.push(FunctionInfo {
-                            name,
-                            schema: None,
-                            parameters: vec![],
-                            return_type: return_type.unwrap_or_default(),
-                            definition,
-                            is_aggregate: false,
-                            comment,
-                        });
-                    }
-                }
-            }
-            "postgres" | "postgresql" => {
-                let result = conn
-                    .query(
-                        "SELECT proname, pg_get_function_result(oid), prosrc,
-                            proisagg, obj_description(oid, 'pg_proc')
-                     FROM pg_proc
-                     WHERE prokind = 'f'",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let return_type = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let is_agg = row.get(3).and_then(|v| v.as_bool());
-                    let comment = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let Some(name) = name {
-                        functions.push(FunctionInfo {
-                            name,
-                            schema: None,
-                            parameters: vec![],
-                            return_type: return_type.unwrap_or_default(),
-                            definition,
-                            is_aggregate: is_agg.unwrap_or(false),
-                            comment,
-                        });
-                    }
-                }
-            }
-            "sqlite" => {
-                // SQLite has built-in functions but no user-defined functions in metadata
-                // We could list built-in functions here
-            }
-            _ => {}
-        }
-
-        Ok(functions)
+        let introspection = conn
+            .as_schema_introspection()
+            .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
+        let functions = introspection.list_functions(None).await?;
+        Ok(functions
+            .into_iter()
+            .map(|function| FunctionInfo {
+                name: function.name,
+                schema: function.schema,
+                parameters: function
+                    .parameters
+                    .into_iter()
+                    .map(|parameter| ParameterInfo {
+                        name: parameter.name.unwrap_or_default(),
+                        data_type: parameter.data_type,
+                        direction: match parameter.mode {
+                            zqlz_core::ParameterMode::Out => ParameterDirection::Out,
+                            zqlz_core::ParameterMode::InOut => ParameterDirection::InOut,
+                            _ => ParameterDirection::In,
+                        },
+                    })
+                    .collect(),
+                return_type: function.return_type,
+                definition: function.definition,
+                is_aggregate: false,
+                comment: function.comment,
+            })
+            .collect())
     }
 
     /// Fetch triggers (driver-specific)
     async fn fetch_triggers(&self, conn: &dyn Connection) -> Result<Vec<TriggerInfo>> {
-        let mut triggers = Vec::new();
-
-        match self.driver_type.to_lowercase().as_str() {
-            "sqlite" => {
-                let result = conn
-                    .query(
-                        "SELECT name, tbl_name, sql FROM sqlite_master WHERE type = 'trigger'",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let table_name = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let (Some(name), Some(table_name)) = (name, table_name) {
-                        triggers.push(TriggerInfo {
-                            name,
-                            table_name,
-                            event: "UNKNOWN".to_string(),
-                            timing: "UNKNOWN".to_string(),
-                            definition,
-                        });
-                    }
+        let introspection = conn
+            .as_schema_introspection()
+            .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
+        let triggers = introspection.list_triggers(None, None).await?;
+        Ok(triggers
+            .into_iter()
+            .map(|trigger| TriggerInfo {
+                name: trigger.name,
+                table_name: trigger.table_name,
+                event: trigger
+                    .events
+                    .first()
+                    .map(|event| match event {
+                        zqlz_core::TriggerEvent::Insert => "INSERT",
+                        zqlz_core::TriggerEvent::Update => "UPDATE",
+                        zqlz_core::TriggerEvent::Delete => "DELETE",
+                        zqlz_core::TriggerEvent::Truncate => "TRUNCATE",
+                    })
+                    .unwrap_or("UNKNOWN")
+                    .to_string(),
+                timing: match trigger.timing {
+                    zqlz_core::TriggerTiming::Before => "BEFORE",
+                    zqlz_core::TriggerTiming::After => "AFTER",
+                    zqlz_core::TriggerTiming::InsteadOf => "INSTEAD OF",
                 }
-            }
-            "mysql" | "mariadb" => {
-                let result = conn.query(
-                    "SELECT TRIGGER_NAME, EVENT_OBJECT_TABLE, EVENT_MANIPULATION, ACTION_TIMING, ACTION_STATEMENT
-                     FROM INFORMATION_SCHEMA.TRIGGERS
-                     WHERE TRIGGER_SCHEMA = DATABASE()",
-                    &[]
-                ).await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let table_name = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let event = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let timing = row.get(3).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let (Some(name), Some(table_name), Some(event), Some(timing)) =
-                        (name, table_name, event, timing)
-                    {
-                        triggers.push(TriggerInfo {
-                            name,
-                            table_name,
-                            event,
-                            timing,
-                            definition,
-                        });
-                    }
-                }
-            }
-            "postgres" | "postgresql" => {
-                let result = conn
-                    .query(
-                        "SELECT t.tgname, c.relname, pg_get_triggerdef(t.oid)
-                     FROM pg_trigger t
-                     JOIN pg_class c ON t.tgrelid = c.oid
-                     WHERE NOT t.tgisinternal",
-                        &[],
-                    )
-                    .await?;
-
-                for row in result.rows {
-                    let name = row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let table_name = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                    let definition = row.get(2).and_then(|v| v.as_str()).map(|s| s.to_string());
-
-                    if let (Some(name), Some(table_name)) = (name, table_name) {
-                        triggers.push(TriggerInfo {
-                            name,
-                            table_name,
-                            event: "UNKNOWN".to_string(),
-                            timing: "UNKNOWN".to_string(),
-                            definition,
-                        });
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        Ok(triggers)
+                .to_string(),
+                definition: trigger.definition,
+            })
+            .collect())
     }
 
     /// Fetch indexes
     async fn fetch_indexes(&self, conn: &dyn Connection) -> Result<Vec<IndexInfo>> {
+        let introspection = conn
+            .as_schema_introspection()
+            .ok_or_else(|| anyhow::anyhow!("Schema introspection not supported"))?;
+
+        let tables = introspection.list_tables(None).await?;
         let mut indexes = Vec::new();
-
-        match self.driver_type.to_lowercase().as_str() {
-            "sqlite" => {
-                // Get list of tables first
-                let tables_result = conn
-                    .query("SELECT name FROM sqlite_master WHERE type = 'table'", &[])
-                    .await?;
-
-                for table_row in tables_result.rows {
-                    if let Some(table_name) = table_row
-                        .get(0)
-                        .and_then(|v| v.as_str())
-                        .map(|s| s.to_string())
-                    {
-                        let result = conn
-                            .query(&format!("PRAGMA index_list('{}')", table_name), &[])
-                            .await?;
-
-                        for row in result.rows {
-                            let name = row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string());
-                            let is_unique = row.get(2).and_then(|v| v.as_i64());
-
-                            if let Some(name) = name {
-                                indexes.push(IndexInfo {
-                                    name,
-                                    table_name: table_name.clone(),
-                                    columns: vec![], // Would need another PRAGMA to get columns
-                                    is_unique: is_unique == Some(1),
-                                });
-                            }
-                        }
-                    }
-                }
-            }
-            _ => {
-                // Other databases would have similar queries
-            }
+        for table in tables {
+            let table_indexes = introspection
+                .get_indexes(table.schema.as_deref(), &table.name)
+                .await?;
+            indexes.extend(table_indexes.into_iter().map(|index| IndexInfo {
+                name: index.name,
+                table_name: table.name.clone(),
+                columns: index.columns,
+                is_unique: index.is_unique,
+            }));
         }
 
         Ok(indexes)
@@ -4244,8 +4084,21 @@ impl SqlLsp {
     /// For non-SQL dialects (like Redis), validation is skipped and no errors
     /// are returned for valid dialect commands.
     pub fn validate_sql(&mut self, text: &Rope) -> Vec<Diagnostic> {
-        // Get dialect config for the current connection
-        let dialect_config = self.dialect.dialect_config();
+        // For drivers that have not migrated to declarative dialect bundles yet
+        // (for example SQLite/MySQL/PostgreSQL), synthesize a minimal config so
+        // diagnostics can still route to the correct sqlparser dialect by driver id.
+        let dialect_config_owned = self.dialect.dialect_config().cloned().or_else(|| {
+            if self.dialect == SqlDialect::Generic {
+                return None;
+            }
+
+            Some(zqlz_core::DialectConfig {
+                id: self.driver_type.clone(),
+                display_name: self.get_dialect_name().to_string(),
+                ..zqlz_core::DialectConfig::default()
+            })
+        });
+        let dialect_config = dialect_config_owned.as_ref();
 
         // Use SqlDiagnostics with dialect-aware analysis
         self.sql_diagnostics

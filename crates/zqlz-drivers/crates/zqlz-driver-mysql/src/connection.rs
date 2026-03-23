@@ -8,9 +8,36 @@ use mysql_async::{
 use std::sync::Arc;
 use std::sync::OnceLock;
 use zqlz_core::{
-    CellUpdateRequest, ColumnMeta, Connection, QueryCancelHandle, QueryResult, Result, Row,
-    RowIdentifier, SchemaIntrospection, StatementResult, Transaction, Value, ZqlzError,
+    BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnMeta, Connection,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
+    ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault, QueryCancelHandle,
+    QueryResult, Result, Row, RowIdentifier, SchemaIntrospection, SqlObjectName, StatementResult,
+    Transaction, Value, ZqlzError,
 };
+
+fn strip_pg_casts(expr: &str) -> String {
+    let mut result = expr.to_owned();
+    loop {
+        let Some(cast_start) = result.rfind("::") else {
+            break;
+        };
+        let after = &result[cast_start + 2..];
+        let ident_len = after
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ' ')
+            .map(char::len_utf8)
+            .sum::<usize>();
+        if ident_len == 0 {
+            break;
+        }
+        let mut end = cast_start + 2 + ident_len;
+        if result[end..].starts_with("[]") {
+            end += 2;
+        }
+        result.replace_range(cast_start..end, "");
+    }
+    result
+}
 
 /// Global Tokio runtime for MySQL operations.
 ///
@@ -305,6 +332,381 @@ impl Connection for MySqlConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("mysql")
+    }
+
+    fn explain_config(&self) -> ExplainConfig {
+        ExplainConfig::mysql()
+    }
+
+    fn explain_parser_kind(&self) -> ExplainParserKind {
+        ExplainParserKind::MySql
+    }
+
+    fn quote_identifier(&self, identifier: &str) -> String {
+        escape_identifier_mysql(identifier)
+    }
+
+    fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+        BindPlaceholderPolicy::QuestionMark
+    }
+
+    fn max_bind_parameters(&self) -> usize {
+        65_535
+    }
+
+    fn search_text_cast_expression(&self, expression_sql: &str) -> String {
+        format!("CAST({} AS CHAR)", expression_sql)
+    }
+
+    fn normalize_import_check_expression(&self, expression_sql: &str) -> String {
+        strip_pg_casts(expression_sql)
+    }
+
+    fn semantic_default_sql(&self, kind: ImportSemanticDefault) -> Option<String> {
+        match kind {
+            ImportSemanticDefault::CurrentUser => Some("CURRENT_USER".to_string()),
+            ImportSemanticDefault::GeneratedUuid => Some("(UUID())".to_string()),
+        }
+    }
+
+    fn supports_partial_indexes(&self) -> bool {
+        false
+    }
+
+    fn supports_include_indexes(&self) -> bool {
+        false
+    }
+
+    fn supports_nulls_ordering_in_indexes(&self) -> bool {
+        false
+    }
+
+    fn import_index_capabilities(&self) -> ImportIndexCapabilities {
+        ImportIndexCapabilities {
+            supports_hash: false,
+            supports_gin: false,
+            supports_gist: false,
+            supports_spgist: false,
+            supports_brin: false,
+            supports_fulltext: true,
+            supports_spatial: true,
+            supports_partial: false,
+            supports_include: false,
+            supports_nulls_ordering: false,
+        }
+    }
+
+    fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
+        let new_name = match table_name.namespace.as_deref() {
+            Some(namespace) => format!(
+                "{}.{}",
+                self.quote_identifier(namespace),
+                self.quote_identifier(new_table_name)
+            ),
+            None => self.quote_identifier(new_table_name),
+        };
+
+        Ok(format!(
+            "RENAME TABLE {} TO {}",
+            self.render_qualified_name(table_name),
+            new_name
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        table_name: &SqlObjectName,
+        options: DropTableOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP TABLE");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(table_name));
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "MySQL does not support DROP TABLE ... CASCADE".to_string(),
+            ));
+        }
+        Ok(sql)
+    }
+
+    fn drop_view_sql(&self, view_name: &SqlObjectName, options: DropViewOptions) -> Result<String> {
+        let mut sql = String::from("DROP VIEW");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(view_name));
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "MySQL does not support DROP VIEW ... CASCADE".to_string(),
+            ));
+        }
+        Ok(sql)
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        options: DropTriggerOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP TRIGGER");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(trigger_name));
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "MySQL does not support DROP TRIGGER ... CASCADE".to_string(),
+            ));
+        }
+        Ok(sql)
+    }
+
+    fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "TRUNCATE TABLE {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        source_table_name: &SqlObjectName,
+        new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        Ok(format!(
+            "CREATE TABLE {} AS SELECT * FROM {}",
+            self.render_qualified_name(new_table_name),
+            self.render_qualified_name(source_table_name)
+        ))
+    }
+
+    fn clear_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        self.truncate_table_sql(table_name)
+    }
+
+    fn table_has_rows_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "SELECT 1 FROM {} LIMIT 1",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        let projection = if projected_columns.is_empty() {
+            "*".to_string()
+        } else {
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut sql = format!(
+            "SELECT {} FROM {}",
+            projection,
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        Ok(sql)
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+        order_by_columns: &[String],
+        limit: u64,
+    ) -> Result<String> {
+        let mut sql = format!(
+            "SELECT DISTINCT {} FROM {}",
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        if !order_by_columns.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(
+                &order_by_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+
+        sql.push_str(&format!(" LIMIT {}", limit));
+        Ok(sql)
+    }
+
+    fn insert_row_sql(
+        &self,
+        table_name: &SqlObjectName,
+        column_names: &[String],
+        value_count: usize,
+    ) -> Result<String> {
+        let placeholders = (0..value_count)
+            .map(|index| self.format_bind_placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = column_names
+            .iter()
+            .map(|column| self.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Ok(format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.render_qualified_name(table_name),
+            columns,
+            placeholders
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Ok(
+            r#"
+        SELECT
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Questions') as total_queries,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_select') as select_queries,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_insert') as insert_queries,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_update') as update_queries,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_delete') as delete_queries,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_bytes_data') as buffer_pool_pages_data,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_read_requests') as buffer_pool_read_requests,
+            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_reads') as buffer_pool_reads,
+            (SELECT @@innodb_buffer_pool_size) as buffer_pool_size
+        "#
+            .to_string(),
+        )
+    }
+
+    fn restore_sequence_sql(&self, sequence_name: &str, current_value: i64) -> Option<String> {
+        let table_name = sequence_name
+            .split_once('.')
+            .map(|(table, _)| table)
+            .unwrap_or(sequence_name);
+        Some(format!(
+            "ALTER TABLE {} AUTO_INCREMENT = {}",
+            self.quote_identifier(table_name),
+            current_value + 1
+        ))
+    }
+
+    async fn export_sequence_current_value(
+        &self,
+        table_name: &str,
+        _column_name: &str,
+    ) -> Result<Option<i64>> {
+        let sql = format!(
+            "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}'",
+            table_name.replace('\'', "''")
+        );
+        let result = self.query(&sql, &[]).await?;
+        let Some(next_value) = result
+            .rows
+            .first()
+            .and_then(|row| row.values.first())
+            .and_then(|value| value.as_i64())
+        else {
+            return Ok(None);
+        };
+
+        Ok(Some(next_value - 1).filter(|value| *value > 0))
+    }
+
+    fn normalize_create_view_sql(&self, sql: &str) -> String {
+        let trimmed = sql.trim();
+        if trimmed
+            .to_ascii_uppercase()
+            .starts_with("CREATE OR REPLACE VIEW")
+        {
+            trimmed.to_string()
+        } else if trimmed.to_ascii_uppercase().starts_with("CREATE VIEW") {
+            trimmed.replacen("CREATE VIEW", "CREATE OR REPLACE VIEW", 1)
+        } else {
+            trimmed.to_string()
+        }
+    }
+
+    async fn resolve_session_namespace(&self) -> Result<Option<String>> {
+        let result = self.query("SELECT DATABASE()", &[]).await?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string)
+            .or_else(|| self.default_database().map(ToString::to_string)))
+    }
+
+    fn supports_fast_exact_count(&self) -> bool {
+        false
+    }
+
+    fn check_constraint_enforcement(&self) -> CheckConstraintEnforcement {
+        CheckConstraintEnforcement::Unknown
+    }
+
+    fn foreign_key_checks_sql(&self) -> Option<ForeignKeyChecksSql> {
+        Some(ForeignKeyChecksSql {
+            disable_sql: "SET FOREIGN_KEY_CHECKS=0".to_string(),
+            enable_sql: "SET FOREIGN_KEY_CHECKS=1".to_string(),
+        })
+    }
+
+    async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
+        let schema = table_name
+            .namespace
+            .clone()
+            .or_else(|| self.default_database().map(ToString::to_string));
+
+        let Some(schema_name) = schema else {
+            return Ok(None);
+        };
+
+        let result = self
+            .query(
+                "SELECT TABLE_ROWS FROM information_schema.tables WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1",
+                &[
+                    Value::String(schema_name),
+                    Value::String(table_name.name.clone()),
+                ],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .and_then(|value| u64::try_from(value).ok()))
     }
 
     #[tracing::instrument(skip(self, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]

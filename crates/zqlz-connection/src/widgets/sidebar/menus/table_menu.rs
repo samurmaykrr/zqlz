@@ -36,6 +36,7 @@ impl ConnectionSidebar {
     /// - **Refresh**: Emits `RefreshSchema` to reload schema information
     ///
     /// This menu appears when right-clicking on a table node.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::widgets) fn show_table_context_menu(
         &mut self,
         conn_id: Uuid,

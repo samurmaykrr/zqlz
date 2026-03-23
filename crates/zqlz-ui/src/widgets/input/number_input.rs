@@ -1,13 +1,12 @@
 use gpui::{
-    AnyElement, App, Context, Corners, Edges, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, KeyBinding, ParentElement, RenderOnce, SharedString,
-    StyleRefinement, Styled, Window, actions, prelude::FluentBuilder as _,
+    actions, prelude::FluentBuilder as _, AnyElement, App, Context, Corners, Edges, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+    ParentElement, RenderOnce, SharedString, StyleRefinement, Styled, Window,
 };
 
 use crate::widgets::{
-    ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _,
     button::{Button, ButtonVariants},
-    h_flex,
+    h_flex, ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _,
 };
 
 use super::{Input, InputState};
@@ -151,7 +150,10 @@ impl RenderOnce for NumberInput {
             .on_action(window.listener_for(&self.state, InputState::on_action_increment))
             .on_action(window.listener_for(&self.state, InputState::on_action_decrement))
             .flex_1()
-            .rounded(cx.theme().radius)
+            .when(self.appearance, |this| {
+                this.border_1()
+                    .border_color(cx.theme().border.opacity(0.25))
+            })
             .refine_style(&self.style)
             .when(self.disabled, |this| this.bg(cx.theme().muted))
             .child(

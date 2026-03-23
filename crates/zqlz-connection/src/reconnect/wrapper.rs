@@ -9,8 +9,9 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use async_trait::async_trait;
 use tokio::sync::Mutex;
 use zqlz_core::{
-    Connection, QueryCancelHandle, QueryResult, Result, SchemaIntrospection, StatementResult,
-    Transaction, Value, ZqlzError,
+    Connection, DropTableOptions, DropTriggerOptions, DropViewOptions, QueryCancelHandle,
+    QueryResult, Result, SchemaIntrospection, SqlObjectName, StatementResult, Transaction, Value,
+    ZqlzError,
 };
 
 use super::BackoffStrategy;
@@ -305,6 +306,116 @@ impl Connection for ReconnectingConnection {
     fn dialect_id(&self) -> Option<&'static str> {
         // We can't reliably get this without a connection, so return None
         None
+    }
+
+    fn rename_table_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _new_table_name: &str,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _options: DropTableOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn drop_view_sql(
+        &self,
+        _view_name: &SqlObjectName,
+        _options: DropViewOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        _trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        _options: DropTriggerOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn truncate_table_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        _source_table_name: &SqlObjectName,
+        _new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn clear_table_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn table_has_rows_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _projected_columns: &[String],
+        _where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _projected_columns: &[String],
+        _where_clause_sql: Option<&str>,
+        _order_by_columns: &[String],
+        _limit: u64,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn insert_row_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _column_names: &[String],
+        _value_count: usize,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Reconnecting wrapper cannot build SQL without direct driver context".into(),
+        ))
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {

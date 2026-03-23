@@ -47,7 +47,7 @@ fn empty_collection_save_error(value_type: RedisValueType) -> anyhow::Error {
 
 fn parse_collection_items(new_value: &str) -> Vec<String> {
     if new_value.trim().starts_with('[') {
-        serde_json::from_str(&new_value)
+        serde_json::from_str(new_value)
             .unwrap_or_else(|_| new_value.lines().map(|value| value.to_string()).collect())
     } else {
         new_value.lines().map(|value| value.to_string()).collect()
@@ -436,7 +436,7 @@ impl MainView {
                 let schema_qualifier = source_viewer.as_ref().and_then(|v| {
                     v.read_with(cx, |viewer, _cx| {
                         let db = viewer.database_name();
-                        resolve_schema_qualifier(connection.driver_name(), &db)
+                        resolve_schema_qualifier(&connection, &db)
                     })
                     .ok()
                     .flatten()

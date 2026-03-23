@@ -8,8 +8,10 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 use zqlz_core::{
-    ColumnMeta, Connection, QueryResult, Result, Row, StatementResult, Transaction, Value,
-    ZqlzError,
+    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta, Connection, DropTableOptions,
+    DropTriggerOptions, DropViewOptions, ExplainConfig, ForeignKeyChecksSql,
+    ImportIndexCapabilities, ImportSemanticDefault, QueryResult, Result, Row, SchemaIntrospection,
+    SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
 };
 
 /// MS SQL Server connection errors
@@ -135,15 +137,18 @@ impl MssqlConnection {
             .unwrap_or_else(|| "localhost".to_string());
         let port = if config.port > 0 { config.port } else { 1433 };
         let database = config.get_string("database");
-        let username = config
-            .get_string("user")
-            .or_else(|| config.get_string("username"));
-        let password = config.get_string("password");
-        let trust_cert = config
-            .params
-            .get("trust_cert")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
+        let use_windows_auth = windows_auth_from_config(config);
+        let (username, password) = if use_windows_auth {
+            (None, None)
+        } else {
+            (
+                config
+                    .get_string("user")
+                    .or_else(|| config.get_string("username")),
+                config.get_string("password"),
+            )
+        };
+        let trust_cert = trust_cert_from_config(config);
 
         Self::connect(
             &host,
@@ -164,6 +169,29 @@ impl MssqlConnection {
     }
 }
 
+pub(crate) fn trust_cert_from_config(config: &zqlz_core::ConnectionConfig) -> bool {
+    fn is_truthy(value: &str) -> bool {
+        value == "true" || value == "1"
+    }
+
+    config
+        .params
+        .get("trust_certificate")
+        .map(String::as_str)
+        .or_else(|| config.params.get("trust_cert").map(String::as_str))
+        .map(is_truthy)
+        .unwrap_or(false)
+}
+
+pub(crate) fn windows_auth_from_config(config: &zqlz_core::ConnectionConfig) -> bool {
+    config
+        .params
+        .get("use_windows_auth")
+        .map(String::as_str)
+        .map(|value| value == "true" || value == "1")
+        .unwrap_or(false)
+}
+
 #[async_trait]
 impl Connection for MssqlConnection {
     fn driver_name(&self) -> &str {
@@ -172,6 +200,341 @@ impl Connection for MssqlConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("mssql")
+    }
+
+    fn explain_config(&self) -> ExplainConfig {
+        ExplainConfig::default()
+    }
+
+    fn quote_identifier(&self, identifier: &str) -> String {
+        crate::dialect::MssqlDialect::new().quote_identifier(identifier)
+    }
+
+    fn requires_database_scoped_connection(&self) -> bool {
+        true
+    }
+
+    fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+        BindPlaceholderPolicy::QuestionMark
+    }
+
+    fn max_bind_parameters(&self) -> usize {
+        2_100
+    }
+
+    fn paginated_select_sql(&self, base_sql: &str, limit: u64, offset: u64) -> String {
+        let normalized_base_sql = base_sql.trim_end().trim_end_matches(';');
+        let has_order_by = normalized_base_sql
+            .to_ascii_uppercase()
+            .contains(" ORDER BY ");
+
+        if has_order_by {
+            format!(
+                "{} OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+                normalized_base_sql, offset, limit
+            )
+        } else {
+            format!(
+                "{} ORDER BY (SELECT NULL) OFFSET {} ROWS FETCH NEXT {} ROWS ONLY",
+                normalized_base_sql, offset, limit
+            )
+        }
+    }
+
+    fn search_text_cast_expression(&self, expression_sql: &str) -> String {
+        format!("CAST({} AS NVARCHAR(MAX))", expression_sql)
+    }
+
+    fn semantic_default_sql(&self, kind: ImportSemanticDefault) -> Option<String> {
+        match kind {
+            ImportSemanticDefault::CurrentUser => Some("CURRENT_USER".to_string()),
+            ImportSemanticDefault::GeneratedUuid => Some("NEWID()".to_string()),
+        }
+    }
+
+    fn supports_partial_indexes(&self) -> bool {
+        true
+    }
+
+    fn supports_include_indexes(&self) -> bool {
+        true
+    }
+
+    fn supports_nulls_ordering_in_indexes(&self) -> bool {
+        false
+    }
+
+    fn import_index_capabilities(&self) -> ImportIndexCapabilities {
+        ImportIndexCapabilities {
+            supports_hash: false,
+            supports_gin: false,
+            supports_gist: false,
+            supports_spgist: false,
+            supports_brin: false,
+            supports_fulltext: true,
+            supports_spatial: true,
+            supports_partial: true,
+            supports_include: true,
+            supports_nulls_ordering: false,
+        }
+    }
+
+    fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
+        let full_name = match table_name.namespace.as_deref() {
+            Some(namespace) => format!(
+                "{}.{}",
+                self.quote_identifier(namespace),
+                self.quote_identifier(&table_name.name)
+            ),
+            None => self.quote_identifier(&table_name.name),
+        };
+
+        let escaped_full_name = full_name.replace('"', "\"\"");
+        let escaped_new_name = new_table_name.replace('"', "\"\"");
+
+        Ok(format!(
+            "EXEC sp_rename N'{}', N'{}', 'OBJECT'",
+            escaped_full_name, escaped_new_name
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        table_name: &SqlObjectName,
+        options: DropTableOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP TABLE");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(table_name));
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQL Server does not support DROP TABLE ... CASCADE".to_string(),
+            ));
+        }
+        Ok(sql)
+    }
+
+    fn drop_view_sql(&self, view_name: &SqlObjectName, options: DropViewOptions) -> Result<String> {
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQL Server does not support DROP VIEW ... CASCADE".to_string(),
+            ));
+        }
+
+        let mut sql = String::from("DROP VIEW");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(view_name));
+        Ok(sql)
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        options: DropTriggerOptions,
+    ) -> Result<String> {
+        if options.cascade {
+            return Err(ZqlzError::NotSupported(
+                "SQL Server does not support DROP TRIGGER ... CASCADE".to_string(),
+            ));
+        }
+
+        let mut sql = String::from("DROP TRIGGER");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(trigger_name));
+        Ok(sql)
+    }
+
+    fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "TRUNCATE TABLE {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        source_table_name: &SqlObjectName,
+        new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        Ok(format!(
+            "SELECT * INTO {} FROM {}",
+            self.render_qualified_name(new_table_name),
+            self.render_qualified_name(source_table_name)
+        ))
+    }
+
+    fn clear_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        self.truncate_table_sql(table_name)
+    }
+
+    fn table_has_rows_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "SELECT TOP 1 1 FROM {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        let projection = if projected_columns.is_empty() {
+            "*".to_string()
+        } else {
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+
+        let mut sql = format!(
+            "SELECT {} FROM {}",
+            projection,
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        Ok(sql)
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+        order_by_columns: &[String],
+        limit: u64,
+    ) -> Result<String> {
+        let mut sql = format!(
+            "SELECT DISTINCT TOP {} {} FROM {}",
+            limit,
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.render_qualified_name(table_name)
+        );
+
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+
+        if !order_by_columns.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(
+                &order_by_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+
+        Ok(sql)
+    }
+
+    fn insert_row_sql(
+        &self,
+        table_name: &SqlObjectName,
+        column_names: &[String],
+        value_count: usize,
+    ) -> Result<String> {
+        let placeholders = (0..value_count)
+            .map(|index| self.format_bind_placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = column_names
+            .iter()
+            .map(|column| self.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+
+        Ok(format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.render_qualified_name(table_name),
+            columns,
+            placeholders
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Ok(
+            r#"
+        SELECT
+            (SELECT cntr_value FROM sys.dm_os_performance_counters
+             WHERE counter_name = 'Batch Requests/sec' AND instance_name = '') as total_queries,
+            (SELECT cntr_value FROM sys.dm_os_performance_counters
+             WHERE counter_name = 'Buffer cache hit ratio' AND object_name LIKE '%Buffer Manager%') as cache_hit_ratio,
+            (SELECT cntr_value FROM sys.dm_os_performance_counters
+             WHERE counter_name = 'Database pages' AND object_name LIKE '%Buffer Manager%') as buffer_pages
+        "#
+            .to_string(),
+        )
+    }
+
+    async fn resolve_session_namespace(&self) -> Result<Option<String>> {
+        let result = self.query("SELECT SCHEMA_NAME()", &[]).await?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string))
+    }
+
+    fn supports_fast_exact_count(&self) -> bool {
+        false
+    }
+
+    fn check_constraint_enforcement(&self) -> CheckConstraintEnforcement {
+        CheckConstraintEnforcement::Enforced
+    }
+
+    fn foreign_key_checks_sql(&self) -> Option<ForeignKeyChecksSql> {
+        None
+    }
+
+    async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
+        let object_name = match table_name.namespace.as_deref() {
+            Some(namespace) => format!("{}.{}", namespace, table_name.name),
+            None => table_name.name.clone(),
+        };
+
+        let result = self
+            .query(
+                "SELECT SUM(p.row_count) \
+                 FROM sys.dm_db_partition_stats p \
+                 WHERE p.object_id = OBJECT_ID(@P1) \
+                   AND p.index_id IN (0, 1)",
+                &[Value::String(object_name)],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_i64())
+            .and_then(|value| u64::try_from(value).ok()))
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
@@ -297,6 +660,10 @@ impl Connection for MssqlConnection {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
+        Some(self)
     }
 }
 

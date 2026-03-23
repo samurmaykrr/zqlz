@@ -188,9 +188,8 @@ where
             .on_key_down(window.listener_for(&self.state, TableState::on_key_down))
             .bg(cx.theme().table)
             .when(bordered, |this| {
-                this.rounded(cx.theme().radius)
-                    .border_1()
-                    .border_color(cx.theme().border)
+                this.border_1()
+                    .border_color(cx.theme().border.opacity(0.25))
             })
             .child(self.state)
     }

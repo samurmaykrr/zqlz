@@ -19,7 +19,10 @@
 pub mod binder;
 mod extractor;
 
-pub use binder::{BindError, BindResult, BoundQuery, bind_named, bind_positional};
+pub use binder::{
+    BindError, BindResult, BoundNamedQuery, BoundPositionalQuery, BoundQuery, bind_named,
+    bind_named_with_policy, bind_positional, bind_positional_with_policy,
+};
 pub use extractor::{
     ExtractionResult, Parameter, ParameterStyle, extract_parameters, extract_parameters_with_style,
 };

@@ -28,6 +28,7 @@ use crate::components::{PendingCellChange, TableViewerEvent, TableViewerPanel};
 use super::super::super::table_handlers_utils::{
     conversion::resolve_schema_qualifier, formatting::escape_redis_value,
 };
+use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
 
 #[derive(Clone, Debug)]
 struct FailedModifiedCell {
@@ -177,7 +178,7 @@ pub(in crate::main_view) fn handle_save_new_row_event(
     let new_row_index = request.new_row_index;
 
     let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Insert the new row in background
     cx.spawn(async move |cx| {
@@ -312,8 +313,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
     // Capture the is_view state and database_name before loading
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
-    let driver_name = connection.driver_name().to_string();
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Extract active filter/sort/search state so the post-delete refresh preserves it
     let (where_clauses, order_by_clauses, visible_columns) =
@@ -328,30 +328,21 @@ pub(in crate::main_view) fn handle_delete_rows_event(
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
                 order_by_clauses = sorts
                     .iter()
-                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
                     .collect();
             }
 
-            let all_column_names: Vec<String> =
-                viewer.column_meta.iter().map(|c| c.name.clone()).collect();
-
-            if !viewer.search_text.is_empty() && !all_column_names.is_empty() {
-                let escaped_search = viewer
-                    .search_text
-                    .replace("'", "''")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_");
-                let column_conditions: Vec<String> = all_column_names
+            if let Some(search_clause) = build_search_clause_for_columns(
+                &connection,
+                &viewer
+                    .column_meta
                     .iter()
-                    .map(|col_name| {
-                        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                        format!(
-                            "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                            escaped_col, escaped_search
-                        )
-                    })
-                    .collect();
-                where_clauses.push(format!("({})", column_conditions.join(" OR ")));
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>(),
+                &viewer.search_text,
+                false,
+            ) {
+                where_clauses.push(search_clause);
             }
 
             let visible_columns: Vec<String> = viewer
@@ -587,7 +578,7 @@ pub(in crate::main_view) fn handle_commit_changes_event(
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
     let driver_category = viewer_entity.read(cx).driver_category;
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Build column names from metadata
     let column_names: Vec<String> = column_meta.iter().map(|c| c.name.clone()).collect();

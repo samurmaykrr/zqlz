@@ -1,10 +1,11 @@
 //! Tests for MS SQL Server connection module
 
 use crate::connection::{
-    MssqlConnectionError, TiberiusParam, column_data_to_value, values_to_tiberius_params,
+    MssqlConnectionError, TiberiusParam, column_data_to_value, trust_cert_from_config,
+    values_to_tiberius_params, windows_auth_from_config,
 };
 use tiberius::ColumnData;
-use zqlz_core::{Value, ZqlzError};
+use zqlz_core::{ConnectionConfig, Value, ZqlzError};
 
 // Value conversion tests
 
@@ -155,6 +156,45 @@ fn test_column_data_to_value_bool() {
 }
 
 // MssqlConnection tests
+
+#[test]
+fn test_trust_cert_from_config_defaults_false() {
+    let config = ConnectionConfig::new("mssql", "SQL Server");
+    assert!(!trust_cert_from_config(&config));
+}
+
+#[test]
+fn test_trust_cert_from_config_accepts_trust_certificate_truthy_values() {
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("trust_certificate", true);
+    assert!(trust_cert_from_config(&config));
+
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("trust_certificate", 1);
+    assert!(trust_cert_from_config(&config));
+}
+
+#[test]
+fn test_trust_cert_from_config_accepts_legacy_trust_cert_truthy_values() {
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("trust_cert", true);
+    assert!(trust_cert_from_config(&config));
+
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("trust_cert", 1);
+    assert!(trust_cert_from_config(&config));
+}
+
+#[test]
+fn test_windows_auth_from_config_defaults_false() {
+    let config = ConnectionConfig::new("mssql", "SQL Server");
+    assert!(!windows_auth_from_config(&config));
+}
+
+#[test]
+fn test_windows_auth_from_config_accepts_truthy_values() {
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("use_windows_auth", true);
+    assert!(windows_auth_from_config(&config));
+
+    let config = ConnectionConfig::new("mssql", "SQL Server").with_param("use_windows_auth", 1);
+    assert!(windows_auth_from_config(&config));
+}
 
 #[test]
 fn test_mssql_connection_driver_name() {

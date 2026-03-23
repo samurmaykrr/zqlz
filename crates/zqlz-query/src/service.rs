@@ -9,11 +9,12 @@ use uuid::Uuid;
 use zqlz_analyzer::{
     QueryAnalyzer, parse_mysql_explain, parse_postgres_explain, parse_sqlite_explain,
 };
-use zqlz_core::{Connection, ExplainConfig};
+use zqlz_core::{Connection, ExplainConfig, ExplainParserKind, Value};
 
 use crate::engine::QueryEngine;
 use crate::error::{QueryServiceError, QueryServiceResult};
 use crate::history::{QueryHistory, QueryHistoryEntry};
+use crate::parameters::{BindError, bind_named_with_policy, bind_positional_with_policy};
 use crate::view_models::{QueryExecution, StatementExecution, StatementResult};
 
 /// Service for executing queries and statements
@@ -181,6 +182,178 @@ impl QueryService {
             success = success_count,
             duration_ms = duration_ms,
             "Query execution completed"
+        );
+
+        Ok(QueryExecution {
+            sql: sql.to_string(),
+            duration_ms,
+            statements: statement_results,
+        })
+    }
+
+    /// Execute a query with named parameters.
+    #[tracing::instrument(skip(self, connection, sql, named_params), fields(connection_id = %connection_id, sql_preview = %sql.chars().take(50).collect::<String>(), named_param_count = named_params.len()))]
+    pub async fn execute_query_with_named_params(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        sql: &str,
+        named_params: &std::collections::HashMap<String, Value>,
+    ) -> QueryServiceResult<QueryExecution> {
+        let placeholder_policy = connection.bind_placeholder_policy();
+        let bound = bind_named_with_policy(sql, named_params, placeholder_policy)
+            .map_err(Self::map_bind_error)?;
+        self.execute_query_with_bound_params(connection, connection_id, &bound.sql, &bound.values)
+            .await
+    }
+
+    /// Execute a query with positional parameters.
+    #[tracing::instrument(skip(self, connection, sql, positional_params), fields(connection_id = %connection_id, sql_preview = %sql.chars().take(50).collect::<String>(), positional_param_count = positional_params.len()))]
+    pub async fn execute_query_with_positional_params(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        sql: &str,
+        positional_params: &[Value],
+    ) -> QueryServiceResult<QueryExecution> {
+        let placeholder_policy = connection.bind_placeholder_policy();
+        let bound = bind_positional_with_policy(sql, positional_params, placeholder_policy)
+            .map_err(Self::map_bind_error)?;
+        self.execute_query_with_bound_params(connection, connection_id, &bound.sql, &bound.values)
+            .await
+    }
+
+    async fn execute_query_with_bound_params(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        sql: &str,
+        params: &[Value],
+    ) -> QueryServiceResult<QueryExecution> {
+        tracing::debug!(
+            param_count = params.len(),
+            "Executing query via QueryService with bound parameters"
+        );
+
+        let start = std::time::Instant::now();
+
+        // Split SQL into individual statements
+        let statements = self.split_statements(sql);
+
+        let mut statement_results = Vec::new();
+
+        for statement_sql in statements {
+            let statement_sql = statement_sql.trim();
+            if statement_sql.is_empty() {
+                continue;
+            }
+
+            let statement_start = std::time::Instant::now();
+
+            // Determine if it's a query or statement
+            let is_query = self.engine.is_query(statement_sql);
+
+            let statement_result = if is_query {
+                match self
+                    .engine
+                    .execute_query_with_params(&connection, statement_sql, params)
+                    .await
+                {
+                    Ok(query_result) => {
+                        let duration = statement_start.elapsed().as_millis() as u64;
+                        StatementResult {
+                            sql: statement_sql.to_string(),
+                            duration_ms: duration,
+                            result: Some(query_result),
+                            error: None,
+                            affected_rows: 0,
+                        }
+                    }
+                    Err(e) => {
+                        let duration = statement_start.elapsed().as_millis() as u64;
+                        StatementResult {
+                            sql: statement_sql.to_string(),
+                            duration_ms: duration,
+                            result: None,
+                            error: Some(e.to_string()),
+                            affected_rows: 0,
+                        }
+                    }
+                }
+            } else {
+                match self
+                    .engine
+                    .execute_statement_with_params(&connection, statement_sql, params)
+                    .await
+                {
+                    Ok(stmt_result) => {
+                        let duration = statement_start.elapsed().as_millis() as u64;
+                        StatementResult {
+                            sql: statement_sql.to_string(),
+                            duration_ms: duration,
+                            result: None,
+                            error: None,
+                            affected_rows: stmt_result.affected_rows,
+                        }
+                    }
+                    Err(e) => {
+                        let duration = statement_start.elapsed().as_millis() as u64;
+                        StatementResult {
+                            sql: statement_sql.to_string(),
+                            duration_ms: duration,
+                            result: None,
+                            error: Some(e.to_string()),
+                            affected_rows: 0,
+                        }
+                    }
+                }
+            };
+
+            statement_results.push(statement_result);
+        }
+
+        let duration = start.elapsed();
+        let duration_ms = duration.as_millis() as u64;
+
+        // Track in history
+        let success_count = statement_results
+            .iter()
+            .filter(|s| s.error.is_none())
+            .count();
+        let total_rows: u64 = statement_results
+            .iter()
+            .filter_map(|s| s.result.as_ref())
+            .map(|r| r.rows.len() as u64)
+            .sum();
+
+        let entry = if success_count == statement_results.len() {
+            QueryHistoryEntry::success(
+                sql.to_string(),
+                Some(connection_id),
+                duration_ms,
+                total_rows,
+            )
+        } else {
+            let errors: Vec<String> = statement_results
+                .iter()
+                .filter_map(|s| s.error.as_ref())
+                .cloned()
+                .collect();
+            QueryHistoryEntry::failure(
+                sql.to_string(),
+                Some(connection_id),
+                duration_ms,
+                errors.join("; "),
+            )
+        };
+        self.history.write().add(entry);
+
+        tracing::info!(
+            statements = statement_results.len(),
+            success = success_count,
+            duration_ms = duration_ms,
+            param_count = params.len(),
+            "Parameterized query execution completed"
         );
 
         Ok(QueryExecution {
@@ -405,6 +578,10 @@ impl QueryService {
         self.history.read().search(query).cloned().collect()
     }
 
+    fn map_bind_error(error: BindError) -> QueryServiceError {
+        QueryServiceError::QueryFailed(format!("Parameter binding failed: {}", error))
+    }
+
     /// Execute EXPLAIN on a SQL query
     ///
     /// Uses the connection's dialect to determine the correct EXPLAIN syntax.
@@ -515,11 +692,9 @@ impl QueryService {
         query_plan: Option<&zqlz_core::QueryResult>,
         duration_ms: u64,
     ) -> Option<zqlz_analyzer::QueryAnalysis> {
-        let dialect = connection.dialect_id()?;
-
-        // Try to parse based on dialect
-        let parsed_plan = match dialect {
-            "postgresql" | "postgres" => {
+        // Try to parse based on driver-declared parser behavior
+        let parsed_plan = match connection.explain_parser_kind() {
+            ExplainParserKind::PostgreSql => {
                 // For PostgreSQL, try to parse the raw output as JSON
                 if let Some(raw) = raw_output {
                     // PostgreSQL EXPLAIN output is typically a single row with JSON
@@ -537,7 +712,7 @@ impl QueryService {
                     None
                 }
             }
-            "mysql" | "mariadb" => {
+            ExplainParserKind::MySql => {
                 // For MySQL, try to parse the raw output as JSON
                 if let Some(raw) = raw_output {
                     if let Some(first_row) = raw.rows.first() {
@@ -554,7 +729,7 @@ impl QueryService {
                     None
                 }
             }
-            "sqlite" => {
+            ExplainParserKind::Sqlite => {
                 // For SQLite, parse the query plan output
                 if let Some(plan) = query_plan {
                     // Convert QueryResult to text format for parsing
@@ -564,7 +739,7 @@ impl QueryService {
                     None
                 }
             }
-            _ => None,
+            ExplainParserKind::None => None,
         };
 
         // If we successfully parsed the plan, analyze it
@@ -599,12 +774,7 @@ impl QueryService {
 
     /// Get the ExplainConfig for a connection based on its dialect
     fn get_explain_config_for_connection(&self, connection: &Arc<dyn Connection>) -> ExplainConfig {
-        match connection.dialect_id() {
-            Some("sqlite") => ExplainConfig::sqlite(),
-            Some("postgresql") | Some("postgres") => ExplainConfig::postgresql(),
-            Some("mysql") | Some("mariadb") => ExplainConfig::mysql(),
-            _ => ExplainConfig::default(),
-        }
+        connection.explain_config()
     }
 
     /// Check if SQL is a query (SELECT, WITH, SHOW, etc.) or a statement

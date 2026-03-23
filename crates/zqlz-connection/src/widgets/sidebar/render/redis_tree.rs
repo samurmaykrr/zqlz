@@ -6,7 +6,7 @@ use gpui::*;
 
 use super::{LeafItemProps, RedisSchemaTreeProps, SectionHeaderProps};
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
-use zqlz_ui::widgets::{caption, v_flex, ActiveTheme, Icon, ZqlzIcon};
+use zqlz_ui::widgets::{ActiveTheme, Icon, ZqlzIcon, caption, v_flex};
 
 impl ConnectionSidebar {
     /// Render the Redis-specific schema tree.
@@ -147,7 +147,7 @@ impl ConnectionSidebar {
                         key_count.map(|c| format!(" ({})", c)).unwrap_or_default()
                     );
 
-                    let mut row = Self::render_leaf_item(
+                    let mut row = self.render_leaf_item(
                         LeafItemProps {
                             element_id: SharedString::from(format!(
                                 "redis-db-{}-{}",
@@ -242,7 +242,7 @@ impl ConnectionSidebar {
                     let query_name = query.name.clone();
                     let name_for_click = query.name.clone();
                     let name_for_menu = query.name.clone();
-                    section = section.child(Self::render_leaf_item(
+                    section = section.child(self.render_leaf_item(
                         LeafItemProps {
                             element_id: SharedString::from(format!(
                                 "query-{}-{}",

@@ -1,11 +1,11 @@
 use gpui::{
-    App, Context, Corner, Corners, Edges, ElementId, InteractiveElement as _, IntoElement,
-    ParentElement, RenderOnce, StyleRefinement, Styled, Window, div, prelude::FluentBuilder,
+    div, prelude::FluentBuilder, App, Context, Corner, Edges, ElementId, InteractiveElement as _,
+    IntoElement, ParentElement, RenderOnce, StyleRefinement, Styled, Window,
 };
 
 use crate::widgets::{
-    Disableable, IconName, Selectable, Sizable, Size, StyledExt as _,
     menu::{DropdownMenu, PopupMenu},
+    Disableable, IconName, Selectable, Sizable, Size, StyledExt as _,
 };
 
 use super::{Button, ButtonRounded, ButtonVariant, ButtonVariants};
@@ -27,7 +27,7 @@ pub struct DropdownButton {
     loading: bool,
     variant: ButtonVariant,
     size: Size,
-    rounded: ButtonRounded,
+    _rounded: ButtonRounded,
     anchor: Corner,
 }
 
@@ -46,7 +46,7 @@ impl DropdownButton {
             loading: false,
             variant: ButtonVariant::default(),
             size: Size::default(),
-            rounded: ButtonRounded::default(),
+            _rounded: ButtonRounded::default(),
             anchor: Corner::TopRight,
         }
     }
@@ -79,7 +79,7 @@ impl DropdownButton {
 
     /// Set the rounded style of the button.
     pub fn rounded(mut self, rounded: impl Into<ButtonRounded>) -> Self {
-        self.rounded = rounded.into();
+        self._rounded = rounded.into();
         self
     }
 
@@ -146,7 +146,7 @@ impl Selectable for DropdownButton {
 
 impl RenderOnce for DropdownButton {
     fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        let rounded = self.variant.is_ghost() && !self.selected;
+        let merge_middle_border = self.variant.is_ghost() && !self.selected;
 
         div()
             .id(self.id)
@@ -155,13 +155,6 @@ impl RenderOnce for DropdownButton {
             .when_some(self.button, |this, button| {
                 this.child(
                     button
-                        .rounded(self.rounded)
-                        .border_corners(Corners {
-                            top_left: true,
-                            top_right: rounded,
-                            bottom_left: true,
-                            bottom_right: rounded,
-                        })
                         .border_edges(Edges {
                             left: true,
                             top: true,
@@ -180,18 +173,11 @@ impl RenderOnce for DropdownButton {
                     this.child(
                         Button::new("popup")
                             .icon(IconName::ChevronDown)
-                            .rounded(self.rounded)
                             .border_edges(Edges {
-                                left: rounded,
+                                left: merge_middle_border,
                                 top: true,
                                 right: true,
                                 bottom: true,
-                            })
-                            .border_corners(Corners {
-                                top_left: rounded,
-                                top_right: true,
-                                bottom_left: rounded,
-                                bottom_right: true,
                             })
                             .selected(self.selected)
                             .disabled(self.disabled || self.loading)

@@ -137,7 +137,11 @@ impl ConnectionSidebar {
             None
         };
         let theme = cx.theme();
-        let border_color = theme.border.opacity(0.5);
+        let row_background = Hsla::transparent_black();
+        let row_selected_background = theme.list_active;
+        let row_hover_background = theme.list_hover;
+        let action_control_size = px(20.0);
+        let subtle_action_border = theme.border.opacity(0.6);
 
         v_flex()
             .w_full()
@@ -150,10 +154,20 @@ impl ConnectionSidebar {
                     .py_1()
                     .gap_2()
                     .items_center()
-                    .rounded_md()
+                    .rounded_none()
+                    .bg(if is_selected {
+                        row_selected_background
+                    } else {
+                        row_background
+                    })
                     .cursor_pointer()
-                    .when(is_selected, |this| this.bg(theme.list_active))
-                    .hover(|this| this.bg(theme.list_hover))
+                    .hover(move |this| {
+                        if is_selected {
+                            this.bg(row_selected_background)
+                        } else {
+                            this.bg(row_hover_background)
+                        }
+                    })
                     .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                         if event.click_count() == 2 {
                             this.activate_selected_connection(cx);
@@ -173,6 +187,7 @@ impl ConnectionSidebar {
                         this.child(
                             div()
                                 .id(SharedString::from(format!("expand-{}", conn_id)))
+                                .size(action_control_size)
                                 .flex()
                                 .items_center()
                                 .justify_center()
@@ -220,78 +235,70 @@ impl ConnectionSidebar {
                         h_flex()
                             .gap_1()
                             .when(is_connected, |this| {
-                                this.invisible()
-                                    .group_hover("conn-row", |el| el.visible())
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "new-query-{}",
-                                                conn_id
-                                            )))
-                                            .size_6()
-                                            .rounded_sm()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            // Use accent tint so button hover is distinguishable
-                                            // from the row-level hover background (which uses muted,
-                                            // the same color as theme.muted in dark mode).
-                                            .hover(|el| el.bg(theme.accent.opacity(0.15)))
-                                            .tooltip(|window, cx| {
-                                                Tooltip::new("New Query").build(window, cx)
-                                            })
-                                            .on_click(cx.listener(
-                                                move |_this, _event: &ClickEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    cx.emit(ConnectionSidebarEvent::NewQuery(
-                                                        conn_id,
-                                                    ));
-                                                },
-                                            ))
-                                            .child(
-                                                Icon::new(ZqlzIcon::FileSql)
-                                                    .size_3p5()
-                                                    .text_color(theme.muted_foreground),
-                                            ),
-                                    )
-                                    .child(
-                                        div()
-                                            .id(SharedString::from(format!(
-                                                "disconnect-{}",
-                                                conn_id
-                                            )))
-                                            .size_6()
-                                            .rounded_sm()
-                                            .flex()
-                                            .items_center()
-                                            .justify_center()
-                                            .cursor_pointer()
-                                            .hover(|el| el.bg(theme.danger.opacity(0.15)))
-                                            .tooltip(|window, cx| {
-                                                Tooltip::new("Disconnect").build(window, cx)
-                                            })
-                                            .on_click(cx.listener(
-                                                move |_this, _event: &ClickEvent, _, cx| {
-                                                    cx.stop_propagation();
-                                                    cx.emit(ConnectionSidebarEvent::Disconnect(
-                                                        conn_id,
-                                                    ));
-                                                },
-                                            ))
-                                            .child(
-                                                Icon::new(ZqlzIcon::X)
-                                                    .size_3p5()
-                                                    .text_color(theme.muted_foreground),
-                                            ),
-                                    )
+                                this.child(
+                                    div()
+                                        .id(SharedString::from(format!("new-query-{}", conn_id)))
+                                        .size(action_control_size)
+                                        .border_1()
+                                        .border_color(subtle_action_border)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|el| el.bg(theme.accent.opacity(0.15)))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new("New Query").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(
+                                            move |_this, _event: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.emit(ConnectionSidebarEvent::NewQuery(conn_id));
+                                            },
+                                        ))
+                                        .child(
+                                            Icon::new(ZqlzIcon::FileSql)
+                                                .size_3p5()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("disconnect-{}", conn_id)))
+                                        .size(action_control_size)
+                                        .border_1()
+                                        .border_color(subtle_action_border)
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .cursor_pointer()
+                                        .hover(|el| el.bg(theme.danger.opacity(0.15)))
+                                        .tooltip(|window, cx| {
+                                            Tooltip::new("Disconnect").build(window, cx)
+                                        })
+                                        .on_click(cx.listener(
+                                            move |_this, _event: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                cx.emit(ConnectionSidebarEvent::Disconnect(
+                                                    conn_id,
+                                                ));
+                                            },
+                                        ))
+                                        .child(
+                                            Icon::new(ZqlzIcon::X)
+                                                .size_3p5()
+                                                .text_color(theme.muted_foreground),
+                                        ),
+                                )
                             })
                             .when(is_connecting, |this| {
                                 this.child(
                                     div()
+                                        .h(action_control_size)
                                         .px_2()
-                                        .py(px(2.0))
-                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(subtle_action_border)
+                                        .flex()
+                                        .items_center()
                                         .bg(theme.primary.opacity(0.6))
                                         .child(
                                             caption("Connecting...")
@@ -303,9 +310,12 @@ impl ConnectionSidebar {
                                 this.child(
                                     div()
                                         .id(SharedString::from(format!("connect-{}", conn_id)))
+                                        .h(action_control_size)
                                         .px_2()
-                                        .py(px(2.0))
-                                        .rounded_sm()
+                                        .border_1()
+                                        .border_color(subtle_action_border)
+                                        .flex()
+                                        .items_center()
                                         .bg(theme.primary)
                                         .cursor_pointer()
                                         // Lighten on hover rather than darken — darkening feels
@@ -329,11 +339,7 @@ impl ConnectionSidebar {
             .when_some(redis_schema_tree, |this, tree| this.child(tree))
             .when_some(sql_schema_tree, |this, tree| this.child(tree))
             .when(!is_last, |this| {
-                if is_expanded && is_connected {
-                    this.pb_2().mb_1().border_b_1().border_color(border_color)
-                } else {
-                    this.border_b_1().border_color(border_color)
-                }
+                this.border_b_1().border_color(theme.border.opacity(0.6))
             })
             .into_any_element()
     }

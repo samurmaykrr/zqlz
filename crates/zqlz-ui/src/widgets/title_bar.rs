@@ -251,7 +251,8 @@ struct TitleBarState {
     should_move: bool,
 }
 
-// TODO: Remove this when GPUI has released v0.2.3
+// TitleBarState is stored via `window.use_state`, which currently requires
+// the state type to implement `Render`.
 impl Render for TitleBarState {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()

@@ -42,7 +42,7 @@
         "element.background": "#002900",
         "element.hover": "#003300",
         "element.active": "#00FF00",
-        "element.selected": "#00FF0011",
+        "element.selected": "#003700",
         "element.disabled": "#007700",
         "ghost_element.hover": "#00FF0011",
         "ghost_element.active": "#00FF0011",

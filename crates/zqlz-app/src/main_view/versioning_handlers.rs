@@ -6,7 +6,7 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, TableDetails};
+use zqlz_core::{Connection, DropViewOptions, SqlObjectName, TableDetails};
 use zqlz_schema_tools::{
     MigrationConfig, MigrationDialect, MigrationGenerator, SchemaComparator, SchemaDiff,
 };
@@ -45,12 +45,15 @@ fn version_restore_commit_message(version: &VersionEntry) -> String {
     )
 }
 
-fn migration_dialect_for_driver(driver_name: &str) -> MigrationDialect {
-    if driver_name.contains("postgres") {
+fn migration_dialect_for_connection(connection: &Arc<dyn Connection>) -> MigrationDialect {
+    if matches!(
+        connection.dialect_id(),
+        Some("postgres") | Some("postgresql")
+    ) {
         MigrationDialect::PostgreSQL
-    } else if driver_name.contains("mysql") || driver_name.contains("mariadb") {
+    } else if matches!(connection.dialect_id(), Some("mysql") | Some("mariadb")) {
         MigrationDialect::MySQL
-    } else if driver_name.contains("mssql") || driver_name.contains("sqlserver") {
+    } else if matches!(connection.dialect_id(), Some("mssql") | Some("sqlserver")) {
         MigrationDialect::MsSql
     } else {
         MigrationDialect::SQLite
@@ -58,24 +61,34 @@ fn migration_dialect_for_driver(driver_name: &str) -> MigrationDialect {
 }
 
 fn quote_qualified_name(
-    dialect: MigrationDialect,
+    connection: &Arc<dyn Connection>,
     schema: Option<&str>,
     object_name: &str,
 ) -> String {
-    let dialect = MigrationConfig::for_dialect(dialect).dialect;
-    let object_name = dialect.quote_identifier(object_name);
-
     match schema {
-        Some(schema_name) if !schema_name.is_empty() => {
-            format!("{}.{}", dialect.quote_identifier(schema_name), object_name)
-        }
-        _ => object_name,
+        Some(schema_name) if !schema_name.is_empty() => connection
+            .render_qualified_name(&SqlObjectName::with_namespace(schema_name, object_name)),
+        _ => connection.quote_identifier(object_name),
     }
 }
 
+fn is_postgres_dialect(connection: &Arc<dyn Connection>) -> bool {
+    matches!(
+        connection.dialect_id(),
+        Some("postgres") | Some("postgresql")
+    )
+}
+
+fn supports_create_or_replace_view(connection: &Arc<dyn Connection>) -> bool {
+    matches!(
+        connection.dialect_id(),
+        Some("postgres") | Some("postgresql") | Some("mysql") | Some("mariadb")
+    )
+}
+
 fn build_sql_restore_plan(
+    connection: &Arc<dyn Connection>,
     version: VersionEntry,
-    driver_name: &str,
 ) -> anyhow::Result<Option<RestorePlan>> {
     let trimmed_content = version.content.trim();
     if trimmed_content.is_empty() {
@@ -84,23 +97,40 @@ fn build_sql_restore_plan(
 
     let statements = match version.object_type {
         DatabaseObjectType::View => {
-            let qualified_name = quote_qualified_name(
-                migration_dialect_for_driver(driver_name),
-                version.object_schema.as_deref(),
-                &version.object_name,
-            );
-            if driver_name.contains("postgres")
-                || driver_name.contains("mysql")
-                || driver_name.contains("mariadb")
-            {
-                vec![format!(
-                    "CREATE OR REPLACE VIEW {} AS {}",
-                    qualified_name, trimmed_content
-                )]
+            if is_postgres_dialect(connection) {
+                vec![trimmed_content.to_string()]
             } else {
+                let view_object_name = match version.object_schema.as_deref() {
+                    Some(schema_name) if !schema_name.is_empty() => {
+                        SqlObjectName::with_namespace(schema_name, &version.object_name)
+                    }
+                    _ => SqlObjectName::new(&version.object_name),
+                };
+                let drop_view_sql = connection
+                    .drop_view_sql(
+                        &view_object_name,
+                        DropViewOptions {
+                            if_exists: true,
+                            cascade: false,
+                        },
+                    )
+                    .unwrap_or_else(|_| {
+                        format!(
+                            "DROP VIEW IF EXISTS {}",
+                            quote_qualified_name(
+                                connection,
+                                version.object_schema.as_deref(),
+                                &version.object_name,
+                            )
+                        )
+                    });
                 vec![
-                    format!("DROP VIEW IF EXISTS {}", qualified_name),
-                    format!("CREATE VIEW {} AS {}", qualified_name, trimmed_content),
+                    drop_view_sql,
+                    if supports_create_or_replace_view(connection) {
+                        connection.normalize_create_view_sql(trimmed_content)
+                    } else {
+                        trimmed_content.to_string()
+                    },
                 ]
             }
         }
@@ -119,7 +149,6 @@ fn build_sql_restore_plan(
 
 async fn build_table_restore_plan(
     connection: Arc<dyn Connection>,
-    driver_name: &str,
     version: VersionEntry,
 ) -> anyhow::Result<Option<RestorePlan>> {
     let target_snapshot: TableDetails = serde_json::from_str(&version.content)?;
@@ -140,7 +169,7 @@ async fn build_table_restore_plan(
     schema_diff.modified_tables.push(table_diff);
 
     let generator = MigrationGenerator::with_config(MigrationConfig::for_dialect(
-        migration_dialect_for_driver(driver_name),
+        migration_dialect_for_connection(&connection),
     ));
     let migration = generator.generate(&schema_diff)?;
     if migration.up_sql.is_empty() {
@@ -156,13 +185,12 @@ async fn build_table_restore_plan(
 
 async fn build_restore_plan(
     connection: Arc<dyn Connection>,
-    driver_name: &str,
     version: VersionEntry,
 ) -> anyhow::Result<Option<RestorePlan>> {
     if version.object_type == DatabaseObjectType::Table {
-        build_table_restore_plan(connection, driver_name, version).await
+        build_table_restore_plan(connection, version).await
     } else {
-        build_sql_restore_plan(version, driver_name)
+        build_sql_restore_plan(&connection, version)
     }
 }
 
@@ -396,20 +424,13 @@ impl MainView {
                     return;
                 };
 
-                let driver_name = app_state
-                    .saved_connections()
-                    .into_iter()
-                    .find(|saved_connection| saved_connection.id == version.connection_id)
-                    .map(|saved_connection| saved_connection.driver)
-                    .unwrap_or_else(|| connection.driver_name().to_string());
-
                 let connection = connection.clone();
                 let repository = self.version_repository.clone();
                 let main_view = cx.entity().downgrade();
                 let window_handle = window.window_handle();
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    match build_restore_plan(connection.clone(), &driver_name, version.clone()).await {
+                    match build_restore_plan(connection.clone(), version.clone()).await {
                         Ok(Some(plan)) => {
                             cx.update(|window, cx| {
                                 let plan_for_dialog = plan.clone();

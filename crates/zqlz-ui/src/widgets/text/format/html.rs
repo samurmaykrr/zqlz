@@ -104,24 +104,80 @@ fn attr_value(attrs: &RefCell<Vec<html5ever::Attribute>>, name: LocalName) -> Op
 }
 
 /// Get style properties to HashMap
-/// TODO: Use cssparser to parse style attribute.
+///
+/// This keeps parsing intentionally lightweight and only targets `style` attribute
+/// snippets commonly found in pasted markdown/html content.
 fn style_attrs(attrs: &RefCell<Vec<html5ever::Attribute>>) -> HashMap<String, String> {
     let mut styles = HashMap::new();
     let Some(css_text) = attr_value(attrs, local_name!("style")) else {
         return styles;
     };
 
-    for decl in css_text.split(';') {
-        let mut parts = decl.splitn(2, ':');
-        if let (Some(key), Some(value)) = (parts.next(), parts.next()) {
-            styles.insert(
-                key.trim().to_lowercase().to_string(),
-                value.trim().to_string(),
-            );
+    for decl in split_css_declarations(&css_text) {
+        if let Some((key, value)) = split_css_property(decl) {
+            let value = value.trim().trim_end_matches("!important").trim();
+            if !key.is_empty() && !value.is_empty() {
+                styles.insert(key.to_ascii_lowercase(), value.to_string());
+            }
         }
     }
 
     styles
+}
+
+fn split_css_declarations(css_text: &str) -> Vec<&str> {
+    let mut declarations = Vec::new();
+    let mut start = 0usize;
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+    let mut paren_depth = 0usize;
+
+    for (index, character) in css_text.char_indices() {
+        match character {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '(' if !in_single_quotes && !in_double_quotes => paren_depth += 1,
+            ')' if !in_single_quotes && !in_double_quotes => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            ';' if !in_single_quotes && !in_double_quotes && paren_depth == 0 => {
+                declarations.push(css_text[start..index].trim());
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+
+    if start <= css_text.len() {
+        declarations.push(css_text[start..].trim());
+    }
+
+    declarations
+}
+
+fn split_css_property(declaration: &str) -> Option<(&str, &str)> {
+    let mut in_single_quotes = false;
+    let mut in_double_quotes = false;
+    let mut paren_depth = 0usize;
+
+    for (index, character) in declaration.char_indices() {
+        match character {
+            '\'' if !in_double_quotes => in_single_quotes = !in_single_quotes,
+            '"' if !in_single_quotes => in_double_quotes = !in_double_quotes,
+            '(' if !in_single_quotes && !in_double_quotes => paren_depth += 1,
+            ')' if !in_single_quotes && !in_double_quotes => {
+                paren_depth = paren_depth.saturating_sub(1);
+            }
+            ':' if !in_single_quotes && !in_double_quotes && paren_depth == 0 => {
+                let key = declaration[..index].trim();
+                let value = declaration[index + character.len_utf8()..].trim();
+                return Some((key, value));
+            }
+            _ => {}
+        }
+    }
+
+    None
 }
 
 /// Parse length value from style attribute.

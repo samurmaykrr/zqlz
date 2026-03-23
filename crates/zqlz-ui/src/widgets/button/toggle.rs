@@ -1,13 +1,13 @@
 use std::{cell::Cell, rc::Rc};
 
 use gpui::{
-    AnyElement, App, ElementId, InteractiveElement, IntoElement, ParentElement, RenderOnce,
-    SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _,
+    div, prelude::FluentBuilder as _, AnyElement, App, ElementId, InteractiveElement, IntoElement,
+    ParentElement, RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled,
+    Window,
 };
-use smallvec::{SmallVec, smallvec};
+use smallvec::{smallvec, SmallVec};
 
-use crate::widgets::{ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, Disableable, Icon, Sizable, Size, StyledExt};
 
 type ToggleClickHandler = Box<dyn Fn(&bool, &mut Window, &mut App) + 'static>;
 type ToggleGroupClickHandler = Rc<dyn Fn(&Vec<bool>, &mut Window, &mut App) + 'static>;
@@ -126,6 +126,15 @@ impl RenderOnce for Toggle {
         let checked = self.checked;
         let disabled = self.disabled;
         let hoverable = !disabled && !checked;
+        let ghost_border_color = if disabled {
+            cx.theme().border.opacity(0.35)
+        } else if checked {
+            cx.theme().primary
+        } else {
+            // `border` can be too close to panel background on dark themes.
+            // Use muted foreground so inactive toggles still read as controls.
+            cx.theme().muted_foreground.opacity(0.6)
+        };
 
         div()
             .id(self.id)
@@ -140,6 +149,12 @@ impl RenderOnce for Toggle {
                 _ => this.min_w_8().h_8().px_2(),
             })
             .rounded(cx.theme().radius)
+            // Ghost toggles are visually subtle by design, but on darker themes
+            // they can disappear when unchecked. Keep a border so the control
+            // remains discoverable in both states.
+            .when(self.variant == ToggleVariant::Ghost, |this| {
+                this.border_1().border_color(ghost_border_color)
+            })
             .when(self.variant == ToggleVariant::Outline, |this| {
                 this.border_1()
                     .border_color(cx.theme().border)

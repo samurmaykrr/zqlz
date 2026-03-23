@@ -8,6 +8,7 @@ use gpui::*;
 use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
 
 /// Handle load more event for infinite scroll
 /// Fetches the next batch of rows and appends to existing data
@@ -41,29 +42,9 @@ pub(in crate::main_view) fn handle_load_more_event(
             sorts = current_sorts;
         }
 
-        if !viewer.search_text.is_empty() {
-            let all_column_names: Vec<String> =
-                viewer.column_meta.iter().map(|c| c.name.clone()).collect();
-
-            if !all_column_names.is_empty() {
-                let escaped_search = viewer
-                    .search_text
-                    .replace("'", "''")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_");
-                let column_conditions: Vec<String> = all_column_names
-                    .iter()
-                    .map(|col_name| {
-                        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                        format!(
-                            "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                            escaped_col, escaped_search
-                        )
-                    })
-                    .collect();
-                where_clauses.push(format!("({})", column_conditions.join(" OR ")));
-            }
-        }
+        let all_column_names: Vec<String> =
+            viewer.column_meta.iter().map(|c| c.name.clone()).collect();
+        let search_text = viewer.search_text.clone();
 
         let visible_columns: Vec<String> = viewer
             .column_visibility_state
@@ -79,6 +60,8 @@ pub(in crate::main_view) fn handle_load_more_event(
             sorts,
             visible_columns,
             viewer.database_name.clone(),
+            search_text,
+            all_column_names,
         ))
     });
 
@@ -86,10 +69,12 @@ pub(in crate::main_view) fn handle_load_more_event(
         connection_id,
         table_name,
         limit,
-        where_clauses,
+        mut where_clauses,
         sorts,
         visible_columns,
         database_name,
+        search_text,
+        all_column_names,
     )) = viewer_info
     else {
         tracing::warn!("LoadMore: Missing connection_id, table_name, or pagination state");
@@ -118,9 +103,14 @@ pub(in crate::main_view) fn handle_load_more_event(
     let table_service = app_state.table_service.clone();
     let order_by_clauses: Vec<String> = sorts
         .iter()
-        .map(|sort| sort.to_sql_for_driver(connection.driver_name()))
+        .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
         .collect();
-    let schema_qualifier = resolve_schema_qualifier(connection.driver_name(), &database_name);
+    if let Some(search_clause) =
+        build_search_clause_for_columns(&connection, &all_column_names, &search_text, false)
+    {
+        where_clauses.push(search_clause);
+    }
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     window
         .spawn(cx, async move |cx| {

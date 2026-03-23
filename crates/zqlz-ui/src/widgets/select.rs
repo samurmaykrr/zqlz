@@ -1,20 +1,20 @@
+use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    AnyElement, App, AppContext, Bounds, ClickEvent, Context, DismissEvent, Edges, ElementId,
-    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    Length, ParentElement, Pixels, Render, RenderOnce, SharedString, StatefulInteractiveElement,
-    StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, anchored, deferred, div,
-    prelude::FluentBuilder, px, rems,
+    anchored, deferred, div, prelude::FluentBuilder, px, rems, AnyElement, App, AppContext, Bounds,
+    ClickEvent, Context, DismissEvent, Edges, ElementId, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, KeyBinding, Length, ParentElement, Pixels, Render,
+    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
+    Task, WeakEntity, Window,
 };
 use rust_i18n::t;
 
 use crate::widgets::{
-    ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Selectable, Sizable,
-    Size, StyleSized, StyledExt,
     actions::{Cancel, Confirm, SelectDown, SelectUp},
     h_flex,
     input::clear_button,
     list::{List, ListDelegate, ListState},
-    v_flex,
+    v_flex, ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Selectable,
+    Sizable, Size, StyleSized, StyledExt,
 };
 
 type EmptyStateRenderer = Box<dyn Fn(&Window, &App) -> AnyElement>;
@@ -202,10 +202,25 @@ where
             .map_or(Size::Medium, |state| state.read(cx).options.size);
 
         if let Some(item) = self.delegate.item(ix) {
+            let tooltip_text = item.title();
             let list_item = SelectListItem::new(ix.row)
                 .selected(selected)
                 .with_size(size)
-                .child(div().whitespace_nowrap().child(item.render(window, cx)));
+                .child(
+                    div()
+                        .id(ElementId::NamedInteger(
+                            "select-item-title".into(),
+                            (ix.section * 10000 + ix.row) as u64,
+                        ))
+                        .w_full()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .tooltip(move |window, cx| {
+                            Tooltip::new(tooltip_text.clone()).build(window, cx)
+                        })
+                        .child(item.render(window, cx)),
+                );
             Some(list_item)
         } else {
             None
@@ -547,6 +562,98 @@ impl<D> SelectState<D>
 where
     D: SelectDelegate + 'static,
 {
+    fn selected_title_text(&self, cx: &App) -> Option<SharedString> {
+        let selected_index = self.selected_index(cx)?;
+        let item = self
+            .list
+            .read(cx)
+            .delegate()
+            .delegate
+            .item(selected_index)?;
+
+        let title = item.title();
+        if let Some(prefix) = self.options.title_prefix.as_ref() {
+            Some(format!("{}{}", prefix, title).into())
+        } else {
+            Some(title)
+        }
+    }
+
+    fn estimated_dropdown_min_width(&self, cx: &App) -> Pixels {
+        let control_width = self.bounds.size.width + px(2.);
+        let configured_min_width = self.options.menu_min_width.unwrap_or(px(0.));
+
+        let mut sampled_lengths: Vec<usize> = Vec::new();
+        let mut max_samples = 0usize;
+        let sample_limit = 64usize;
+
+        let list = self.list.read(cx);
+        let delegate = list.delegate();
+        let sections_count = delegate.sections_count(cx);
+
+        for section in 0..sections_count {
+            let items_count = delegate.items_count(section, cx);
+            for row in 0..items_count {
+                let item = delegate
+                    .delegate
+                    .item(IndexPath::default().section(section).row(row));
+                if let Some(item) = item {
+                    sampled_lengths.push(item.title().chars().count());
+                    max_samples += 1;
+                }
+
+                if max_samples >= sample_limit {
+                    break;
+                }
+            }
+
+            if max_samples >= sample_limit {
+                break;
+            }
+        }
+
+        if let Some(selected_title) = self.selected_title_text(cx) {
+            sampled_lengths.push(selected_title.chars().count());
+        }
+        if let Some(placeholder) = self.options.placeholder.as_ref() {
+            sampled_lengths.push(placeholder.chars().count());
+        }
+
+        let heuristic_content_width = if sampled_lengths.is_empty() {
+            px(0.)
+        } else {
+            sampled_lengths.sort_unstable();
+            let seventy_fifth_percentile_index = sampled_lengths.len() * 3 / 4;
+            let percentile_chars = sampled_lengths
+                .get(seventy_fifth_percentile_index)
+                .copied()
+                .unwrap_or(0)
+                .clamp(18, 44);
+
+            let approximate_char_width = match self.options.size {
+                Size::XSmall => 6.0,
+                Size::Small => 6.5,
+                Size::Medium => 7.0,
+                Size::Large => 7.5,
+                Size::Custom(_) => 7.0,
+            };
+            let chrome_width = match self.options.size {
+                Size::XSmall => 36.0,
+                Size::Small => 40.0,
+                Size::Medium => 44.0,
+                Size::Large => 48.0,
+                Size::Custom(_) => 44.0,
+            };
+
+            px(percentile_chars as f32 * approximate_char_width + chrome_width)
+        };
+
+        control_width
+            .max(configured_min_width)
+            .max(heuristic_content_width)
+            .min(px(560.))
+    }
+
     /// Create a new Select state.
     pub fn new(
         delegate: D,
@@ -637,6 +744,20 @@ where
         });
     }
 
+    /// Update the inner select delegate in place.
+    pub fn update_delegate(
+        &mut self,
+        update: impl FnOnce(&mut D),
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        D: SelectDelegate + 'static,
+    {
+        self.list.update(cx, |list, _| {
+            update(&mut list.delegate_mut().delegate);
+        });
+    }
+
     /// Get the selected index of the select.
     pub fn selected_index(&self, cx: &App) -> Option<IndexPath> {
         self.list.read(cx).selected_index()
@@ -645,6 +766,11 @@ where
     /// Get the selected value of the select.
     pub fn selected_value(&self) -> Option<&<D::Item as SelectItem>::Value> {
         self.selected_value.as_ref()
+    }
+
+    /// Get the current query text from the dropdown search input.
+    pub fn search_query(&self, cx: &App) -> String {
+        self.list.read(cx).query_input.read(cx).value().to_string()
     }
 
     /// Focus the select input.
@@ -786,11 +912,11 @@ where
         let searchable = self.searchable;
         let is_focused = self.focus_handle.is_focused(window);
         let show_clean = self.options.cleanable && self.selected_index(cx).is_some();
-        let bounds = self.bounds;
+        let selected_title_tooltip = self.selected_title_text(cx);
+        let dropdown_min_width = self.estimated_dropdown_min_width(cx);
         let allow_open = !(self.open || self.options.disabled);
         let outline_visible =
             self.options.focus_border && (self.open || is_focused && !self.options.disabled);
-        let popup_radius = cx.theme().radius.min(px(8.));
 
         self.list
             .update(cx, |list, cx| list.set_searchable(searchable, cx));
@@ -809,8 +935,7 @@ where
                     .border_color(cx.theme().transparent)
                     .when(self.options.appearance, |this| {
                         this.bg(cx.theme().background)
-                            .border_color(cx.theme().input)
-                            .rounded(cx.theme().radius)
+                            .border_color(cx.theme().border.opacity(0.25))
                             .when(cx.theme().shadow, |this| this.shadow_xs())
                     })
                     .map(|this| {
@@ -842,6 +967,11 @@ where
                                     .overflow_hidden()
                                     .whitespace_nowrap()
                                     .truncate()
+                                    .when_some(selected_title_tooltip.clone(), |this, tooltip| {
+                                        this.tooltip(move |window, cx| {
+                                            Tooltip::new(tooltip.clone()).build(window, cx)
+                                        })
+                                    })
                                     .child(self.display_title(window, cx)),
                             )
                             .when(show_clean, |this| {
@@ -877,14 +1007,7 @@ where
                             div()
                                 .occlude()
                                 .map(|this| match self.options.menu_width {
-                                    Length::Auto => {
-                                        // If min_width is set, use it as minimum, otherwise use parent width
-                                        if let Some(min_w) = self.options.menu_min_width {
-                                            this.min_w(min_w)
-                                        } else {
-                                            this.w(bounds.size.width + px(2.))
-                                        }
-                                    }
+                                    Length::Auto => this.min_w(dropdown_min_width),
                                     Length::Definite(w) => this.w(w),
                                 })
                                 .child(
@@ -894,8 +1017,7 @@ where
                                         .bg(cx.theme().popover)
                                         .text_color(cx.theme().popover_foreground)
                                         .border_1()
-                                        .border_color(cx.theme().border)
-                                        .rounded(popup_radius)
+                                        .border_color(cx.theme().border.opacity(0.25))
                                         .shadow_md()
                                         .child(
                                             List::new(&self.list)
@@ -1138,7 +1260,6 @@ impl RenderOnce for SelectListItem {
             .gap_x_1()
             .py_1()
             .px_2()
-            .rounded(cx.theme().radius)
             .text_base()
             .text_color(cx.theme().foreground)
             .relative()

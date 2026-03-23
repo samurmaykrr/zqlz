@@ -19,7 +19,7 @@ use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::Connection;
+use zqlz_core::{Connection, Value};
 use zqlz_lsp::SqlLsp;
 use zqlz_services::SchemaService;
 use zqlz_settings::{
@@ -518,16 +518,24 @@ impl From<zqlz_ui::widgets::highlighter::DiagnosticSeverity> for DiagnosticInfoS
 
 /// Events emitted by the query editor
 #[derive(Clone, Debug)]
+pub enum QueryExecutionParams {
+    Positional(Vec<Value>),
+    Named(HashMap<String, Value>),
+}
+
+#[derive(Clone, Debug)]
 pub enum QueryEditorEvent {
     /// User requested to execute the current query
     ExecuteQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        params: Option<QueryExecutionParams>,
     },
     /// User requested to execute selected text or current statement
     ExecuteSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        params: Option<QueryExecutionParams>,
     },
     /// User requested to explain the current query
     ExplainQuery {
@@ -695,6 +703,65 @@ pub enum InlineSuggestionSource {
 }
 
 impl QueryEditor {
+    fn json_to_execution_value(value: &serde_json::Value) -> Value {
+        match value {
+            serde_json::Value::Null => Value::Null,
+            serde_json::Value::Bool(boolean) => Value::Bool(*boolean),
+            serde_json::Value::Number(number) => {
+                if let Some(integer) = number.as_i64() {
+                    Value::Int64(integer)
+                } else if let Some(float) = number.as_f64() {
+                    Value::Float64(float)
+                } else {
+                    Value::Decimal(number.to_string())
+                }
+            }
+            serde_json::Value::String(string) => Value::String(string.clone()),
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                Value::Json(value.clone())
+            }
+        }
+    }
+
+    fn parse_sql_parameters(text: &str) -> Result<QueryExecutionParams, String> {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return Ok(QueryExecutionParams::Named(HashMap::new()));
+        }
+
+        let parsed = serde_json::from_str::<serde_json::Value>(trimmed)
+            .map_err(|error| format!("Parameter JSON parse error: {}", error))?;
+
+        match parsed {
+            serde_json::Value::Array(array) => Ok(QueryExecutionParams::Positional(
+                array.iter().map(Self::json_to_execution_value).collect(),
+            )),
+            serde_json::Value::Object(map) => Ok(QueryExecutionParams::Named(
+                map.into_iter()
+                    .map(|(key, value)| (key, Self::json_to_execution_value(&value)))
+                    .collect(),
+            )),
+            _ => Err("Parameters must be a JSON array or object".to_string()),
+        }
+    }
+
+    fn execution_params(&self, cx: &App) -> Option<QueryExecutionParams> {
+        if self.editor_mode != EditorMode::Template {
+            return None;
+        }
+
+        let params_text = self.template_params.read(cx).get_text(cx).to_string();
+        match Self::parse_sql_parameters(&params_text) {
+            Ok(QueryExecutionParams::Positional(params)) if params.is_empty() => None,
+            Ok(QueryExecutionParams::Named(params)) if params.is_empty() => None,
+            Ok(params) => Some(params),
+            Err(error) => {
+                tracing::warn!(error = %error, "Invalid template parameters for SQL execution");
+                None
+            }
+        }
+    }
+
     fn diagnostic_infos_from_lsp_diagnostics(
         diagnostics: &[lsp_types::Diagnostic],
     ) -> Vec<DiagnosticInfo> {
@@ -1956,6 +2023,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExecuteQuery {
             sql,
             connection_id: self.connection_id,
+            params: self.execution_params(cx),
         });
     }
 
@@ -1976,6 +2044,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExecuteSelection {
             sql,
             connection_id: self.connection_id,
+            params: self.execution_params(cx),
         });
     }
 
@@ -2777,11 +2846,21 @@ impl QueryEditor {
             if self.object_type.is_procedural() {
                 let content = editor.get_text(cx).to_string();
                 let formatted = Self::format_sql_with_dollar_quoting(&content, driver_type);
+                let formatted = Self::normalize_formatted_sql_for_driver(&formatted, driver_type);
                 if formatted != content {
                     editor.replace_all_text(&formatted, cx);
                 }
             } else {
                 editor.format_sql(cx);
+
+                if Self::should_normalize_bracket_identifiers(driver_type) {
+                    let formatted = editor.get_text(cx).to_string();
+                    let normalized =
+                        Self::normalize_formatted_sql_for_driver(&formatted, driver_type);
+                    if normalized != formatted {
+                        editor.replace_all_text(&normalized, cx);
+                    }
+                }
             }
         });
         self.update_diagnostics(cx);
@@ -2887,6 +2966,65 @@ impl QueryEditor {
 
         // No procedural content detected, format normally
         Self::format_sql(sql, driver_type)
+    }
+
+    fn should_normalize_bracket_identifiers(driver_type: Option<&str>) -> bool {
+        matches!(
+            driver_type,
+            Some("sqlite") | Some("mssql") | Some("sqlserver")
+        )
+    }
+
+    fn normalize_formatted_sql_for_driver(sql: &str, driver_type: Option<&str>) -> String {
+        if Self::should_normalize_bracket_identifiers(driver_type) {
+            return Self::normalize_bracket_identifier_spacing(sql);
+        }
+
+        sql.to_string()
+    }
+
+    fn normalize_bracket_identifier_spacing(sql: &str) -> String {
+        let mut normalized = String::with_capacity(sql.len());
+        let mut index = 0;
+
+        while index < sql.len() {
+            let Some(relative_open) = sql[index..].find('[') else {
+                normalized.push_str(&sql[index..]);
+                break;
+            };
+            let open_index = index + relative_open;
+
+            normalized.push_str(&sql[index..open_index]);
+
+            let mut cursor = open_index + 1;
+            let mut closing = None;
+            while cursor < sql.len() {
+                let byte = sql.as_bytes()[cursor];
+                if byte == b']' {
+                    if cursor + 1 < sql.len() && sql.as_bytes()[cursor + 1] == b']' {
+                        cursor += 2;
+                        continue;
+                    }
+
+                    closing = Some(cursor);
+                    break;
+                }
+                cursor += 1;
+            }
+
+            let Some(closing_index) = closing else {
+                normalized.push_str(&sql[open_index..]);
+                break;
+            };
+
+            let inner = &sql[open_index + 1..closing_index];
+            normalized.push('[');
+            normalized.push_str(inner.trim());
+            normalized.push(']');
+            index = closing_index + 1;
+        }
+
+        normalized
     }
 
     /// Render the toolbar with execution controls
@@ -3350,7 +3488,8 @@ impl QueryEditor {
                         div()
                             .w_full()
                             .bg(theme.muted)
-                            .rounded_sm()
+                            .border_1()
+                            .border_color(theme.border.opacity(0.5))
                             .p_2()
                             .mb_2()
                             .font_family(theme.mono_font_family.clone())
@@ -3377,7 +3516,8 @@ impl QueryEditor {
                 div()
                     .w_full()
                     .bg(theme.muted)
-                    .rounded_sm()
+                    .border_1()
+                    .border_color(theme.border.opacity(0.5))
                     .p_2()
                     .mb_2()
                     .font_family(theme.mono_font_family.clone())
@@ -3466,7 +3606,8 @@ impl QueryEditor {
                 parts.push(
                     div()
                         .bg(theme.muted)
-                        .rounded_sm()
+                        .border_1()
+                        .border_color(theme.border.opacity(0.5))
                         .px_1()
                         .font_family(theme.mono_font_family.clone())
                         .text_xs()
@@ -3592,8 +3733,7 @@ impl QueryEditor {
                 .overflow_x_hidden()
                 .bg(theme.popover)
                 .border_1()
-                .border_color(theme.info)
-                .rounded_md()
+                .border_color(theme.border.opacity(0.6))
                 .shadow_lg()
                 .p_3()
                 .child(self.format_hover_content(content, cx))
@@ -3680,6 +3820,7 @@ impl Render for QueryEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg_color = cx.theme().background;
         let indicator_bg = cx.theme().primary.opacity(0.1);
+        let subtle_border = cx.theme().border.opacity(0.5);
 
         let is_template_mode = self.editor_mode == EditorMode::Template;
         let hover_content = self.hover_content.clone();
@@ -3788,7 +3929,8 @@ impl Render for QueryEditor {
                                         .right_2()
                                         .px_3()
                                         .py_1()
-                                        .rounded_md()
+                                        .border_1()
+                                        .border_color(subtle_border)
                                         .bg(indicator_bg)
                                         .text_sm()
                                         .font_medium()
@@ -4044,6 +4186,32 @@ mod tests {
                 message: "check predicate".to_string(),
                 source: Some("sqlparser".to_string()),
             }]
+        );
+    }
+
+    #[test]
+    fn normalize_bracket_identifier_spacing_trims_only_edges() {
+        let sql =
+            "CREATE VIEW [ ProductDetails_V ] AS SELECT [ Product ] . [ Name ] FROM [ users ]";
+        let normalized = QueryEditor::normalize_bracket_identifier_spacing(sql);
+
+        assert_eq!(
+            normalized,
+            "CREATE VIEW [ProductDetails_V] AS SELECT [Product] . [Name] FROM [users]"
+        );
+    }
+
+    #[test]
+    fn normalize_formatted_sql_for_driver_applies_only_to_sqlite_like_dialects() {
+        let sql = "SELECT [ users ]";
+
+        assert_eq!(
+            QueryEditor::normalize_formatted_sql_for_driver(sql, Some("sqlite")),
+            "SELECT [users]"
+        );
+        assert_eq!(
+            QueryEditor::normalize_formatted_sql_for_driver(sql, Some("postgres")),
+            sql
         );
     }
 }

@@ -1,14 +1,14 @@
 use std::rc::Rc;
 
 use crate::widgets::{
-    ActiveTheme, Disableable, FocusableExt as _, Icon, IconName, Selectable, Sizable, Size,
-    StyleSized, StyledExt, h_flex, spinner::Spinner, tooltip::Tooltip,
+    h_flex, spinner::Spinner, tooltip::Tooltip, ActiveTheme, Disableable, FocusableExt as _, Icon,
+    IconName, Selectable, Sizable, Size, StyleSized, StyledExt,
 };
 use gpui::{
-    Action, AnyElement, App, ClickEvent, Corners, Div, Edges, ElementId, Hsla, InteractiveElement,
-    Interactivity, IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
-    Stateful, StatefulInteractiveElement as _, StyleRefinement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, relative,
+    div, prelude::FluentBuilder as _, px, relative, Action, AnyElement, App, ClickEvent, Corners,
+    Div, Edges, ElementId, Hsla, InteractiveElement, Interactivity, IntoElement, MouseButton,
+    ParentElement, Pixels, RenderOnce, SharedString, Stateful, StatefulInteractiveElement as _,
+    StyleRefinement, Styled, Window,
 };
 
 type TooltipData = Option<(
@@ -453,14 +453,8 @@ impl RenderOnce for Button {
             .read(cx)
             .clone();
         let is_focused = focus_handle.is_focused(window);
-
-        let rounding = match self.rounded {
-            ButtonRounded::Small => cx.theme().radius * 0.5,
-            ButtonRounded::Medium => cx.theme().radius,
-            ButtonRounded::Large => cx.theme().radius * 2.0,
-            ButtonRounded::Size(px) => px,
-            ButtonRounded::None => Pixels::ZERO,
-        };
+        let _rounded = self.rounded;
+        let light_border = cx.theme().border.opacity(0.25);
 
         self.base
             .when(!self.disabled, |this| {
@@ -499,18 +493,6 @@ impl RenderOnce for Button {
                     }
                 }
             })
-            .when(self.border_corners.top_left, |this| {
-                this.rounded_tl(rounding)
-            })
-            .when(self.border_corners.top_right, |this| {
-                this.rounded_tr(rounding)
-            })
-            .when(self.border_corners.bottom_left, |this| {
-                this.rounded_bl(rounding)
-            })
-            .when(self.border_corners.bottom_right, |this| {
-                this.rounded_br(rounding)
-            })
             .when(self.border_edges.left, |this| this.border_l_1())
             .when(self.border_edges.right, |this| this.border_r_1())
             .when(self.border_edges.top, |this| this.border_t_1())
@@ -519,23 +501,23 @@ impl RenderOnce for Button {
             .when(self.selected, |this| {
                 let selected_style = style.selected(self.outline, cx);
                 this.bg(selected_style.bg)
-                    .border_color(selected_style.border)
+                    .border_color(light_border)
                     .text_color(selected_style.fg)
             })
             .when(!self.disabled && !self.selected, |this| {
-                this.border_color(normal_style.border)
+                this.border_color(light_border)
                     .bg(normal_style.bg)
                     .when(normal_style.underline, |this| this.text_decoration_1())
                     .hover(|this| {
                         let hover_style = style.hovered(self.outline, cx);
                         this.bg(hover_style.bg)
-                            .border_color(hover_style.border)
+                            .border_color(light_border)
                             .text_color(hover_style.fg)
                     })
                     .active(|this| {
                         let active_style = style.active(self.outline, cx);
                         this.bg(active_style.bg)
-                            .border_color(active_style.border)
+                            .border_color(light_border)
                             .text_color(active_style.fg)
                     })
             })
@@ -543,7 +525,7 @@ impl RenderOnce for Button {
                 let disabled_style = style.disabled(self.outline, cx);
                 this.bg(disabled_style.bg)
                     .text_color(disabled_style.fg)
-                    .border_color(disabled_style.border)
+                    .border_color(light_border)
                     .shadow_none()
             })
             .refine_style(&self.style)
@@ -616,7 +598,7 @@ impl RenderOnce for Button {
             })
             .when(self.loading && !self.disabled, |this| {
                 this.bg(normal_style.bg.opacity(0.8))
-                    .border_color(normal_style.border.opacity(0.8))
+                    .border_color(light_border)
                     .text_color(normal_style.fg.opacity(0.8))
             })
             .when_some(self.tooltip, |this, (tooltip, action)| {
@@ -637,7 +619,6 @@ impl RenderOnce for Button {
 
 struct ButtonVariantStyle {
     bg: Hsla,
-    border: Hsla,
     fg: Hsla,
     underline: bool,
     shadow: bool,
@@ -717,62 +698,6 @@ impl ButtonVariant {
         }
     }
 
-    fn border_color(&self, bg: Hsla, outline: bool, cx: &mut App) -> Hsla {
-        match self {
-            Self::Secondary => {
-                if outline {
-                    cx.theme().border
-                } else {
-                    bg
-                }
-            }
-            Self::SecondaryPrimary => {
-                if outline {
-                    cx.theme().border
-                } else {
-                    bg
-                }
-            }
-            Self::Primary => {
-                if outline {
-                    cx.theme().primary
-                } else {
-                    bg
-                }
-            }
-            Self::Danger => {
-                if outline {
-                    cx.theme().danger
-                } else {
-                    bg
-                }
-            }
-            Self::Info => {
-                if outline {
-                    cx.theme().info
-                } else {
-                    bg
-                }
-            }
-            Self::Warning => {
-                if outline {
-                    cx.theme().warning
-                } else {
-                    bg
-                }
-            }
-            Self::Success => {
-                if outline {
-                    cx.theme().success
-                } else {
-                    bg
-                }
-            }
-            Self::Ghost | Self::Link | Self::Text => cx.theme().transparent,
-            Self::Custom(colors) => colors.border,
-        }
-    }
-
     fn underline(&self, _: &App) -> bool {
         matches!(self, Self::Link)
     }
@@ -787,14 +712,12 @@ impl ButtonVariant {
 
     fn normal(&self, outline: bool, cx: &mut App) -> ButtonVariantStyle {
         let bg = self.bg_color(outline, cx);
-        let border = self.border_color(bg, outline, cx);
         let fg = self.text_color(outline, cx);
         let underline = self.underline(cx);
         let shadow = self.shadow(outline, cx);
 
         ButtonVariantStyle {
             bg,
-            border,
             fg,
             underline,
             shadow,
@@ -857,7 +780,6 @@ impl ButtonVariant {
             Self::Text => cx.theme().transparent,
         };
 
-        let border = self.border_color(bg, outline, cx);
         let fg = match self {
             Self::Link => cx.theme().link_hover,
             _ => self.text_color(outline, cx),
@@ -868,7 +790,6 @@ impl ButtonVariant {
 
         ButtonVariantStyle {
             bg,
-            border,
             fg,
             underline,
             shadow,
@@ -928,7 +849,6 @@ impl ButtonVariant {
                 }
             }
         };
-        let border = self.border_color(bg, outline, cx);
         let fg = match self {
             Self::Link => cx.theme().link_active,
             Self::Text => cx.theme().foreground.opacity(0.7),
@@ -939,7 +859,6 @@ impl ButtonVariant {
 
         ButtonVariantStyle {
             bg,
-            border,
             fg,
             underline,
             shadow,
@@ -961,7 +880,6 @@ impl ButtonVariant {
             Self::Custom(colors) => colors.active,
         };
 
-        let border = self.border_color(bg, outline, cx);
         let fg = match self {
             Self::Link => cx.theme().link_active,
             Self::Text => cx.theme().foreground.opacity(0.7),
@@ -972,7 +890,6 @@ impl ButtonVariant {
 
         ButtonVariantStyle {
             bg,
-            border,
             fg,
             underline,
             shadow,
@@ -992,18 +909,13 @@ impl ButtonVariant {
             Self::Custom(style) => style.color.opacity(0.15),
         };
         let fg = cx.theme().muted_foreground.opacity(0.5);
-        let (bg, border) = if outline {
-            (cx.theme().transparent, cx.theme().border.opacity(0.5))
-        } else {
-            (bg, bg)
-        };
+        let bg = if outline { cx.theme().transparent } else { bg };
 
         let underline = self.underline(cx);
         let shadow = false;
 
         ButtonVariantStyle {
             bg,
-            border,
             fg,
             underline,
             shadow,
