@@ -1,7 +1,7 @@
 use crate::widgets::{ActiveTheme, PixelsExt as _};
 use gpui::{
-    div, point, px, App, BoxShadow, Corners, DefiniteLength, Div, Edges, FocusHandle, Hsla,
-    ParentElement, Pixels, Refineable, StyleRefinement, Styled, Window,
+    App, BoxShadow, Corners, DefiniteLength, Div, Edges, FocusHandle, Hsla, ParentElement, Pixels,
+    Refineable, StyleRefinement, Styled, Window, div, point, px,
 };
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

@@ -1,9 +1,9 @@
 use gpui::{
-    div, prelude::FluentBuilder, Action, AnyElement, AnyView, App, AppContext, Context,
-    IntoElement, ParentElement, Render, SharedString, StyleRefinement, Styled, Window,
+    Action, AnyElement, AnyView, App, AppContext, Context, IntoElement, ParentElement, Render,
+    SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder,
 };
 
-use crate::widgets::{h_flex, kbd::Kbd, text::Text, ActiveTheme, StyledExt};
+use crate::widgets::{ActiveTheme, StyledExt, h_flex, kbd::Kbd, text::Text};
 
 type TooltipElementBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 

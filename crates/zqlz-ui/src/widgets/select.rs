@@ -1,20 +1,21 @@
 use crate::widgets::tooltip::Tooltip;
 use gpui::{
-    anchored, deferred, div, prelude::FluentBuilder, px, rems, AnyElement, App, AppContext, Bounds,
-    ClickEvent, Context, DismissEvent, Edges, ElementId, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, KeyBinding, Length, ParentElement, Pixels, Render,
-    RenderOnce, SharedString, StatefulInteractiveElement, StyleRefinement, Styled, Subscription,
-    Task, WeakEntity, Window,
+    AnyElement, App, AppContext, Bounds, ClickEvent, Context, DismissEvent, Edges, ElementId,
+    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
+    Length, ParentElement, Pixels, Render, RenderOnce, SharedString, StatefulInteractiveElement,
+    StyleRefinement, Styled, Subscription, Task, WeakEntity, Window, anchored, deferred, div,
+    prelude::FluentBuilder, px, rems,
 };
 use rust_i18n::t;
 
 use crate::widgets::{
+    ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Selectable, Sizable,
+    Size, StyleSized, StyledExt,
     actions::{Cancel, Confirm, SelectDown, SelectUp},
     h_flex,
     input::clear_button,
     list::{List, ListDelegate, ListState},
-    v_flex, ActiveTheme, Disableable, ElementExt as _, Icon, IconName, IndexPath, Selectable,
-    Sizable, Size, StyleSized, StyledExt,
+    v_flex,
 };
 
 type EmptyStateRenderer = Box<dyn Fn(&Window, &App) -> AnyElement>;

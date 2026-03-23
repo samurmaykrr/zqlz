@@ -7,10 +7,16 @@ use crate::widgets::sidebar::ConnectionSidebar;
 use crate::widgets::sidebar::types::*;
 
 impl ConnectionSidebar {
+    fn invalidate_virtual_rows(&mut self) {
+        self.virtual_rows.clear();
+        self.virtual_rows_dirty = true;
+    }
+
     /// Set connections from external source (e.g., AppState)
     /// This decouples the sidebar from the app's global state.
     pub fn set_connections(&mut self, connections: Vec<ConnectionEntry>, cx: &mut Context<Self>) {
         self.connections = connections;
+        self.invalidate_virtual_rows();
         tracing::info!("Set {} connections", self.connections.len());
         cx.notify();
     }
@@ -18,6 +24,7 @@ impl ConnectionSidebar {
     /// Add a new connection to the sidebar
     pub fn add_connection(&mut self, entry: ConnectionEntry, cx: &mut Context<Self>) {
         self.connections.push(entry);
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -27,6 +34,7 @@ impl ConnectionSidebar {
         if self.selected_connection == Some(id) {
             self.selected_connection = None;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -62,6 +70,7 @@ impl ConnectionSidebar {
                 conn.procedures_loading = false;
             }
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -70,6 +79,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             conn.is_connecting = connecting;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -88,6 +98,7 @@ impl ConnectionSidebar {
             conn.schema_names = schema_names;
             conn.tables_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -97,6 +108,7 @@ impl ConnectionSidebar {
             conn.views = views;
             conn.views_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -111,6 +123,7 @@ impl ConnectionSidebar {
             conn.materialized_views = materialized_views;
             conn.materialized_views_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -120,6 +133,7 @@ impl ConnectionSidebar {
             conn.functions = functions;
             conn.functions_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -134,6 +148,7 @@ impl ConnectionSidebar {
             conn.procedures = procedures;
             conn.procedures_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -143,6 +158,7 @@ impl ConnectionSidebar {
             conn.triggers = triggers;
             conn.triggers_loading = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -161,6 +177,7 @@ impl ConnectionSidebar {
                 _ => {}
             }
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -188,6 +205,7 @@ impl ConnectionSidebar {
             conn.schema_names = schema_names;
             conn.schema_expanded = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -207,6 +225,7 @@ impl ConnectionSidebar {
                 schema: None,
             }];
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -252,6 +271,7 @@ impl ConnectionSidebar {
                 })
                 .collect();
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -312,6 +332,7 @@ impl ConnectionSidebar {
                 })
                 .collect();
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -365,6 +386,7 @@ impl ConnectionSidebar {
                 procedures_loading: false,
             });
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -381,6 +403,7 @@ impl ConnectionSidebar {
         {
             db.is_loading = loading;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -389,6 +412,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.tables.retain(|t| t != table_name);
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -400,6 +424,7 @@ impl ConnectionSidebar {
             conn.tables.push(table_name);
             conn.tables.sort();
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -408,6 +433,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.views.retain(|v| v != view_name);
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -419,6 +445,7 @@ impl ConnectionSidebar {
             conn.views.push(view_name);
             conn.views.sort();
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -427,6 +454,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.triggers.retain(|t| t != trigger_name);
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -438,6 +466,7 @@ impl ConnectionSidebar {
             conn.triggers.push(trigger_name);
             conn.triggers.sort();
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -451,6 +480,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.queries = queries;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -467,6 +497,7 @@ impl ConnectionSidebar {
             conn.queries.push(query);
             conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -475,6 +506,7 @@ impl ConnectionSidebar {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
             conn.queries.retain(|q| q.id != query_id);
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -492,6 +524,7 @@ impl ConnectionSidebar {
             }
             conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -508,6 +541,7 @@ impl ConnectionSidebar {
             conn.functions_loading = conn.object_capabilities.supports_functions;
             conn.procedures_loading = conn.object_capabilities.supports_procedures;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -529,6 +563,7 @@ impl ConnectionSidebar {
                 .collect();
             conn.redis_databases_expanded = false;
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 
@@ -550,6 +585,7 @@ impl ConnectionSidebar {
             db.is_loading = false;
             db.key_count = Some(db.keys.len() as i64);
         }
+        self.invalidate_virtual_rows();
         cx.notify();
     }
 }

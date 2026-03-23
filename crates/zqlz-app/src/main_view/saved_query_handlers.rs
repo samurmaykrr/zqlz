@@ -6,13 +6,14 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
+    ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
     button::ButtonVariant,
     dialog::DialogButtonProps,
     h_flex,
     input::{Input, InputState},
     notification::Notification,
     typography::body_small,
-    v_flex, ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
+    v_flex,
 };
 
 use crate::app::AppState;

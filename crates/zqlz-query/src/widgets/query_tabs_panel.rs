@@ -8,11 +8,12 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_services::SchemaService;
 use zqlz_ui::widgets::{
+    ActiveTheme,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     tooltip::Tooltip,
-    v_flex, ActiveTheme,
+    v_flex,
 };
 
 use super::{

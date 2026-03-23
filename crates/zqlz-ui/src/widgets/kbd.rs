@@ -1,6 +1,6 @@
 use gpui::{
-    div, relative, Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke,
-    ParentElement as _, RenderOnce, StyleRefinement, Styled, Window,
+    Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke, ParentElement as _,
+    RenderOnce, StyleRefinement, Styled, Window, div, relative,
 };
 
 use crate::widgets::{ActiveTheme, StyledExt};

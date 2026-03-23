@@ -153,43 +153,39 @@ impl RenderOnce for Switch {
                         })
                         .child(
                             // Switch Toggle
-                            div()
-                                .bg(toggle_bg)
-                                .shadow_md()
-                                .size(bar_width)
-                                .map(|this| {
-                                    let prev_checked = toggle_state.read(cx);
-                                    if !self.disabled && *prev_checked != checked {
-                                        let duration = Duration::from_secs_f64(0.15);
-                                        cx.spawn({
-                                            let toggle_state = toggle_state.clone();
-                                            async move |cx| {
-                                                cx.background_executor().timer(duration).await;
-                                                toggle_state.update(cx, |this, _| *this = checked);
-                                            }
-                                        })
-                                        .detach();
+                            div().bg(toggle_bg).shadow_md().size(bar_width).map(|this| {
+                                let prev_checked = toggle_state.read(cx);
+                                if !self.disabled && *prev_checked != checked {
+                                    let duration = Duration::from_secs_f64(0.15);
+                                    cx.spawn({
+                                        let toggle_state = toggle_state.clone();
+                                        async move |cx| {
+                                            cx.background_executor().timer(duration).await;
+                                            toggle_state.update(cx, |this, _| *this = checked);
+                                        }
+                                    })
+                                    .detach();
 
-                                        this.with_animation(
-                                            ElementId::NamedInteger("move".into(), checked as u64),
-                                            Animation::new(duration),
-                                            move |this, delta| {
-                                                let max_x = bg_width - bar_width - inset * 2;
-                                                let x = if checked {
-                                                    max_x * delta
-                                                } else {
-                                                    max_x - max_x * delta
-                                                };
-                                                this.left(x)
-                                            },
-                                        )
-                                        .into_any_element()
-                                    } else {
-                                        let max_x = bg_width - bar_width - inset * 2;
-                                        let x = if checked { max_x } else { px(0.) };
-                                        this.left(x).into_any_element()
-                                    }
-                                }),
+                                    this.with_animation(
+                                        ElementId::NamedInteger("move".into(), checked as u64),
+                                        Animation::new(duration),
+                                        move |this, delta| {
+                                            let max_x = bg_width - bar_width - inset * 2;
+                                            let x = if checked {
+                                                max_x * delta
+                                            } else {
+                                                max_x - max_x * delta
+                                            };
+                                            this.left(x)
+                                        },
+                                    )
+                                    .into_any_element()
+                                } else {
+                                    let max_x = bg_width - bar_width - inset * 2;
+                                    let x = if checked { max_x } else { px(0.) };
+                                    this.left(x).into_any_element()
+                                }
+                            }),
                         ),
                 )
                 .when_some(self.label, |this, label| {
