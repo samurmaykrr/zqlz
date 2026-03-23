@@ -1,8 +1,8 @@
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    div, px, relative, AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity,
-    InteractiveElement as _, IntoElement, IsZero, MouseButton, ParentElement as _, Rems,
-    RenderOnce, StyleRefinement, Styled, Window,
+    AnyElement, App, DefiniteLength, Edges, EdgesRefinement, Entity, InteractiveElement as _,
+    IntoElement, IsZero, MouseButton, ParentElement as _, Rems, RenderOnce, StyleRefinement,
+    Styled, Window, div, px, relative,
 };
 
 use crate::widgets::button::{Button, ButtonVariants as _};
@@ -10,9 +10,9 @@ use crate::widgets::input::clear_button;
 use crate::widgets::input::element::{LINE_NUMBER_RIGHT_MARGIN, RIGHT_MARGIN};
 use crate::widgets::scroll::Scrollbar;
 use crate::widgets::spinner::Spinner;
-use crate::widgets::{h_flex, Selectable, StyledExt};
-use crate::widgets::{v_flex, ActiveTheme};
+use crate::widgets::{ActiveTheme, v_flex};
 use crate::widgets::{IconName, Size};
+use crate::widgets::{Selectable, StyledExt, h_flex};
 use crate::widgets::{Sizable, StyleSized};
 
 use super::InputState;

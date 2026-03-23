@@ -3,9 +3,9 @@ use rust_i18n::t;
 use std::{ops::Range, rc::Rc};
 
 use gpui::{
-    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render, Styled,
-    Subscription, Window, actions, div, prelude::FluentBuilder as _,
+    App, AppContext as _, Context, Empty, Entity, FocusHandle, Focusable, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, Styled, Subscription, Window,
+    actions, div, prelude::FluentBuilder as _,
 };
 use ropey::Rope;
 

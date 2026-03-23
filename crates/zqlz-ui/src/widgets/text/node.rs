@@ -1111,10 +1111,9 @@ impl BlockNode {
                                                         .px_2()
                                                         .py_1()
                                                         .when(!is_last_col, |this| {
-                                                            this.border_r_1()
-                                                                .border_color(
-                                                                    cx.theme().border.opacity(0.25),
-                                                                )
+                                                            this.border_r_1().border_color(
+                                                                cx.theme().border.opacity(0.25),
+                                                            )
                                                         })
                                                         .truncate()
                                                         .child(

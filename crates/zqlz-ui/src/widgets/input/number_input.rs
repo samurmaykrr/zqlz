@@ -1,12 +1,13 @@
 use gpui::{
-    actions, prelude::FluentBuilder as _, AnyElement, App, Context, Corners, Edges, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
-    ParentElement, RenderOnce, SharedString, StyleRefinement, Styled, Window,
+    AnyElement, App, Context, Corners, Edges, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyBinding, ParentElement, RenderOnce, SharedString,
+    StyleRefinement, Styled, Window, actions, prelude::FluentBuilder as _,
 };
 
 use crate::widgets::{
+    ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _,
     button::{Button, ButtonVariants},
-    h_flex, ActiveTheme, Disableable, IconName, Sizable, Size, StyledExt as _,
+    h_flex,
 };
 
 use super::{Input, InputState};

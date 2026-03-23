@@ -1,12 +1,12 @@
 use gpui::{
-    div, prelude::FluentBuilder, px, AnyElement, App, AppContext as _, Context, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyDownEvent,
-    MouseButton, MouseDownEvent, ParentElement as _, Render, RenderOnce, SharedString, Styled as _,
-    Subscription, Window,
+    AnyElement, App, AppContext as _, Context, Empty, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, ParentElement as _,
+    Render, RenderOnce, SharedString, Styled as _, Subscription, Window, div,
+    prelude::FluentBuilder, px,
 };
 
-use super::{blink_cursor::BlinkCursor, InputEvent};
-use crate::widgets::{h_flex, v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable, Size};
+use super::{InputEvent, blink_cursor::BlinkCursor};
+use crate::widgets::{ActiveTheme, Disableable, Icon, IconName, Sizable, Size, h_flex, v_flex};
 
 pub struct OtpState {
     focus_handle: FocusHandle,

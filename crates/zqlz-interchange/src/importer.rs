@@ -706,7 +706,8 @@ impl GenericImporter {
         // inline CHECK constraint to restrict values to the declared set.
         // This must come before the NOT NULL / DEFAULT clauses.
         if let CanonicalType::Enum { ref values, .. } = col.canonical_type
-            && !self.supports_named_enum_types() && !values.is_empty()
+            && !self.supports_named_enum_types()
+            && !values.is_empty()
         {
             let quoted_values: Vec<String> = values
                 .iter()
