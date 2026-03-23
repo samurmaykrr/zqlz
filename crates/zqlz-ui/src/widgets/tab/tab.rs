@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
-use crate::widgets::{ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt, h_flex};
+use crate::widgets::{h_flex, ActiveTheme, Icon, IconName, Selectable, Sizable, Size, StyledExt};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, ClickEvent, Div, Edges, Hsla, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, RenderOnce, SharedString, StatefulInteractiveElement, Styled, Window,
-    div, px, relative,
+    div, px, relative, AnyElement, App, ClickEvent, Div, Edges, Hsla, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Pixels, RenderOnce, SharedString,
+    StatefulInteractiveElement, Styled, Window,
 };
 
 type TabClickHandler = Rc<dyn Fn(&ClickEvent, &mut Window, &mut App) + 'static>;
@@ -144,7 +144,7 @@ impl TabVariant {
                 fg: cx.theme().tab_foreground,
                 bg: cx.theme().transparent,
                 borders: Edges::all(px(1.)),
-                border_color: cx.theme().border,
+                border_color: cx.theme().border.opacity(0.25),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
@@ -189,7 +189,7 @@ impl TabVariant {
                 fg: cx.theme().secondary_foreground,
                 bg: cx.theme().secondary_hover,
                 borders: Edges::all(px(1.)),
-                border_color: cx.theme().border,
+                border_color: cx.theme().border.opacity(0.25),
                 ..Default::default()
             },
             TabVariant::Pill => TabStyle {
@@ -232,7 +232,7 @@ impl TabVariant {
                     right: px(1.),
                     ..Default::default()
                 },
-                border_color: cx.theme().border,
+                border_color: cx.theme().border.opacity(0.25),
                 ..Default::default()
             },
             TabVariant::Outline => TabStyle {
@@ -273,7 +273,7 @@ impl TabVariant {
                 fg: cx.theme().muted_foreground,
                 bg: cx.theme().transparent,
                 border_color: if selected {
-                    cx.theme().border
+                    cx.theme().border.opacity(0.25)
                 } else {
                     cx.theme().transparent
                 },
@@ -292,7 +292,7 @@ impl TabVariant {
                 border_color: if selected {
                     cx.theme().primary
                 } else {
-                    cx.theme().border
+                    cx.theme().border.opacity(0.25)
                 },
                 ..Default::default()
             },
@@ -323,7 +323,7 @@ impl TabVariant {
                 fg: cx.theme().muted_foreground,
                 bg: cx.theme().transparent,
                 border_color: if selected {
-                    cx.theme().border
+                    cx.theme().border.opacity(0.25)
                 } else {
                     cx.theme().transparent
                 },
@@ -333,40 +333,6 @@ impl TabVariant {
                 },
                 ..Default::default()
             },
-        }
-    }
-
-    pub(super) fn tab_bar_radius(&self, size: Size, cx: &App) -> Pixels {
-        if *self != TabVariant::Segmented {
-            return px(0.);
-        }
-
-        match size {
-            Size::XSmall | Size::Small => cx.theme().radius,
-            Size::Large => cx.theme().radius_lg,
-            _ => cx.theme().radius_lg,
-        }
-    }
-
-    fn radius(&self, size: Size, cx: &App) -> Pixels {
-        match self {
-            TabVariant::Outline | TabVariant::Pill => px(99.),
-            TabVariant::Segmented => match size {
-                Size::XSmall | Size::Small => cx.theme().radius,
-                Size::Large => cx.theme().radius_lg,
-                _ => cx.theme().radius_lg,
-            },
-            _ => px(0.),
-        }
-    }
-
-    fn inner_radius(&self, size: Size, cx: &App) -> Pixels {
-        match self {
-            TabVariant::Segmented => match size {
-                Size::Large => self.tab_bar_radius(size, cx) - px(3.),
-                _ => self.tab_bar_radius(size, cx) - px(2.),
-            },
-            _ => px(0.),
         }
     }
 }
@@ -605,8 +571,6 @@ impl RenderOnce for Tab {
             tab_style.borders.left = px(0.);
             hover_style.borders.left = px(0.);
         }
-        let radius = self.variant.radius(self.size, cx);
-        let inner_radius = self.variant.inner_radius(self.size, cx);
         let inner_paddings = self.variant.inner_paddings(self.size);
         let inner_margins = self.variant.inner_margins(self.size);
         let inner_height = self.variant.inner_height(self.size);
@@ -634,7 +598,6 @@ impl RenderOnce for Tab {
             .border_t(tab_style.borders.top)
             .border_b(tab_style.borders.bottom)
             .border_color(tab_style.border_color)
-            .rounded(radius)
             .when(!self.selected && !self.disabled, |this| {
                 this.hover(|this| {
                     this.text_color(hover_style.fg)
@@ -644,7 +607,6 @@ impl RenderOnce for Tab {
                         .border_t(hover_style.borders.top)
                         .border_b(hover_style.borders.bottom)
                         .border_color(hover_style.border_color)
-                        .rounded(radius)
                 })
             })
             .when_some(self.prefix, |this, prefix| this.child(prefix))
@@ -677,9 +639,8 @@ impl RenderOnce for Tab {
                             .children(self.children),
                     })
                     .bg(tab_style.inner_bg)
-                    .rounded(inner_radius)
                     .when(tab_style.shadow, |this| this.shadow_xs())
-                    .hover(|this| this.bg(hover_style.inner_bg).rounded(inner_radius)),
+                    .hover(|this| this.bg(hover_style.inner_bg)),
             )
             .when_some(self.suffix, |this, suffix| this.child(suffix))
             .on_mouse_down(MouseButton::Left, |_, _, cx| {

@@ -3,7 +3,8 @@
 //! Provides bulk operations for multiple rows in the table viewer, including
 //! set value, delete, and duplicate operations with SQL generation support.
 
-use zqlz_core::{ColumnMeta, Value};
+use std::sync::Arc;
+use zqlz_core::{ColumnMeta, Connection, Value};
 
 use super::duplicate::{DuplicateOptions, DuplicatedRow, duplicate_row};
 
@@ -142,7 +143,25 @@ pub fn generate_bulk_update_sql(
     primary_key_column: &str,
     primary_key_values: &[Value],
     new_value: &Value,
-    driver_name: &str,
+    connection: &Arc<dyn Connection>,
+) -> String {
+    generate_bulk_update_sql_with_quoter(
+        table_name,
+        column_name,
+        primary_key_column,
+        primary_key_values,
+        new_value,
+        |name| quote_identifier(name, connection),
+    )
+}
+
+fn generate_bulk_update_sql_with_quoter(
+    table_name: &str,
+    column_name: &str,
+    primary_key_column: &str,
+    primary_key_values: &[Value],
+    new_value: &Value,
+    quote_identifier: impl Fn(&str) -> String,
 ) -> String {
     if primary_key_values.is_empty() {
         return String::new();
@@ -156,10 +175,10 @@ pub fn generate_bulk_update_sql(
 
     format!(
         "UPDATE {} SET {} = {} WHERE {} IN ({})",
-        quote_identifier(table_name, driver_name),
-        quote_identifier(column_name, driver_name),
+        quote_identifier(table_name),
+        quote_identifier(column_name),
         format_value(new_value),
-        quote_identifier(primary_key_column, driver_name),
+        quote_identifier(primary_key_column),
         pk_list
     )
 }
@@ -170,7 +189,21 @@ pub fn generate_bulk_delete_sql(
     table_name: &str,
     primary_key_column: &str,
     primary_key_values: &[Value],
-    driver_name: &str,
+    connection: &Arc<dyn Connection>,
+) -> String {
+    generate_bulk_delete_sql_with_quoter(
+        table_name,
+        primary_key_column,
+        primary_key_values,
+        |name| quote_identifier(name, connection),
+    )
+}
+
+fn generate_bulk_delete_sql_with_quoter(
+    table_name: &str,
+    primary_key_column: &str,
+    primary_key_values: &[Value],
+    quote_identifier: impl Fn(&str) -> String,
 ) -> String {
     if primary_key_values.is_empty() {
         return String::new();
@@ -184,20 +217,16 @@ pub fn generate_bulk_delete_sql(
 
     format!(
         "DELETE FROM {} WHERE {} IN ({})",
-        quote_identifier(table_name, driver_name),
-        quote_identifier(primary_key_column, driver_name),
+        quote_identifier(table_name),
+        quote_identifier(primary_key_column),
         pk_list
     )
 }
 
 /// Quote a SQL identifier using the appropriate style for the target database.
 #[allow(dead_code)]
-fn quote_identifier(name: &str, driver_name: &str) -> String {
-    match driver_name {
-        "mysql" => format!("`{}`", name.replace('`', "``")),
-        "mssql" => format!("[{}]", name.replace(']', "]]")),
-        _ => format!("\"{}\"", name.replace('"', "\"\"")),
-    }
+fn quote_identifier(name: &str, connection: &Arc<dyn Connection>) -> String {
+    connection.quote_identifier(name)
 }
 
 /// Format a value for SQL
@@ -237,6 +266,14 @@ fn hex_encode(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn quote_identifier_for_driver(name: &str, driver_name: &str) -> String {
+        match driver_name {
+            "mysql" | "mariadb" => format!("`{}`", name.replace('`', "``")),
+            "mssql" | "sqlserver" => format!("[{}]", name.replace(']', "]]")),
+            _ => format!("\"{}\"", name.replace('"', "\"\"")),
+        }
+    }
 
     fn make_column(name: &str, auto_increment: bool) -> ColumnMeta {
         ColumnMeta {
@@ -308,13 +345,13 @@ mod tests {
 
     #[test]
     fn test_bulk_update_sql_generation() {
-        let sql = generate_bulk_update_sql(
+        let sql = generate_bulk_update_sql_with_quoter(
             "users",
             "status",
             "id",
             &[Value::Int64(1), Value::Int64(3), Value::Int64(5)],
             &Value::String("active".to_string()),
-            "postgresql",
+            |name| quote_identifier_for_driver(name, "postgresql"),
         );
 
         assert_eq!(
@@ -325,13 +362,13 @@ mod tests {
 
     #[test]
     fn test_bulk_update_sql_generation_mysql() {
-        let sql = generate_bulk_update_sql(
+        let sql = generate_bulk_update_sql_with_quoter(
             "users",
             "status",
             "id",
             &[Value::Int64(1), Value::Int64(3)],
             &Value::String("active".to_string()),
-            "mysql",
+            |name| quote_identifier_for_driver(name, "mysql"),
         );
 
         assert_eq!(
@@ -342,11 +379,11 @@ mod tests {
 
     #[test]
     fn test_bulk_delete_sql_generation() {
-        let sql = generate_bulk_delete_sql(
+        let sql = generate_bulk_delete_sql_with_quoter(
             "users",
             "id",
             &[Value::Int64(1), Value::Int64(2), Value::Int64(3)],
-            "postgresql",
+            |name| quote_identifier_for_driver(name, "postgresql"),
         );
 
         assert_eq!(sql, r#"DELETE FROM "users" WHERE "id" IN (1, 2, 3)"#);
@@ -354,8 +391,12 @@ mod tests {
 
     #[test]
     fn test_bulk_delete_sql_generation_mysql() {
-        let sql =
-            generate_bulk_delete_sql("users", "id", &[Value::Int64(1), Value::Int64(2)], "mysql");
+        let sql = generate_bulk_delete_sql_with_quoter(
+            "users",
+            "id",
+            &[Value::Int64(1), Value::Int64(2)],
+            |name| quote_identifier_for_driver(name, "mysql"),
+        );
 
         assert_eq!(sql, "DELETE FROM `users` WHERE `id` IN (1, 2)");
     }
@@ -400,11 +441,19 @@ mod tests {
 
     #[test]
     fn test_empty_primary_keys_returns_empty_sql() {
-        let sql =
-            generate_bulk_update_sql("users", "status", "id", &[], &Value::Null, "postgresql");
+        let sql = generate_bulk_update_sql_with_quoter(
+            "users",
+            "status",
+            "id",
+            &[],
+            &Value::Null,
+            |name| quote_identifier_for_driver(name, "postgresql"),
+        );
         assert!(sql.is_empty());
 
-        let sql = generate_bulk_delete_sql("users", "id", &[], "postgresql");
+        let sql = generate_bulk_delete_sql_with_quoter("users", "id", &[], |name| {
+            quote_identifier_for_driver(name, "postgresql")
+        });
         assert!(sql.is_empty());
     }
 }

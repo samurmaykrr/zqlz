@@ -8,15 +8,16 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_services::SchemaService;
 use zqlz_ui::widgets::{
-    ActiveTheme,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     tooltip::Tooltip,
-    v_flex,
+    v_flex, ActiveTheme,
 };
 
-use super::{DiagnosticInfo, EditorObjectType, QueryEditor, QueryEditorEvent};
+use super::{
+    DiagnosticInfo, EditorObjectType, QueryEditor, QueryEditorEvent, QueryExecutionParams,
+};
 
 /// Events emitted by the query tabs panel
 #[derive(Clone, Debug)]
@@ -25,12 +26,14 @@ pub enum QueryTabsPanelEvent {
     ExecuteQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        params: Option<QueryExecutionParams>,
         editor_index: usize,
     },
     /// User requested to execute selection or current statement
     ExecuteSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        params: Option<QueryExecutionParams>,
         editor_index: usize,
     },
     /// User requested to explain a query (entire content)
@@ -124,17 +127,27 @@ impl QueryTabsPanel {
                 };
 
                 match event {
-                    QueryEditorEvent::ExecuteQuery { sql, connection_id } => {
+                    QueryEditorEvent::ExecuteQuery {
+                        sql,
+                        connection_id,
+                        params,
+                    } => {
                         cx.emit(QueryTabsPanelEvent::ExecuteQuery {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            params: params.clone(),
                             editor_index,
                         });
                     }
-                    QueryEditorEvent::ExecuteSelection { sql, connection_id } => {
+                    QueryEditorEvent::ExecuteSelection {
+                        sql,
+                        connection_id,
+                        params,
+                    } => {
                         cx.emit(QueryTabsPanelEvent::ExecuteSelection {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            params: params.clone(),
                             editor_index,
                         });
                     }
@@ -541,7 +554,8 @@ impl QueryTabsPanel {
                         div()
                             .id(SharedString::from(format!("close-tab-{}", idx)))
                             .size_4()
-                            .rounded_sm()
+                            .border_1()
+                            .border_color(theme.border.opacity(0.6))
                             .flex()
                             .items_center()
                             .justify_center()
@@ -592,7 +606,8 @@ impl QueryTabsPanel {
             .child(
                 div()
                     .size_16()
-                    .rounded_2xl()
+                    .border_1()
+                    .border_color(theme.border.opacity(0.5))
                     .bg(theme.primary)
                     .flex()
                     .items_center()

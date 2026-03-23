@@ -1660,12 +1660,6 @@ where
                                 return;
                             }
 
-                            // sync col widths into real widths
-                            // TODO: Consider to remove this, this may not need now.
-                            // for (_, col_group) in view.col_groups.iter_mut().enumerate() {
-                            //     col_group.width = col_group.bounds.size.width;
-                            // }
-
                             let ix = *ix;
                             view.resizing_col = Some(ix);
 
@@ -1749,7 +1743,6 @@ where
                 .items_center()
                 .justify_center()
                 .p(px(2.))
-                .rounded(cx.theme().radius / 2.)
                 .when(is_sorted, |this| this.bg(cx.theme().secondary.opacity(0.7)))
                 .hover(|this| this.bg(cx.theme().secondary))
                 .active(|this| this.bg(cx.theme().secondary_active).opacity(1.))
@@ -1870,8 +1863,7 @@ where
                             },
                         )
                         .drag_over::<DragColumn>(|this, _, _, cx| {
-                            this.rounded_l_none()
-                                .border_l_2()
+                            this.border_l_2()
                                 .border_r_0()
                                 .border_color(cx.theme().drag_border)
                         })
@@ -1933,7 +1925,7 @@ where
             .h(self.options.size.table_row_height())
             .flex_shrink_0()
             .border_b_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.25))
             .text_color(cx.theme().table_head_foreground)
             .refine_style(&style)
             .when(left_columns_count > 0, |this| {
@@ -1962,7 +1954,7 @@ where
                                 .w_0()
                                 .flex_shrink_0()
                                 .border_r_1()
-                                .border_color(cx.theme().border),
+                                .border_color(cx.theme().border.opacity(0.25)),
                         )
                         .on_prepaint(move |bounds, _, cx| {
                             view.update(cx, |r, _| r.fixed_head_cols_bounds = bounds)
@@ -2064,7 +2056,7 @@ where
                                     .w_0()
                                     .flex_shrink_0()
                                     .border_r_1()
-                                    .border_color(cx.theme().border),
+                                    .border_color(cx.theme().border.opacity(0.25)),
                             ),
                     )
                 })

@@ -12,8 +12,8 @@ pub use types::*;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use menus::state::ContextMenuState;
-use std::time::Duration;
 use std::path::PathBuf;
+use std::time::Duration;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
@@ -259,6 +259,9 @@ pub struct ConnectionSidebar {
     /// Currently selected connection
     selected_connection: Option<Uuid>,
 
+    /// Last object row activated from the sidebar tree.
+    active_leaf_item_id: Option<String>,
+
     /// Search query for filtering schema objects
     search_query: String,
 
@@ -314,6 +317,7 @@ impl ConnectionSidebar {
             focus_handle: cx.focus_handle(),
             connections: Vec::new(),
             selected_connection: None,
+            active_leaf_item_id: None,
             search_query: String::new(),
             search_query_lowercase: String::new(),
             search_input_state: None,
@@ -345,38 +349,38 @@ impl ConnectionSidebar {
             self._subscriptions.push(cx.subscribe(
                 &search_input_state,
                 |this, _, event: &InputEvent, cx| {
-                    if let InputEvent::Change = event {
-                        if let Some(input) = &this.search_input_state {
-                            this.search_query = input.read(cx).value().to_string();
-                            let next_lowercase = this.search_query.to_lowercase();
+                    if let InputEvent::Change = event
+                        && let Some(input) = &this.search_input_state
+                    {
+                        this.search_query = input.read(cx).value().to_string();
+                        let next_lowercase = this.search_query.to_lowercase();
 
-                            if this.search_query.is_empty() {
-                                this.search_query_lowercase.clear();
-                                this.search_debounce_task = None;
-                                cx.notify();
-                                return;
-                            }
-
-                            this.search_debounce_task = Some(cx.spawn({
-                                let next_lowercase = next_lowercase.clone();
-                                async move |this, cx| {
-                                    cx.background_executor()
-                                        .timer(Duration::from_millis(150))
-                                        .await;
-
-                                    if let Err(error) = this.update(cx, |sidebar, cx| {
-                                        sidebar.search_query_lowercase = next_lowercase.clone();
-                                        sidebar.search_debounce_task = None;
-                                        cx.notify();
-                                    }) {
-                                        tracing::debug!(
-                                            error = %error,
-                                            "Sidebar search debounce update skipped"
-                                        );
-                                    }
-                                }
-                            }));
+                        if this.search_query.is_empty() {
+                            this.search_query_lowercase.clear();
+                            this.search_debounce_task = None;
+                            cx.notify();
+                            return;
                         }
+
+                        this.search_debounce_task = Some(cx.spawn({
+                            let next_lowercase = next_lowercase.clone();
+                            async move |this, cx| {
+                                cx.background_executor()
+                                    .timer(Duration::from_millis(150))
+                                    .await;
+
+                                if let Err(error) = this.update(cx, |sidebar, cx| {
+                                    sidebar.search_query_lowercase = next_lowercase.clone();
+                                    sidebar.search_debounce_task = None;
+                                    cx.notify();
+                                }) {
+                                    tracing::debug!(
+                                        error = %error,
+                                        "Sidebar search debounce update skipped"
+                                    );
+                                }
+                            }
+                        }));
                     }
                 },
             ));
@@ -451,8 +455,20 @@ impl ConnectionSidebar {
     /// Select a connection
     fn select_connection(&mut self, id: Uuid, cx: &mut Context<Self>) {
         self.selected_connection = Some(id);
+        self.active_leaf_item_id = None;
         cx.emit(ConnectionSidebarEvent::Selected(id));
         cx.notify();
+    }
+
+    fn set_active_leaf_item(&mut self, item_id: Option<String>, cx: &mut Context<Self>) {
+        if self.active_leaf_item_id != item_id {
+            self.active_leaf_item_id = item_id;
+            cx.notify();
+        }
+    }
+
+    fn is_leaf_item_active(&self, item_id: &str) -> bool {
+        self.active_leaf_item_id.as_deref() == Some(item_id)
     }
 
     /// Activate (Enter) the selected connection: connect if disconnected, toggle expand if connected
@@ -704,7 +720,9 @@ impl ConnectionSidebar {
             if schema.collapsed_schema_groups.contains(schema_name) {
                 schema.collapsed_schema_groups.remove(schema_name);
             } else {
-                schema.collapsed_schema_groups.insert(schema_name.to_string());
+                schema
+                    .collapsed_schema_groups
+                    .insert(schema_name.to_string());
             }
         }
         cx.notify();
@@ -787,6 +805,7 @@ impl ConnectionSidebar {
     pub fn set_selected(&mut self, id: Option<Uuid>, cx: &mut Context<Self>) {
         if self.selected_connection != id {
             self.selected_connection = id;
+            self.active_leaf_item_id = None;
             cx.notify();
         }
     }
@@ -911,6 +930,8 @@ impl Render for ConnectionSidebar {
             }))
             .size_full()
             .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.border)
             .font_family(cx.theme().font_family.clone())
             // Search input - only show when there are connections
             .when_some(search_input_state, |this, input_state| {
@@ -941,7 +962,6 @@ impl Render for ConnectionSidebar {
                     .flex_1()
                     .w_full()
                     .overflow_y_scroll()
-                    .py_1()
                     .drag_over::<ExternalPaths>(|this, _, _, cx| this.bg(cx.theme().drop_target))
                     .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
                         this.import_dropped_paths(paths.paths(), cx);

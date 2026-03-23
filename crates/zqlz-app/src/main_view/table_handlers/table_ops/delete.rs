@@ -1,6 +1,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::{DropTableOptions, SqlObjectName};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
@@ -76,7 +77,20 @@ impl MainView {
                     let table_name = table_name.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = format!("DROP TABLE \"{}\"", table_name);
+                        let sql = match connection.drop_table_sql(
+                            &SqlObjectName::new(&table_name),
+                            DropTableOptions::default(),
+                        ) {
+                            Ok(sql) => sql,
+                            Err(error) => {
+                                tracing::error!(
+                                    table = %table_name,
+                                    %error,
+                                    "Failed to build drop table SQL"
+                                );
+                                return;
+                            }
+                        };
                         match connection.execute(&sql, &[]).await {
                             Ok(_) => {
                                 tracing::info!("Table '{}' deleted successfully", table_name);
@@ -222,7 +236,24 @@ impl MainView {
                         let mut deleted_tables: Vec<String> = Vec::new();
 
                         for table_name in &table_names {
-                            let sql = format!("DROP TABLE \"{}\"", table_name);
+                            let sql = match connection.drop_table_sql(
+                                &SqlObjectName::new(table_name),
+                                DropTableOptions::default(),
+                            ) {
+                                Ok(sql) => sql,
+                                Err(error) => {
+                                    let error_msg = format!(
+                                        "'{}': failed to build DROP TABLE SQL ({})",
+                                        table_name, error
+                                    );
+                                    tracing::error!("{}", error_msg);
+                                    if continue_on_error {
+                                        errors.push(error_msg);
+                                        continue;
+                                    }
+                                    return;
+                                }
+                            };
                             match connection.execute(&sql, &[]).await {
                                 Ok(_) => {
                                     tracing::info!("Table '{}' deleted successfully", table_name);

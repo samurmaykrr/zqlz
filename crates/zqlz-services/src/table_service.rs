@@ -27,16 +27,6 @@ impl TableService {
         Self { default_limit }
     }
 
-    /// Whether this driver supports cheap COUNT(*) queries.
-    ///
-    /// SQLite and DuckDB keep row counts in metadata so COUNT(*) is
-    /// essentially free. For MySQL/PostgreSQL/MSSQL/ClickHouse the
-    /// count requires a full table scan and can take seconds on large
-    /// tables, so we skip it and use heuristic "has more" pagination.
-    pub fn supports_fast_count(driver: &str) -> bool {
-        matches!(driver, "sqlite" | "duckdb")
-    }
-
     /// Browse table data with filters and sorting
     ///
     /// # Arguments
@@ -74,8 +64,8 @@ impl TableService {
         } = request;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
-        let driver = connection.driver_name();
-        let qualified = Self::qualified_table_name(table_name, schema, driver);
+        let driver_name = connection.driver_name();
+        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         // Build WHERE clause (needed for both COUNT and SELECT)
         let where_clause = if where_clauses.is_empty() {
@@ -90,7 +80,7 @@ impl TableService {
         } else {
             visible_columns
                 .iter()
-                .map(|c| Self::escape_identifier_for(c, driver))
+                .map(|c| connection.quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -103,10 +93,11 @@ impl TableService {
         };
 
         // Build safe SQL
-        let data_sql = format!(
-            "SELECT {} FROM {}{}{} LIMIT {} OFFSET {}",
-            columns, qualified, where_clause, order_by_clause, limit, offset
+        let base_sql = format!(
+            "SELECT {} FROM {}{}{}",
+            columns, qualified, where_clause, order_by_clause
         );
+        let data_sql = connection.paginated_select_sql(&base_sql, limit as u64, offset as u64);
 
         tracing::debug!("Browsing table with filters, SQL: {}", data_sql);
 
@@ -129,10 +120,11 @@ impl TableService {
             let result =
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
             (result, cached_total, false)
-        } else if Self::supports_fast_count(driver) {
+        } else if connection.supports_fast_exact_count() {
             // Run the data query and COUNT(*) concurrently so the user doesn't wait
             // for a potentially slow full-table count before seeing rows.
-            let count_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+            let count_base_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+            let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
             tracing::debug!("Counting rows with SQL: {}", count_sql);
 
             let count_conn = connection.clone();
@@ -162,7 +154,7 @@ impl TableService {
             (result, total_rows, false)
         } else if has_filters {
             // Metadata estimates don't reflect WHERE filters, so skip counting
-            tracing::debug!("Driver '{}' with active filters: skipping count (estimates don't apply to filtered queries)", driver);
+            tracing::debug!("Driver '{}' with active filters: skipping count (estimates don't apply to filtered queries)", driver_name);
             let data_result = connection.query(&data_sql, &[]).await;
             let result =
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
@@ -219,8 +211,7 @@ impl TableService {
         schema: Option<&str>,
         where_clauses: Vec<String>,
     ) -> ServiceResult<u64> {
-        let driver = connection.driver_name();
-        let qualified = Self::qualified_table_name(table_name, schema, driver);
+        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -228,7 +219,8 @@ impl TableService {
             format!(" WHERE {}", where_clauses.join(" AND "))
         };
 
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+        let count_base_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+        let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
         tracing::debug!("On-demand row count, SQL: {}", count_sql);
 
         let count_result = connection
@@ -280,8 +272,7 @@ impl TableService {
             limit,
             pk_columns,
         } = request;
-        let driver = connection.driver_name();
-        let qualified = Self::qualified_table_name(table_name, schema, driver);
+        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -294,7 +285,7 @@ impl TableService {
         } else {
             visible_columns
                 .iter()
-                .map(|c| Self::escape_identifier_for(c, driver))
+                .map(|c| connection.quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -305,7 +296,7 @@ impl TableService {
         let reversed_order = if order_by_clauses.is_empty() {
             pk_columns
                 .iter()
-                .map(|col| format!("{} DESC", Self::escape_identifier_for(col, driver)))
+                .map(|col| format!("{} DESC", connection.quote_identifier(col)))
                 .collect::<Vec<_>>()
                 .join(", ")
         } else {
@@ -316,12 +307,14 @@ impl TableService {
                 .join(", ")
         };
 
-        let data_sql = format!(
-            "SELECT {} FROM {}{} ORDER BY {} LIMIT {}",
-            columns, qualified, where_clause, reversed_order, limit
+        let base_sql = format!(
+            "SELECT {} FROM {}{} ORDER BY {}",
+            columns, qualified, where_clause, reversed_order
         );
+        let data_sql = connection.paginated_select_sql(&base_sql, limit as u64, 0);
 
-        let count_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+        let count_base_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
+        let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
 
         tracing::debug!("Last-page data SQL: {}", data_sql);
         tracing::debug!("Last-page count SQL: {}", count_sql);
@@ -398,8 +391,7 @@ impl TableService {
             total_rows,
             pk_columns,
         } = request;
-        let driver = connection.driver_name();
-        let qualified = Self::qualified_table_name(table_name, schema, driver);
+        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -412,7 +404,7 @@ impl TableService {
         } else {
             visible_columns
                 .iter()
-                .map(|c| Self::escape_identifier_for(c, driver))
+                .map(|c| connection.quote_identifier(c))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
@@ -431,7 +423,7 @@ impl TableService {
         let reversed_order = if order_by_clauses.is_empty() {
             pk_columns
                 .iter()
-                .map(|col| format!("{} DESC", Self::escape_identifier_for(col, driver)))
+                .map(|col| format!("{} DESC", connection.quote_identifier(col)))
                 .collect::<Vec<_>>()
                 .join(", ")
         } else {
@@ -442,10 +434,12 @@ impl TableService {
                 .join(", ")
         };
 
-        let data_sql = format!(
-            "SELECT {} FROM {}{} ORDER BY {} LIMIT {} OFFSET {}",
-            columns, qualified, where_clause, reversed_order, reverse_limit, reverse_offset
+        let base_sql = format!(
+            "SELECT {} FROM {}{} ORDER BY {}",
+            columns, qualified, where_clause, reversed_order
         );
+        let data_sql =
+            connection.paginated_select_sql(&base_sql, reverse_limit as u64, reverse_offset as u64);
 
         tracing::debug!(
             "Near-end page: original offset={}, reversed to OFFSET {} LIMIT {} (total={})",
@@ -534,11 +528,12 @@ impl TableService {
         table_name: &str,
         schema: Option<&str>,
     ) -> ServiceResult<(u64, bool)> {
-        let driver = connection.driver_name();
+        let driver_name = connection.driver_name();
 
-        if Self::supports_fast_count(driver) {
-            let qualified = Self::qualified_table_name(table_name, schema, driver);
-            let count_sql = format!("SELECT COUNT(*) FROM {}", qualified);
+        if connection.supports_fast_exact_count() {
+            let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+            let count_base_sql = format!("SELECT COUNT(*) FROM {}", qualified);
+            let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
             let count_result = connection
                 .query(&count_sql, &[])
                 .await
@@ -559,25 +554,17 @@ impl TableService {
             return Ok((total, false));
         }
 
-        let estimate_sql = Self::estimate_row_count_sql(driver, table_name, schema);
+        let qualified_table_name = match schema {
+            Some(schema_name) if !schema_name.is_empty() => {
+                zqlz_core::SqlObjectName::with_namespace(schema_name, table_name)
+            }
+            _ => zqlz_core::SqlObjectName::new(table_name),
+        };
 
-        tracing::debug!("Estimating row count with SQL: {}", estimate_sql);
-
-        let result = connection
-            .query(&estimate_sql, &[])
+        let estimated = connection
+            .estimated_row_count(&qualified_table_name)
             .await
-            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
-
-        let estimated = result
-            .rows
-            .first()
-            .and_then(|row| row.values.first())
-            .and_then(|v| v.as_i64())
-            // pg_class.reltuples returns -1 for unanalyzed tables; clamp
-            // on i64 *before* the cast so the sign bit isn't reinterpreted
-            // as u64::MAX via two's-complement wrap-around.
-            .filter(|&i| i >= 0)
-            .map(|i| i as u64)
+            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
             .ok_or_else(|| {
                 ServiceError::TableOperationFailed(
                     "Estimated row count query returned no result".to_string(),
@@ -585,61 +572,13 @@ impl TableService {
             })?;
 
         tracing::info!(
-            table_name = %table_name,
+            table_name = %qualified_table_name.name,
             estimated = estimated,
-            driver = driver,
+            driver = driver_name,
             "Estimated row count from metadata"
         );
 
         Ok((estimated, true))
-    }
-
-    /// Build the driver-specific SQL to get an estimated row count from metadata.
-    fn estimate_row_count_sql(driver: &str, table_name: &str, schema: Option<&str>) -> String {
-        match driver {
-            "mysql" => {
-                let db = schema.unwrap_or("DATABASE()");
-                let db_clause = if schema.is_some() {
-                    format!("'{}'", db.replace('\'', "''"))
-                } else {
-                    "DATABASE()".to_string()
-                };
-                format!(
-                    "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = {} AND TABLE_NAME = '{}'",
-                    db_clause,
-                    table_name.replace('\'', "''")
-                )
-            }
-            "postgres" | "postgresql" => {
-                let schema_name = schema.unwrap_or("public");
-                format!(
-                    "SELECT reltuples::bigint FROM pg_class WHERE relname = '{}' AND relnamespace = (SELECT oid FROM pg_namespace WHERE nspname = '{}')",
-                    table_name.replace('\'', "''"),
-                    schema_name.replace('\'', "''")
-                )
-            }
-            "mssql" | "sqlserver" => {
-                let schema_name = schema.unwrap_or("dbo");
-                format!(
-                    "SELECT SUM(p.rows) FROM sys.partitions p INNER JOIN sys.tables t ON p.object_id = t.object_id INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = '{}' AND s.name = '{}' AND p.index_id IN (0, 1)",
-                    table_name.replace('\'', "''"),
-                    schema_name.replace('\'', "''")
-                )
-            }
-            "clickhouse" => {
-                let db = schema.unwrap_or("default");
-                format!(
-                    "SELECT sum(rows) FROM system.parts WHERE database = '{}' AND table = '{}' AND active",
-                    db.replace('\'', "''"),
-                    table_name.replace('\'', "''")
-                )
-            }
-            _ => {
-                // MongoDB, Redis, etc. — no metadata shortcut, fall back to 0
-                // and let the caller treat it as unknown.
-                "SELECT 0".to_string()
-            }
-        }
     }
 
     /// Browse table data with automatic LIMIT
@@ -665,20 +604,18 @@ impl TableService {
     ) -> ServiceResult<QueryResult> {
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
-        let driver = connection.driver_name();
-        let qualified = Self::qualified_table_name(table_name, schema, driver);
+        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         // Build safe SQL with proper identifier escaping
-        let data_sql = format!(
-            "SELECT * FROM {} LIMIT {} OFFSET {}",
-            qualified, limit, offset
-        );
+        let base_sql = format!("SELECT * FROM {}", qualified);
+        let data_sql = connection.paginated_select_sql(&base_sql, limit as u64, offset as u64);
 
         tracing::debug!("Browsing table with SQL: {}", data_sql);
 
-        let (mut result, total_rows, is_estimated) = if Self::supports_fast_count(driver) {
+        let (mut result, total_rows, is_estimated) = if connection.supports_fast_exact_count() {
             // SQLite/DuckDB: COUNT(*) is essentially free, run concurrently.
-            let count_sql = format!("SELECT COUNT(*) FROM {}", qualified);
+            let count_base_sql = format!("SELECT COUNT(*) FROM {}", qualified);
+            let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
             tracing::debug!("Counting rows with SQL: {}", count_sql);
 
             let count_conn = connection.clone();
@@ -1017,20 +954,14 @@ impl TableService {
         )
     }
 
-    /// Escape SQL identifier (table/column name) using the appropriate
-    /// quoting style for the target database.
-    fn escape_identifier_for(identifier: &str, driver_name: &str) -> String {
-        match driver_name {
-            "mysql" => format!("`{}`", identifier.replace('`', "``")),
-            "mssql" => format!("[{}]", identifier.replace(']', "]]")),
-            _ => format!("\"{}\"", identifier.replace('"', "\"\"")),
-        }
-    }
-
     /// Build a possibly schema-qualified table reference.
     /// When `schema` is provided (e.g. a MySQL database name), the result is
     /// `schema`.`table`; otherwise just the escaped table name.
-    fn qualified_table_name(table_name: &str, schema: Option<&str>, driver_name: &str) -> String {
+    fn qualified_table_name(
+        connection: &dyn Connection,
+        table_name: &str,
+        schema: Option<&str>,
+    ) -> String {
         let parsed = table_name
             .split_once('.')
             .and_then(|(schema_name, relation_name)| {
@@ -1042,13 +973,6 @@ impl TableService {
             });
 
         let (effective_schema, effective_table_name) = match (schema, parsed) {
-            // For PostgreSQL we prefer the schema embedded in the object name,
-            // because the sidebar now shows cross-schema objects as `schema.table`.
-            (Some(_), Some((embedded_schema, embedded_table)))
-                if driver_name == "postgres" || driver_name == "postgresql" =>
-            {
-                (Some(embedded_schema), embedded_table)
-            }
             // If both schema arg and table name include the same schema, avoid
             // producing `<schema>."schema.table"`.
             (Some(explicit_schema), Some((embedded_schema, embedded_table)))
@@ -1064,20 +988,25 @@ impl TableService {
         };
 
         match effective_schema {
-            Some(schema_name) => format!(
-                "{}.{}",
-                Self::escape_identifier_for(schema_name, driver_name),
-                Self::escape_identifier_for(effective_table_name, driver_name)
+            Some(schema_name) => connection.render_qualified_name(
+                &zqlz_core::SqlObjectName::with_namespace(schema_name, effective_table_name),
             ),
-            None => Self::escape_identifier_for(effective_table_name, driver_name),
+            None => connection.quote_identifier(effective_table_name),
         }
     }
 
-    fn param_placeholder(driver_name: &str, param_index: usize) -> String {
-        if driver_name == "postgresql" {
-            format!("${}", param_index)
-        } else {
-            "?".to_string()
+    #[cfg(test)]
+    fn escape_identifier_for(identifier: &str, driver_name: &str) -> String {
+        match driver_name.to_ascii_lowercase().as_str() {
+            "mysql" | "mariadb" => {
+                format!("`{}`", identifier.replace('`', "``"))
+            }
+            "mssql" | "sqlserver" => {
+                format!("[{}]", identifier.replace(']', "]]"))
+            }
+            _ => {
+                format!("\"{}\"", identifier.replace('"', "\"\""))
+            }
         }
     }
 
@@ -1338,8 +1267,6 @@ impl TableService {
         row_data: RowInsertData,
     ) -> ServiceResult<()> {
         tracing::debug!("Inserting row into table {}", table_name);
-        let driver = connection.driver_name();
-
         if row_data.column_names.is_empty() {
             return Err(ServiceError::TableOperationFailed(
                 "No columns specified for insert".to_string(),
@@ -1422,8 +1349,8 @@ impl TableService {
 
             match value {
                 Some(val) => {
-                    columns.push(Self::escape_identifier_for(column_name, driver));
-                    placeholders.push(Self::param_placeholder(driver, param_index));
+                    columns.push(connection.quote_identifier(column_name));
+                    placeholders.push(connection.format_bind_placeholder(param_index - 1));
                     param_index += 1;
                     let column_type = column_types.get(column_name).map(|s| s.as_str());
                     let parsed_value = match val {
@@ -1436,7 +1363,7 @@ impl TableService {
                     if has_default || is_auto_increment {
                         continue;
                     }
-                    columns.push(Self::escape_identifier_for(column_name, driver));
+                    columns.push(connection.quote_identifier(column_name));
                     placeholders.push("NULL".to_string());
                 }
             }
@@ -1450,7 +1377,7 @@ impl TableService {
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            Self::qualified_table_name(table_name, schema, driver),
+            Self::qualified_table_name(connection.as_ref(), table_name, schema),
             columns.join(", "),
             placeholders.join(", ")
         );
@@ -1499,8 +1426,6 @@ impl TableService {
             return Ok(0);
         }
 
-        let driver = connection.driver_name();
-
         let schema_introspection = connection
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
@@ -1543,10 +1468,11 @@ impl TableService {
             };
 
             // Build DELETE statement
-            let (where_clause, params) = self.build_where_clause(&row_identifier, driver)?;
+            let (where_clause, params) =
+                self.build_where_clause(connection.as_ref(), &row_identifier)?;
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
-                Self::qualified_table_name(table_name, schema, driver),
+                Self::qualified_table_name(connection.as_ref(), table_name, schema),
                 where_clause
             );
 
@@ -1587,8 +1513,8 @@ impl TableService {
     /// Build WHERE clause from row identifier
     fn build_where_clause(
         &self,
+        connection: &dyn Connection,
         row_identifier: &RowIdentifier,
-        driver_name: &str,
     ) -> ServiceResult<(String, Vec<Value>)> {
         match row_identifier {
             RowIdentifier::RowIndex(_) => Err(ServiceError::TableOperationFailed(
@@ -1597,21 +1523,29 @@ impl TableService {
             RowIdentifier::PrimaryKey(pk_values) => {
                 let conditions: Vec<String> = pk_values
                     .iter()
-                    .map(|(col, _)| {
-                        format!("{} = ?", Self::escape_identifier_for(col, driver_name))
+                    .enumerate()
+                    .map(|(idx, (col, _))| {
+                        format!(
+                            "{} = {}",
+                            connection.quote_identifier(col),
+                            connection.format_bind_placeholder(idx)
+                        )
                     })
                     .collect();
                 let params: Vec<Value> = pk_values.iter().map(|(_, v)| v.clone()).collect();
                 Ok((conditions.join(" AND "), params))
             }
             RowIdentifier::FullRow(row_values) => {
+                let mut next_param_index = 0usize;
                 let conditions: Vec<String> = row_values
                     .iter()
                     .map(|(col, val)| {
                         if val == &Value::Null {
-                            format!("{} IS NULL", Self::escape_identifier_for(col, driver_name))
+                            format!("{} IS NULL", connection.quote_identifier(col))
                         } else {
-                            format!("{} = ?", Self::escape_identifier_for(col, driver_name))
+                            let placeholder = connection.format_bind_placeholder(next_param_index);
+                            next_param_index += 1;
+                            format!("{} = {}", connection.quote_identifier(col), placeholder)
                         }
                     })
                     .collect();

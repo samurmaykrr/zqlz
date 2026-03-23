@@ -6,8 +6,6 @@ license.workspace = true
 
 [features]
 default = []
-tree-sitter-languages = []
-inspector = []
 
 [dependencies]
 # GUI Framework
@@ -51,13 +49,6 @@ smol.workspace = true
 tree-sitter.workspace = true
 tree-sitter-json.workspace = true
 tree-sitter-sequel.workspace = true
-tree-sitter-md.workspace = true
-tree-sitter-yaml.workspace = true
-tree-sitter-rust.workspace = true
-tree-sitter-go.workspace = true
-tree-sitter-c.workspace = true
-tree-sitter-cpp.workspace = true
-tree-sitter-toml.workspace = true
 aho-corasick.workspace = true
 
 # Additional dependencies for widgets
@@ -68,9 +59,7 @@ enum-iterator = "2.1.0"
 # HTML parsing for text widgets
 html5ever.workspace = true
 markup5ever_rcdom.workspace = true
-
-# TODO: Markdown parsing - currently disabled, need to replace Zed's markdown crate
-# markdown.workspace = true
+pulldown-cmark.workspace = true
 
 [dev-dependencies]
 indoc.workspace = true

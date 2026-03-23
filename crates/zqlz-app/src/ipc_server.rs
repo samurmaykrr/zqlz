@@ -5,17 +5,24 @@
 
 #[cfg(windows)]
 use std::hash::{Hash, Hasher};
+#[cfg(unix)]
+use std::io::ErrorKind;
+use std::path::Path;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::{Context, Result};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-#[cfg(unix)]
-use tokio::net::UnixListener;
 #[cfg(windows)]
-use tokio::net::windows::named_pipe::{NamedPipeServer, ServerOptions};
+use tokio::net::windows::named_pipe::{
+    ClientOptions, NamedPipeClient, NamedPipeServer, ServerOptions,
+};
+#[cfg(unix)]
+use tokio::net::{UnixListener, UnixStream};
+#[cfg(windows)]
+use tokio::time::{Duration, sleep};
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SavedConnection};
 use zqlz_query::{QueryHistory, QueryService};
@@ -23,7 +30,7 @@ use zqlz_query::{QueryHistory, QueryService};
 use crate::storage::LocalStorage;
 
 // ---------------------------------------------------------------------------
-// Protocol types (must match zqlz-cli/src/ipc.rs exactly)
+// Protocol types (must match zqlz-cli/src/ipc.rs, plus app-only variants)
 // ---------------------------------------------------------------------------
 
 /// A single column in a query result.
@@ -139,6 +146,12 @@ enum Request {
         limit: usize,
         search: Option<String>,
     },
+    QueryHistoryEntry {
+        id: Uuid,
+    },
+    OpenTargets {
+        targets: Vec<String>,
+    },
 }
 
 /// Responses sent back to the CLI.
@@ -152,6 +165,7 @@ enum Response {
     StringList(Vec<String>),
     Columns(Vec<ColumnInfo>),
     History(Vec<HistoryEntry>),
+    HistoryEntry(HistoryEntry),
 }
 
 // ---------------------------------------------------------------------------
@@ -168,6 +182,22 @@ pub struct IpcServerHandle {
     pub query_service: Arc<QueryService>,
     pub query_history: Arc<RwLock<QueryHistory>>,
     pub storage: Arc<LocalStorage>,
+}
+
+pub type OpenTargetsQueue = Arc<RwLock<Vec<String>>>;
+
+static OPEN_TARGETS_QUEUE: OnceLock<OpenTargetsQueue> = OnceLock::new();
+
+fn open_targets_queue() -> OpenTargetsQueue {
+    OPEN_TARGETS_QUEUE
+        .get_or_init(|| Arc::new(RwLock::new(Vec::new())))
+        .clone()
+}
+
+impl IpcServerHandle {
+    pub fn open_targets_queue(&self) -> OpenTargetsQueue {
+        open_targets_queue()
+    }
 }
 
 /// Default IPC endpoint.
@@ -346,6 +376,23 @@ where
     serde_json::from_slice(&payload).context("deserializing IPC request")
 }
 
+async fn write_request<S>(stream: &mut S, request: &Request) -> Result<()>
+where
+    S: AsyncWrite + Unpin,
+{
+    let payload = serde_json::to_vec(request).context("serializing IPC request")?;
+    let len = payload.len() as u32;
+    stream
+        .write_all(&len.to_be_bytes())
+        .await
+        .context("writing IPC request length")?;
+    stream
+        .write_all(&payload)
+        .await
+        .context("writing IPC request payload")?;
+    Ok(())
+}
+
 async fn write_response<S>(stream: &mut S, response: &Response) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -361,6 +408,30 @@ where
         .await
         .context("writing IPC response payload")?;
     Ok(())
+}
+
+async fn read_response<S>(stream: &mut S) -> Result<Response>
+where
+    S: AsyncRead + Unpin,
+{
+    let mut len_buf = [0u8; 4];
+    stream
+        .read_exact(&mut len_buf)
+        .await
+        .context("reading IPC response length")?;
+    let len = u32::from_be_bytes(len_buf) as usize;
+
+    if len > 64 * 1024 * 1024 {
+        anyhow::bail!("IPC response too large ({} bytes)", len);
+    }
+
+    let mut payload = vec![0u8; len];
+    stream
+        .read_exact(&mut payload)
+        .await
+        .context("reading IPC response payload")?;
+
+    serde_json::from_slice(&payload).context("deserializing IPC response")
 }
 
 // ---------------------------------------------------------------------------
@@ -430,11 +501,18 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             };
 
             let connection_id = patched.id;
-            match handle
+            let execution_result = handle
                 .query_service
                 .execute_query(conn.clone(), connection_id, &sql)
-                .await
-            {
+                .await;
+            if let Err(error) = handle.connections.disconnect(connection_id).await {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    error = %error,
+                    "failed to disconnect IPC query connection"
+                );
+            }
+            match execution_result {
                 Ok(execution) => {
                     let statements = execution
                         .statements
@@ -488,10 +566,20 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             };
 
             match handle.connections.connect(&saved).await {
-                Ok(conn_id) => match handle.connections.list_databases(conn_id).await {
-                    Ok(dbs) => Response::StringList(dbs),
-                    Err(e) => Response::Error(e.to_string()),
-                },
+                Ok(conn_id) => {
+                    let databases_result = handle.connections.list_databases(conn_id).await;
+                    if let Err(error) = handle.connections.disconnect(conn_id).await {
+                        tracing::warn!(
+                            connection_id = %conn_id,
+                            error = %error,
+                            "failed to disconnect IPC list-databases connection"
+                        );
+                    }
+                    match databases_result {
+                        Ok(dbs) => Response::StringList(dbs),
+                        Err(e) => Response::Error(e.to_string()),
+                    }
+                }
                 Err(e) => Response::Error(e.to_string()),
             }
         }
@@ -521,13 +609,28 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
                 None => {
+                    if let Err(error) = handle.connections.disconnect(patched.id).await {
+                        tracing::warn!(
+                            connection_id = %patched.id,
+                            error = %error,
+                            "failed to disconnect IPC list-tables connection"
+                        );
+                    }
                     return Response::Error(
                         "driver does not support schema introspection".to_string(),
                     );
                 }
             };
 
-            match schema.list_tables(None).await {
+            let tables_result = schema.list_tables(None).await;
+            if let Err(error) = handle.connections.disconnect(patched.id).await {
+                tracing::warn!(
+                    connection_id = %patched.id,
+                    error = %error,
+                    "failed to disconnect IPC list-tables connection"
+                );
+            }
+            match tables_result {
                 Ok(tables) => Response::StringList(tables.into_iter().map(|t| t.name).collect()),
                 Err(e) => Response::Error(e.to_string()),
             }
@@ -559,13 +662,28 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
                 None => {
+                    if let Err(error) = handle.connections.disconnect(patched.id).await {
+                        tracing::warn!(
+                            connection_id = %patched.id,
+                            error = %error,
+                            "failed to disconnect IPC list-columns connection"
+                        );
+                    }
                     return Response::Error(
                         "driver does not support schema introspection".to_string(),
                     );
                 }
             };
 
-            match schema.get_table(None, &table).await {
+            let table_result = schema.get_table(None, &table).await;
+            if let Err(error) = handle.connections.disconnect(patched.id).await {
+                tracing::warn!(
+                    connection_id = %patched.id,
+                    error = %error,
+                    "failed to disconnect IPC list-columns connection"
+                );
+            }
+            match table_result {
                 Ok(table_info) => {
                     let columns = table_info
                         .columns
@@ -631,7 +749,116 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
 
             Response::History(entries)
         }
+
+        Request::QueryHistoryEntry { id } => {
+            let history = handle.query_history.read();
+            match history.entries().find(|entry| entry.id == id) {
+                Some(entry) => Response::HistoryEntry(history_entry_to_wire(entry)),
+                None => Response::Error(format!("query history entry '{}' not found", id)),
+            }
+        }
+
+        Request::OpenTargets { targets } => {
+            if !targets.is_empty() {
+                let queue = handle.open_targets_queue();
+                queue.write().extend(targets);
+            }
+            Response::Ok
+        }
     }
+}
+
+/// Try to forward launch/open targets to an already running instance.
+///
+/// Returns:
+/// - `Ok(true)` when targets were forwarded and acknowledged.
+/// - `Ok(false)` when no IPC server is available.
+/// - `Err(..)` for framing/protocol or other connection failures.
+pub fn try_forward_open_targets(socket_path: &Path, targets: Vec<String>) -> Result<bool> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .context("building Tokio runtime for IPC handoff")?;
+
+    runtime.block_on(async move { try_forward_open_targets_async(socket_path, targets).await })
+}
+
+async fn try_forward_open_targets_async(socket_path: &Path, targets: Vec<String>) -> Result<bool> {
+    if targets.is_empty() {
+        return Ok(true);
+    }
+
+    let request = Request::OpenTargets { targets };
+
+    #[cfg(unix)]
+    {
+        match UnixStream::connect(socket_path).await {
+            Ok(mut stream) => return send_open_targets_request(&mut stream, request).await,
+            Err(error) if is_unix_server_unavailable(&error) => return Ok(false),
+            Err(error) => {
+                return Err(error).with_context(|| {
+                    format!("connecting to IPC socket at {}", socket_path.display())
+                });
+            }
+        }
+    }
+
+    #[cfg(windows)]
+    {
+        match connect_windows_client(socket_path).await? {
+            Some(mut stream) => return send_open_targets_request(&mut stream, request).await,
+            None => return Ok(false),
+        }
+    }
+
+    #[allow(unreachable_code)]
+    Ok(false)
+}
+
+async fn send_open_targets_request<S>(stream: &mut S, request: Request) -> Result<bool>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    write_request(stream, &request).await?;
+    let response = read_response(stream).await?;
+    match response {
+        Response::Ok => Ok(true),
+        Response::Error(message) => Err(anyhow::anyhow!(
+            "IPC server rejected OpenTargets: {message}"
+        )),
+        _ => Err(anyhow::anyhow!(
+            "IPC server returned unexpected response to OpenTargets"
+        )),
+    }
+}
+
+#[cfg(unix)]
+fn is_unix_server_unavailable(error: &std::io::Error) -> bool {
+    matches!(
+        error.kind(),
+        ErrorKind::NotFound | ErrorKind::ConnectionRefused
+    )
+}
+
+#[cfg(windows)]
+async fn connect_windows_client(socket_path: &Path) -> Result<Option<NamedPipeClient>> {
+    const PIPE_BUSY: i32 = 231;
+    const FILE_NOT_FOUND: i32 = 2;
+
+    for _ in 0..20 {
+        match ClientOptions::new().open(socket_path) {
+            Ok(client) => return Ok(Some(client)),
+            Err(error) if error.raw_os_error() == Some(FILE_NOT_FOUND) => return Ok(None),
+            Err(error) if error.raw_os_error() == Some(PIPE_BUSY) => {
+                sleep(Duration::from_millis(25)).await;
+            }
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    Err(anyhow::anyhow!(
+        "timed out waiting for IPC named pipe availability"
+    ))
 }
 
 // ---------------------------------------------------------------------------

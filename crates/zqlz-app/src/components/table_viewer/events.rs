@@ -340,6 +340,12 @@ pub enum TableViewerEvent {
         referenced_table: String,
         /// The columns in the referenced table to fetch (typically the PK columns)
         referenced_columns: Vec<String>,
+        /// Search query for server-side FK typeahead (None/empty means initial suggestions)
+        query: Option<String>,
+        /// Maximum number of suggestions to return
+        limit: usize,
+        /// Request generation to ignore stale async responses
+        request_id: u64,
     },
 
     /// Navigate to a foreign key referenced table

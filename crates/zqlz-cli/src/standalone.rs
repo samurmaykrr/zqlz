@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
+use zqlz_internal_storage::InternalStorage;
+use zqlz_internal_storage::rusqlite;
 
 use zqlz_core::{Connection, ConnectionConfig};
 use zqlz_drivers::DriverRegistry;
@@ -103,8 +105,9 @@ impl SavedConnection {
 // ---------------------------------------------------------------------------
 
 fn storage_db_path() -> Result<PathBuf> {
-    let config_dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(config_dir.join("zqlz").join("storage.db"))
+    Ok(InternalStorage::for_config_file("storage.db")?
+        .path()
+        .to_path_buf())
 }
 
 // ---------------------------------------------------------------------------

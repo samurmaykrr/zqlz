@@ -8,7 +8,7 @@ use zqlz_analyzer::QueryAnalysis;
 use zqlz_core::QueryResult;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Selectable, Sizable,
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonRounded, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     table::{Column, ColumnSort, Table, TableDelegate, TableState},
@@ -836,6 +836,7 @@ impl ResultsPanel {
                 Button::new("tab-message")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Message")
                     .selected(self.active_tab == ResultTab::Message)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -847,6 +848,7 @@ impl ResultsPanel {
                 Button::new("tab-summary")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Summary")
                     .selected(self.active_tab == ResultTab::Summary)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -874,6 +876,7 @@ impl ResultsPanel {
                                 Button::new(format!("tab-result-{}", idx))
                                     .ghost()
                                     .xsmall()
+                                    .rounded(ButtonRounded::None)
                                     .label(format!("Result {}", idx + 1))
                                     .selected(self.active_tab == ResultTab::Result(result_idx))
                                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -886,6 +889,7 @@ impl ResultsPanel {
                                 Button::new(format!("close-result-{}", idx))
                                     .ghost()
                                     .xsmall()
+                                    .rounded(ButtonRounded::None)
                                     .label("×")
                                     .on_click(cx.listener(move |this, _, window, cx| {
                                         this.close_result_tab(result_idx, cx);
@@ -911,6 +915,7 @@ impl ResultsPanel {
                 Button::new(format!("tab-explain-{}", idx))
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label(format!("Explain {}", idx + 1))
                     .selected(self.active_tab == ResultTab::Explain(explain_idx))
                     .on_click(cx.listener(move |this, _, window, cx| {
@@ -937,6 +942,7 @@ impl ResultsPanel {
                     }
                 })
                 .xsmall()
+                .rounded(ButtonRounded::None)
                 .map(|btn| {
                     if problem_count > 0 {
                         btn.label(format!("Problems ({})", problem_count))
@@ -956,6 +962,7 @@ impl ResultsPanel {
             Button::new("tab-info")
                 .ghost()
                 .xsmall()
+                .rounded(ButtonRounded::None)
                 .label("Info")
                 .selected(self.active_tab == ResultTab::Info)
                 .on_click(cx.listener(|this, _, _, cx| {
@@ -973,6 +980,7 @@ impl ResultsPanel {
                 Button::new("reload-diagnostics")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label(if self.diagnostics_loading {
                         "Reloading..."
                     } else {
@@ -993,6 +1001,7 @@ impl ResultsPanel {
                     Button::new("export-csv")
                         .ghost()
                         .xsmall()
+                        .rounded(ButtonRounded::None)
                         .label("Export CSV")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.export_csv(cx);
@@ -1002,6 +1011,7 @@ impl ResultsPanel {
                     Button::new("export-json")
                         .ghost()
                         .xsmall()
+                        .rounded(ButtonRounded::None)
                         .label("Export JSON")
                         .on_click(cx.listener(|this, _, _, cx| {
                             this.export_json(cx);
@@ -1358,7 +1368,8 @@ impl ResultsPanel {
                                             .font_family(theme.mono_font_family.clone())
                                             .p_2()
                                             .bg(theme.muted)
-                                            .rounded(px(4.0))
+                                            .border_1()
+                                            .border_color(theme.border.opacity(0.6))
                                             .child(
                                                 v_flex()
                                                     .gap_1()
@@ -1546,7 +1557,8 @@ impl ResultsPanel {
                             .font_family(theme.mono_font_family.clone())
                             .p_2()
                             .bg(theme.muted)
-                            .rounded(px(4.0))
+                            .border_1()
+                            .border_color(theme.border.opacity(0.6))
                             .child(exec.sql.clone()),
                     ),
             )
@@ -1625,6 +1637,7 @@ impl ResultsPanel {
                         Button::new("filter-errors")
                             .ghost()
                             .xsmall()
+                            .rounded(ButtonRounded::None)
                             .when(self.problems_show_errors, |b| b.selected(true))
                             .child(
                                 h_flex()
@@ -1657,6 +1670,7 @@ impl ResultsPanel {
                         Button::new("filter-warnings")
                             .ghost()
                             .xsmall()
+                            .rounded(ButtonRounded::None)
                             .when(self.problems_show_warnings, |b| b.selected(true))
                             .child(
                                 h_flex()
@@ -1689,6 +1703,7 @@ impl ResultsPanel {
                         Button::new("filter-info")
                             .ghost()
                             .xsmall()
+                            .rounded(ButtonRounded::None)
                             .when(self.problems_show_info, |b| b.selected(true))
                             .child(
                                 h_flex()
@@ -1717,6 +1732,7 @@ impl ResultsPanel {
                         Button::new("filter-hints")
                             .ghost()
                             .xsmall()
+                            .rounded(ButtonRounded::None)
                             .when(self.problems_show_hints, |b| b.selected(true))
                             .child(
                                 h_flex()
@@ -1838,6 +1854,7 @@ impl ResultsPanel {
                 Button::new("explain-sub-visual")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Visual")
                     .selected(self.explain_sub_tab == ExplainSubTab::Visual)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1849,6 +1866,7 @@ impl ResultsPanel {
                 Button::new("explain-sub-plan")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Plan")
                     .selected(self.explain_sub_tab == ExplainSubTab::Plan)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1863,6 +1881,7 @@ impl ResultsPanel {
                 Button::new("explain-sub-op")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Op")
                     .selected(self.explain_sub_tab == ExplainSubTab::Op)
                     .on_click(cx.listener(|this, _, window, cx| {
@@ -1877,6 +1896,7 @@ impl ResultsPanel {
                 Button::new("explain-sub-statistics")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Statistics")
                     .selected(self.explain_sub_tab == ExplainSubTab::Statistics)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -1888,6 +1908,7 @@ impl ResultsPanel {
                 Button::new("explain-sub-info")
                     .ghost()
                     .xsmall()
+                    .rounded(ButtonRounded::None)
                     .label("Info")
                     .selected(self.explain_sub_tab == ExplainSubTab::Info)
                     .on_click(cx.listener(|this, _, _, cx| {
@@ -2019,7 +2040,6 @@ impl ResultsPanel {
                         div()
                             .px_2()
                             .py(px(2.0))
-                            .rounded(px(4.0))
                             .bg(score_color.opacity(0.2))
                             .border_1()
                             .border_color(score_color)
@@ -2110,7 +2130,6 @@ impl ResultsPanel {
                     .flex_1()
                     .p_3()
                     .bg(theme.muted.opacity(0.2))
-                    .rounded(px(6.0))
                     .border_1()
                     .border_color(theme.border)
                     .overflow_y_scroll()
@@ -2164,7 +2183,6 @@ impl ResultsPanel {
                         div()
                             .px_2()
                             .py(px(2.0))
-                            .rounded(px(4.0))
                             .bg(node_color.opacity(0.2))
                             .border_1()
                             .border_color(node_color)
@@ -2193,8 +2211,9 @@ impl ResultsPanel {
                             div()
                                 .px_2()
                                 .py(px(2.0))
-                                .rounded(px(3.0))
                                 .bg(theme.danger.opacity(cost_intensity as f32 * 0.3))
+                                .border_1()
+                                .border_color(theme.border.opacity(0.6))
                                 .child(
                                     div()
                                         .text_xs()
@@ -2264,8 +2283,9 @@ impl ResultsPanel {
                         div()
                             .px_2()
                             .py(px(2.0))
-                            .rounded(px(12.0))
                             .bg(theme.muted.opacity(0.5))
+                            .border_1()
+                            .border_color(theme.border.opacity(0.6))
                             .child(
                                 div()
                                     .text_xs()
@@ -2292,7 +2312,6 @@ impl ResultsPanel {
                                         .justify_center()
                                         .p_4()
                                         .bg(theme.success.opacity(0.1))
-                                        .rounded(px(6.0))
                                         .border_1()
                                         .border_color(theme.success)
                                         .child(div().text_sm().text_color(theme.success).child(
@@ -2311,7 +2330,6 @@ impl ResultsPanel {
                                     .gap_2()
                                     .p_3()
                                     .bg(severity_color.opacity(0.05))
-                                    .rounded(px(6.0))
                                     .border_1()
                                     .border_color(severity_color.opacity(0.3))
                                     .child(
@@ -2322,8 +2340,9 @@ impl ResultsPanel {
                                                 div()
                                                     .px_2()
                                                     .py(px(2.0))
-                                                    .rounded(px(3.0))
                                                     .bg(severity_color.opacity(0.2))
+                                                    .border_1()
+                                                    .border_color(severity_color.opacity(0.45))
                                                     .child(
                                                         div()
                                                             .text_xs()
@@ -2366,8 +2385,9 @@ impl ResultsPanel {
                                                 div()
                                                     .px_2()
                                                     .py(px(2.0))
-                                                    .rounded(px(3.0))
                                                     .bg(theme.muted.opacity(0.3))
+                                                    .border_1()
+                                                    .border_color(theme.border.opacity(0.6))
                                                     .child(
                                                         div()
                                                             .text_xs()
@@ -2664,7 +2684,8 @@ impl ResultsPanel {
                                 .font_family(theme.mono_font_family.clone())
                                 .p_2()
                                 .bg(theme.muted)
-                                .rounded(px(4.0))
+                                .border_1()
+                                .border_color(theme.border.opacity(0.6))
                                 .child(result.sql.clone()),
                         ),
                 )
@@ -2680,7 +2701,8 @@ impl ResultsPanel {
                                         .font_family(theme.mono_font_family.clone())
                                         .p_2()
                                         .bg(theme.muted)
-                                        .rounded(px(4.0))
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.6))
                                         .child(error.clone()),
                                 ),
                         )

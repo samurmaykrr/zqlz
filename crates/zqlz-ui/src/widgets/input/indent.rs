@@ -1,15 +1,15 @@
 use gpui::{
-    Bounds, Context, EntityInputHandler as _, Hsla, Path, PathBuilder, Pixels, SharedString,
-    TextRun, TextStyle, Window, point, px,
+    point, px, Bounds, Context, EntityInputHandler as _, Hsla, Path, PathBuilder, Pixels,
+    SharedString, TextRun, TextStyle, Window,
 };
 use ropey::RopeSlice;
 
 use crate::widgets::{
-    RopeExt,
     input::{
-        Indent, IndentInline, InputState, LastLayout, Outdent, OutdentInline, element::TextElement,
-        mode::InputMode,
+        element::TextElement, mode::InputMode, Indent, IndentInline, InputState, LastLayout,
+        Outdent, OutdentInline,
     },
+    RopeExt,
 };
 
 #[derive(Debug, Copy, Clone)]
@@ -376,13 +376,18 @@ impl InputState {
             let start_offset = self.selected_range.start;
             let offset = self.start_of_line_of_selection(window, cx);
             let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
-            // FIXME: To improve performance
-            if self
-                .text
-                .slice(offset..self.text.len())
-                .to_string()
-                .starts_with(tab_indent.as_ref())
-            {
+            let is_prefixed_with_indent = if offset + tab_indent.len() <= self.text.len() {
+                let indent_slice = self.text.slice(offset..offset + tab_indent.len());
+                if let Some(indent_text) = indent_slice.as_str() {
+                    indent_text == tab_indent.as_ref()
+                } else {
+                    indent_slice == RopeSlice::from(tab_indent.as_ref())
+                }
+            } else {
+                false
+            };
+
+            if is_prefixed_with_indent {
                 self.replace_text_in_range_silent(
                     Some(self.range_to_utf16(&(offset..offset + tab_indent.len()))),
                     "",

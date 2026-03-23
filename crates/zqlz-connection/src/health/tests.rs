@@ -130,17 +130,7 @@ mod ping_tests {
         assert_eq!(err.to_string(), "Ping timed out");
     }
 
-    #[test]
-    fn test_get_ping_query() {
-        use super::ping::get_ping_query;
-
-        assert_eq!(get_ping_query("mysql"), "SELECT 1");
-        assert_eq!(get_ping_query("postgresql"), "SELECT 1");
-        assert_eq!(get_ping_query("postgres"), "SELECT 1");
-        assert_eq!(get_ping_query("sqlite"), "SELECT 1");
-        assert_eq!(get_ping_query("mssql"), "SELECT 1");
-        assert_eq!(get_ping_query("unknown"), "SELECT 1");
-    }
+    // Ping query selection now lives on the Connection trait (`ping_query_sql`).
 }
 
 mod checker_tests {

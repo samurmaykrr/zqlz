@@ -311,17 +311,15 @@ where
     /// visible range is near the end.
     fn load_more_if_need(
         &mut self,
-        entities_count: usize,
-        visible_end: usize,
+        items_count: usize,
+        visible_items_count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // FIXME: Here need void sections items count.
-
         let threshold = self.delegate.load_more_threshold();
         // Securely handle subtract logic to prevent attempt
         // to subtract with overflow
-        if visible_end >= entities_count.saturating_sub(threshold) {
+        if visible_items_count >= items_count.saturating_sub(threshold) {
             if !self.delegate.has_more(cx) {
                 return;
             }
@@ -492,7 +490,6 @@ where
     fn render_items(
         &mut self,
         items_count: usize,
-        entities_count: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
@@ -517,9 +514,11 @@ where
                             "virtual-list",
                             rows_cache.entries_sizes.clone(),
                             move |list, visible_range: Range<usize>, window, cx| {
+                                let visible_items_count =
+                                    rows_cache.item_count_before_flatten_end(visible_range.end);
                                 list.load_more_if_need(
-                                    entities_count,
-                                    visible_range.end,
+                                    items_count,
+                                    visible_items_count,
                                     window,
                                     cx,
                                 );
@@ -622,7 +621,6 @@ where
             None
         };
         let items_count = self.rows_cache.items_count();
-        let entities_count = self.rows_cache.len();
         let mouse_right_clicked_index = self.mouse_right_clicked_index;
 
         v_flex()
@@ -663,7 +661,7 @@ where
                         if let Some(view) = initial_view {
                             this.child(view)
                         } else {
-                            this.child(self.render_items(items_count, entities_count, window, cx))
+                            this.child(self.render_items(items_count, window, cx))
                         }
                     })
                     // Click out to cancel right clicked row

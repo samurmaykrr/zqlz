@@ -1,0 +1,102 @@
+{
+  "author": "arunk140",
+  "name": "Neon Cyberpunk",
+  "themes": [
+    {
+      "name": "Neon Cyberpunk",
+      "appearance": "dark",
+      "style": {
+        "background": "#0a0a0f",
+        "border": "#00ff9f",
+        "border.focused": "#ff00ff",
+        "border.selected": "#00ffff",
+        "elevated_surface.background": "#1a1a2f",
+        "element.background": "#2a2a4f",
+        "element.hover": "#3a3a6f",
+        "element.active": "#9292C7",
+        "element.selected": "#5a5aaf",
+        "ghost_element.hover": "#2a2a4f80",
+        "ghost_element.active": "#3a3a6f80",
+        "ghost_element.selected": "#4a4a8f80",
+        "text": "#e0e0ff",
+        "text.accent": "#00ffff",
+        "text.muted": "#8080a0",
+        "text.placeholder": "#6060a0",
+        "icon": "#00ff9f",
+        "icon.accent": "#ff00ff",
+        "link_text.hover": "#ff00ff",
+        "error": "#ff0066",
+        "warning": "#ffaa00",
+        "success": "#00ff9f",
+        "info": "#00ffff",
+        "hint": "#ff00ff",
+        "editor.background": "#0f0f1f",
+        "editor.foreground": "#e0e0ff",
+        "editor.line_number": "#4040a0",
+        "editor.active_line_number": "#00ffff",
+        "editor.active_line.background": "#1a1a3f80",
+        "editor.highlighted_line.background": "#2a2a5f80",
+        "editor.wrap_guide": "#2020a0",
+        "editor.active_wrap_guide": "#4040ff",
+        "search.match_background": "#ffaa0040",
+        "syntax": {
+          "comment": {
+            "color": "#606090",
+            "font_style": "italic"
+          },
+          "constant": {
+            "color": "#ff00ff"
+          },
+          "function": {
+            "color": "#00ffff"
+          },
+          "keyword": {
+            "color": "#ff0066",
+            "font_weight": 700
+          },
+          "string": {
+            "color": "#ffaa00"
+          },
+          "type": {
+            "color": "#00ff9f"
+          },
+          "variable": {
+            "color": "#e0e0ff"
+          },
+          "punctuation": {
+            "color": "#8080a0"
+          },
+          "tag": {
+            "color": "#ff0066"
+          },
+          "attribute": {
+            "color": "#00ffff"
+          }
+        },
+        "terminal.background": "#0a0a0f",
+        "terminal.foreground": "#e0e0ff",
+        "terminal.ansi.black": "#0a0a0f",
+        "terminal.ansi.red": "#ff0066",
+        "terminal.ansi.green": "#00ff9f",
+        "terminal.ansi.yellow": "#ffaa00",
+        "terminal.ansi.blue": "#0066ff",
+        "terminal.ansi.magenta": "#ff00ff",
+        "terminal.ansi.cyan": "#00ffff",
+        "terminal.ansi.white": "#e0e0ff",
+        "terminal.ansi.bright_black": "#4040a0",
+        "terminal.ansi.bright_red": "#ff4d99",
+        "terminal.ansi.bright_green": "#66ffbf",
+        "terminal.ansi.bright_yellow": "#ffcc66",
+        "terminal.ansi.bright_blue": "#4d99ff",
+        "terminal.ansi.bright_magenta": "#ff66ff",
+        "terminal.ansi.bright_cyan": "#66ffff",
+        "terminal.ansi.bright_white": "#ffffff",
+        "surface.background": "#2A2A4F",
+        "panel.background": "#2A2A4F",
+        "border.variant": "#0FB483",
+        "panel.focused_border": "#FF00FF",
+        "icon.muted": "#8080A0"
+      }
+    }
+  ]
+}

@@ -1,0 +1,91 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.1.0.json",
+  "name": "Evil Rabbit",
+  "author": "Artem Zakharchenko",
+  "themes": [
+    {
+      "name": "Evil Rabbit (Dark)",
+      "appearance": "dark",
+      "style": {
+        "border": "#2D2D2D",
+        "border.variant": "#ffffff10",
+        "background": "#0f0f0f",
+        "panel.background": "#0f0f0f",
+        "tab_bar.background": "#0f0f0f",
+        "tab.active_background": "#0f0f0f",
+        "tab.inactive_background": "#ffffff08",
+        "title_bar.background": "#0f0f0f",
+        "toolbar.background": "#0f0f0f",
+        "terminal.background": "#0f0f0f",
+        "surface.background": "#0f0f0f",
+        "scrollbar.track.border": "#ffffff20",
+        "status_bar.background": "#0f0f0f",
+        "editor.active_line.background": "#ffffff10",
+        "editor.background": "#0f0f0f",
+        "editor.foreground": "#ffffff",
+        "editor.line_number": "#ffffff32",
+        "editor.gutter.background": "#0f0f0f",
+        "ghost_element.selected": "#ffffff10",
+        "ghost_element.background": "#ffffff08",
+        "ghost_element.hover": "#ffffff10",
+        "syntax": {
+          "constant": {
+            "color": "#a7a7a7",
+            "font_style": null,
+            "font_weight": null
+          },
+          "string": {
+            "color": "#a7a7a7",
+            "font_style": null,
+            "font_weight": null
+          },
+          "comment": {
+            "color": "#666666",
+            "font_style": null,
+            "font_weight": null
+          },
+          "keyword": {
+            "color": "#a7a7a7",
+            "font_style": null,
+            "font_weight": null
+          },
+          "parameter": {
+            "color": "#a7a7a7",
+            "font_style": null,
+            "font_weight": null
+          },
+          "punctuation": {
+            "color": "#a7a7a7",
+            "font_style": null,
+            "font_weight": null
+          },
+          "property": {
+            "color": "#ffffff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "function": {
+            "color": "#ffffff",
+            "font_style": null,
+            "font_weight": null
+          },
+          "number": {
+            "color": "#ffffff",
+            "font_style": null,
+            "font_weight": null
+          }
+        },
+        "element.background": "#191919",
+        "element.active": "#B5B5B5",
+        "icon.accent": "#B5B5B5",
+        "border.focused": "#B5B5B5",
+        "panel.focused_border": "#B5B5B5",
+        "element.hover": "#272727",
+        "element.selected": "#272727",
+        "ghost_element.active": "#272727",
+        "text.muted": "#909090",
+        "icon.muted": "#909090"
+      }
+    }
+  ]
+}

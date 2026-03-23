@@ -4,7 +4,7 @@
 //! Triggers are database objects that automatically execute in response to certain events on a table or view.
 //!
 //! Available menu items:
-//! - **Edit Raw SQL**: Opens the trigger definition in a raw SQL editor
+//! - **Edit DDL**: Opens the trigger's full DDL in the manual editor
 //! - **Open Designer**: Opens the visual trigger designer
 //! - **New Trigger**: Creates a new trigger
 //! - **Delete Trigger**: Removes the trigger
@@ -23,7 +23,7 @@ impl ConnectionSidebar {
     /// Show trigger context menu
     ///
     /// Displays a menu for trigger operations:
-    /// - **Edit Raw SQL**: Emits `DesignTrigger` to open the trigger definition in a query editor
+    /// - **Edit DDL**: Emits `DesignTrigger` to edit the trigger's full DDL
     /// - **Open Designer**: Emits `OpenTriggerDesigner` to open the visual trigger editor
     /// - **New Trigger**: Emits `NewTrigger` to create a new trigger
     /// - **Delete Trigger**: Emits `DeleteTrigger` to drop the trigger
@@ -65,7 +65,7 @@ impl ConnectionSidebar {
                     let menu = menu
                         .action_context(action_context.clone())
                         .max_h(px(400.0))
-                        .item(PopupMenuItem::new("Edit Raw SQL").on_click({
+                        .item(PopupMenuItem::new("Edit DDL").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = trigger_for_menu.clone();
                             let object_schema = object_schema.clone();

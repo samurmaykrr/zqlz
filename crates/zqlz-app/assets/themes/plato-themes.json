@@ -1,0 +1,403 @@
+{
+  "$schema": "https://zed.dev/schema/themes/v0.2.0.json",
+  "name": "Plato Themes",
+  "author": "Denis Mishankov | https://github.com/mishankov",
+  "themes": [
+    {
+      "name": "Plato Green Dark",
+      "appearance": "dark",
+      "style": {
+        "title_bar.background": "#006644",
+        "title_bar.inactive_background": "#006644",
+        "tab_bar.background": "#121212",
+        "tab.active_background": "#121212",
+        "tab.inactive_background": "#242424",
+        "toolbar.background": "#121212",
+        "panel.background": "#121212",
+        "element.active": "#008C5E",
+        "element.selected": "#006644",
+        "element.hover": "#052E20",
+        "status_bar.background": "#006644",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#ccc",
+        "text.accent": "#CC6688",
+        "text.disabled": "#555",
+        "text.muted": "#999",
+        "hint": "#555",
+        "editor.foreground": "#999",
+        "editor.document_highlight.read_background": "#333",
+        "editor.document_highlight.write_background": "#336",
+        "editor.document_highlight.bracket_background": "#222",
+        "editor.active_line.background": "#151515",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#00CC88",
+            "background_color": "#00664466"
+          },
+          "string": {
+            "color": "#E6B3C3",
+            "background_color": "#CC668866"
+          },
+          "number": {
+            "color": "#CC6688"
+          },
+          "function": {
+            "color": "#ccc"
+          },
+          "variable": {
+            "color": "#ccc"
+          }
+        },
+        "players": [
+          {
+            "selection": "#222"
+          }
+        ],
+        "element.background": "#080808",
+        "surface.background": "#080808",
+        "icon.accent": "#008C5E",
+        "border": "#373737",
+        "border.variant": "#272727",
+        "border.focused": "#008C5E",
+        "panel.focused_border": "#008C5E",
+        "ghost_element.hover": "#052E20",
+        "ghost_element.selected": "#006644",
+        "ghost_element.active": "#006644",
+        "icon.muted": "#999999"
+      }
+    },
+    {
+      "name": "Plato Green Light",
+      "appearance": "light",
+      "style": {
+        "title_bar.background": "#00CC88",
+        "title_bar.inactive_background": "#00CC88",
+        "tab_bar.background": "#f5f5f5",
+        "tab.active_background": "#f5f5f5",
+        "tab.inactive_background": "#e0e0e0",
+        "toolbar.background": "#f5f5f5",
+        "panel.background": "#f5f5f5",
+        "element.active": "#007951",
+        "element.selected": "#00CC88",
+        "element.hover": "#8DDFC4",
+        "status_bar.background": "#00CC88",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#333",
+        "text.accent": "#BF406A",
+        "text.disabled": "#666",
+        "text.muted": "#777",
+        "hint": "#ccc",
+        "editor.foreground": "#777",
+        "editor.document_highlight.read_background": "#eee",
+        "editor.document_highlight.write_background": "#ddf",
+        "editor.document_highlight.bracket_background": "#eee",
+        "editor.active_line.background": "#f5f5f5",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#17825E",
+            "background_color": "#00CC8866"
+          },
+          "string": {
+            "color": "#BF406A",
+            "background_color": "#CC668866"
+          },
+          "number": {
+            "color": "#CC6688"
+          },
+          "function": {
+            "color": "#222"
+          },
+          "variable": {
+            "color": "#222"
+          }
+        },
+        "players": [
+          {
+            "selection": "#dadada"
+          }
+        ],
+        "element.background": "#EBEBEB",
+        "surface.background": "#EBEBEB",
+        "icon.accent": "#007951",
+        "border": "#CACACA",
+        "border.variant": "#D6D6D6",
+        "border.focused": "#007951",
+        "panel.focused_border": "#007951",
+        "ghost_element.hover": "#8DDFC4",
+        "ghost_element.selected": "#00CC88",
+        "ghost_element.active": "#00CC88",
+        "icon.muted": "#777777"
+      }
+    },
+    {
+      "name": "Plato Blue Dark",
+      "appearance": "dark",
+      "style": {
+        "title_bar.background": "#004466",
+        "title_bar.inactive_background": "#004466",
+        "tab_bar.background": "#121212",
+        "tab.active_background": "#121212",
+        "tab.inactive_background": "#242424",
+        "toolbar.background": "#121212",
+        "panel.background": "#121212",
+        "element.active": "#0080BF",
+        "element.selected": "#004466",
+        "element.hover": "#05202E",
+        "status_bar.background": "#004466",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#ccc",
+        "text.accent": "#CC8866",
+        "text.disabled": "#555",
+        "text.muted": "#999",
+        "hint": "#555",
+        "editor.foreground": "#999",
+        "editor.document_highlight.read_background": "#333",
+        "editor.document_highlight.write_background": "#336",
+        "editor.document_highlight.bracket_background": "#222",
+        "editor.active_line.background": "#151515",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#0088CC",
+            "background_color": "#00446666"
+          },
+          "string": {
+            "color": "#E6C4B3",
+            "background_color": "#CC886666"
+          },
+          "number": {
+            "color": "#CC8866"
+          },
+          "function": {
+            "color": "#ccc"
+          },
+          "variable": {
+            "color": "#ccc"
+          }
+        },
+        "players": [
+          {
+            "selection": "#222"
+          }
+        ],
+        "element.background": "#080808",
+        "surface.background": "#080808",
+        "icon.accent": "#0080BF",
+        "border": "#373737",
+        "border.variant": "#272727",
+        "border.focused": "#0080BF",
+        "panel.focused_border": "#0080BF",
+        "ghost_element.hover": "#05202E",
+        "ghost_element.selected": "#004466",
+        "ghost_element.active": "#004466",
+        "icon.muted": "#999999"
+      }
+    },
+    {
+      "name": "Plato Blue Light",
+      "appearance": "light",
+      "style": {
+        "title_bar.background": "#33BBFF",
+        "title_bar.inactive_background": "#33BBFF",
+        "tab_bar.background": "#f5f5f5",
+        "tab.active_background": "#f5f5f5",
+        "tab.inactive_background": "#e0e0e0",
+        "toolbar.background": "#f5f5f5",
+        "panel.background": "#f5f5f5",
+        "element.active": "#006FA6",
+        "element.selected": "#33BBFF",
+        "element.hover": "#A2D8F3",
+        "status_bar.background": "#33BBFF",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#333",
+        "text.accent": "#BF6A40",
+        "text.disabled": "#666",
+        "text.muted": "#777",
+        "hint": "#ccc",
+        "editor.foreground": "#777",
+        "editor.document_highlight.read_background": "#eee",
+        "editor.document_highlight.write_background": "#ddf",
+        "editor.document_highlight.bracket_background": "#eee",
+        "editor.active_line.background": "#f5f5f5",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#269DD9",
+            "background_color": "#33BBFF66"
+          },
+          "string": {
+            "color": "#BF6A40",
+            "background_color": "#CC886666"
+          },
+          "number": {
+            "color": "#CC8866"
+          },
+          "function": {
+            "color": "#222"
+          },
+          "variable": {
+            "color": "#222"
+          }
+        },
+        "players": [
+          {
+            "selection": "#dadada"
+          }
+        ],
+        "element.background": "#EBEBEB",
+        "surface.background": "#EBEBEB",
+        "icon.accent": "#006FA6",
+        "border": "#CACACA",
+        "border.variant": "#D6D6D6",
+        "border.focused": "#006FA6",
+        "panel.focused_border": "#006FA6",
+        "ghost_element.hover": "#A2D8F3",
+        "ghost_element.selected": "#33BBFF",
+        "ghost_element.active": "#33BBFF",
+        "icon.muted": "#777777"
+      }
+    },
+    {
+      "name": "Plato Orange Dark",
+      "appearance": "dark",
+      "style": {
+        "title_bar.background": "#CC4B00",
+        "title_bar.inactive_background": "#CC4B00",
+        "tab_bar.background": "#121212",
+        "tab.active_background": "#121212",
+        "tab.inactive_background": "#242424",
+        "toolbar.background": "#121212",
+        "panel.background": "#121212",
+        "element.active": "#D24D00",
+        "element.selected": "#CC4B00",
+        "element.hover": "#572305",
+        "status_bar.background": "#CC4B00",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#ccc",
+        "text.accent": "#66A7CC",
+        "text.disabled": "#555",
+        "text.muted": "#999",
+        "hint": "#555",
+        "editor.foreground": "#999",
+        "editor.document_highlight.read_background": "#333",
+        "editor.document_highlight.write_background": "#336",
+        "editor.document_highlight.bracket_background": "#222",
+        "editor.active_line.background": "#151515",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#FF7E33",
+            "background_color": "#CC4B0066"
+          },
+          "string": {
+            "color": "#B3D3E6",
+            "background_color": "#66A7CC66"
+          },
+          "number": {
+            "color": "#66A7CC"
+          },
+          "function": {
+            "color": "#ccc"
+          },
+          "variable": {
+            "color": "#ccc"
+          }
+        },
+        "players": [
+          {
+            "selection": "#222"
+          }
+        ],
+        "element.background": "#080808",
+        "surface.background": "#080808",
+        "icon.accent": "#D24D00",
+        "border": "#373737",
+        "border.variant": "#272727",
+        "border.focused": "#D24D00",
+        "panel.focused_border": "#D24D00",
+        "ghost_element.hover": "#572305",
+        "ghost_element.selected": "#CC4B00",
+        "ghost_element.active": "#CC4B00",
+        "icon.muted": "#999999"
+      }
+    },
+    {
+      "name": "Plato Orange Light",
+      "appearance": "light",
+      "style": {
+        "title_bar.background": "#FF7E33",
+        "title_bar.inactive_background": "#FF7E33",
+        "tab_bar.background": "#f5f5f5",
+        "tab.active_background": "#f5f5f5",
+        "tab.inactive_background": "#e0e0e0",
+        "toolbar.background": "#f5f5f5",
+        "panel.background": "#f5f5f5",
+        "element.active": "#B94400",
+        "element.selected": "#FF7E33",
+        "element.hover": "#F3C0A2",
+        "status_bar.background": "#FF7E33",
+        "error": "#f00",
+        "error.background": "#ff000033",
+        "error.border": "#300",
+        "text": "#333",
+        "text.accent": "#409FBF",
+        "text.disabled": "#666",
+        "text.muted": "#777",
+        "hint": "#ccc",
+        "editor.foreground": "#777",
+        "editor.document_highlight.read_background": "#eee",
+        "editor.document_highlight.write_background": "#ddf",
+        "editor.document_highlight.bracket_background": "#eee",
+        "editor.active_line.background": "#f5f5f5",
+        "link_text.hover": "#55f",
+        "syntax": {
+          "comment": {
+            "color": "#D96826",
+            "background_color": "#FF7E3366"
+          },
+          "string": {
+            "color": "#409FBF",
+            "background_color": "#66B3CC66"
+          },
+          "number": {
+            "color": "#66B3CC"
+          },
+          "function": {
+            "color": "#222"
+          },
+          "variable": {
+            "color": "#222"
+          }
+        },
+        "players": [
+          {
+            "selection": "#dadada"
+          }
+        ],
+        "element.background": "#EBEBEB",
+        "surface.background": "#EBEBEB",
+        "icon.accent": "#B94400",
+        "border": "#CACACA",
+        "border.variant": "#D6D6D6",
+        "border.focused": "#B94400",
+        "panel.focused_border": "#B94400",
+        "ghost_element.hover": "#F3C0A2",
+        "ghost_element.selected": "#FF7E33",
+        "ghost_element.active": "#FF7E33",
+        "icon.muted": "#777777"
+      }
+    }
+  ]
+}

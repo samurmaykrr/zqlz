@@ -2,6 +2,7 @@
 
 use gpui::*;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
 use zqlz_connection::{SavedConnection, SchemaObjects};
@@ -132,10 +133,11 @@ impl DatabaseType {
 }
 
 impl MainView {
-    fn is_postgres_driver(driver_name: &str) -> bool {
-        driver_name == "postgres"
-            || driver_name == "postgresql"
-            || driver_name == "zqlz-driver-postgres"
+    fn is_postgres_connection(connection: &Arc<dyn zqlz_core::Connection>) -> bool {
+        matches!(
+            connection.dialect_id(),
+            Some("postgres") | Some("postgresql")
+        )
     }
 
     /// Connect to a database
@@ -171,7 +173,6 @@ impl MainView {
         let workspace_state = self.workspace_state.downgrade();
         let driver_type = saved.driver.clone(); // Capture driver type for LSP
         let connection_name = saved.name.clone(); // Capture connection name for UI
-        let sidebar_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
         // Known up-front from the saved config; used to pre-populate the sidebar
         // with the active database node before any async queries complete.
         let active_db_from_config = saved.params.get("database").cloned();
@@ -275,7 +276,7 @@ impl MainView {
                     // Step 3: Load schema in background (slow operation)
                     tracing::info!("Starting background schema load for connection {}", conn_id);
 
-                    if driver_type == "redis" {
+                    if matches!(conn.dialect_id(), Some("redis")) {
                         // For Redis, load databases list
                         if let Some(schema_introspection) = conn.as_schema_introspection() {
                             match schema_introspection.list_databases().await {
@@ -379,7 +380,7 @@ impl MainView {
                                 let resolved_schema_name = schema_service
                                     .get_schema_name_cached(&conn, conn_id)
                                     .await;
-                                let schema_names = if Self::is_postgres_driver(conn.driver_name()) {
+                                let schema_names = if Self::is_postgres_connection(&conn) {
                                     if let Some(introspection) = conn.as_schema_introspection() {
                                         introspection
                                             .list_schemas()
@@ -415,9 +416,10 @@ impl MainView {
 
                                 // Update objects panel with basic table list
                                 let conn_name = connection_name.clone();
-                                let driver_category = driver_name_to_category(&driver_type);
+                                let driver_category = driver_name_to_category(conn.driver_name());
                                 let objects_data = ObjectsPanelData::from_table_infos(tables.clone());
-                                let object_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
+                                let object_capabilities =
+                                    SidebarObjectCapabilities::for_connection(conn.as_ref());
                                 _ = objects_panel.update(cx, |panel, cx| {
                                     panel.load_objects(
                                         conn_id,
@@ -447,6 +449,9 @@ impl MainView {
                                 // Load remaining schema sections sequentially to avoid
                                 // waker contention on the shared Postgres mutex. Each
                                 // result clears its own spinner as soon as it arrives.
+                                let sidebar_capabilities =
+                                    SidebarObjectCapabilities::for_connection(conn.as_ref());
+
                                 if sidebar_capabilities.supports_views {
                                     match schema_service.load_views(conn.clone(), conn_id).await {
                                         Ok(v) => {
@@ -647,15 +652,13 @@ impl MainView {
             return;
         };
 
-        let driver_type = saved.driver.clone();
         let sidebar = self.connection_sidebar.downgrade();
         let objects_panel = self.objects_panel.downgrade();
 
         tracing::info!(
-            "Loading schema for database '{}' on connection {} (driver: {})",
+            "Loading schema for database '{}' on connection {}",
             database_name,
             connection_id,
-            driver_type
         );
 
         // Mark the database as loading in the sidebar
@@ -664,25 +667,10 @@ impl MainView {
         });
 
         cx.spawn_in(window, async move |_this, cx| {
-            let result = match driver_type.as_str() {
-                // MySQL and ClickHouse can query any database's schema via
-                // information_schema on the existing connection
-                "mysql" | "mariadb" | "clickhouse" => {
-                    Self::load_schema_via_existing_connection(
-                        &connection,
-                        &database_name,
-                    )
-                    .await
-                }
-                // PostgreSQL, MSSQL, and others need a temporary connection
-                // to the target database
-                _ => {
-                    Self::load_schema_via_temp_connection(
-                        &saved,
-                        &database_name,
-                    )
-                    .await
-                }
+            let result = if connection.requires_database_scoped_connection() {
+                Self::load_schema_via_temp_connection(&saved, &database_name).await
+            } else {
+                Self::load_schema_via_existing_connection(&connection, &database_name).await
             };
 
             match result {
@@ -708,8 +696,9 @@ impl MainView {
                     if let Some(data) = objects_panel_data {
                         let conn_name = database_name.clone();
                         let db_name = Some(database_name.clone());
-                        let driver_category = driver_name_to_category(&driver_type);
-                        let object_capabilities = SidebarObjectCapabilities::for_driver(&driver_type);
+                        let driver_category = driver_name_to_category(connection.driver_name());
+                        let object_capabilities =
+                            SidebarObjectCapabilities::for_connection(connection.as_ref());
                         _ = objects_panel.update(cx, |panel, cx| {
                             panel.load_objects(
                                 connection_id,
@@ -797,7 +786,7 @@ impl MainView {
             .as_schema_introspection()
             .ok_or_else(|| anyhow::anyhow!("Connection does not support schema introspection"))?;
 
-        let is_postgres = Self::is_postgres_driver(connection.driver_name());
+        let is_postgres = Self::is_postgres_connection(connection);
         let schema_names = introspection
             .list_schemas()
             .await
@@ -883,7 +872,7 @@ impl MainView {
             anyhow::anyhow!("Temp connection does not support schema introspection")
         })?;
 
-        let is_postgres = Self::is_postgres_driver(saved.driver.as_str());
+        let is_postgres = Self::is_postgres_connection(&temp_conn);
         let schema_names: Vec<String> = introspection
             .list_schemas()
             .await
@@ -1239,7 +1228,7 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let sidebar = self.connection_sidebar.downgrade();
-        let sidebar_capabilities = SidebarObjectCapabilities::for_driver(connection.driver_name());
+        let sidebar_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
 
         let is_supported = match section {
             "views" => sidebar_capabilities.supports_views,

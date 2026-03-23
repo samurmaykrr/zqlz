@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
-use zqlz_core::{Connection, Result, ZqlzError};
+use zqlz_core::{Connection, Result};
 
 /// Query execution statistics
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -329,8 +329,8 @@ impl PerformanceCollector {
         let start = std::time::Instant::now();
         let driver_name = conn.driver_name();
 
-        let query = PerformanceQuery::for_driver(driver_name)?;
-        let result = conn.query(query, &[]).await?;
+        let query = conn.performance_metrics_query_sql()?;
+        let result = conn.query(&query, &[]).await?;
 
         let (query_stats, cache_stats) = self.parse_metrics_result(&result, driver_name)?;
 
@@ -421,95 +421,4 @@ impl Default for PerformanceCollector {
 pub trait MetricsConnection: Connection {
     /// Collect performance metrics from the database
     async fn collect_metrics(&self) -> Result<PerformanceMetrics>;
-}
-
-/// Query builder for database-specific performance metrics queries
-pub struct PerformanceQuery;
-
-impl PerformanceQuery {
-    /// Get the SQL query for PostgreSQL performance metrics
-    pub fn postgres() -> &'static str {
-        r#"
-        SELECT
-            (SELECT sum(calls) FROM pg_stat_statements) as total_queries,
-            (SELECT count(*) FROM pg_stat_statements WHERE query ILIKE 'SELECT%') as select_queries,
-            (SELECT count(*) FROM pg_stat_statements WHERE query ILIKE 'INSERT%') as insert_queries,
-            (SELECT count(*) FROM pg_stat_statements WHERE query ILIKE 'UPDATE%') as update_queries,
-            (SELECT count(*) FROM pg_stat_statements WHERE query ILIKE 'DELETE%') as delete_queries,
-            (SELECT avg(mean_exec_time) FROM pg_stat_statements WHERE calls > 0) as avg_time_ms,
-            (SELECT max(max_exec_time) FROM pg_stat_statements) as max_time_ms,
-            (SELECT 
-                CASE WHEN (blks_hit + blks_read) = 0 THEN 0
-                ELSE blks_hit::float / (blks_hit + blks_read)::float END
-             FROM pg_stat_database WHERE datname = current_database()) as cache_hit_ratio,
-            (SELECT setting::bigint * 8192 FROM pg_settings WHERE name = 'shared_buffers') as shared_buffers,
-            (SELECT blks_hit FROM pg_stat_database WHERE datname = current_database()) as blks_hit,
-            (SELECT blks_read FROM pg_stat_database WHERE datname = current_database()) as blks_read
-        "#
-    }
-
-    /// Get the SQL query for MySQL performance metrics
-    pub fn mysql() -> &'static str {
-        r#"
-        SELECT
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Questions') as total_queries,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_select') as select_queries,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_insert') as insert_queries,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_update') as update_queries,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Com_delete') as delete_queries,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_bytes_data') as buffer_pool_pages_data,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_read_requests') as buffer_pool_read_requests,
-            (SELECT VARIABLE_VALUE FROM performance_schema.global_status WHERE VARIABLE_NAME = 'Innodb_buffer_pool_reads') as buffer_pool_reads,
-            (SELECT @@innodb_buffer_pool_size) as buffer_pool_size
-        "#
-    }
-
-    /// Get the SQL query for SQLite (limited metrics)
-    pub fn sqlite() -> &'static str {
-        "SELECT 0 as total_queries"
-    }
-
-    /// Get the SQL query for SQL Server performance metrics
-    pub fn mssql() -> &'static str {
-        r#"
-        SELECT
-            (SELECT cntr_value FROM sys.dm_os_performance_counters 
-             WHERE counter_name = 'Batch Requests/sec' AND instance_name = '') as total_queries,
-            (SELECT cntr_value FROM sys.dm_os_performance_counters 
-             WHERE counter_name = 'Buffer cache hit ratio' AND object_name LIKE '%Buffer Manager%') as cache_hit_ratio,
-            (SELECT cntr_value FROM sys.dm_os_performance_counters 
-             WHERE counter_name = 'Database pages' AND object_name LIKE '%Buffer Manager%') as buffer_pages
-        "#
-    }
-
-    /// Get the SQL query for ClickHouse performance metrics
-    pub fn clickhouse() -> &'static str {
-        r#"
-        SELECT
-            (SELECT sum(value) FROM system.events WHERE event = 'Query') as total_queries,
-            (SELECT sum(value) FROM system.events WHERE event = 'SelectQuery') as select_queries,
-            (SELECT sum(value) FROM system.events WHERE event = 'InsertQuery') as insert_queries
-        "#
-    }
-
-    /// Get the SQL query for DuckDB (limited metrics)
-    pub fn duckdb() -> &'static str {
-        "SELECT 0 as total_queries"
-    }
-
-    /// Get the appropriate query for a driver
-    pub fn for_driver(driver_name: &str) -> Result<&'static str> {
-        match driver_name {
-            "postgresql" | "postgres" => Ok(Self::postgres()),
-            "mysql" => Ok(Self::mysql()),
-            "sqlite" => Ok(Self::sqlite()),
-            "mssql" | "sqlserver" => Ok(Self::mssql()),
-            "clickhouse" => Ok(Self::clickhouse()),
-            "duckdb" => Ok(Self::duckdb()),
-            _ => Err(ZqlzError::NotSupported(format!(
-                "Performance metrics query not available for driver: {}",
-                driver_name
-            ))),
-        }
-    }
 }

@@ -49,6 +49,7 @@ pub fn test_schema() -> DatabaseSchema {
         table_indexes: HashMap::new(),
         database_name: Some("testdb".to_string()),
         schema_name: Some("public".to_string()),
+        schema_names: vec!["public".to_string()],
     }
 }
 
@@ -80,6 +81,7 @@ pub fn test_schema_complex() -> DatabaseSchema {
         table_indexes: HashMap::new(),
         database_name: Some("testdb".to_string()),
         schema_name: Some("public".to_string()),
+        schema_names: vec!["public".to_string()],
     }
 }
 
@@ -97,6 +99,7 @@ pub fn test_schema_minimal() -> DatabaseSchema {
         table_indexes: HashMap::new(),
         database_name: None,
         schema_name: None,
+        schema_names: vec![],
     }
 }
 
@@ -114,5 +117,6 @@ pub fn test_schema_empty() -> DatabaseSchema {
         table_indexes: HashMap::new(),
         database_name: None,
         schema_name: None,
+        schema_names: vec![],
     }
 }

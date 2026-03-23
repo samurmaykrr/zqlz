@@ -4,7 +4,7 @@
 //! Functions are database-stored procedures that return values and can be queried.
 //!
 //! Available menu items:
-//! - **View Definition**: Opens the function's SQL definition in a viewer
+//! - **Edit DDL**: Opens the function's full DDL in the manual editor
 //! - **View History**: Shows the version history of the function
 //! - **Refresh**: Reloads the schema information
 
@@ -20,7 +20,7 @@ impl ConnectionSidebar {
     /// Show function context menu
     ///
     /// Displays a menu for function operations:
-    /// - **View Definition**: Emits `OpenFunction` to display the function's SQL definition
+    /// - **Edit DDL**: Emits `OpenFunction` to edit the function's full DDL
     /// - **View History**: Emits `ViewHistory { object_type: "function" }` to show version history
     /// - **Refresh**: Emits `RefreshSchema` to reload schema information
     ///
@@ -57,7 +57,7 @@ impl ConnectionSidebar {
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
                     menu.action_context(action_context.clone())
                         .max_h(px(400.0))
-                        .item(PopupMenuItem::new("View Definition").on_click({
+                        .item(PopupMenuItem::new("Edit DDL").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = function_for_menu.clone();
                             let object_schema = object_schema.clone();

@@ -4,7 +4,7 @@
 //! Stored procedures are database-stored programs that can perform operations and may or may not return values.
 //!
 //! Available menu items:
-//! - **View Definition**: Opens the procedure's SQL definition in a viewer
+//! - **Edit DDL**: Opens the procedure's full DDL in the manual editor
 //! - **View History**: Shows the version history of the procedure
 //! - **Refresh**: Reloads the schema information
 
@@ -20,7 +20,7 @@ impl ConnectionSidebar {
     /// Show procedure context menu
     ///
     /// Displays a menu for stored procedure operations:
-    /// - **View Definition**: Emits `OpenProcedure` to display the procedure's SQL definition
+    /// - **Edit DDL**: Emits `OpenProcedure` to edit the procedure's full DDL
     /// - **View History**: Emits `ViewHistory { object_type: "procedure" }` to show version history
     /// - **Refresh**: Emits `RefreshSchema` to reload schema information
     ///
@@ -57,7 +57,7 @@ impl ConnectionSidebar {
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
                     menu.action_context(action_context.clone())
                         .max_h(px(400.0))
-                        .item(PopupMenuItem::new("View Definition").on_click({
+                        .item(PopupMenuItem::new("Edit DDL").on_click({
                             let sidebar = sidebar_weak.clone();
                             let name = procedure_for_menu.clone();
                             let object_schema = object_schema.clone();

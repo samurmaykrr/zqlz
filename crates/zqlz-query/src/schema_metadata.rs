@@ -604,6 +604,7 @@ mod tests {
             table_indexes: HashMap::new(),
             database_name: Some("testdb".to_string()),
             schema_name: Some("public".to_string()),
+            schema_names: vec!["public".to_string()],
         };
 
         let metadata = SchemaMetadata::new(schema);
@@ -625,6 +626,7 @@ mod tests {
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
+            schema_names: vec![],
         };
 
         let metadata = SchemaMetadata::new(schema);
@@ -655,6 +657,7 @@ mod tests {
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
+            schema_names: vec![],
         };
 
         let metadata = SchemaMetadata::new(schema);
@@ -684,6 +687,7 @@ mod tests {
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
+            schema_names: vec![],
         };
 
         let metadata = SchemaMetadata::new(schema);

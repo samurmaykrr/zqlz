@@ -465,7 +465,10 @@ impl SyntaxHighlighter {
         highlights
     }
 
-    /// TODO: Use incremental parsing to handle the injection.
+    /// TODO: Cache per-language injection parsers/trees and apply InputEdit updates.
+    ///
+    /// Injections are currently reparsed from scratch for each matched node on every
+    /// highlight pass, which is correct but can be expensive for large embedded blocks.
     fn handle_injection(
         &self,
         injection_language: &str,
@@ -484,8 +487,6 @@ impl SyntaxHighlighter {
         if content.len() == 0 {
             return cache;
         };
-        // FIXME: Avoid to_string.
-        let content = content.to_string();
 
         let Some(config) = LanguageRegistry::singleton().language(injection_language) else {
             return cache;
@@ -495,32 +496,65 @@ impl SyntaxHighlighter {
             return cache;
         }
 
-        let source = content.as_bytes();
-        let Some(tree) = parser.parse(source, None) else {
-            return cache;
-        };
+        if let Some(content_str) = content.as_str() {
+            let source = content_str.as_bytes();
+            let Some(tree) = parser.parse(source, None) else {
+                return cache;
+            };
 
-        let mut query_cursor = QueryCursor::new();
-        let mut matches = query_cursor.matches(query, tree.root_node(), source);
+            let mut query_cursor = QueryCursor::new();
+            let mut matches = query_cursor.matches(query, tree.root_node(), source);
 
-        let mut last_end = start_offset;
-        while let Some(m) = matches.next() {
-            for cap in m.captures {
-                let cap_node = cap.node;
+            let mut last_end = start_offset;
+            while let Some(m) = matches.next() {
+                for cap in m.captures {
+                    let cap_node = cap.node;
 
-                let node_range: Range<usize> =
-                    start_offset + cap_node.start_byte()..start_offset + cap_node.end_byte();
+                    let node_range: Range<usize> =
+                        start_offset + cap_node.start_byte()..start_offset + cap_node.end_byte();
 
-                if node_range.start < last_end {
-                    continue;
+                    if node_range.start < last_end {
+                        continue;
+                    }
+                    if node_range.end > end_offset {
+                        break;
+                    }
+
+                    if let Some(highlight_name) = query.capture_names().get(cap.index as usize) {
+                        last_end = node_range.end;
+                        cache.push((node_range, highlight_name.to_string()));
+                    }
                 }
-                if node_range.end > end_offset {
-                    break;
-                }
+            }
+        } else {
+            let content_text = content.to_string();
+            let source = content_text.as_bytes();
+            let Some(tree) = parser.parse(source, None) else {
+                return cache;
+            };
 
-                if let Some(highlight_name) = query.capture_names().get(cap.index as usize) {
-                    last_end = node_range.end;
-                    cache.push((node_range, highlight_name.to_string()));
+            let mut query_cursor = QueryCursor::new();
+            let mut matches = query_cursor.matches(query, tree.root_node(), source);
+
+            let mut last_end = start_offset;
+            while let Some(m) = matches.next() {
+                for cap in m.captures {
+                    let cap_node = cap.node;
+
+                    let node_range: Range<usize> =
+                        start_offset + cap_node.start_byte()..start_offset + cap_node.end_byte();
+
+                    if node_range.start < last_end {
+                        continue;
+                    }
+                    if node_range.end > end_offset {
+                        break;
+                    }
+
+                    if let Some(highlight_name) = query.capture_names().get(cap.index as usize) {
+                        last_end = node_range.end;
+                        cache.push((node_range, highlight_name.to_string()));
+                    }
                 }
             }
         }

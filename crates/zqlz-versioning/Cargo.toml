@@ -15,11 +15,10 @@ serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
-rusqlite.workspace = true
-dirs.workspace = true
 async-trait.workspace = true
 zqlz-core.workspace = true
 zqlz-schema-tools.workspace = true
+zqlz-internal-storage.workspace = true
 
 # UI dependencies
 gpui.workspace = true

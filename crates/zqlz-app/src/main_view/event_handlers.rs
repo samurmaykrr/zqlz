@@ -916,10 +916,9 @@ impl MainView {
 
         let schema_service = app_state.schema_service.clone();
         let object_capabilities = app_state
-            .saved_connections()
-            .iter()
-            .find(|connection| connection.id == connection_id)
-            .map(|connection| SidebarObjectCapabilities::for_driver(&connection.driver))
+            .connections
+            .get(connection_id)
+            .map(|connection| SidebarObjectCapabilities::for_connection(connection.as_ref()))
             .unwrap_or_default();
         let connection_name = app_state
             .saved_connections()

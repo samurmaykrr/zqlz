@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use thiserror::Error;
 
-use zqlz_core::Connection;
+use zqlz_core::{Connection, SqlObjectName};
 
 use crate::widgets::{
     FieldMapping, ImportAdvancedSettings, ImportMode, ImportWizardState, LogLevel,
@@ -133,19 +133,6 @@ impl CsvImporter {
         }
     }
 
-    /// Quote an identifier using the driver's quoting style.
-    ///
-    /// MySQL uses backticks; all other supported drivers (PostgreSQL, SQLite) use
-    /// double-quotes. This keeps generated DDL valid without pulling in the full
-    /// GenericImporter machinery.
-    fn quote_identifier(&self, name: &str) -> String {
-        if self.connection.driver_name() == "mysql" {
-            format!("`{}`", name.replace('`', "``"))
-        } else {
-            format!("\"{}\"", name.replace('"', "\"\""))
-        }
-    }
-
     /// Returns true if a table with the given name exists on the target connection.
     async fn table_exists(&self, table_name: &str) -> Result<bool, CsvImportError> {
         let schema = self.connection.as_schema_introspection().ok_or_else(|| {
@@ -162,8 +149,11 @@ impl CsvImporter {
     ///
     /// Used for the `Skip` import mode: a non-empty table is left untouched.
     async fn table_has_rows(&self, table_name: &str) -> Result<bool, CsvImportError> {
-        let quoted = self.quote_identifier(table_name);
-        let sql = format!("SELECT 1 FROM {} LIMIT 1", quoted);
+        let table_name = parse_sql_object_name(table_name);
+        let sql = self
+            .connection
+            .table_has_rows_sql(&table_name)
+            .map_err(|e| CsvImportError::QueryError(e.to_string()))?;
         let rows = self
             .connection
             .query(&sql, &[])
@@ -191,7 +181,11 @@ impl CsvImporter {
             ImportMode::Append => Ok(false),
             ImportMode::Copy => {
                 if self.table_exists(table_name).await? {
-                    let sql = format!("DELETE FROM {}", self.quote_identifier(table_name));
+                    let table_name = parse_sql_object_name(table_name);
+                    let sql = self
+                        .connection
+                        .clear_table_sql(&table_name)
+                        .map_err(|e| CsvImportError::QueryError(e.to_string()))?;
                     self.connection
                         .execute(&sql, &[])
                         .await
@@ -548,9 +542,9 @@ impl CsvImporter {
         field_mappings: &[FieldMapping],
         advanced: &ImportAdvancedSettings,
     ) -> Result<bool, String> {
-        // Build column names and values based on mappings
+        // Build column names and bind parameters based on mappings
         let mut column_names = Vec::new();
-        let mut value_strings = Vec::new();
+        let mut params = Vec::new();
 
         for (idx, header) in headers.iter().enumerate() {
             // Check if this field should be skipped
@@ -571,39 +565,36 @@ impl CsvImporter {
                 .map(|m| m.target_field.clone())
                 .unwrap_or_else(|| header.clone());
 
-            column_names.push(format!("\"{}\"", target_column));
+            column_names.push(target_column);
 
             // Get value
             let value = values.get(idx).map(|s| s.as_str()).unwrap_or("");
 
-            // Format value for SQL
-            let sql_value = if value.is_empty() {
+            let param_value = if value.is_empty() {
                 if advanced.empty_string_as_null {
-                    "NULL".to_string()
+                    zqlz_core::Value::Null
                 } else {
-                    "''".to_string()
+                    zqlz_core::Value::String(String::new())
                 }
             } else {
-                // Escape single quotes
-                format!("'{}'", value.replace('\'', "''"))
+                zqlz_core::Value::String(value.to_string())
             };
 
-            value_strings.push(sql_value);
+            params.push(param_value);
         }
 
         if column_names.is_empty() {
             return Ok(false);
         }
 
-        let sql = format!(
-            "INSERT INTO \"{}\" ({}) VALUES ({})",
-            table_name,
-            column_names.join(", "),
-            value_strings.join(", ")
-        );
+        let table_name = parse_sql_object_name(table_name);
+        let sql = self
+            .connection
+            .insert_row_sql(&table_name, &column_names, params.len())
+            .map_err(|e| e.to_string())?;
 
         self.connection
-            .execute(&sql, &[])
+            .execute(&sql, &params)
             .await
             .map_err(|e| e.to_string())?;
 
@@ -625,6 +616,10 @@ pub fn generate_create_table_sql(
     headers: &[String],
     field_mappings: &[FieldMapping],
 ) -> String {
+    fn escape_identifier(name: &str) -> String {
+        format!("\"{}\"", name.replace('"', "\"\""))
+    }
+
     // Determine which columns to include and whether each is a PK column.
     let active_columns: Vec<(&str, bool)> = headers
         .iter()
@@ -655,9 +650,9 @@ pub fn generate_create_table_sql(
             // Use inline PRIMARY KEY only when there is exactly one PK column;
             // otherwise the composite constraint below is used.
             if *is_pk && pk_columns.len() == 1 {
-                format!("    \"{}\" TEXT PRIMARY KEY", col)
+                format!("    {} TEXT PRIMARY KEY", escape_identifier(col))
             } else {
-                format!("    \"{}\" TEXT", col)
+                format!("    {} TEXT", escape_identifier(col))
             }
         })
         .collect();
@@ -665,17 +660,31 @@ pub fn generate_create_table_sql(
     if pk_columns.len() > 1 {
         let pk_list = pk_columns
             .iter()
-            .map(|col| format!("\"{}\"", col))
+            .map(|col| escape_identifier(col))
             .collect::<Vec<_>>()
             .join(", ");
         column_defs.push(format!("    PRIMARY KEY ({})", pk_list));
     }
 
     format!(
-        "CREATE TABLE IF NOT EXISTS \"{}\" (\n{}\n)",
-        table_name,
+        "CREATE TABLE IF NOT EXISTS {} (\n{}\n)",
+        escape_identifier(table_name),
         column_defs.join(",\n")
     )
+}
+
+fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => SqlObjectName::new(object_name),
+        }
+    } else {
+        SqlObjectName::new(object_name)
+    }
 }
 
 /// Parse a file to preview its contents
@@ -915,6 +924,174 @@ mod tests {
             self.driver
         }
 
+        fn rename_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &str,
+        ) -> ZqlzResult<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropTableOptions,
+        ) -> ZqlzResult<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &zqlz_core::SqlObjectName,
+            _options: zqlz_core::DropViewOptions,
+        ) -> ZqlzResult<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &zqlz_core::SqlObjectName,
+            _table_name: Option<&zqlz_core::SqlObjectName>,
+            _options: zqlz_core::DropTriggerOptions,
+        ) -> ZqlzResult<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> ZqlzResult<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &zqlz_core::SqlObjectName,
+            new_table_name: &zqlz_core::SqlObjectName,
+        ) -> ZqlzResult<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> ZqlzResult<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &zqlz_core::SqlObjectName) -> ZqlzResult<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+        ) -> ZqlzResult<String> {
+            let projection = if projected_columns.is_empty() {
+                "*".to_string()
+            } else {
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            let mut sql = format!(
+                "SELECT {} FROM {}",
+                projection,
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            Ok(sql)
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            projected_columns: &[String],
+            where_clause_sql: Option<&str>,
+            order_by_columns: &[String],
+            limit: u64,
+        ) -> ZqlzResult<String> {
+            let mut sql = format!(
+                "SELECT DISTINCT {} FROM {}",
+                projected_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                self.render_qualified_name(table_name)
+            );
+            if let Some(where_clause_sql) = where_clause_sql {
+                sql.push_str(" WHERE ");
+                sql.push_str(where_clause_sql);
+            }
+            if !order_by_columns.is_empty() {
+                sql.push_str(" ORDER BY ");
+                sql.push_str(
+                    &order_by_columns
+                        .iter()
+                        .map(|column| self.quote_identifier(column))
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                );
+            }
+            sql.push_str(&format!(" LIMIT {}", limit));
+            Ok(sql)
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &zqlz_core::SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> ZqlzResult<String> {
+            let placeholders = (0..value_count)
+                .map(|index| self.format_bind_placeholder(index))
+                .collect::<Vec<_>>()
+                .join(", ");
+            let columns = column_names
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                columns,
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> ZqlzResult<String> {
+            Ok("SELECT 0 as total_queries".to_string())
+        }
+
         async fn execute(
             &self,
             sql: &str,
@@ -1105,14 +1282,20 @@ mod tests {
     fn quote_identifier_uses_double_quotes_for_postgres() {
         let conn = Arc::new(TrackingConnection::new("postgresql"));
         let importer = make_importer_with_mode(conn, ImportMode::Append);
-        assert_eq!(importer.quote_identifier("my_table"), "\"my_table\"");
+        assert_eq!(
+            importer.connection.quote_identifier("my_table"),
+            "\"my_table\""
+        );
     }
 
     #[test]
     fn quote_identifier_uses_backticks_for_mysql() {
         let conn = Arc::new(TrackingConnection::new("mysql"));
         let importer = make_importer_with_mode(conn, ImportMode::Append);
-        assert_eq!(importer.quote_identifier("my_table"), "`my_table`");
+        assert_eq!(
+            importer.connection.quote_identifier("my_table"),
+            "`my_table`"
+        );
     }
 
     #[tokio::test]

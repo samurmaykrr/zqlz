@@ -6,9 +6,104 @@ use serde::{Deserialize, Deserializer, Serialize};
 
 use crate::widgets::{
     Colorize, Theme, ThemeColor, ThemeMode,
-    highlighter::{HighlightTheme, HighlightThemeStyle},
+    highlighter::{HighlightTheme, HighlightThemeStyle, StatusColors, SyntaxColors},
     try_parse_color,
 };
+
+#[inline]
+fn fill_option<T: Clone>(value: &mut Option<T>, fallback: &Option<T>) {
+    if value.is_none() {
+        *value = fallback.clone();
+    }
+}
+
+fn merge_status_colors(base: &mut StatusColors, fallback: &StatusColors) {
+    fill_option(&mut base.error, &fallback.error);
+    fill_option(&mut base.error_background, &fallback.error_background);
+    fill_option(&mut base.error_border, &fallback.error_border);
+    fill_option(&mut base.warning, &fallback.warning);
+    fill_option(&mut base.warning_background, &fallback.warning_background);
+    fill_option(&mut base.warning_border, &fallback.warning_border);
+    fill_option(&mut base.info, &fallback.info);
+    fill_option(&mut base.info_background, &fallback.info_background);
+    fill_option(&mut base.info_border, &fallback.info_border);
+    fill_option(&mut base.success, &fallback.success);
+    fill_option(&mut base.success_background, &fallback.success_background);
+    fill_option(&mut base.success_border, &fallback.success_border);
+    fill_option(&mut base.hint, &fallback.hint);
+    fill_option(&mut base.hint_background, &fallback.hint_background);
+    fill_option(&mut base.hint_border, &fallback.hint_border);
+}
+
+fn merge_syntax_colors(base: &mut SyntaxColors, fallback: &SyntaxColors) {
+    fill_option(&mut base.attribute, &fallback.attribute);
+    fill_option(&mut base.boolean, &fallback.boolean);
+    fill_option(&mut base.comment, &fallback.comment);
+    fill_option(&mut base.comment_doc, &fallback.comment_doc);
+    fill_option(&mut base.constant, &fallback.constant);
+    fill_option(&mut base.constructor, &fallback.constructor);
+    fill_option(&mut base.embedded, &fallback.embedded);
+    fill_option(&mut base.emphasis, &fallback.emphasis);
+    fill_option(&mut base.emphasis_strong, &fallback.emphasis_strong);
+    fill_option(&mut base.enum_, &fallback.enum_);
+    fill_option(&mut base.function, &fallback.function);
+    fill_option(&mut base.hint, &fallback.hint);
+    fill_option(&mut base.keyword, &fallback.keyword);
+    fill_option(&mut base.label, &fallback.label);
+    fill_option(&mut base.link_text, &fallback.link_text);
+    fill_option(&mut base.link_uri, &fallback.link_uri);
+    fill_option(&mut base.number, &fallback.number);
+    fill_option(&mut base.operator, &fallback.operator);
+    fill_option(&mut base.predictive, &fallback.predictive);
+    fill_option(&mut base.preproc, &fallback.preproc);
+    fill_option(&mut base.primary, &fallback.primary);
+    fill_option(&mut base.property, &fallback.property);
+    fill_option(&mut base.punctuation, &fallback.punctuation);
+    fill_option(&mut base.punctuation_bracket, &fallback.punctuation_bracket);
+    fill_option(
+        &mut base.punctuation_delimiter,
+        &fallback.punctuation_delimiter,
+    );
+    fill_option(
+        &mut base.punctuation_list_marker,
+        &fallback.punctuation_list_marker,
+    );
+    fill_option(&mut base.punctuation_special, &fallback.punctuation_special);
+    fill_option(&mut base.string, &fallback.string);
+    fill_option(&mut base.string_escape, &fallback.string_escape);
+    fill_option(&mut base.string_regex, &fallback.string_regex);
+    fill_option(&mut base.string_special, &fallback.string_special);
+    fill_option(
+        &mut base.string_special_symbol,
+        &fallback.string_special_symbol,
+    );
+    fill_option(&mut base.tag, &fallback.tag);
+    fill_option(&mut base.tag_doctype, &fallback.tag_doctype);
+    fill_option(&mut base.text_literal, &fallback.text_literal);
+    fill_option(&mut base.title, &fallback.title);
+    fill_option(&mut base.type_, &fallback.type_);
+    fill_option(&mut base.variable, &fallback.variable);
+    fill_option(&mut base.variable_special, &fallback.variable_special);
+    fill_option(&mut base.variant, &fallback.variant);
+}
+
+fn merge_highlight_style(
+    style: Option<HighlightThemeStyle>,
+    fallback: &HighlightThemeStyle,
+) -> HighlightThemeStyle {
+    let mut merged = style.unwrap_or_default();
+    fill_option(&mut merged.editor_background, &fallback.editor_background);
+    fill_option(&mut merged.editor_foreground, &fallback.editor_foreground);
+    fill_option(&mut merged.editor_active_line, &fallback.editor_active_line);
+    fill_option(
+        &mut merged.editor_active_line_number,
+        &fallback.editor_active_line_number,
+    );
+    fill_option(&mut merged.editor_line_number, &fallback.editor_line_number);
+    merge_status_colors(&mut merged.status, &fallback.status);
+    merge_syntax_colors(&mut merged.syntax, &fallback.syntax);
+    merged
+}
 
 /// Represents a theme configuration.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
@@ -168,9 +263,14 @@ fn deserialize_zed_theme(
         .ok_or_else(|| anyhow::anyhow!("Zed theme missing 'style' object"))?;
 
     let colors = ThemeConfigColors {
-        background: style_str(style, "background"),
-        foreground: style_str(style, "text"),
-        muted_foreground: style_str(style, "text.muted"),
+        background: style_str(style, "background")
+            .or_else(|| style_str(style, "editor.background"))
+            .or_else(|| style_str(style, "surface.background"))
+            .or_else(|| style_str(style, "panel.background")),
+        foreground: style_str(style, "text")
+            .or_else(|| style_str(style, "editor.foreground"))
+            .or_else(|| style_str(style, "terminal.foreground")),
+        muted_foreground: style_str(style, "text.muted").or_else(|| style_str(style, "icon.muted")),
         accent_foreground: style_str(style, "text.accent"),
         border: style_str(style, "border"),
         ring: style_str(style, "border.focused")
@@ -857,8 +957,6 @@ impl ThemeColor {
         apply_color!(overlay_backdrop);
         apply_color!(window_border, fallback = self.border);
 
-        // TODO: Apply default fallback colors to highlight.
-
         // Ensure opacity for list_active, table_active
         self.list_active = self.list_active.alpha(self.list_active.a.min(0.2));
         self.table_active = self.table_active.alpha(self.table_active.a.min(0.2));
@@ -869,19 +967,24 @@ impl ThemeColor {
 impl Theme {
     /// Apply the given theme configuration to the current theme.
     pub fn apply_config(&mut self, config: &Rc<ThemeConfig>) {
+        let fallback_highlight_theme = if config.mode.is_dark() {
+            HighlightTheme::default_dark()
+        } else {
+            HighlightTheme::default_light()
+        };
+        let merged_highlight_style =
+            merge_highlight_style(config.highlight.clone(), &fallback_highlight_theme.style);
+
         if config.mode.is_dark() {
             self.dark_theme = config.clone();
         } else {
             self.light_theme = config.clone();
         }
-        if let Some(style) = &config.highlight {
-            let highlight_theme = Arc::new(HighlightTheme {
-                name: config.name.to_string(),
-                appearance: config.mode,
-                style: style.clone(),
-            });
-            self.highlight_theme = highlight_theme.clone();
-        }
+        self.highlight_theme = Arc::new(HighlightTheme {
+            name: config.name.to_string(),
+            appearance: config.mode,
+            style: merged_highlight_style,
+        });
 
         let default_theme = if config.mode.is_dark() {
             Self::from(ThemeColor::dark().as_ref())

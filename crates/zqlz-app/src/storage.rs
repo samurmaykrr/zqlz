@@ -10,13 +10,13 @@
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_command_palette::{CommandUsageEntry, CommandUsagePersistence};
 use zqlz_connection::SavedConnection;
+use zqlz_internal_storage::InternalStorage;
+use zqlz_internal_storage::rusqlite::{self, Connection, params};
 use zqlz_query::{HistoryPersistence, QueryHistoryEntry};
 use zqlz_templates::dbt::{ModelConfig, QuotingConfig};
 use zqlz_templates::project::{Model, ModelDependency, Project, SourceDefinition, SourceTable};
@@ -55,32 +55,19 @@ impl SavedQuery {
 
 /// Local storage manager using SQLite
 pub struct LocalStorage {
-    db_path: PathBuf,
+    storage: InternalStorage,
 }
 
 #[allow(dead_code)]
 impl LocalStorage {
     /// Create a new local storage instance
     pub fn new() -> Result<Self> {
-        let db_path = Self::get_storage_path()?;
-
-        // Ensure parent directory exists
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        let storage = Self { db_path };
+        let storage = Self {
+            storage: InternalStorage::for_config_file("storage.db")?,
+        };
         storage.initialize_schema()?;
 
         Ok(storage)
-    }
-
-    /// Get the storage database path
-    fn get_storage_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-
-        let app_dir = config_dir.join("zqlz");
-        Ok(app_dir.join("storage.db"))
     }
 
     /// Initialize the database schema
@@ -181,8 +168,12 @@ impl LocalStorage {
 
     /// Get a database connection
     fn connect(&self) -> Result<Connection> {
-        Connection::open(&self.db_path)
-            .with_context(|| format!("Failed to open database at {:?}", self.db_path))
+        self.storage.connect().with_context(|| {
+            format!(
+                "Failed to open database at {}",
+                self.storage.path().display()
+            )
+        })
     }
 
     /// Save a connection, storing all params (including password) directly in params_json.

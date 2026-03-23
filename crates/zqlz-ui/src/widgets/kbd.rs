@@ -1,6 +1,6 @@
 use gpui::{
-    Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke, ParentElement as _,
-    RenderOnce, StyleRefinement, Styled, Window, div, relative,
+    div, relative, Action, AsKeystroke, FocusHandle, IntoElement, KeyContext, Keystroke,
+    ParentElement as _, RenderOnce, StyleRefinement, Styled, Window,
 };
 
 use crate::widgets::{ActiveTheme, StyledExt};
@@ -211,14 +211,13 @@ impl RenderOnce for Kbd {
 
         div()
             .border_1()
-            .border_color(cx.theme().border)
+            .border_color(cx.theme().border.opacity(0.25))
             .text_color(cx.theme().muted_foreground)
             .bg(cx.theme().background)
             .py_0p5()
             .px_1()
             .min_w_5()
             .text_center()
-            .rounded_sm()
             .line_height(relative(1.))
             .text_xs()
             .whitespace_normal()

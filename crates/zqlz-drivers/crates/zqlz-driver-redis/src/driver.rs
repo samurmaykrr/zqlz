@@ -10,7 +10,8 @@ use uuid::Uuid;
 use zqlz_core::{
     ColumnMeta, CompletionsConfig, Connection, ConnectionConfig, ConnectionField,
     ConnectionFieldSchema, DatabaseDriver, DiagnosticsConfig, DialectBundle, DialectConfig,
-    DialectInfo, DriverCapabilities, QueryResult, Result, Row, SchemaIntrospection,
+    DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions, DropViewOptions,
+    ExplainParserKind, QueryResult, Result, Row, SchemaIntrospection, SqlObjectName,
     StatementResult, Transaction, Value, ZqlzError,
 };
 
@@ -328,6 +329,131 @@ impl Connection for RedisConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("redis")
+    }
+
+    fn requires_database_scoped_connection(&self) -> bool {
+        true
+    }
+
+    fn normalize_database_scope_name(&self, database_name: &str) -> String {
+        database_name
+            .strip_prefix("db")
+            .unwrap_or(database_name)
+            .to_string()
+    }
+
+    fn explain_parser_kind(&self) -> ExplainParserKind {
+        ExplainParserKind::None
+    }
+
+    fn rename_table_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _new_table_name: &str,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL table rename operations".to_string(),
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _options: DropTableOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL DROP TABLE operations".to_string(),
+        ))
+    }
+
+    fn drop_view_sql(
+        &self,
+        _view_name: &SqlObjectName,
+        _options: DropViewOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL DROP VIEW operations".to_string(),
+        ))
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        _trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        _options: DropTriggerOptions,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL DROP TRIGGER operations".to_string(),
+        ))
+    }
+
+    fn truncate_table_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL TRUNCATE TABLE operations".to_string(),
+        ))
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        _source_table_name: &SqlObjectName,
+        _new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL table duplication operations".to_string(),
+        ))
+    }
+
+    fn clear_table_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL table clear operations".to_string(),
+        ))
+    }
+
+    fn table_has_rows_sql(&self, _table_name: &SqlObjectName) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL table row-existence queries".to_string(),
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _projected_columns: &[String],
+        _where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL row-selection queries".to_string(),
+        ))
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _projected_columns: &[String],
+        _where_clause_sql: Option<&str>,
+        _order_by_columns: &[String],
+        _limit: u64,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL distinct-row queries".to_string(),
+        ))
+    }
+
+    fn insert_row_sql(
+        &self,
+        _table_name: &SqlObjectName,
+        _column_names: &[String],
+        _value_count: usize,
+    ) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL INSERT-row statement generation".to_string(),
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Err(ZqlzError::NotSupported(
+            "Redis does not support SQL performance metrics queries".to_string(),
+        ))
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {

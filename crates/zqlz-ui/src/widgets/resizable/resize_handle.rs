@@ -126,16 +126,13 @@ impl<T: 'static, E: 'static + Render> Element for ResizeHandle<T, E> {
                     )
                 })
                 .map(|this| match self.placement {
-                    Some(DockPlacement::Left) => {
-                        // Special for Left Dock
-                        //  FIXME: Improve this to let the scroll bar have px(HANDLE_PADDING)
-                        this.cursor_col_resize()
-                            .top_0()
-                            .right(px(1.))
-                            .h_full()
-                            .w(HANDLE_SIZE)
-                            .pl(HANDLE_PADDING)
-                    }
+                    Some(DockPlacement::Left) => this
+                        .cursor_col_resize()
+                        .top_0()
+                        .right(neg_offset)
+                        .h_full()
+                        .w(HANDLE_SIZE)
+                        .px(HANDLE_PADDING),
                     _ => this
                         .when(axis.is_horizontal(), |this| {
                             this.cursor_col_resize()

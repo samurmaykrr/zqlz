@@ -6,7 +6,7 @@ use gpui::*;
 
 use super::SectionHeaderProps;
 use crate::widgets::sidebar::ConnectionSidebar;
-use zqlz_ui::widgets::{h_flex, Icon, IconName};
+use zqlz_ui::widgets::{ActiveTheme, Icon, IconName, h_flex};
 
 impl ConnectionSidebar {
     /// Render a collapsible section header with count indicator.
@@ -78,6 +78,11 @@ impl ConnectionSidebar {
         } = props;
         let has_search = !self.search_query.is_empty();
         let indent = px(8.0 + depth as f32 * 12.0);
+        let text_color = if is_expanded {
+            cx.theme().foreground
+        } else {
+            muted_foreground
+        };
 
         let row = h_flex()
             .id(element_id)
@@ -88,7 +93,7 @@ impl ConnectionSidebar {
             .gap_1p5()
             .items_center()
             .text_xs()
-            .text_color(muted_foreground)
+            .text_color(text_color)
             .cursor_pointer()
             .hover(|el| el.bg(list_hover))
             .on_click(cx.listener(on_click))

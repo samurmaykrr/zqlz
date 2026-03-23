@@ -1,9 +1,9 @@
 use gpui::{
-    Action, AnyElement, AnyView, App, AppContext, Context, IntoElement, ParentElement, Render,
-    SharedString, StyleRefinement, Styled, Window, div, prelude::FluentBuilder, px,
+    div, prelude::FluentBuilder, Action, AnyElement, AnyView, App, AppContext, Context,
+    IntoElement, ParentElement, Render, SharedString, StyleRefinement, Styled, Window,
 };
 
-use crate::widgets::{ActiveTheme, StyledExt, h_flex, kbd::Kbd, text::Text};
+use crate::widgets::{h_flex, kbd::Kbd, text::Text, ActiveTheme, StyledExt};
 
 type TooltipElementBuilder = Box<dyn Fn(&mut Window, &mut App) -> AnyElement>;
 
@@ -95,9 +95,8 @@ impl Render for Tooltip {
                 .text_color(cx.theme().popover_foreground)
                 .bg(cx.theme().popover)
                 .border_1()
-                .border_color(cx.theme().border)
+                .border_color(cx.theme().border.opacity(0.25))
                 .shadow_md()
-                .rounded(px(6.))
                 .justify_between()
                 .py_0p5()
                 .px_2()

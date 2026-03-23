@@ -9,4 +9,5 @@
 pub(super) mod conversion;
 pub(super) mod formatting;
 pub(super) mod redis;
+pub(super) mod sql;
 pub(super) mod validation;

@@ -5,7 +5,7 @@ use std::{
 };
 
 use gpui::{
-    AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, Half, HighlightStyle,
+    AnyElement, App, DefiniteLength, Div, ElementId, FontStyle, FontWeight, HighlightStyle,
     InteractiveElement as _, IntoElement, Length, ObjectFit, ParentElement, SharedString,
     SharedUri, StatefulInteractiveElement, Styled, StyledImage as _, Window, div, img,
     prelude::FluentBuilder as _, px, relative, rems,
@@ -563,7 +563,8 @@ impl CodeBlock {
                 div()
                     .id(("codeblock", options.ix))
                     .p_3()
-                    .rounded(cx.theme().radius)
+                    .border_1()
+                    .border_color(cx.theme().border.opacity(0.25))
                     .bg(cx.theme().muted)
                     .font_family(cx.theme().mono_font_family.clone())
                     .text_size(cx.theme().mono_font_size)
@@ -583,7 +584,6 @@ impl CodeBlock {
                                 .top_2()
                                 .right_2()
                                 .bg(cx.theme().muted)
-                                .rounded(cx.theme().radius)
                                 .child(actions(self, window, cx)),
                         )
                     }),
@@ -994,7 +994,6 @@ impl BlockNode {
                                                     .size(rems(0.875))
                                                     .items_center()
                                                     .justify_center()
-                                                    .rounded(cx.theme().radius.half())
                                                     .border_1()
                                                     .border_color(cx.theme().primary)
                                                     .text_color(cx.theme().primary_foreground)
@@ -1071,8 +1070,7 @@ impl BlockNode {
                         .id(("table", options.ix))
                         .w_full()
                         .border_1()
-                        .border_color(cx.theme().border)
-                        .rounded(cx.theme().radius)
+                        .border_color(cx.theme().border.opacity(0.25))
                         .children({
                             let mut rows = Vec::with_capacity(table.children.len());
                             for (row_ix, row) in table.children.iter().enumerate() {
@@ -1083,7 +1081,7 @@ impl BlockNode {
                                         .when(row_ix < table.children.len() - 1, |this| {
                                             this.border_b_1()
                                         })
-                                        .border_color(cx.theme().border)
+                                        .border_color(cx.theme().border.opacity(0.25))
                                         .flex()
                                         .flex_row()
                                         .children({
@@ -1114,7 +1112,9 @@ impl BlockNode {
                                                         .py_1()
                                                         .when(!is_last_col, |this| {
                                                             this.border_r_1()
-                                                                .border_color(cx.theme().border)
+                                                                .border_color(
+                                                                    cx.theme().border.opacity(0.25),
+                                                                )
                                                         })
                                                         .truncate()
                                                         .child(

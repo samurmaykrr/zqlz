@@ -1090,25 +1090,40 @@ impl InputState {
     pub(super) fn previous_start_of_word(&mut self) -> usize {
         let offset = self.selected_range.start;
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
-        // FIXME: Avoid to_string
-        let left_part = self.text.slice(0..offset).to_string();
+        let left_part = self.text.slice(0..offset);
 
-        UnicodeSegmentation::split_word_bound_indices(left_part.as_str())
-            .rfind(|(_, s)| !s.trim_start().is_empty())
-            .map(|(i, _)| i)
-            .unwrap_or(0)
+        if let Some(left_text) = left_part.as_str() {
+            UnicodeSegmentation::split_word_bound_indices(left_text)
+                .rfind(|(_, segment)| !segment.trim_start().is_empty())
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        } else {
+            let left_text = left_part.to_string();
+            UnicodeSegmentation::split_word_bound_indices(left_text.as_str())
+                .rfind(|(_, segment)| !segment.trim_start().is_empty())
+                .map(|(index, _)| index)
+                .unwrap_or(0)
+        }
     }
 
     /// Return the next end offset of the next word.
     pub(super) fn next_end_of_word(&mut self) -> usize {
         let offset = self.cursor();
         let offset = self.offset_from_utf16(self.offset_to_utf16(offset));
-        let right_part = self.text.slice(offset..self.text.len()).to_string();
+        let right_part = self.text.slice(offset..self.text.len());
 
-        UnicodeSegmentation::split_word_bound_indices(right_part.as_str())
-            .find(|(_, s)| !s.trim_start().is_empty())
-            .map(|(i, s)| offset + i + s.len())
-            .unwrap_or(self.text.len())
+        if let Some(right_text) = right_part.as_str() {
+            UnicodeSegmentation::split_word_bound_indices(right_text)
+                .find(|(_, segment)| !segment.trim_start().is_empty())
+                .map(|(index, segment)| offset + index + segment.len())
+                .unwrap_or(self.text.len())
+        } else {
+            let right_text = right_part.to_string();
+            UnicodeSegmentation::split_word_bound_indices(right_text.as_str())
+                .find(|(_, segment)| !segment.trim_start().is_empty())
+                .map(|(index, segment)| offset + index + segment.len())
+                .unwrap_or(self.text.len())
+        }
     }
 
     /// Get start of line byte offset of cursor

@@ -577,6 +577,210 @@ impl TypeMapper for MySqlTypeMapper {
     }
 }
 
+/// Microsoft SQL Server type mapper
+#[derive(Debug, Clone, Default)]
+pub struct MssqlTypeMapper;
+
+impl TypeMapper for MssqlTypeMapper {
+    fn driver_name(&self) -> &str {
+        "mssql"
+    }
+
+    fn to_canonical(&self, native_type: &str) -> CanonicalType {
+        let lower = native_type.to_lowercase();
+        let lower = lower.trim();
+
+        match lower {
+            "bit" => CanonicalType::Boolean,
+            "tinyint" => CanonicalType::TinyInt,
+            "smallint" => CanonicalType::SmallInt,
+            "int" | "integer" => CanonicalType::Integer,
+            "bigint" => CanonicalType::BigInt,
+            "real" => CanonicalType::Float,
+            "float" => CanonicalType::Double,
+            "money" | "smallmoney" => CanonicalType::Money {
+                precision: None,
+                scale: None,
+            },
+            "date" => CanonicalType::Date,
+            "time" => CanonicalType::Time {
+                precision: None,
+                with_timezone: false,
+            },
+            "datetime" | "datetime2" | "smalldatetime" => {
+                CanonicalType::DateTime { precision: None }
+            }
+            "datetimeoffset" => CanonicalType::Timestamp { precision: None },
+            "uniqueidentifier" => CanonicalType::Uuid,
+            "text" | "ntext" => CanonicalType::Text,
+            "xml" => CanonicalType::Xml,
+            "image" => CanonicalType::Blob,
+            "timestamp" | "rowversion" => CanonicalType::Binary {
+                max_length: Some(8),
+            },
+            "geometry" => CanonicalType::Geometry { srid: None },
+            "geography" => CanonicalType::Geography { srid: None },
+            _ => {
+                if lower.starts_with("nvarchar") || lower.starts_with("varchar") {
+                    let max_length = parse_length(lower);
+                    CanonicalType::String {
+                        max_length,
+                        fixed_length: false,
+                    }
+                } else if lower.starts_with("nchar") || lower.starts_with("char") {
+                    let max_length = parse_length(lower);
+                    CanonicalType::String {
+                        max_length,
+                        fixed_length: true,
+                    }
+                } else if lower.starts_with("decimal") || lower.starts_with("numeric") {
+                    let (precision, scale) = parse_precision_scale(lower);
+                    CanonicalType::Decimal { precision, scale }
+                } else if lower.starts_with("varbinary") || lower.starts_with("binary") {
+                    let max_length = parse_length(lower);
+                    CanonicalType::Binary { max_length }
+                } else {
+                    CanonicalType::Custom {
+                        source_type: native_type.to_string(),
+                        format_hint: Some(DataFormatHint::Text),
+                    }
+                }
+            }
+        }
+    }
+
+    fn native_type_for(&self, canonical: &CanonicalType) -> String {
+        match canonical {
+            CanonicalType::Null => "NULL".into(),
+            CanonicalType::Boolean => "BIT".into(),
+            CanonicalType::TinyInt => "TINYINT".into(),
+            CanonicalType::SmallInt | CanonicalType::SmallSerial => "SMALLINT".into(),
+            CanonicalType::Integer | CanonicalType::Serial => "INT".into(),
+            CanonicalType::BigInt | CanonicalType::UnsignedBigInt | CanonicalType::BigSerial => {
+                "BIGINT".into()
+            }
+            CanonicalType::Float => "REAL".into(),
+            CanonicalType::Double => "FLOAT".into(),
+            CanonicalType::Decimal { precision, scale } => match (precision, scale) {
+                (Some(p), Some(s)) => format!("DECIMAL({},{})", p, s),
+                (Some(p), None) => format!("DECIMAL({})", p),
+                _ => "DECIMAL".into(),
+            },
+            CanonicalType::Money { .. } => "MONEY".into(),
+            CanonicalType::String {
+                max_length,
+                fixed_length,
+            } => {
+                let base = if *fixed_length { "NCHAR" } else { "NVARCHAR" };
+                match max_length {
+                    Some(len) if *len <= 4000 => format!("{}({})", base, len),
+                    _ => "NVARCHAR(MAX)".into(),
+                }
+            }
+            CanonicalType::Text | CanonicalType::CaseInsensitiveText => "NVARCHAR(MAX)".into(),
+            CanonicalType::Binary { max_length } => match max_length {
+                Some(len) if *len <= 8000 => format!("VARBINARY({})", len),
+                _ => "VARBINARY(MAX)".into(),
+            },
+            CanonicalType::Blob => "VARBINARY(MAX)".into(),
+            CanonicalType::Date => "DATE".into(),
+            CanonicalType::Time {
+                precision,
+                with_timezone,
+            } => {
+                if *with_timezone {
+                    match precision {
+                        Some(p) => format!("DATETIMEOFFSET({})", p),
+                        None => "DATETIMEOFFSET".into(),
+                    }
+                } else {
+                    match precision {
+                        Some(p) => format!("TIME({})", p),
+                        None => "TIME".into(),
+                    }
+                }
+            }
+            CanonicalType::DateTime { precision } => match precision {
+                Some(p) => format!("DATETIME2({})", p),
+                None => "DATETIME2".into(),
+            },
+            CanonicalType::Timestamp { precision } => match precision {
+                Some(p) => format!("DATETIMEOFFSET({})", p),
+                None => "DATETIMEOFFSET".into(),
+            },
+            CanonicalType::Interval | CanonicalType::Year => "INT".into(),
+            CanonicalType::Uuid => "UNIQUEIDENTIFIER".into(),
+            CanonicalType::Json { .. }
+            | CanonicalType::Array { .. }
+            | CanonicalType::Document
+            | CanonicalType::List
+            | CanonicalType::SortedSet
+            | CanonicalType::KeyValue
+            | CanonicalType::Hash => "NVARCHAR(MAX)".into(),
+            CanonicalType::Xml => "XML".into(),
+            CanonicalType::Enum { .. } | CanonicalType::Set { .. } => "NVARCHAR(255)".into(),
+            CanonicalType::IpAddress | CanonicalType::MacAddress | CanonicalType::Cidr => {
+                "NVARCHAR(45)".into()
+            }
+            CanonicalType::Point => "GEOMETRY".into(),
+            CanonicalType::Line => "GEOMETRY".into(),
+            CanonicalType::Polygon => "GEOMETRY".into(),
+            CanonicalType::Geometry { .. } => "GEOMETRY".into(),
+            CanonicalType::Geography { .. } => "GEOGRAPHY".into(),
+            CanonicalType::TextSearchVector | CanonicalType::TextSearchQuery => {
+                "NVARCHAR(MAX)".into()
+            }
+            CanonicalType::IntegerRange
+            | CanonicalType::TimestampRange
+            | CanonicalType::DateRange => "NVARCHAR(MAX)".into(),
+            CanonicalType::ObjectId => "NVARCHAR(24)".into(),
+            CanonicalType::Bit { .. } | CanonicalType::BitVarying { .. } => "VARBINARY(MAX)".into(),
+            CanonicalType::Custom { source_type, .. } => source_type.clone(),
+        }
+    }
+
+    fn supports_type(&self, canonical: &CanonicalType) -> bool {
+        !matches!(
+            canonical,
+            CanonicalType::Array { .. }
+                | CanonicalType::Set { .. }
+                | CanonicalType::TextSearchVector
+                | CanonicalType::TextSearchQuery
+                | CanonicalType::IntegerRange
+                | CanonicalType::TimestampRange
+                | CanonicalType::DateRange
+                | CanonicalType::Custom { .. }
+        )
+    }
+}
+
+/// Resolve aliases to a canonical mapper id.
+pub fn canonical_mapper_id(driver: &str) -> Option<&'static str> {
+    match driver.to_lowercase().as_str() {
+        "sqlite" | "sqlite3" => Some("sqlite"),
+        "postgres" | "postgresql" | "pg" => Some("postgresql"),
+        "mysql" | "mariadb" => Some("mysql"),
+        "mssql" | "sqlserver" => Some("mssql"),
+        _ => None,
+    }
+}
+
+/// Best-effort mapper choice for unknown SQL-ish drivers in runtime paths.
+pub fn closest_safe_mapper_id(driver: &str) -> &'static str {
+    let lower = driver.to_lowercase();
+    let lower = lower.trim();
+
+    if lower.contains("postgres") || lower.contains("cockroach") || lower.contains("yugabyte") {
+        "postgresql"
+    } else if lower.contains("mysql") || lower.contains("maria") || lower.contains("tidb") {
+        "mysql"
+    } else if lower.contains("sqlserver") || lower.contains("mssql") || lower.contains("azure") {
+        "mssql"
+    } else {
+        "sqlite"
+    }
+}
+
 fn parse_length(type_str: &str) -> Option<u32> {
     if let Some(start) = type_str.find('(')
         && let Some(end) = type_str.find(')')
@@ -622,10 +826,7 @@ fn parse_enum_values(type_str: &str) -> Vec<String> {
 /// `get_type_mapper` (e.g., to surface a user-facing error rather than silently
 /// falling back to the SQLite mapper).
 pub fn is_known_driver(driver: &str) -> bool {
-    matches!(
-        driver.to_lowercase().as_str(),
-        "sqlite" | "sqlite3" | "postgres" | "postgresql" | "pg" | "mysql" | "mariadb"
-    )
+    canonical_mapper_id(driver).is_some()
 }
 
 /// Get a type mapper for a given driver name.
@@ -634,16 +835,17 @@ pub fn is_known_driver(driver: &str) -> bool {
 /// callers always get a usable mapper, but emits a `tracing::warn!` so the
 /// fallback is visible in logs rather than silently producing wrong DDL.
 pub fn get_type_mapper(driver: &str) -> Box<dyn TypeMapper> {
-    match driver.to_lowercase().as_str() {
-        "sqlite" | "sqlite3" => Box::new(SqliteTypeMapper),
-        "postgres" | "postgresql" | "pg" => Box::new(PostgresTypeMapper),
-        "mysql" | "mariadb" => Box::new(MySqlTypeMapper),
+    match canonical_mapper_id(driver) {
+        Some("sqlite") => Box::new(SqliteTypeMapper),
+        Some("postgresql") => Box::new(PostgresTypeMapper),
+        Some("mysql") => Box::new(MySqlTypeMapper),
+        Some("mssql") => Box::new(MssqlTypeMapper),
         unknown => {
             tracing::warn!(
-                driver = unknown,
+                driver = driver,
                 "no TypeMapper registered for driver '{}'; falling back to SQLite \
                  — generated DDL may be semantically incorrect for the target database",
-                unknown
+                unknown.unwrap_or(driver)
             );
             Box::new(SqliteTypeMapper)
         }
@@ -735,6 +937,8 @@ mod tests {
             "pg",
             "mysql",
             "mariadb",
+            "mssql",
+            "sqlserver",
         ] {
             assert!(
                 is_known_driver(name),
@@ -749,11 +953,12 @@ mod tests {
         assert!(is_known_driver("PostgreSQL"));
         assert!(is_known_driver("MYSQL"));
         assert!(is_known_driver("SQLite3"));
+        assert!(is_known_driver("SqlServer"));
     }
 
     #[test]
     fn is_known_driver_returns_false_for_unknown_drivers() {
-        for name in &["mssql", "duckdb", "oracle", "cockroachdb", ""] {
+        for name in &["duckdb", "oracle", "cockroachdb", ""] {
             assert!(
                 !is_known_driver(name),
                 "expected '{}' to be an unknown driver",
@@ -791,10 +996,21 @@ mod tests {
     }
 
     #[test]
+    fn get_type_mapper_returns_mssql_mapper_for_mssql_aliases() {
+        for alias in &["mssql", "sqlserver"] {
+            let mapper = get_type_mapper(alias);
+            assert_eq!(
+                mapper.native_type_for(&CanonicalType::Uuid),
+                "UNIQUEIDENTIFIER",
+                "alias '{}' should return MssqlTypeMapper",
+                alias
+            );
+        }
+    }
+
+    #[test]
     fn get_type_mapper_falls_back_to_sqlite_for_unknown_driver() {
-        // The fallback mapper must still be usable — verify it produces the SQLite
-        // mapping for a well-known type so callers do not panic on the return value.
-        let mapper = get_type_mapper("mssql");
+        let mapper = get_type_mapper("duckdb");
         assert_eq!(
             mapper.native_type_for(&CanonicalType::Uuid),
             "TEXT",

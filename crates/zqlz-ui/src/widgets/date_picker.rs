@@ -27,19 +27,18 @@
 use std::rc::Rc;
 
 use gpui::{
-    AnyElement, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement as _, IntoElement, KeyBinding, ParentElement, Render, RenderOnce,
-    SharedString, StatefulInteractiveElement as _, Styled, Window, div,
-    prelude::FluentBuilder as _, px,
+    div, prelude::FluentBuilder as _, px, AnyElement, App, AppContext, Context, DismissEvent,
+    Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, KeyBinding,
+    ParentElement, Render, RenderOnce, SharedString, StatefulInteractiveElement as _, Styled,
+    Window,
 };
 
 use super::{
-    ActiveTheme, Icon, IconName, Sizable,
     actions::Cancel,
     button::{Button, ButtonVariants},
     h_flex,
     input::{Input, InputEvent, InputState},
-    v_flex,
+    v_flex, ActiveTheme, Icon, IconName, Sizable,
 };
 
 const CONTEXT: &str = "DatePicker";
@@ -307,7 +306,6 @@ impl DatePickerState {
         let accent_color = theme.accent;
         let muted_fg = theme.muted_foreground;
         let muted_bg = theme.muted;
-        let radius = theme.radius;
 
         h_flex()
             .w_full()
@@ -328,7 +326,6 @@ impl DatePickerState {
                         .id("inline-calendar-btn")
                         .cursor_pointer()
                         .p_1()
-                        .rounded(radius)
                         .flex_shrink_0()
                         .when(popover_open, |s| s.bg(accent_color.opacity(0.2)))
                         .hover(|s| s.bg(muted_bg))
@@ -353,8 +350,7 @@ impl DatePickerState {
         let nullable = self.nullable;
 
         let popover_bg = theme.popover;
-        let border_color = theme.border;
-        let radius = theme.radius;
+        let border_color = theme.border.opacity(0.25);
 
         // Pre-render calendar and time spinners
         let calendar_element = if mode != DatePickerMode::Time {
@@ -381,7 +377,6 @@ impl DatePickerState {
             .bg(popover_bg)
             .border_1()
             .border_color(border_color)
-            .rounded(radius)
             .shadow_lg()
             .min_w(px(220.))
             // Calendar (for date/datetime modes)
@@ -553,7 +548,6 @@ impl DatePickerState {
                             .id("prev-month")
                             .cursor_pointer()
                             .p_1()
-                            .rounded(theme.radius)
                             .hover(|s| s.bg(theme.muted))
                             .on_click(cx.listener(|state, _, _, cx| {
                                 state.prev_month(cx);
@@ -571,7 +565,6 @@ impl DatePickerState {
                             .id("next-month")
                             .cursor_pointer()
                             .p_1()
-                            .rounded(theme.radius)
                             .hover(|s| s.bg(theme.muted))
                             .on_click(cx.listener(|state, _, _, cx| {
                                 state.next_month(cx);
@@ -646,7 +639,6 @@ impl DatePickerState {
                                 .justify_center()
                                 .text_xs()
                                 .cursor_pointer()
-                                .rounded(theme.radius)
                                 .when(is_selected, |s| {
                                     s.bg(theme.primary).text_color(theme.primary_foreground)
                                 })
@@ -739,7 +731,6 @@ impl DatePickerState {
                 div()
                     .id(SharedString::from(format!("{}-up", field)))
                     .cursor_pointer()
-                    .rounded(theme.radius)
                     .hover(|s| s.bg(theme.muted))
                     .on_click({
                         cx.listener(move |state, _, window, cx| {
@@ -760,7 +751,6 @@ impl DatePickerState {
                 div()
                     .id(SharedString::from(format!("{}-down", field)))
                     .cursor_pointer()
-                    .rounded(theme.radius)
                     .hover(|s| s.bg(theme.muted))
                     .on_click({
                         cx.listener(move |state, _, window, cx| {
@@ -780,7 +770,6 @@ impl DatePickerState {
                 div()
                     .id("micros-up")
                     .cursor_pointer()
-                    .rounded(theme.radius)
                     .hover(|s| s.bg(theme.muted))
                     .on_click(cx.listener(|state, _, window, cx| {
                         state.adjust_microseconds(1000, window, cx); // Increment by 1ms
@@ -799,7 +788,6 @@ impl DatePickerState {
                 div()
                     .id("micros-down")
                     .cursor_pointer()
-                    .rounded(theme.radius)
                     .hover(|s| s.bg(theme.muted))
                     .on_click(cx.listener(|state, _, window, cx| {
                         state.adjust_microseconds(-1000, window, cx); // Decrement by 1ms
@@ -984,8 +972,7 @@ impl Render for DatePickerState {
 
         // Pre-extract theme values to avoid borrow conflicts
         let popover_bg = theme.popover;
-        let border_color = theme.border;
-        let radius = theme.radius;
+        let border_color = theme.border.opacity(0.25);
         let muted_bg = theme.muted;
         let accent_color = theme.accent;
         let muted_fg = theme.muted_foreground;
@@ -1012,7 +999,6 @@ impl Render for DatePickerState {
             .bg(popover_bg)
             .border_1()
             .border_color(border_color)
-            .rounded(radius)
             .shadow_lg()
             .min_w(px(280.))
             // Text input at top (always visible)
@@ -1028,7 +1014,6 @@ impl Render for DatePickerState {
                                 .id("toggle-calendar")
                                 .cursor_pointer()
                                 .p_1()
-                                .rounded(radius)
                                 .when(popover_open, |s| s.bg(accent_color.opacity(0.2)))
                                 .hover(|s| s.bg(muted_bg))
                                 .on_click(cx.listener(|state, _, _, cx| {
@@ -1133,7 +1118,6 @@ impl RenderOnce for DatePickerInline {
         let accent_color = theme.accent;
         let muted_fg = theme.muted_foreground;
         let muted_bg = theme.muted;
-        let radius = theme.radius;
 
         let state_entity = self.state.clone();
 
@@ -1156,7 +1140,6 @@ impl RenderOnce for DatePickerInline {
                         .id("inline-calendar-btn")
                         .cursor_pointer()
                         .p_1()
-                        .rounded(radius)
                         .flex_shrink_0()
                         .when(popover_open, |s| s.bg(accent_color.opacity(0.2)))
                         .hover(|s| s.bg(muted_bg))
@@ -1220,8 +1203,7 @@ impl RenderOnce for DatePickerPopover {
         let text_value = state.text_value.clone();
 
         let popover_bg = theme.popover;
-        let border_color = theme.border;
-        let radius = theme.radius;
+        let border_color = theme.border.opacity(0.25);
 
         let state_entity = self.state.clone();
         let state_entity2 = self.state.clone();
@@ -1246,7 +1228,6 @@ impl RenderOnce for DatePickerPopover {
             .bg(popover_bg)
             .border_1()
             .border_color(border_color)
-            .rounded(radius)
             .shadow_lg()
             .min_w(px(220.))
             // Calendar (for date/datetime modes)
@@ -1360,7 +1341,6 @@ fn render_calendar_static(
                         .id("prev-month")
                         .cursor_pointer()
                         .p_1()
-                        .rounded(theme.radius)
                         .hover(|s| s.bg(theme.muted))
                         .on_click(move |_, _window, cx| {
                             state_prev.update(cx, |state, cx| {
@@ -1380,7 +1360,6 @@ fn render_calendar_static(
                         .id("next-month")
                         .cursor_pointer()
                         .p_1()
-                        .rounded(theme.radius)
                         .hover(|s| s.bg(theme.muted))
                         .on_click(move |_, _window, cx| {
                             state_next.update(cx, |state, cx| {
@@ -1446,7 +1425,6 @@ fn render_calendar_grid_static(
     let primary = theme.primary;
     let primary_fg = theme.primary_foreground;
     let muted = theme.muted;
-    let radius = theme.radius;
 
     v_flex()
         .gap_px()
@@ -1472,7 +1450,6 @@ fn render_calendar_grid_static(
                                 .justify_center()
                                 .text_xs()
                                 .cursor_pointer()
-                                .rounded(radius)
                                 .when(is_selected, |s| s.bg(primary).text_color(primary_fg))
                                 .when(!is_selected && is_today, |s| {
                                     s.border_1().border_color(primary)
@@ -1582,7 +1559,6 @@ fn render_spinner_static(
             div()
                 .id(SharedString::from(format!("{}-up", field)))
                 .cursor_pointer()
-                .rounded(theme.radius)
                 .hover(|s| s.bg(theme.muted))
                 .on_click(move |_, window, cx| {
                     state_up.update(cx, |state, cx| {
@@ -1603,7 +1579,6 @@ fn render_spinner_static(
             div()
                 .id(SharedString::from(format!("{}-down", field)))
                 .cursor_pointer()
-                .rounded(theme.radius)
                 .hover(|s| s.bg(theme.muted))
                 .on_click(move |_, window, cx| {
                     state_down.update(cx, |state, cx| {
@@ -1630,7 +1605,6 @@ fn render_microseconds_spinner_static(
             div()
                 .id("micros-up")
                 .cursor_pointer()
-                .rounded(theme.radius)
                 .hover(|s| s.bg(theme.muted))
                 .on_click(move |_, window, cx| {
                     state_up.update(cx, |state, cx| {
@@ -1651,7 +1625,6 @@ fn render_microseconds_spinner_static(
             div()
                 .id("micros-down")
                 .cursor_pointer()
-                .rounded(theme.radius)
                 .hover(|s| s.bg(theme.muted))
                 .on_click(move |_, window, cx| {
                     state_down.update(cx, |state, cx| {

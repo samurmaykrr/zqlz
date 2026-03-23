@@ -311,8 +311,9 @@ impl Render for QueryHistoryPanel {
                                         .min_w(px(88.))
                                         .px_2()
                                         .py_1()
-                                        .rounded_md()
                                         .bg(theme.secondary)
+                                        .border_1()
+                                        .border_color(theme.border.opacity(0.6))
                                         .text_xs()
                                         .text_color(theme.secondary_foreground)
                                         .child(format!(

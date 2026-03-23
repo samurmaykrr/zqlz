@@ -15,7 +15,7 @@ This is an early-stage project. Only SQLite is fully functional. PostgreSQL and 
 ### Prerequisites
 
 - Rust 1.75 or later
-- macOS 12.0+ (currently only macOS is supported but you can build for other platforms with some adjustments)
+- macOS 12.0+, Windows, or Linux (macOS remains the primary and most routinely validated platform)
 
 ### Development
 

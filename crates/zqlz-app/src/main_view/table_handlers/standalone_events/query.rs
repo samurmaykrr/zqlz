@@ -9,6 +9,7 @@ use zqlz_ui::widgets::{WindowExt, notification::Notification};
 use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
@@ -73,34 +74,22 @@ pub(in crate::main_view) fn handle_apply_filters_event(
             .map(|col| col.name.clone())
             .collect();
 
-        if !searchable_columns.is_empty() {
-            let escaped_search = request
-                .search_text
-                .replace("'", "''")
-                .replace("%", "\\%")
-                .replace("_", "\\_");
-            let column_conditions: Vec<String> = searchable_columns
-                .iter()
-                .map(|col_name| {
-                    let escaped_col = format!("\"{}\"", col_name.replace("\"", "\"\""));
-                    format!(
-                        "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                        escaped_col, escaped_search
-                    )
-                })
-                .collect();
-            where_clauses.push(format!("({})", column_conditions.join(" OR ")));
+        if let Some(search_clause) = build_search_clause_for_columns(
+            &connection,
+            &searchable_columns,
+            &request.search_text,
+            false,
+        ) {
+            where_clauses.push(search_clause);
         }
     }
 
-    let driver_name = connection.driver_name().to_string();
-
-    // Convert SortCriterion to SQL ORDER BY fragments using driver-specific
-    // identifier escaping so MySQL/MariaDB sorts work reliably.
+    // Convert SortCriterion to SQL ORDER BY fragments using driver-owned
+    // identifier escaping from the active connection.
     let order_by_clauses: Vec<String> = request
         .sorts
         .iter()
-        .map(|sort| sort.to_sql_for_driver(&driver_name))
+        .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
         .collect();
 
     let visible_columns = request.visible_columns;
@@ -108,7 +97,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
     // Capture the is_view state and database_name before loading
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
-    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     let filter_count = where_clauses.len();
     let sort_count = order_by_clauses.len();

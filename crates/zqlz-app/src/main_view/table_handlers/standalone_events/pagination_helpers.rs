@@ -11,6 +11,7 @@ use crate::app::AppState;
 use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| {
@@ -84,13 +85,12 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let driver_name = connection.driver_name().to_string();
-    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Determine if we'll need a background count task after data is loaded.
     // This is needed when: no cached total provided, and the driver is slow-count.
-    let needs_background_count = request.cached_total.is_none()
-        && !zqlz_services::TableService::supports_fast_count(&driver_name);
+    let needs_background_count =
+        request.cached_total.is_none() && !connection.supports_fast_exact_count();
 
     // Extract the viewer's current filter/sort/search state so pagination preserves it
     let (where_clauses, order_by_clauses, visible_columns) =
@@ -105,33 +105,22 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
                 order_by_clauses = sorts
                     .iter()
-                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
                     .collect();
             }
 
             // Add search text as WHERE clause (same logic as handle_apply_filters_event)
-            if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> =
-                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
-
-                if !all_column_names.is_empty() {
-                    let escaped_search = viewer
-                        .search_text
-                        .replace("'", "''")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_");
-                    let column_conditions: Vec<String> = all_column_names
-                        .iter()
-                        .map(|col_name| {
-                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                            format!(
-                                "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                                escaped_col, escaped_search
-                            )
-                        })
-                        .collect();
-                    where_clauses.push(format!("({})", column_conditions.join(" OR ")));
-                }
+            if let Some(search_clause) = build_search_clause_for_columns(
+                &connection,
+                &viewer
+                    .column_meta
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>(),
+                &viewer.search_text,
+                false,
+            ) {
+                where_clauses.push(search_clause);
             }
 
             let visible_columns: Vec<String> = viewer
@@ -319,8 +308,7 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     let table_service = app_state.table_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
-    let driver_name = connection.driver_name().to_string();
-    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     let (where_clauses, order_by_clauses, visible_columns) =
         viewer_entity.read_with(cx, |viewer, cx| {
@@ -334,32 +322,21 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
                 where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
                 order_by_clauses = sorts
                     .iter()
-                    .map(|sort| sort.to_sql_for_driver(&driver_name))
+                    .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
                     .collect();
             }
 
-            if !viewer.search_text.is_empty() {
-                let all_column_names: Vec<String> =
-                    viewer.column_meta.iter().map(|c| c.name.clone()).collect();
-
-                if !all_column_names.is_empty() {
-                    let escaped_search = viewer
-                        .search_text
-                        .replace("'", "''")
-                        .replace('%', "\\%")
-                        .replace('_', "\\_");
-                    let column_conditions: Vec<String> = all_column_names
-                        .iter()
-                        .map(|col_name| {
-                            let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                            format!(
-                                "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                                escaped_col, escaped_search
-                            )
-                        })
-                        .collect();
-                    where_clauses.push(format!("({})", column_conditions.join(" OR ")));
-                }
+            if let Some(search_clause) = build_search_clause_for_columns(
+                &connection,
+                &viewer
+                    .column_meta
+                    .iter()
+                    .map(|c| c.name.clone())
+                    .collect::<Vec<_>>(),
+                &viewer.search_text,
+                false,
+            ) {
+                where_clauses.push(search_clause);
             }
 
             let visible_columns: Vec<String> = viewer

@@ -244,9 +244,11 @@ fn test_large_positional_number() {
 // Binder Tests
 // =============================================================================
 
-use super::binder::{BindError, bind_named, bind_positional};
+use super::binder::{
+    BindError, bind_named, bind_named_with_policy, bind_positional, bind_positional_with_policy,
+};
 use std::collections::HashMap;
-use zqlz_core::Value;
+use zqlz_core::{BindPlaceholderPolicy, Value};
 
 #[test]
 fn test_bind_named_parameters_colon() {
@@ -397,6 +399,56 @@ fn test_bind_positional_question_mark() {
     assert_eq!(result.len(), 2);
     assert_eq!(result[0], Value::Int64(42));
     assert_eq!(result[1], Value::String("Bob".to_string()));
+}
+
+#[test]
+fn test_bind_named_with_question_mark_policy() {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::Int64(42));
+    params.insert("name".to_string(), Value::String("Alice".to_string()));
+
+    let result = bind_named_with_policy(
+        "SELECT * FROM users WHERE id = :id AND name = :name",
+        &params,
+        BindPlaceholderPolicy::QuestionMark,
+    )
+    .unwrap();
+
+    assert_eq!(result.sql, "SELECT * FROM users WHERE id = ? AND name = ?");
+    assert_eq!(result.values.len(), 2);
+}
+
+#[test]
+fn test_bind_positional_with_policy_question_to_dollar() {
+    let values = vec![Value::Int64(42), Value::String("Bob".to_string())];
+
+    let result = bind_positional_with_policy(
+        "SELECT * FROM users WHERE id = ? AND name = ?",
+        &values,
+        BindPlaceholderPolicy::DollarNumbered,
+    )
+    .unwrap();
+
+    assert_eq!(
+        result.sql,
+        "SELECT * FROM users WHERE id = $1 AND name = $2"
+    );
+    assert_eq!(result.values.len(), 2);
+}
+
+#[test]
+fn test_bind_positional_with_policy_dollar_to_question() {
+    let values = vec![Value::Int64(42), Value::String("Bob".to_string())];
+
+    let result = bind_positional_with_policy(
+        "SELECT * FROM users WHERE id = $1 AND name = $2",
+        &values,
+        BindPlaceholderPolicy::QuestionMark,
+    )
+    .unwrap();
+
+    assert_eq!(result.sql, "SELECT * FROM users WHERE id = ? AND name = ?");
+    assert_eq!(result.values.len(), 2);
 }
 
 #[test]

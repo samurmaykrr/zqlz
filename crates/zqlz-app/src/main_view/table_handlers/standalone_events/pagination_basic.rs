@@ -13,6 +13,7 @@ use zqlz_core::DriverCategory;
 use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
 
 use super::pagination_helpers::{
     PaginationReloadRequest, ReversedPaginationRequest, reload_table_reversed,
@@ -186,8 +187,7 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
 
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
-    let driver_name = connection.driver_name().to_string();
-    let schema_qualifier = resolve_schema_qualifier(driver_name.as_str(), &database_name);
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     // Extract everything we need from the viewer in a single read so we
     // don't need to borrow it again before spawning the async task.
@@ -202,32 +202,21 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
             where_clauses = filters.iter().filter_map(|f| f.to_sql()).collect();
             order_by_clauses = sorts
                 .iter()
-                .map(|sort| sort.to_sql_for_driver(&driver_name))
+                .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
                 .collect();
         }
 
-        if !viewer.search_text.is_empty() {
-            let all_column_names: Vec<String> =
-                viewer.column_meta.iter().map(|c| c.name.clone()).collect();
-
-            if !all_column_names.is_empty() {
-                let escaped_search = viewer
-                    .search_text
-                    .replace("'", "''")
-                    .replace('%', "\\%")
-                    .replace('_', "\\_");
-                let column_conditions: Vec<String> = all_column_names
-                    .iter()
-                    .map(|col_name| {
-                        let escaped_col = format!("\"{}\"", col_name.replace('"', "\"\""));
-                        format!(
-                            "CAST({} AS TEXT) LIKE '%{}%' ESCAPE '\\'",
-                            escaped_col, escaped_search
-                        )
-                    })
-                    .collect();
-                where_clauses.push(format!("({})", column_conditions.join(" OR ")));
-            }
+        if let Some(search_clause) = build_search_clause_for_columns(
+            &connection,
+            &viewer
+                .column_meta
+                .iter()
+                .map(|c| c.name.clone())
+                .collect::<Vec<_>>(),
+            &viewer.search_text,
+            false,
+        ) {
+            where_clauses.push(search_clause);
         }
 
         let visible_columns: Vec<String> = viewer

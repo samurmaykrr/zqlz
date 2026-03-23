@@ -56,6 +56,7 @@ impl TableViewerDelegate {
             fk_values_cache: HashMap::new(),
             fk_select_state: None,
             fk_loading: false,
+            fk_request_id: 0,
             last_filter_conditions: Vec::new(),
             last_filter_search_text: String::new(),
             primary_key_columns: Vec::new(),

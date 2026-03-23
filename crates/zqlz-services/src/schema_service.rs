@@ -18,6 +18,10 @@ use zqlz_schema::SchemaCache;
 use crate::error::{ServiceError, ServiceResult};
 use crate::view_models::{ColumnInfo, DatabaseSchema, TableDetails};
 
+type ScopedObjectCacheKey = (Uuid, String, Option<String>);
+type TableDetailsCacheMap = HashMap<ScopedObjectCacheKey, TableDetails>;
+type DdlCacheMap = HashMap<ScopedObjectCacheKey, String>;
+
 /// Batch size for prefetching table details. Small enough to avoid saturating
 /// remote connection poolers (e.g. Neon PgBouncer) while still providing
 /// some parallelism.
@@ -43,20 +47,14 @@ pub struct SchemaService {
     /// by `self.cache.is_valid(connection_id)` — entries are considered stale
     /// whenever the main schema cache expires or is invalidated, so they share
     /// one consistent TTL domain rather than having independent timestamps.
-    table_details_cache: RwLock<HashMap<(Uuid, String, Option<String>), TableDetails>>,
+    table_details_cache: RwLock<TableDetailsCacheMap>,
     /// Per-connection, per-object, per-schema cache for generated DDL strings.
     /// Shares the same TTL domain as
     /// `table_details_cache` — cleared together on invalidation.
-    ddl_cache: RwLock<HashMap<(Uuid, String, Option<String>), String>>,
+    ddl_cache: RwLock<DdlCacheMap>,
 }
 
 impl SchemaService {
-    fn is_postgres_driver(driver_name: &str) -> bool {
-        driver_name == "postgres"
-            || driver_name == "postgresql"
-            || driver_name == "zqlz-driver-postgres"
-    }
-
     fn normalize_scope(scope: Option<&str>) -> Option<String> {
         scope
             .map(str::trim)
@@ -169,77 +167,35 @@ impl SchemaService {
 
         tracing::debug!("Schema cache miss, loading from database");
 
-        // Resolve current database and schema names BEFORE introspection so we can
-        // pass them as the schema parameter. This is critical for MySQL: when no
-        // default database is selected, DATABASE() returns NULL, causing all
-        // information_schema queries with `TABLE_SCHEMA = DATABASE()` to return
-        // zero rows. By resolving the name first we can pass it explicitly.
-        let (db_query, schema_query) = match connection.driver_name() {
-            "mysql" | "mariadb" => ("SELECT DATABASE()", "SELECT DATABASE()"),
-            "mssql" => ("SELECT DB_NAME()", "SELECT SCHEMA_NAME()"),
-            "sqlite" => ("SELECT 'main'", "SELECT 'main'"),
-            _ => ("SELECT current_database()", "SELECT current_schema()"),
+        // Resolve current namespace from the active connection.
+        let resolved_namespace = if connection.has_session_namespace() {
+            connection.resolve_session_namespace().await.ok().flatten()
+        } else {
+            None
         };
-        let database_name = match connection.driver_name() {
-            "mysql" | "mariadb" | "clickhouse" => {
-                if let Some(target_database) = target_database.clone() {
-                    Some(target_database)
-                } else {
-                    connection.query(db_query, &[]).await.ok().and_then(|r| {
-                        r.rows.first().and_then(|row| {
-                            row.get(0).and_then(|v| v.as_str().map(|s| s.to_string()))
-                        })
-                    })
-                }
-            }
-            _ => connection.query(db_query, &[]).await.ok().and_then(|r| {
-                r.rows
-                    .first()
-                    .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-            }),
-        };
-        let schema_name = match connection.driver_name() {
-            "mysql" | "mariadb" | "clickhouse" if target_database.is_some() => {
-                target_database.clone()
-            }
-            _ => connection
-                .query(schema_query, &[])
-                .await
-                .ok()
-                .and_then(|r| {
-                    r.rows
-                        .first()
-                        .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-                }),
-        };
+        let database_name = target_database.clone().or(resolved_namespace.clone());
+        let schema_name = target_database.clone().or(resolved_namespace);
         let schema_names = schema
             .list_schemas()
             .await
             .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
             .unwrap_or_else(|_| Vec::new());
 
-        // For MySQL/MSSQL the "schema" parameter to introspection methods is the
-        // database name. For PostgreSQL it's the schema name (e.g. "public").
-        let introspection_schema = match connection.driver_name() {
-            "mysql" | "mariadb" | "mssql" | "clickhouse" => {
-                target_database.as_deref().or(database_name.as_deref())
-            }
-            driver_name if Self::is_postgres_driver(driver_name) => None,
-            "sqlite" => None, // SQLite always uses the single attached database
-            _ => schema_name.as_deref(),
-        };
+        let introspection_schema = target_database.as_deref().or(schema_name.as_deref());
 
         // Load all schema objects (handle partial failures gracefully)
         let tables_result = schema.list_tables(introspection_schema).await;
         let extended_result = schema.list_tables_extended(introspection_schema).await;
         let views_result = schema.list_views(introspection_schema).await;
-        let materialized_views_result = schema.list_materialized_views(introspection_schema).await;
-        // PostgreSQL triggers are table-level objects, not top-level sidebar items.
-        // Skip loading them for PG to avoid cluttering the sidebar.
-        let triggers_result = if Self::is_postgres_driver(connection.driver_name()) {
-            Ok(Vec::new())
+        let materialized_views_result = if connection.supports_materialized_views() {
+            schema.list_materialized_views(introspection_schema).await
         } else {
+            Ok(Vec::new())
+        };
+        let triggers_result = if connection.supports_top_level_triggers() {
             schema.list_triggers(introspection_schema, None).await
+        } else {
+            Ok(Vec::new())
         };
         let functions_result = schema.list_functions(introspection_schema).await;
         let procedures_result = schema.list_procedures(introspection_schema).await;
@@ -419,6 +375,10 @@ impl SchemaService {
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> ServiceResult<Vec<ViewInfo>> {
+        if !connection.supports_materialized_views() {
+            return Ok(Vec::new());
+        }
+
         let schema = connection
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
@@ -500,8 +460,7 @@ impl SchemaService {
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> ServiceResult<Vec<TriggerInfo>> {
-        // Skip triggers for PostgreSQL (they're table-level)
-        if Self::is_postgres_driver(connection.driver_name()) {
+        if !connection.supports_top_level_triggers() {
             return Ok(Vec::new());
         }
 
@@ -559,7 +518,7 @@ impl SchemaService {
         connection: &Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> Option<String> {
-        if connection.driver_name() == "sqlite" {
+        if !connection.has_session_namespace() {
             return None;
         }
 
@@ -592,7 +551,7 @@ impl SchemaService {
         connection: &Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> Option<String> {
-        if connection.driver_name() == "sqlite" {
+        if !connection.has_session_namespace() {
             return None;
         }
 
@@ -615,7 +574,7 @@ impl SchemaService {
         connection: &Arc<dyn Connection>,
         connection_id: Option<Uuid>,
     ) -> Option<String> {
-        if connection.driver_name() == "sqlite" {
+        if !connection.has_session_namespace() {
             return None;
         }
 
@@ -625,46 +584,20 @@ impl SchemaService {
                 let cached_db = self.cache.get_database_name(conn_id);
                 let cached_schema = self.cache.get_schema_name(conn_id);
                 if cached_db.is_some() || cached_schema.is_some() {
-                    return match connection.driver_name() {
-                        "mysql" | "mssql" => cached_db,
-                        driver_name if Self::is_postgres_driver(driver_name) => None,
-                        _ => cached_schema,
-                    };
+                    return cached_schema;
                 }
             }
         }
 
-        let (db_query, schema_query) = match connection.driver_name() {
-            "mysql" | "mariadb" => ("SELECT DATABASE()", "SELECT DATABASE()"),
-            "mssql" => ("SELECT DB_NAME()", "SELECT SCHEMA_NAME()"),
-            _ => ("SELECT current_database()", "SELECT current_schema()"),
-        };
-
-        let database_name = connection.query(db_query, &[]).await.ok().and_then(|r| {
-            r.rows
-                .first()
-                .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-        });
-        let schema_name = connection
-            .query(schema_query, &[])
-            .await
-            .ok()
-            .and_then(|r| {
-                r.rows
-                    .first()
-                    .and_then(|row| row.get(0).and_then(|v| v.as_str().map(|s| s.to_string())))
-            });
+        let schema_name = connection.resolve_session_namespace().await.ok().flatten();
+        let database_name = schema_name.clone();
 
         if let Some(conn_id) = connection_id {
             self.cache
                 .set_connection_names(conn_id, database_name.clone(), schema_name.clone());
         }
 
-        match connection.driver_name() {
-            "mysql" | "mariadb" | "mssql" => database_name,
-            driver_name if Self::is_postgres_driver(driver_name) => None,
-            _ => schema_name,
-        }
+        schema_name
     }
 
     /// Get detailed table information
@@ -1210,7 +1143,7 @@ impl SchemaService {
             }
         }
 
-        if Self::is_postgres_driver(connection.driver_name()) {
+        if connection.supports_materialized_views() {
             if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
                 if views.iter().any(|view| view.name == object_name) {
                     return Some(Self::placeholder_table_info(

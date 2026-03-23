@@ -4,8 +4,8 @@ use async_trait::async_trait;
 use std::sync::Arc;
 use zqlz_core::{
     CellUpdateRequest, ColumnInfo, ColumnMeta, Connection, DatabaseObject, ForeignKeyInfo,
-    IndexInfo, PrimaryKeyInfo, QueryResult, Result, Row, SchemaIntrospection, StatementResult,
-    TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
+    IndexInfo, PrimaryKeyInfo, QueryResult, Result, Row, SchemaIntrospection, SqlObjectName,
+    StatementResult, TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
 };
 
 /// Mock connection for testing service-layer logic without a real database.
@@ -118,6 +118,188 @@ impl Connection for MockConnection {
         } else {
             Ok(QueryResult::empty())
         }
+    }
+
+    fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {
+        Ok(format!(
+            "ALTER TABLE {} RENAME TO {}",
+            self.render_qualified_name(table_name),
+            self.quote_identifier(new_table_name)
+        ))
+    }
+
+    fn drop_table_sql(
+        &self,
+        table_name: &SqlObjectName,
+        options: zqlz_core::DropTableOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP TABLE");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(table_name));
+        if options.cascade {
+            sql.push_str(" CASCADE");
+        }
+        Ok(sql)
+    }
+
+    fn drop_view_sql(
+        &self,
+        view_name: &SqlObjectName,
+        options: zqlz_core::DropViewOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP VIEW");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(view_name));
+        if options.cascade {
+            sql.push_str(" CASCADE");
+        }
+        Ok(sql)
+    }
+
+    fn drop_trigger_sql(
+        &self,
+        trigger_name: &SqlObjectName,
+        _table_name: Option<&SqlObjectName>,
+        options: zqlz_core::DropTriggerOptions,
+    ) -> Result<String> {
+        let mut sql = String::from("DROP TRIGGER");
+        if options.if_exists {
+            sql.push_str(" IF EXISTS");
+        }
+        sql.push(' ');
+        sql.push_str(&self.render_qualified_name(trigger_name));
+        if options.cascade {
+            sql.push_str(" CASCADE");
+        }
+        Ok(sql)
+    }
+
+    fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "TRUNCATE TABLE {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn duplicate_table_sql(
+        &self,
+        source_table_name: &SqlObjectName,
+        new_table_name: &SqlObjectName,
+    ) -> Result<String> {
+        Ok(format!(
+            "CREATE TABLE {} AS SELECT * FROM {}",
+            self.render_qualified_name(new_table_name),
+            self.render_qualified_name(source_table_name)
+        ))
+    }
+
+    fn clear_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "DELETE FROM {}",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn table_has_rows_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+        Ok(format!(
+            "SELECT 1 FROM {} LIMIT 1",
+            self.render_qualified_name(table_name)
+        ))
+    }
+
+    fn select_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+    ) -> Result<String> {
+        let projection = if projected_columns.is_empty() {
+            "*".to_string()
+        } else {
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        let mut sql = format!(
+            "SELECT {} FROM {}",
+            projection,
+            self.render_qualified_name(table_name)
+        );
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+        Ok(sql)
+    }
+
+    fn select_distinct_rows_sql(
+        &self,
+        table_name: &SqlObjectName,
+        projected_columns: &[String],
+        where_clause_sql: Option<&str>,
+        order_by_columns: &[String],
+        limit: u64,
+    ) -> Result<String> {
+        let mut sql = format!(
+            "SELECT DISTINCT {} FROM {}",
+            projected_columns
+                .iter()
+                .map(|column| self.quote_identifier(column))
+                .collect::<Vec<_>>()
+                .join(", "),
+            self.render_qualified_name(table_name)
+        );
+        if let Some(where_clause_sql) = where_clause_sql {
+            sql.push_str(" WHERE ");
+            sql.push_str(where_clause_sql);
+        }
+        if !order_by_columns.is_empty() {
+            sql.push_str(" ORDER BY ");
+            sql.push_str(
+                &order_by_columns
+                    .iter()
+                    .map(|column| self.quote_identifier(column))
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            );
+        }
+        sql.push_str(&format!(" LIMIT {}", limit));
+        Ok(sql)
+    }
+
+    fn insert_row_sql(
+        &self,
+        table_name: &SqlObjectName,
+        column_names: &[String],
+        value_count: usize,
+    ) -> Result<String> {
+        let placeholders = (0..value_count)
+            .map(|index| self.format_bind_placeholder(index))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let columns = column_names
+            .iter()
+            .map(|column| self.quote_identifier(column))
+            .collect::<Vec<_>>()
+            .join(", ");
+        Ok(format!(
+            "INSERT INTO {} ({}) VALUES ({})",
+            self.render_qualified_name(table_name),
+            columns,
+            placeholders
+        ))
+    }
+
+    fn performance_metrics_query_sql(&self) -> Result<String> {
+        Ok("SELECT 0 as total_queries".to_string())
     }
 
     async fn update_cell(&self, _request: CellUpdateRequest) -> Result<u64> {

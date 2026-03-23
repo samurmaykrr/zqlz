@@ -4,11 +4,11 @@
 
 use anyhow::{Context, Result};
 use chrono::Utc;
-use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use uuid::Uuid;
+use zqlz_internal_storage::rusqlite::{self, Connection, params};
 
 use super::super::filter_types::{
     ColumnVisibility, FilterCondition, FilterOperator, FilterProfile, LogicalOperator,

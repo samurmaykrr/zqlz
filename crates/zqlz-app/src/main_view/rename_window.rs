@@ -17,8 +17,8 @@ use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 use super::{
     table_handlers_utils::validation::validate_table_name,
     view_handlers::{
-        build_create_view_statement, build_drop_view_statement, build_rename_table_statement,
-        fetch_view_definition, validate_view_name,
+        build_drop_view_statement, build_rename_table_statement, fetch_view_definition,
+        replace_create_view_identifier, validate_view_name,
     },
 };
 
@@ -101,6 +101,14 @@ impl RenameTarget {
                 ..
             } => {
                 let definition = fetch_view_definition(connection, None, old_name).await?;
+                let create_renamed_sql =
+                    replace_create_view_identifier(&definition, connection, new_name).ok_or_else(
+                        || "Failed to parse CREATE VIEW statement while renaming view".to_string(),
+                    )?;
+                let restore_sql = replace_create_view_identifier(&definition, connection, old_name)
+                    .ok_or_else(|| {
+                        "Failed to prepare restore SQL while renaming view".to_string()
+                    })?;
 
                 let drop_sql = build_drop_view_statement(connection, old_name, false);
                 connection
@@ -108,19 +116,14 @@ impl RenameTarget {
                     .await
                     .map_err(|error| format!("Failed to drop old view: {error}"))?;
 
-                let create_sql = build_create_view_statement(connection, new_name, &definition);
-                match connection.execute(&create_sql, &[]).await {
+                match connection.execute(&create_renamed_sql, &[]).await {
                     Ok(_) => Ok(()),
-                    Err(error) => {
-                        let restore_sql =
-                            build_create_view_statement(connection, old_name, &definition);
-                        match connection.execute(&restore_sql, &[]).await {
-                            Ok(_) => Err(format!("Failed to create renamed view: {error}")),
-                            Err(restore_error) => Err(format!(
-                                "Failed to create renamed view: {error}. Failed to restore original view: {restore_error}"
-                            )),
-                        }
-                    }
+                    Err(error) => match connection.execute(&restore_sql, &[]).await {
+                        Ok(_) => Err(format!("Failed to create renamed view: {error}")),
+                        Err(restore_error) => Err(format!(
+                            "Failed to create renamed view: {error}. Failed to restore original view: {restore_error}"
+                        )),
+                    },
                 }
             }
         }

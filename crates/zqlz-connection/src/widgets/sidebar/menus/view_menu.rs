@@ -1,7 +1,7 @@
 //! View node context menu
 //!
 //! Provides a context menu for database view nodes with operations for:
-//! - Opening and designing views
+//! - Opening views and editing view DDL
 //! - Creating, deleting, and duplicating views
 //! - Exporting view data
 //! - Copying view names and renaming views
@@ -20,7 +20,7 @@ impl ConnectionSidebar {
     ///
     /// Displays a menu for view operations:
     /// - **Open View**: Emits `OpenView` to display view data in a table viewer
-    /// - **Design View**: Emits `DesignView` to edit the view's SQL definition
+    /// - **Edit DDL**: Emits `DesignView` to edit the view's full DDL
     /// - **New View**: Emits `NewView` to create a new view
     /// - **Delete View**: Emits `DeleteView` to drop the view
     /// - **Duplicate View**: Emits `DuplicateView` to copy the view definition
@@ -31,6 +31,7 @@ impl ConnectionSidebar {
     /// - **Refresh**: Emits `RefreshSchema` to reload schema information
     ///
     /// This menu appears when right-clicking on a view node.
+    #[allow(clippy::too_many_arguments)]
     pub(in crate::widgets) fn show_view_context_menu(
         &mut self,
         conn_id: Uuid,
@@ -77,7 +78,7 @@ impl ConnectionSidebar {
                                 });
                             }
                         }))
-                        .item(PopupMenuItem::new("Design View").on_click({
+                        .item(PopupMenuItem::new("Edit DDL").on_click({
                             let sidebar = sidebar_weak.clone();
                             let view = view_for_menu.clone();
                             let object_schema = object_schema.clone();

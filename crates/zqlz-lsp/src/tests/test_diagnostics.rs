@@ -692,6 +692,24 @@ fn test_valid_simple_select() {
 }
 
 #[test]
+fn test_sqlite_bracketed_identifiers_are_not_reported_as_syntax_errors() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::SQLite);
+    let text = Rope::from(
+        "CREATE VIEW [ ProductDetails_V ] AS
+SELECT
+    u.[user_id] AS [ UserId ],
+    u.[username] AS [ UserName ]
+FROM [ users ] u",
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "SQLite bracketed identifiers should parse without syntax errors",
+    );
+}
+
+#[test]
 fn test_valid_select_with_join() {
     let mut lsp = create_test_lsp();
     let text = Rope::from(

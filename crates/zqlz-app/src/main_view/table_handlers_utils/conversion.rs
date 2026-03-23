@@ -4,6 +4,7 @@
 //! and formats used throughout the application.
 
 use crate::components::{ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaDetails};
+use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
 
@@ -79,11 +80,12 @@ pub(in crate::main_view) fn convert_to_schema_details(
 /// names (e.g. `marketing.orders`), so no separate schema qualifier should be
 /// injected. For SQLite, schemas don't apply.
 pub(in crate::main_view) fn resolve_schema_qualifier(
-    driver_name: &str,
+    connection: &Arc<dyn zqlz_core::Connection>,
     database_name: &Option<String>,
 ) -> Option<String> {
-    match driver_name {
-        "mysql" | "mariadb" | "clickhouse" | "mssql" => database_name.clone(),
+    match connection.dialect_id() {
+        Some("mysql") | Some("mariadb") | Some("clickhouse") | Some("mssql")
+        | Some("sqlserver") => database_name.clone(),
         _ => None,
     }
 }

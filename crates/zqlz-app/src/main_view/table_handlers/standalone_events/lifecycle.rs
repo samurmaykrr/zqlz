@@ -89,7 +89,7 @@ pub(in crate::main_view) fn handle_became_active_event(
                 panel.set_loading_for_table(connection_id, &table_name, cx);
             });
 
-            let schema_qualifier = resolve_schema_qualifier(conn.driver_name(), &database_name);
+            let schema_qualifier = resolve_schema_qualifier(&conn, &database_name);
 
             match schema_service
                 .get_table_details(

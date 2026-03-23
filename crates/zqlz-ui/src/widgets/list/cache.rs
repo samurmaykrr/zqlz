@@ -87,6 +87,33 @@ impl RowsCache {
         self.items_count
     }
 
+    /// Returns how many item rows are covered by the flattened range end.
+    ///
+    /// `flatten_end` follows Rust range semantics (`0..flatten_end`), where
+    /// the value is an exclusive index in flattened entries.
+    pub(crate) fn item_count_before_flatten_end(&self, flatten_end: usize) -> usize {
+        if flatten_end == 0 {
+            return 0;
+        }
+
+        let last_visible_flatten_ix = flatten_end.saturating_sub(1);
+        let Some(last_visible_entry) = self.get(last_visible_flatten_ix) else {
+            return self.items_count;
+        };
+
+        match last_visible_entry {
+            RowEntry::Entry(path) => self.items_before_section(path.section) + path.row + 1,
+            RowEntry::SectionHeader(section_ix) => self.items_before_section(section_ix),
+            RowEntry::SectionFooter(section_ix) => self.items_before_section(section_ix + 1),
+        }
+    }
+
+    fn items_before_section(&self, section_ix: usize) -> usize {
+        (0..section_ix.min(self.sections_count()))
+            .map(|index| self.rows_count(index))
+            .sum()
+    }
+
     /// Returns the index of the  Entry with given path in the flattened rows.
     pub(crate) fn position_of(&self, path: &IndexPath) -> Option<usize> {
         self.entities

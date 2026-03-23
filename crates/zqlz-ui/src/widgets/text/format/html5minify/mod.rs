@@ -441,7 +441,11 @@ where
 
                 (false, omit_end)
             }
-            // TODO: comprehensive handling of optional end element rules
+            "li" => {
+                let omit_end =
+                    can_omit_li_end_tag(ctx, self.collapse_whitespace, self.preserve_comments);
+                (false, omit_end)
+            }
             _ => (false, optional_end_tag(name)),
         })
     }
@@ -754,6 +758,32 @@ fn optional_end_tag(name: &str) -> bool {
             | "thead"
             | "tr"
     )
+}
+
+fn can_omit_li_end_tag(ctx: &Context, collapse_whitespace: bool, preserve_comments: bool) -> bool {
+    ctx.right.is_none_or(|right| {
+        right
+            .iter()
+            .find_map(|node| match &node.data {
+                NodeData::Text { contents } => {
+                    if collapse_whitespace && is_whitespace(contents) {
+                        None
+                    } else {
+                        Some(false)
+                    }
+                }
+                NodeData::Comment { .. } => {
+                    if preserve_comments {
+                        Some(false)
+                    } else {
+                        None
+                    }
+                }
+                NodeData::Element { name, .. } => Some(name.local.as_ref() == "li"),
+                _ => Some(false),
+            })
+            .unwrap_or(true)
+    })
 }
 
 #[cfg(test)]

@@ -562,11 +562,17 @@ impl MainView {
                         connection_id,
                         referenced_table,
                         referenced_columns,
+                        query,
+                        limit,
+                        request_id,
                     } => {
                         handle_load_fk_values_event(
                             *connection_id,
                             referenced_table,
                             referenced_columns,
+                            query.as_deref(),
+                            *limit,
+                            *request_id,
                             viewer_entity_for_events.clone(),
                             window,
                             cx,
@@ -819,8 +825,7 @@ impl MainView {
         let schema_details_panel = self.schema_details_panel.clone();
         let table_name_for_spawn = table_name.clone();
         let database_name_for_spawn = database_name;
-        let schema_qualifier =
-            resolve_schema_qualifier(conn.driver_name(), &database_name_for_spawn);
+        let schema_qualifier = resolve_schema_qualifier(&conn, &database_name_for_spawn);
 
         // Only show a loading spinner in the schema panel when the details are not
         // already warm in the cache — avoids a flicker for repeat opens.
@@ -853,7 +858,7 @@ impl MainView {
                 None => conn,
             };
 
-            let is_redis = conn.driver_name() == "redis";
+            let is_redis = conn.dialect_id() == Some("redis");
             let driver_category = driver_name_to_category(conn.driver_name());
 
             // Browse and schema+DDL are independent — run them in parallel.
@@ -891,15 +896,15 @@ impl MainView {
             );
 
             let mut used_schema_only_fallback = false;
-            if let (Err(browse_error), Ok((table_details, _))) = (&browse_result, &schema_result) {
-                if should_use_sqlite_virtual_table_schema_fallback(
+            if let (Err(browse_error), Ok((table_details, _))) = (&browse_result, &schema_result)
+                && should_use_sqlite_virtual_table_schema_fallback(
                     conn.driver_name(),
                     browse_error,
                     table_details,
-                ) {
-                    browse_result = Ok(build_schema_only_query_result(table_details));
-                    used_schema_only_fallback = true;
-                }
+                )
+            {
+                browse_result = Ok(build_schema_only_query_result(table_details));
+                used_schema_only_fallback = true;
             }
 
             // Deliver browse result first so rows appear immediately.
@@ -907,7 +912,7 @@ impl MainView {
                 Ok(query_result) => {
                     let needs_count = query_result.total_rows.is_none()
                         && !is_redis
-                        && !zqlz_services::TableService::supports_fast_count(conn.driver_name());
+                        && !conn.supports_fast_exact_count();
                     let conn_name = connection_name.clone();
                     if let Err(error) = viewer_weak.update_in(cx, |viewer, window, cx| {
                         if !viewer.is_current_request(initial_request_generation) {

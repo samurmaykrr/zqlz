@@ -498,6 +498,7 @@ mod tests {
                 schema: None,
                 comment: None,
                 row_count: None,
+                table_type: zqlz_core::TableType::Table,
             },
         );
 
@@ -544,6 +545,7 @@ mod tests {
                 schema: None,
                 comment: None,
                 row_count: None,
+                table_type: zqlz_core::TableType::Table,
             },
         );
 

@@ -2,9 +2,9 @@
 
 use super::storage::{Bookmark, BookmarkStorage};
 use chrono::Utc;
-use rusqlite::Result as SqliteResult;
 use std::path::Path;
 use uuid::Uuid;
+use zqlz_internal_storage::rusqlite::Result as SqliteResult;
 
 /// Filter options for listing bookmarks
 #[derive(Debug, Clone, Default)]

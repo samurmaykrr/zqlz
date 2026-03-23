@@ -95,18 +95,29 @@ impl RenderOnce for Switch {
         let on_click = self.on_click.clone();
         let toggle_state = window.use_keyed_state(self.id.clone(), cx, |_, _| checked);
 
-        let (bg, toggle_bg) = match checked {
-            true => (cx.theme().primary, cx.theme().switch_thumb),
-            false => (cx.theme().switch, cx.theme().switch_thumb),
+        let (bg, toggle_bg, border_color) = match checked {
+            true => (
+                cx.theme().primary,
+                cx.theme().switch_thumb,
+                cx.theme().primary.opacity(0.75),
+            ),
+            false => (
+                cx.theme().switch,
+                cx.theme().switch_thumb,
+                // Keep inactive switches legible on dark themes where `switch`
+                // and panel backgrounds can be close in value.
+                cx.theme().muted_foreground.opacity(0.6),
+            ),
         };
 
-        let (bg, toggle_bg) = if self.disabled {
+        let (bg, toggle_bg, border_color) = if self.disabled {
             (
                 if checked { bg.alpha(0.5) } else { bg },
                 toggle_bg.alpha(0.35),
+                border_color.alpha(0.35),
             )
         } else {
-            (bg, toggle_bg)
+            (bg, toggle_bg, border_color)
         };
 
         let (bg_width, bg_height) = match self.size {
@@ -118,12 +129,6 @@ impl RenderOnce for Switch {
             _ => px(16.),
         };
         let inset = px(2.);
-        let radius = if cx.theme().radius >= px(4.) {
-            bg_height
-        } else {
-            cx.theme().radius
-        };
-
         div().refine_style(&self.style).child(
             h_flex()
                 .id(self.id.clone())
@@ -136,11 +141,10 @@ impl RenderOnce for Switch {
                         .id(self.id.clone())
                         .w(bg_width)
                         .h(bg_height)
-                        .rounded(radius)
                         .flex()
                         .items_center()
                         .border(inset)
-                        .border_color(cx.theme().transparent)
+                        .border_color(border_color)
                         .bg(bg)
                         .when_some(self.tooltip.clone(), |this, tooltip| {
                             this.tooltip(move |window, cx| {
@@ -150,7 +154,6 @@ impl RenderOnce for Switch {
                         .child(
                             // Switch Toggle
                             div()
-                                .rounded(radius)
                                 .bg(toggle_bg)
                                 .shadow_md()
                                 .size(bar_width)

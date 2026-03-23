@@ -152,12 +152,11 @@ impl ConnectionManager {
             .ok_or_else(|| ZqlzError::NotFound("Connection not found".into()))?;
 
         // Drivers that support cross-database queries don't need separate connections
-        if !Self::needs_per_database_connection(main_conn.driver_name()) {
+        if !main_conn.requires_database_scoped_connection() {
             return Ok(main_conn);
         }
 
-        let normalized_database_name =
-            Self::normalize_database_name(main_conn.driver_name(), database_name);
+        let normalized_database_name = main_conn.normalize_database_scope_name(database_name);
         let key = (id, normalized_database_name.clone());
 
         // Check cache first
@@ -193,23 +192,6 @@ impl ConnectionManager {
         Ok(conn)
     }
 
-    /// Returns true for drivers where each connection is scoped to a single database
-    /// and separate connections are needed to access different databases.
-    fn needs_per_database_connection(driver_name: &str) -> bool {
-        matches!(driver_name, "postgres" | "postgresql" | "mssql" | "redis")
-    }
-
-    fn normalize_database_name(driver_name: &str, database_name: &str) -> String {
-        if driver_name == "redis" {
-            database_name
-                .strip_prefix("db")
-                .unwrap_or(database_name)
-                .to_string()
-        } else {
-            database_name.to_string()
-        }
-    }
-
     /// Get a connection appropriate for the given database, using the main
     /// connection when no database-specific connection is needed.
     ///
@@ -227,12 +209,11 @@ impl ConnectionManager {
             return Some(main_conn);
         };
 
-        if !Self::needs_per_database_connection(main_conn.driver_name()) {
+        if !main_conn.requires_database_scoped_connection() {
             return Some(main_conn);
         }
 
-        let normalized_database_name =
-            Self::normalize_database_name(main_conn.driver_name(), database_name);
+        let normalized_database_name = main_conn.normalize_database_scope_name(database_name);
         let key = (id, normalized_database_name.clone());
         let cached = self.database_connections.read().get(&key).cloned();
         match cached {
