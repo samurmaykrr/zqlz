@@ -2,41 +2,78 @@ name: build-release
 
 on:
   push:
-    branches:
-      - main
+    tags:
+      - "v*.*.*"
   workflow_dispatch:
-
-    # Every job skips itself when the triggering commit is the bot's version-bump
-    # commit (identified by the "chore: bump version" prefix), which prevents the
-    # workflow from re-entering itself after the bump-version job pushes to main.
+    inputs:
+      tag:
+        description: "Release tag to build (format: vX.Y.Z). Required when running from a branch ref."
+        required: false
+        type: string
 
 jobs:
   create-release:
-    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ubuntu-latest
     permissions:
       contents: write
     outputs:
+      tag: ${{ steps.release_tag.outputs.tag }}
       version: ${{ steps.version.outputs.version }}
     steps:
-      - uses: actions/checkout@v4
+      - name: Resolve release tag
+        id: release_tag
+        run: |
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            tag="${GITHUB_REF_NAME}"
+          else
+            tag="${{ github.event.inputs.tag }}"
+          fi
 
-      - name: Read workspace version
+          if [[ -z "$tag" ]]; then
+            echo "No release tag provided. Run workflow on a tag ref or pass the 'tag' input." >&2
+            exit 1
+          fi
+
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Invalid tag '$tag'. Expected format vX.Y.Z" >&2
+            exit 1
+          fi
+
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.release_tag.outputs.tag }}
+
+      - name: Read and validate workspace version
         id: version
         run: |
-          version=$(grep -m1 '^version = "[0-9]' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          expected_version="${{ steps.release_tag.outputs.tag }}"
+          expected_version="${expected_version#v}"
+
+          workspace_version=$(grep -m1 '^version = "[0-9]' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
+
+          if [[ -z "$workspace_version" ]]; then
+            echo "Could not read workspace version from Cargo.toml" >&2
+            exit 1
+          fi
+
+          if [[ "$workspace_version" != "$expected_version" ]]; then
+            echo "Tag version ($expected_version) does not match Cargo.toml workspace version ($workspace_version)." >&2
+            exit 1
+          fi
+
+          echo "version=$workspace_version" >> "$GITHUB_OUTPUT"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: v${{ steps.version.outputs.version }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.tag }}
           generate_release_notes: true
 
   build:
     needs: create-release
-    if: "!startsWith(github.event.head_commit.message, 'chore: bump version')"
     runs-on: ${{ matrix.os }}
     permissions:
       contents: write
@@ -63,6 +100,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.create-release.outputs.tag }}
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -148,47 +187,5 @@ jobs:
       - name: Upload artifacts to GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ needs.create-release.outputs.version }}
+          tag_name: ${{ needs.create-release.outputs.tag }}
           files: artifacts/*
-
-  # Runs after every platform build succeeds. Bumps the patch version in
-  # Cargo.toml and pushes it directly to main so the next PR starts from the
-  # correct base version without any manual intervention.
-  #
-  # The commit uses the GITHUB_TOKEN bot identity. GitHub Actions does not
-  # re-trigger workflows for pushes made with GITHUB_TOKEN, so there is no
-  # infinite loop - the guard above is a belt-and-suspenders measure.
-  bump-version:
-    needs: build
-    if: >-
-      !startsWith(github.event.head_commit.message, 'chore: bump version') && needs.build.result == 'success'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          # Fetch the tip of main at job start so concurrent pushes don't cause
-          # a non-fast-forward rejection.
-          ref: main
-
-      - name: Bump patch version
-        id: bump
-        run: |
-          current=$(grep -m1 '^version = "[0-9]' Cargo.toml | sed 's/version = "\(.*\)"/\1/')
-          IFS='.' read -r major minor patch <<< "$current"
-          new="${major}.${minor}.$((patch + 1))"
-          awk -v old="$current" -v new="$new" '
-            !done && /^version = "/ && index($0, old) { sub(old, new); done=1 }
-            { print }
-          ' Cargo.toml > Cargo.toml.tmp && mv Cargo.toml.tmp Cargo.toml
-          echo "previous=$current" >> "$GITHUB_OUTPUT"
-          echo "version=$new" >> "$GITHUB_OUTPUT"
-
-      - name: Commit and push version bump
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add Cargo.toml
-          git commit -m "chore: bump version to ${{ steps.bump.outputs.version }}"
-          git push origin main

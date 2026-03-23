@@ -4,6 +4,34 @@ This directory contains scripts and resources for building distributable package
 
 ## Quick Start
 
+## Release Process (Protected `main` Friendly)
+
+This repository publishes releases from git tags instead of pushing version bumps
+from CI directly to `main`.
+
+1. Bump the workspace version locally:
+
+   ```bash
+   ./script/bump-version patch
+   # or: ./script/bump-version minor
+   # or: ./script/bump-version major
+   # or: ./script/bump-version set 1.2.3
+   ```
+
+2. Commit the version bump and merge through a pull request.
+3. After merge, create and push a matching tag:
+
+   ```bash
+   git tag -a vX.Y.Z -m "Release vX.Y.Z"
+   git push origin vX.Y.Z
+   ```
+
+4. The `build-release` GitHub Actions workflow runs on `v*.*.*` tags, creates
+   the release (if needed), and uploads platform artifacts.
+
+Important: the tag version must exactly match `[workspace.package].version` in
+`Cargo.toml`, otherwise the workflow fails fast.
+
 ### macOS
 
 ```bash
