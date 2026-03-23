@@ -1,40 +1,8 @@
 #!/usr/bin/env bash
 #
-# Bumps the workspace patch version in Cargo.toml before every commit so that
-# every committed build carries a unique, monotonically increasing version number
-# without any manual version management.
+# Release versions are bumped manually via ./script/bump-version and merged
+# through pull requests. This hook intentionally does not mutate Cargo.toml.
 
 set -euo pipefail
 
-ROOT="$(git rev-parse --show-toplevel)"
-CARGO_TOML="$ROOT/Cargo.toml"
-
-# Pull the current version from the [workspace.package] block — the first line
-# that looks like: version = "X.Y.Z"
-current_version=$(grep -m1 '^version = "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"' "$CARGO_TOML" \
-    | sed 's/version = "\(.*\)"/\1/')
-
-if [[ -z "$current_version" ]]; then
-    echo "bump-version: could not parse version from $CARGO_TOML" >&2
-    exit 1
-fi
-
-IFS='.' read -r major minor patch <<< "$current_version"
-new_version="${major}.${minor}.$((patch + 1))"
-
-# Rewrite Cargo.toml using awk so it is portable across macOS (BSD sed) and
-# Linux (GNU sed). Only the *first* matching version line is touched — that is
-# the [workspace.package] declaration; dependency version ranges elsewhere are
-# not affected because they use strings like "0.1" rather than "X.Y.Z".
-tmp=$(mktemp)
-awk -v old="$current_version" -v new="$new_version" '
-    !done && /^version = "/ && index($0, old) {
-        sub(old, new)
-        done = 1
-    }
-    { print }
-' "$CARGO_TOML" > "$tmp" && mv "$tmp" "$CARGO_TOML"
-
-git add "$CARGO_TOML"
-
-echo "bump-version: $current_version → $new_version"
+exit 0

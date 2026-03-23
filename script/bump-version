@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+CARGO_TOML="$ROOT/Cargo.toml"
+
+usage() {
+    cat <<'USAGE'
+Usage:
+  ./script/bump-version [patch|minor|major]
+  ./script/bump-version set X.Y.Z
+
+Examples:
+  ./script/bump-version
+  ./script/bump-version patch
+  ./script/bump-version minor
+  ./script/bump-version major
+  ./script/bump-version set 1.4.0
+USAGE
+}
+
+operation="${1:-patch}"
+set_version_input="${2:-}"
+
+if [[ "$operation" == "-h" || "$operation" == "--help" ]]; then
+    usage
+    exit 0
+fi
+
+current_version=$(grep -m1 '^version = "[0-9][0-9]*\.[0-9][0-9]*\.[0-9][0-9]*"' "$CARGO_TOML" \
+    | sed 's/version = "\(.*\)"/\1/')
+
+if [[ -z "$current_version" ]]; then
+    echo "bump-version: could not parse version from $CARGO_TOML" >&2
+    exit 1
+fi
+
+IFS='.' read -r major_version minor_version patch_version <<< "$current_version"
+
+case "$operation" in
+    patch)
+        new_version="${major_version}.${minor_version}.$((patch_version + 1))"
+        ;;
+    minor)
+        new_version="${major_version}.$((minor_version + 1)).0"
+        ;;
+    major)
+        new_version="$((major_version + 1)).0.0"
+        ;;
+    set)
+        if [[ -z "$set_version_input" ]]; then
+            echo "bump-version: 'set' requires a target version (X.Y.Z)." >&2
+            usage
+            exit 1
+        fi
+
+        if [[ ! "$set_version_input" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "bump-version: invalid version '$set_version_input'. Expected X.Y.Z." >&2
+            exit 1
+        fi
+
+        new_version="$set_version_input"
+        ;;
+    *)
+        echo "bump-version: unsupported operation '$operation'." >&2
+        usage
+        exit 1
+        ;;
+esac
+
+if [[ "$new_version" == "$current_version" ]]; then
+    echo "bump-version: version is already $new_version"
+    exit 0
+fi
+
+tmp_file=$(mktemp)
+awk -v old="$current_version" -v new="$new_version" '
+    !done && /^version = "/ && index($0, old) {
+        sub(old, new)
+        done = 1
+    }
+    { print }
+' "$CARGO_TOML" > "$tmp_file" && mv "$tmp_file" "$CARGO_TOML"
+
+echo "bump-version: $current_version -> $new_version"
