@@ -23,6 +23,8 @@ impl TableViewerPanel {
         self.search_text.clear();
         self.pagination_state = None;
         self.active_request_generation = 0;
+        self.selection_stats = None;
+        self.performance_profile = None;
         cx.notify();
     }
 

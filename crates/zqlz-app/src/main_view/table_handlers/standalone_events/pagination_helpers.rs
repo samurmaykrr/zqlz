@@ -11,7 +11,9 @@ use crate::app::AppState;
 use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
-use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
+use crate::main_view::table_handlers_utils::sql::{
+    build_search_clause_for_columns, resolve_search_columns,
+};
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| {
@@ -112,11 +114,13 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
             // Add search text as WHERE clause (same logic as handle_apply_filters_event)
             if let Some(search_clause) = build_search_clause_for_columns(
                 &connection,
-                &viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect::<Vec<_>>(),
+                &resolve_search_columns(
+                    &viewer.column_meta,
+                    viewer
+                        .performance_profile
+                        .as_ref()
+                        .map(|profile| profile.searchable_columns.clone()),
+                ),
                 &viewer.search_text,
                 false,
             ) {
@@ -328,11 +332,13 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
 
             if let Some(search_clause) = build_search_clause_for_columns(
                 &connection,
-                &viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect::<Vec<_>>(),
+                &resolve_search_columns(
+                    &viewer.column_meta,
+                    viewer
+                        .performance_profile
+                        .as_ref()
+                        .map(|profile| profile.searchable_columns.clone()),
+                ),
                 &viewer.search_text,
                 false,
             ) {

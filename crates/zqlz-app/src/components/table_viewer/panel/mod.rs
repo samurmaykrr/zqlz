@@ -58,9 +58,22 @@ mod loader;
 mod render;
 mod search;
 mod selection;
+mod selection_stats;
 mod state;
 mod toolbar;
 mod traits;
+
+pub(super) struct SelectionStatsSummary {
+    pub selection_label: String,
+    pub numeric_stats: Option<(String, String, String, String)>,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct TablePerformanceProfile {
+    pub is_heavy_table: bool,
+    pub recommended_page_size: usize,
+    pub searchable_columns: Vec<String>,
+}
 
 /// Table viewer panel - main component
 pub struct TableViewerPanel {
@@ -159,6 +172,15 @@ pub struct TableViewerPanel {
     /// current value before they start. Their results are only applied if the
     /// generation still matches when they complete.
     pub(super) active_request_generation: u64,
+
+    /// Cached selection summary rendered in the footer.
+    ///
+    /// This is recomputed when the table emits selection-change events so
+    /// render stays lightweight even for large multi-cell selections.
+    pub(super) selection_stats: Option<SelectionStatsSummary>,
+
+    /// Lightweight performance profile derived from loaded table schema.
+    pub(crate) performance_profile: Option<TablePerformanceProfile>,
 }
 
 impl TableViewerPanel {
@@ -195,6 +217,8 @@ impl TableViewerPanel {
             loading_started_at: None,
             _loading_timer_task: None,
             active_request_generation: 0,
+            selection_stats: None,
+            performance_profile: None,
         }
     }
 

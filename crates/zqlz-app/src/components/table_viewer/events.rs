@@ -168,6 +168,8 @@ pub enum TableViewerEvent {
         visible_columns: Vec<String>,
         /// Global search text to match across all columns (empty = no search)
         search_text: String,
+        /// Optional scoped columns for global search
+        search_columns: Option<Vec<String>>,
     },
 
     /// User clicked a column header to sort (server-side)

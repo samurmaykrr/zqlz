@@ -2032,7 +2032,8 @@ impl ConnectionSidebar {
                 }));
             } else {
                 for table_name in &filtered_tables {
-                    let object_schema = self.current_schema_for_virtual_rows(database_name.as_deref());
+                    let object_schema =
+                        self.current_schema_for_virtual_rows(database_name.as_deref());
                     rows.push(SidebarVirtualRow::Leaf(LeafRow {
                         element_id: format!("table-{}-{}", connection.id, table_name),
                         icon: SidebarRowIcon::Table,
@@ -2055,19 +2056,19 @@ impl ConnectionSidebar {
             let include_views_section = Self::push_section_row(
                 rows,
                 SectionRow {
-                element_id: format!("views-header-{}", connection.id),
-                icon: SidebarRowIcon::View,
-                label: "Views".to_string(),
-                total_count: connection.views.len(),
-                filtered_count: filtered_views.len(),
-                is_expanded: views_expanded,
-                depth,
-                action: SidebarSectionAction::ConnectionSection {
-                    conn_id: connection.id,
-                    section: "views",
+                    element_id: format!("views-header-{}", connection.id),
+                    icon: SidebarRowIcon::View,
+                    label: "Views".to_string(),
+                    total_count: connection.views.len(),
+                    filtered_count: filtered_views.len(),
+                    is_expanded: views_expanded,
+                    depth,
+                    action: SidebarSectionAction::ConnectionSection {
+                        conn_id: connection.id,
+                        section: "views",
+                    },
+                    context_menu_section: Some("views"),
                 },
-                context_menu_section: Some("views"),
-            },
                 has_search,
             );
 
@@ -2105,19 +2106,19 @@ impl ConnectionSidebar {
             let include_materialized_views_section = Self::push_section_row(
                 rows,
                 SectionRow {
-                element_id: format!("matviews-header-{}", connection.id),
-                icon: SidebarRowIcon::MaterializedView,
-                label: "Materialized Views".to_string(),
-                total_count: connection.materialized_views.len(),
-                filtered_count: filtered_materialized_views.len(),
-                is_expanded: mat_views_expanded,
-                depth,
-                action: SidebarSectionAction::ConnectionSection {
-                    conn_id: connection.id,
-                    section: "materialized_views",
+                    element_id: format!("matviews-header-{}", connection.id),
+                    icon: SidebarRowIcon::MaterializedView,
+                    label: "Materialized Views".to_string(),
+                    total_count: connection.materialized_views.len(),
+                    filtered_count: filtered_materialized_views.len(),
+                    is_expanded: mat_views_expanded,
+                    depth,
+                    action: SidebarSectionAction::ConnectionSection {
+                        conn_id: connection.id,
+                        section: "materialized_views",
+                    },
+                    context_menu_section: Some("materialized_views"),
                 },
-                context_menu_section: Some("materialized_views"),
-            },
                 has_search,
             );
 
@@ -2419,7 +2420,10 @@ impl ConnectionSidebar {
             } else {
                 for table_name in &filtered_tables {
                     rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                        element_id: format!("table-{}-{}-{}", connection.id, database_name, table_name),
+                        element_id: format!(
+                            "table-{}-{}-{}",
+                            connection.id, database_name, table_name
+                        ),
                         icon: SidebarRowIcon::Table,
                         label: (*table_name).clone(),
                         depth: depth + 1,
@@ -2427,7 +2431,8 @@ impl ConnectionSidebar {
                             conn_id: connection.id,
                             open_table_name: (*table_name).clone(),
                             menu_table_name: (*table_name).clone(),
-                            object_schema: self.current_schema_for_virtual_rows(Some(&database_name)),
+                            object_schema: self
+                                .current_schema_for_virtual_rows(Some(&database_name)),
                             database_name: Some(database_name.clone()),
                         },
                     }));
@@ -2467,7 +2472,10 @@ impl ConnectionSidebar {
                 } else {
                     for view_name in &filtered_views {
                         rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                            element_id: format!("view-{}-{}-{}", connection.id, database_name, view_name),
+                            element_id: format!(
+                                "view-{}-{}-{}",
+                                connection.id, database_name, view_name
+                            ),
                             icon: SidebarRowIcon::View,
                             label: (*view_name).clone(),
                             depth: depth + 1,
@@ -2475,7 +2483,8 @@ impl ConnectionSidebar {
                                 conn_id: connection.id,
                                 open_view_name: (*view_name).clone(),
                                 menu_view_name: (*view_name).clone(),
-                                object_schema: self.current_schema_for_virtual_rows(Some(&database_name)),
+                                object_schema: self
+                                    .current_schema_for_virtual_rows(Some(&database_name)),
                                 database_name: Some(database_name.clone()),
                             },
                         }));
@@ -2516,7 +2525,10 @@ impl ConnectionSidebar {
                 } else {
                     for view_name in &filtered_materialized_views {
                         rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                            element_id: format!("matview-{}-{}-{}", connection.id, database_name, view_name),
+                            element_id: format!(
+                                "matview-{}-{}-{}",
+                                connection.id, database_name, view_name
+                            ),
                             icon: SidebarRowIcon::MaterializedView,
                             label: (*view_name).clone(),
                             depth: depth + 1,
@@ -2564,14 +2576,18 @@ impl ConnectionSidebar {
                 } else {
                     for trigger_name in &filtered_triggers {
                         rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                            element_id: format!("trigger-{}-{}-{}", connection.id, database_name, trigger_name),
+                            element_id: format!(
+                                "trigger-{}-{}-{}",
+                                connection.id, database_name, trigger_name
+                            ),
                             icon: SidebarRowIcon::Trigger,
                             label: (*trigger_name).clone(),
                             depth: depth + 1,
                             kind: SidebarLeafKind::Trigger {
                                 conn_id: connection.id,
                                 trigger_name: (*trigger_name).clone(),
-                                object_schema: self.current_schema_for_virtual_rows(Some(&database_name)),
+                                object_schema: self
+                                    .current_schema_for_virtual_rows(Some(&database_name)),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -2604,21 +2620,28 @@ impl ConnectionSidebar {
             if include_functions_section && functions_expanded {
                 if schema.functions_loading {
                     rows.push(SidebarVirtualRow::Loading(LoadingRow {
-                        element_id: format!("loading-functions-{}-{}", connection.id, database_name),
+                        element_id: format!(
+                            "loading-functions-{}-{}",
+                            connection.id, database_name
+                        ),
                         text: "Loading...".to_string(),
                         depth: depth + 1,
                     }));
                 } else {
                     for function_name in &filtered_functions {
                         rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                            element_id: format!("function-{}-{}-{}", connection.id, database_name, function_name),
+                            element_id: format!(
+                                "function-{}-{}-{}",
+                                connection.id, database_name, function_name
+                            ),
                             icon: SidebarRowIcon::Function,
                             label: (*function_name).clone(),
                             depth: depth + 1,
                             kind: SidebarLeafKind::Function {
                                 conn_id: connection.id,
                                 function_name: (*function_name).clone(),
-                                object_schema: self.current_schema_for_virtual_rows(Some(&database_name)),
+                                object_schema: self
+                                    .current_schema_for_virtual_rows(Some(&database_name)),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -2651,21 +2674,28 @@ impl ConnectionSidebar {
             if include_procedures_section && procedures_expanded {
                 if schema.procedures_loading {
                     rows.push(SidebarVirtualRow::Loading(LoadingRow {
-                        element_id: format!("loading-procedures-{}-{}", connection.id, database_name),
+                        element_id: format!(
+                            "loading-procedures-{}-{}",
+                            connection.id, database_name
+                        ),
                         text: "Loading...".to_string(),
                         depth: depth + 1,
                     }));
                 } else {
                     for procedure_name in &filtered_procedures {
                         rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                            element_id: format!("procedure-{}-{}-{}", connection.id, database_name, procedure_name),
+                            element_id: format!(
+                                "procedure-{}-{}-{}",
+                                connection.id, database_name, procedure_name
+                            ),
                             icon: SidebarRowIcon::Procedure,
                             label: (*procedure_name).clone(),
                             depth: depth + 1,
                             kind: SidebarLeafKind::Procedure {
                                 conn_id: connection.id,
                                 procedure_name: (*procedure_name).clone(),
-                                object_schema: self.current_schema_for_virtual_rows(Some(&database_name)),
+                                object_schema: self
+                                    .current_schema_for_virtual_rows(Some(&database_name)),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -2801,7 +2831,9 @@ impl ConnectionSidebar {
                     .items_center()
                     .justify_center()
                     .when_some(db_logo, |this, logo| this.child(logo.small()))
-                    .when(db_logo.is_none(), |this| this.child(Icon::new(db_icon).size_4())),
+                    .when(db_logo.is_none(), |this| {
+                        this.child(Icon::new(db_icon).size_4())
+                    }),
             )
             .child(body_small(conn_name).truncate().flex_1())
             .child(
@@ -3118,9 +3150,7 @@ impl ConnectionSidebar {
                         | SidebarSectionAction::ConnectionSection { conn_id, .. }
                         | SidebarSectionAction::DatabaseSection { conn_id, .. }
                         | SidebarSectionAction::SchemaGroup { conn_id, .. }
-                        | SidebarSectionAction::SchemaGroupSection { conn_id, .. } => {
-                            *conn_id
-                        }
+                        | SidebarSectionAction::SchemaGroupSection { conn_id, .. } => *conn_id,
                     };
 
                     if let Some(section) = context_menu_section {

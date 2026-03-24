@@ -197,12 +197,6 @@ impl TableDelegate for TableViewerDelegate {
 
         // Non-editing data cell rendering
         let data_col_ix = col_ix - 1;
-        let value = self
-            .rows
-            .get(actual_row_ix)
-            .and_then(|row| row.get(data_col_ix))
-            .cloned()
-            .unwrap_or_default();
 
         let is_modified = self
             .pending_changes
@@ -210,13 +204,27 @@ impl TableDelegate for TableViewerDelegate {
         let is_deleted = self.pending_changes.is_row_deleted(actual_row_ix);
         let original_row_count = self.rows.len() - self.pending_changes.new_row_count();
         let is_new_row = actual_row_ix >= original_row_count;
-        let matches_search = self.cell_matches_search(&value);
+        let is_boolean_column = self.is_boolean_column(data_col_ix);
+
+        let value = self
+            .rows
+            .get(actual_row_ix)
+            .and_then(|row| row.get(data_col_ix));
+        let default_value = Value::default();
+        let value = value.unwrap_or(&default_value);
+        let matches_search = self.cell_matches_search(value);
+        let is_null = value.is_null();
+        let is_auto_increment_placeholder = matches!(value, Value::String(text) if text == super::inline_edit::AUTO_INCREMENT_PLACEHOLDER);
+        let parsed_boolean_value = if is_boolean_column {
+            self.parse_boolean_value(value)
+        } else {
+            None
+        };
 
         // Auto-increment columns on new rows display a muted placeholder
-        let value_str = value.display_for_table();
         if is_new_row
             && self.is_auto_increment_column(data_col_ix)
-            && (value.is_null() || value_str == super::inline_edit::AUTO_INCREMENT_PLACEHOLDER)
+            && (is_null || is_auto_increment_placeholder)
         {
             return div()
                 .h_full()
@@ -232,9 +240,7 @@ impl TableDelegate for TableViewerDelegate {
         }
 
         // Boolean columns get a checkbox
-        if self.is_boolean_column(data_col_ix) {
-            let bool_value = self.parse_boolean_value(&value);
-
+        if is_boolean_column {
             return div()
                 .id(ElementId::NamedInteger(
                     "bool-cell".into(),
@@ -257,18 +263,23 @@ impl TableDelegate for TableViewerDelegate {
                     !is_deleted && !is_new_row && !is_modified && matches_search,
                     |this| this.bg(theme.warning.opacity(0.15)),
                 )
-                .child(self.render_boolean_checkbox(bool_value, is_deleted, window, cx))
+                .child(self.render_boolean_checkbox(parsed_boolean_value, is_deleted, window, cx))
                 .into_any_element();
         }
 
-        let display_value = if value_str.contains('\n') || value_str.contains('\r') {
-            value_str.replace("\r\n", " ").replace(['\n', '\r'], " ")
+        let cell_preview = self.inline_cell_preview_for_cell(actual_row_ix, data_col_ix);
+        let display_value = cell_preview.text;
+        let show_tooltip = cell_preview.show_tooltip;
+        let tooltip_value = if show_tooltip && !is_null {
+            self.rows
+                .get(actual_row_ix)
+                .and_then(|row| row.get(data_col_ix))
+                .cloned()
         } else {
-            value_str.clone()
+            None
         };
 
         let fk_info = self.get_fk_info(data_col_ix).cloned();
-        let is_null = value.is_null();
 
         div()
             .id(ElementId::NamedInteger(
@@ -342,9 +353,12 @@ impl TableDelegate for TableViewerDelegate {
                         .child(div().overflow_hidden().text_ellipsis().child(display_value)),
                 )
             })
-            .when(value_str.len() > 20 && !is_null, |this| {
-                let tooltip_text = value_str.clone();
-                this.tooltip(move |window, cx| Tooltip::new(tooltip_text.clone()).build(window, cx))
+            .when_some(tooltip_value, |this, tooltip_value| {
+                this.tooltip(move |window, cx| {
+                    let tooltip_text =
+                        TableViewerDelegate::tooltip_text_for_cell_value(&tooltip_value);
+                    Tooltip::new(tooltip_text).build(window, cx)
+                })
             })
             .into_any_element()
     }
@@ -472,6 +486,26 @@ impl TableDelegate for TableViewerDelegate {
             || self.date_picker_state.is_some()
             || self.enum_select_state.is_some()
             || self.fk_select_state.is_some()
+    }
+
+    fn visible_rows_changed(
+        &mut self,
+        visible_range: std::ops::Range<usize>,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) {
+        self.visible_rows_range = Some(visible_range);
+        self.warm_visible_preview_cache();
+    }
+
+    fn visible_columns_changed(
+        &mut self,
+        visible_range: std::ops::Range<usize>,
+        _window: &mut Window,
+        _cx: &mut Context<TableState<Self>>,
+    ) {
+        self.visible_columns_range = Some(visible_range);
+        self.warm_visible_preview_cache();
     }
 
     fn calculate_auto_fit_width(&self, col_ix: usize, _cx: &App) -> f32 {

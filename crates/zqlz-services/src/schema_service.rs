@@ -62,6 +62,38 @@ impl SchemaService {
             .map(ToOwned::to_owned)
     }
 
+    fn uses_unscoped_introspection(connection: &dyn Connection) -> bool {
+        matches!(
+            connection.dialect_id(),
+            Some("postgres") | Some("postgresql")
+        )
+    }
+
+    async fn resolve_database_name_for_connection(
+        connection: &Arc<dyn Connection>,
+    ) -> Option<String> {
+        if Self::uses_unscoped_introspection(connection.as_ref()) {
+            return connection
+                .query("SELECT current_database()", &[])
+                .await
+                .ok()
+                .and_then(|result| {
+                    result
+                        .rows
+                        .first()
+                        .and_then(|row| row.get(0))
+                        .and_then(|value| value.as_str())
+                        .map(ToString::to_string)
+                });
+        }
+
+        if connection.has_session_namespace() {
+            return connection.resolve_session_namespace().await.ok().flatten();
+        }
+
+        None
+    }
+
     /// Create a new schema service
     pub fn new() -> Self {
         Self {
@@ -124,7 +156,12 @@ impl SchemaService {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned);
-        let bypass_cache = target_database.is_some();
+        let effective_target_database = if Self::uses_unscoped_introspection(connection.as_ref()) {
+            None
+        } else {
+            target_database
+        };
+        let bypass_cache = effective_target_database.is_some();
 
         // Check cache validity
         if !bypass_cache && self.cache.is_valid(connection_id) {
@@ -173,15 +210,22 @@ impl SchemaService {
         } else {
             None
         };
-        let database_name = target_database.clone().or(resolved_namespace.clone());
-        let schema_name = target_database.clone().or(resolved_namespace);
+        let resolved_database_name = Self::resolve_database_name_for_connection(&connection).await;
+        let database_name = effective_target_database.clone().or(resolved_database_name);
+        let schema_name = effective_target_database.clone().or(resolved_namespace);
         let schema_names = schema
             .list_schemas()
             .await
             .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
             .unwrap_or_else(|_| Vec::new());
 
-        let introspection_schema = target_database.as_deref().or(schema_name.as_deref());
+        let introspection_schema = if Self::uses_unscoped_introspection(connection.as_ref()) {
+            None
+        } else {
+            effective_target_database
+                .as_deref()
+                .or(schema_name.as_deref())
+        };
 
         // Load all schema objects (handle partial failures gracefully)
         let tables_result = schema.list_tables(introspection_schema).await;
@@ -578,26 +622,36 @@ impl SchemaService {
             return None;
         }
 
+        let should_return_namespace_scope = !Self::uses_unscoped_introspection(connection.as_ref());
+
         // Check cache first to avoid redundant queries
         if let Some(conn_id) = connection_id {
             if self.cache.is_valid(conn_id) {
                 let cached_db = self.cache.get_database_name(conn_id);
                 let cached_schema = self.cache.get_schema_name(conn_id);
                 if cached_db.is_some() || cached_schema.is_some() {
-                    return cached_schema;
+                    return if should_return_namespace_scope {
+                        cached_schema
+                    } else {
+                        None
+                    };
                 }
             }
         }
 
         let schema_name = connection.resolve_session_namespace().await.ok().flatten();
-        let database_name = schema_name.clone();
+        let database_name = Self::resolve_database_name_for_connection(connection).await;
 
         if let Some(conn_id) = connection_id {
             self.cache
                 .set_connection_names(conn_id, database_name.clone(), schema_name.clone());
         }
 
-        schema_name
+        if should_return_namespace_scope {
+            schema_name
+        } else {
+            None
+        }
     }
 
     /// Get detailed table information

@@ -1,4 +1,5 @@
 use super::*;
+use zqlz_ui::widgets::PixelsExt;
 
 impl TableViewerDelegate {
     pub fn freeze_column(&mut self, col_ix: usize) {
@@ -24,11 +25,42 @@ impl TableViewerDelegate {
 
         let data_col_ix = col_ix - 1;
 
-        let header_width = if let Some(meta) = self.column_meta.get(data_col_ix) {
-            Self::estimate_text_width(&meta.name, 7.5) + 48.0
-        } else {
-            100.0
-        };
+        let header_label = self
+            .columns
+            .get(col_ix)
+            .map(|column| column.name.as_ref())
+            .or_else(|| {
+                self.column_meta
+                    .get(data_col_ix)
+                    .map(|meta| meta.name.as_str())
+            })
+            .unwrap_or("Column");
+
+        let cell_padding = self.size.table_cell_padding();
+        let horizontal_padding = cell_padding.left.as_f32() + cell_padding.right.as_f32();
+
+        let shows_primary_key_icon = self
+            .column_meta
+            .get(data_col_ix)
+            .is_some_and(|meta| self.primary_key_columns.contains(&meta.name));
+        let shows_foreign_key_icon = self.fk_by_column.contains_key(&data_col_ix);
+        let shows_nullable_badge = self
+            .column_meta
+            .get(data_col_ix)
+            .is_some_and(|meta| meta.nullable);
+
+        let mut header_chrome_width = horizontal_padding + 30.0;
+        if shows_primary_key_icon {
+            header_chrome_width += 18.0;
+        }
+        if shows_foreign_key_icon {
+            header_chrome_width += 18.0;
+        }
+        if shows_nullable_badge {
+            header_chrome_width += 28.0;
+        }
+
+        let header_width = Self::estimate_text_width(header_label, 8.8) + header_chrome_width;
 
         let sample_size = self.rows.len().min(100);
         let mut content_widths: Vec<f32> = Vec::with_capacity(sample_size);
@@ -44,12 +76,12 @@ impl TableViewerDelegate {
             if let Some(value) = self.rows[index].get(data_col_ix) {
                 let display = value.display_for_table();
                 let first_line = display.lines().next().unwrap_or(&display);
-                let measured = if first_line.len() > 60 {
-                    &first_line[..60]
+                let measured = if first_line.chars().count() > 60 {
+                    first_line.chars().take(60).collect::<String>()
                 } else {
-                    first_line
+                    first_line.to_string()
                 };
-                let width = Self::estimate_text_width(measured, 7.0) + 24.0;
+                let width = Self::estimate_text_width(&measured, 7.4) + horizontal_padding + 12.0;
                 content_widths.push(width);
             }
             index += step;
@@ -65,7 +97,7 @@ impl TableViewerDelegate {
         };
 
         let optimal = header_width.max(content_width);
-        optimal.clamp(60.0, 500.0)
+        optimal.clamp(80.0, 900.0)
     }
 
     fn estimate_text_width(text: &str, base_width: f32) -> f32 {

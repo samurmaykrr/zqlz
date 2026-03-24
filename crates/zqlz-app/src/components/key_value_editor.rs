@@ -8,17 +8,21 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::{ops::Range, rc::Rc};
 use uuid::Uuid;
 use zqlz_core::{ColumnMeta, Value};
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, ZqlzIcon,
+    ActiveTheme, Disableable, Icon, IconName, IndexPath, Sizable, VirtualListScrollHandle,
+    ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants},
     checkbox::Checkbox,
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputState},
+    scroll::{Scrollbar, ScrollbarShow},
     select::{Select, SelectEvent, SelectItem, SelectState},
-    v_flex,
+    tooltip::Tooltip,
+    v_flex, v_virtual_list,
 };
 
 use super::TableViewerPanel;
@@ -469,6 +473,9 @@ pub struct KeyValueEditorPanel {
     list_items: Vec<ListItem>,
     hash_fields: Vec<HashField>,
     zset_members: Vec<ZSetMember>,
+    list_scroll_handle: UniformListScrollHandle,
+    hash_scroll_handle: UniformListScrollHandle,
+    zset_scroll_handle: UniformListScrollHandle,
 
     // --- SQL row mode fields ---
     row_data: Option<RowData>,
@@ -480,6 +487,7 @@ pub struct KeyValueEditorPanel {
     expanded_row_field: Option<usize>,
     /// Subscriptions to InputEvent::Change on each row field input
     _field_subscriptions: Vec<Subscription>,
+    sql_row_scroll_handle: VirtualListScrollHandle,
 
     // --- Shared fields ---
     validation_error: Option<String>,
@@ -487,6 +495,18 @@ pub struct KeyValueEditorPanel {
     value_editor_expanded: bool,
     word_wrap: bool,
     _subscriptions: Vec<Subscription>,
+}
+
+const REDIS_COLLECTION_ROW_HEIGHT: f32 = 30.0;
+const REDIS_COLLECTION_SCROLLBAR_WIDTH: f32 = 14.0;
+const SQL_ROW_FIELD_COLLAPSED_HEIGHT: f32 = 72.0;
+const SQL_ROW_FIELD_EXPANDED_HEIGHT: f32 = 230.0;
+const SQL_ROW_EXPANDED_EDITOR_HEIGHT: f32 = 160.0;
+const SQL_ROW_FIELD_LABEL_TOOLTIP_THRESHOLD: usize = 22;
+const SQL_ROW_FIELD_TYPE_TOOLTIP_THRESHOLD: usize = 16;
+
+fn should_show_truncation_tooltip(value: &str, threshold: usize) -> bool {
+    value.chars().count() > threshold
 }
 
 impl KeyValueEditorPanel {
@@ -537,11 +557,15 @@ impl KeyValueEditorPanel {
             list_items: Vec::new(),
             hash_fields: Vec::new(),
             zset_members: Vec::new(),
+            list_scroll_handle: UniformListScrollHandle::new(),
+            hash_scroll_handle: UniformListScrollHandle::new(),
+            zset_scroll_handle: UniformListScrollHandle::new(),
             row_data: None,
             row_fields: Vec::new(),
             focused_field_index: None,
             expanded_row_field: None,
             _field_subscriptions: Vec::new(),
+            sql_row_scroll_handle: VirtualListScrollHandle::new(),
             validation_error: None,
             is_modified: false,
             value_editor_expanded: false,
@@ -634,6 +658,9 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.list_scroll_handle = UniformListScrollHandle::new();
+        self.hash_scroll_handle = UniformListScrollHandle::new();
+        self.zset_scroll_handle = UniformListScrollHandle::new();
 
         match value_type {
             RedisValueType::List | RedisValueType::Set => {
@@ -910,6 +937,7 @@ impl KeyValueEditorPanel {
         self.focused_field_index = None;
         self.expanded_row_field = None;
         self.value_editor_expanded = false;
+        self.sql_row_scroll_handle = VirtualListScrollHandle::new();
         self._field_subscriptions.clear();
 
         self.row_fields = data
@@ -1073,6 +1101,27 @@ impl KeyValueEditorPanel {
         self.expanded_row_field == Some(index)
     }
 
+    fn sql_row_field_sizes(&self) -> Rc<Vec<Size<Pixels>>> {
+        let row_count = self
+            .row_data
+            .as_ref()
+            .map(|data| data.column_meta.len().min(self.row_fields.len()))
+            .unwrap_or(0);
+
+        Rc::new(
+            (0..row_count)
+                .map(|index| {
+                    let row_height = if self.is_row_field_expanded(index) {
+                        px(SQL_ROW_FIELD_EXPANDED_HEIGHT)
+                    } else {
+                        px(SQL_ROW_FIELD_COLLAPSED_HEIGHT)
+                    };
+                    size(px(0.), row_height)
+                })
+                .collect(),
+        )
+    }
+
     fn toggle_value_editor_expansion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.value_editor_expanded = !self.value_editor_expanded;
         self.value_input.update(cx, |input, cx| {
@@ -1093,6 +1142,10 @@ impl KeyValueEditorPanel {
             Some(index)
         };
         self.focus_field(index, window, cx);
+        if let Some(expanded_index) = self.expanded_row_field {
+            self.sql_row_scroll_handle
+                .scroll_to_item(expanded_index, ScrollStrategy::Center);
+        }
     }
 
     fn toggle_row_field_null(&mut self, field_index: usize, cx: &mut Context<Self>) {
@@ -1145,6 +1198,7 @@ impl KeyValueEditorPanel {
         h_flex()
             .gap_0p5()
             .items_center()
+            .flex_shrink_0()
             .child(
                 Checkbox::new(("null-checkbox", field_index))
                     .checked(is_null)
@@ -1752,6 +1806,95 @@ impl KeyValueEditorPanel {
         }
     }
 
+    fn render_list_item_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(item) = self.list_items.get(index) else {
+            return div().id(("list-item-empty", index)).into_any_element();
+        };
+
+        h_flex()
+            .id(("list-item-row", index))
+            .w_full()
+            .h(px(REDIS_COLLECTION_ROW_HEIGHT))
+            .px_1()
+            .py_0p5()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(Input::new(&item.input).w_full().xsmall())
+            .child(
+                Button::new(("remove-item", index))
+                    .icon(Icon::new(ZqlzIcon::Minus).size_3())
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_list_item(index, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_hash_field_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(field) = self.hash_fields.get(index) else {
+            return div().id(("hash-field-empty", index)).into_any_element();
+        };
+
+        h_flex()
+            .id(("hash-field-row", index))
+            .w_full()
+            .h(px(REDIS_COLLECTION_ROW_HEIGHT))
+            .px_1()
+            .py_0p5()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(Input::new(&field.field_input).w(px(110.)).xsmall())
+            .child(Input::new(&field.value_input).flex_1().xsmall())
+            .child(
+                Button::new(("remove-field", index))
+                    .icon(Icon::new(ZqlzIcon::Minus).size_3())
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_hash_field(index, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
+    fn render_zset_member_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let theme = cx.theme();
+        let Some(member) = self.zset_members.get(index) else {
+            return div().id(("zset-member-empty", index)).into_any_element();
+        };
+
+        h_flex()
+            .id(("zset-member-row", index))
+            .w_full()
+            .h(px(REDIS_COLLECTION_ROW_HEIGHT))
+            .px_1()
+            .py_0p5()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(Input::new(&member.member_input).flex_1().xsmall())
+            .child(Input::new(&member.score_input).w(px(70.)).xsmall())
+            .child(
+                Button::new(("remove-member", index))
+                    .icon(Icon::new(ZqlzIcon::Minus).size_3())
+                    .ghost()
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.remove_zset_member(index, cx);
+                    })),
+            )
+            .into_any_element()
+    }
+
     fn render_field_row(
         &self,
         label: &str,
@@ -1786,6 +1929,8 @@ impl KeyValueEditorPanel {
     fn render_list_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let item_count = self.list_items.len();
+        let border_color = theme.border;
+        let muted_foreground = theme.muted_foreground;
 
         v_flex()
             .gap_1()
@@ -1806,46 +1951,75 @@ impl KeyValueEditorPanel {
                     .py_1()
                     .bg(theme.table_head)
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(border_color)
                     .child(
                         div()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child("Element"),
                     ),
             )
-            // Items list
             .child(
                 div()
                     .id("list-items-container")
                     .flex_1()
                     .min_h(px(100.))
-                    .overflow_y_scroll()
+                    .relative()
+                    .overflow_hidden()
                     .border_1()
-                    .border_color(theme.border)
-                    .child(v_flex().children(self.list_items.iter().enumerate().map(
-                        |(idx, item)| {
-                            let index = idx;
-                            h_flex()
-                                .w_full()
-                                .px_1()
-                                .py_0p5()
-                                .gap_1()
-                                .items_center()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(Input::new(&item.input).w_full().xsmall())
+                    .border_color(border_color)
+                    .when(item_count == 0, |this| {
+                        this.child(
+                            v_flex().size_full().items_center().justify_center().child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No elements"),
+                            ),
+                        )
+                    })
+                    .when(item_count > 0, |this| {
+                        this.child(
+                            uniform_list(
+                                "redis-list-items",
+                                item_count,
+                                cx.processor(
+                                    move |state: &mut KeyValueEditorPanel,
+                                          visible_range: Range<usize>,
+                                          _window,
+                                          cx| {
+                                        let total_rows = state.list_items.len();
+                                        let start = visible_range.start.min(total_rows);
+                                        let end = visible_range.end.min(total_rows);
+
+                                        (start..end)
+                                            .map(|index| state.render_list_item_row(index, cx))
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .flex_grow()
+                            .size_full()
+                            .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.list_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(item_count > 0, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                                 .child(
-                                    Button::new(("remove-item", idx))
-                                        .icon(Icon::new(ZqlzIcon::Minus).size_3())
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.remove_list_item(index, cx);
-                                        })),
-                                )
-                        },
-                    ))),
+                                    Scrollbar::vertical(&self.list_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
             )
             // Toolbar
             .child(
@@ -1899,7 +2073,7 @@ impl KeyValueEditorPanel {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child(format!("{} elements", item_count)),
                     ),
             )
@@ -1909,6 +2083,8 @@ impl KeyValueEditorPanel {
     fn render_hash_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let field_count = self.hash_fields.len();
+        let border_color = theme.border;
+        let muted_foreground = theme.muted_foreground;
 
         v_flex()
             .gap_1()
@@ -1929,55 +2105,83 @@ impl KeyValueEditorPanel {
                     .py_1()
                     .bg(theme.table_head)
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(border_color)
                     .child(
                         div()
                             .w(px(120.))
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child("Field"),
                     )
                     .child(
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child("Value"),
                     ),
             )
-            // Fields list
             .child(
                 div()
                     .id("hash-fields-container")
                     .flex_1()
                     .min_h(px(100.))
-                    .overflow_y_scroll()
+                    .relative()
+                    .overflow_hidden()
                     .border_1()
-                    .border_color(theme.border)
-                    .child(v_flex().children(self.hash_fields.iter().enumerate().map(
-                        |(idx, field)| {
-                            let index = idx;
-                            h_flex()
-                                .w_full()
-                                .px_1()
-                                .py_0p5()
-                                .gap_1()
-                                .items_center()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(Input::new(&field.field_input).w(px(110.)).xsmall())
-                                .child(Input::new(&field.value_input).flex_1().xsmall())
+                    .border_color(border_color)
+                    .when(field_count == 0, |this| {
+                        this.child(
+                            v_flex().size_full().items_center().justify_center().child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No fields"),
+                            ),
+                        )
+                    })
+                    .when(field_count > 0, |this| {
+                        this.child(
+                            uniform_list(
+                                "redis-hash-fields",
+                                field_count,
+                                cx.processor(
+                                    move |state: &mut KeyValueEditorPanel,
+                                          visible_range: Range<usize>,
+                                          _window,
+                                          cx| {
+                                        let total_rows = state.hash_fields.len();
+                                        let start = visible_range.start.min(total_rows);
+                                        let end = visible_range.end.min(total_rows);
+
+                                        (start..end)
+                                            .map(|index| state.render_hash_field_row(index, cx))
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .flex_grow()
+                            .size_full()
+                            .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.hash_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(field_count > 0, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                                 .child(
-                                    Button::new(("remove-field", idx))
-                                        .icon(Icon::new(ZqlzIcon::Minus).size_3())
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.remove_hash_field(index, cx);
-                                        })),
-                                )
-                        },
-                    ))),
+                                    Scrollbar::vertical(&self.hash_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
             )
             // Toolbar
             .child(
@@ -2017,7 +2221,7 @@ impl KeyValueEditorPanel {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child(format!("{} fields", field_count)),
                     ),
             )
@@ -2027,6 +2231,8 @@ impl KeyValueEditorPanel {
     fn render_zset_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let member_count = self.zset_members.len();
+        let border_color = theme.border;
+        let muted_foreground = theme.muted_foreground;
 
         v_flex()
             .gap_1()
@@ -2047,55 +2253,83 @@ impl KeyValueEditorPanel {
                     .py_1()
                     .bg(theme.table_head)
                     .border_b_1()
-                    .border_color(theme.border)
+                    .border_color(border_color)
                     .child(
                         div()
                             .flex_1()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child("Element"),
                     )
                     .child(
                         div()
                             .w(px(80.))
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child("Score"),
                     ),
             )
-            // Members list
             .child(
                 div()
                     .id("zset-members-container")
                     .flex_1()
                     .min_h(px(100.))
-                    .overflow_y_scroll()
+                    .relative()
+                    .overflow_hidden()
                     .border_1()
-                    .border_color(theme.border)
-                    .child(v_flex().children(self.zset_members.iter().enumerate().map(
-                        |(idx, member)| {
-                            let index = idx;
-                            h_flex()
-                                .w_full()
-                                .px_1()
-                                .py_0p5()
-                                .gap_1()
-                                .items_center()
-                                .border_b_1()
-                                .border_color(theme.border)
-                                .child(Input::new(&member.member_input).flex_1().xsmall())
-                                .child(Input::new(&member.score_input).w(px(70.)).xsmall())
+                    .border_color(border_color)
+                    .when(member_count == 0, |this| {
+                        this.child(
+                            v_flex().size_full().items_center().justify_center().child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No members"),
+                            ),
+                        )
+                    })
+                    .when(member_count > 0, |this| {
+                        this.child(
+                            uniform_list(
+                                "redis-zset-members",
+                                member_count,
+                                cx.processor(
+                                    move |state: &mut KeyValueEditorPanel,
+                                          visible_range: Range<usize>,
+                                          _window,
+                                          cx| {
+                                        let total_rows = state.zset_members.len();
+                                        let start = visible_range.start.min(total_rows);
+                                        let end = visible_range.end.min(total_rows);
+
+                                        (start..end)
+                                            .map(|index| state.render_zset_member_row(index, cx))
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .flex_grow()
+                            .size_full()
+                            .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.zset_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(member_count > 0, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
                                 .child(
-                                    Button::new(("remove-member", idx))
-                                        .icon(Icon::new(ZqlzIcon::Minus).size_3())
-                                        .ghost()
-                                        .xsmall()
-                                        .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.remove_zset_member(index, cx);
-                                        })),
-                                )
-                        },
-                    ))),
+                                    Scrollbar::vertical(&self.zset_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
             )
             // Toolbar
             .child(
@@ -2135,7 +2369,7 @@ impl KeyValueEditorPanel {
                     .child(
                         div()
                             .text_xs()
-                            .text_color(theme.muted_foreground)
+                            .text_color(muted_foreground)
                             .child(format!("{} members", member_count)),
                     ),
             )
@@ -2229,6 +2463,11 @@ impl KeyValueEditorPanel {
                     .when(is_expanded, |this| this.h(px(EXPANDED_VALUE_EDITOR_HEIGHT)))
                     .when(!is_expanded, |this| {
                         this.min_h(px(COLLAPSED_VALUE_EDITOR_MIN_HEIGHT))
+                    })
+                    .when(is_expanded, |this| {
+                        this.on_scroll_wheel(|_event, _window, cx| {
+                            cx.stop_propagation();
+                        })
                     })
                     .child(Input::new(&self.value_input).w_full().h_full()),
             )
@@ -2327,8 +2566,6 @@ impl KeyValueEditorPanel {
         field: &RowField,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        const EXPANDED_ROW_FIELD_HEIGHT: f32 = 160.0;
-
         let theme = cx.theme();
         let is_auto = col.auto_increment;
         let is_nullable = col.nullable;
@@ -2338,32 +2575,70 @@ impl KeyValueEditorPanel {
         let is_expanded = self.is_row_field_expanded(index);
 
         v_flex()
+            .w_full()
             .gap_0p5()
             .pb_2()
             .child(
                 h_flex()
+                    .w_full()
                     .items_center()
                     .justify_between()
                     .child(
                         h_flex()
+                            .min_w_0()
+                            .flex_1()
                             .gap_1()
                             .items_center()
                             .child(
                                 div()
+                                    .id(("sql-row-name", field_index))
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_xs()
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(theme.foreground)
-                                    .child(col.name.clone()),
+                                    .child(col.name.clone())
+                                    .when(
+                                        should_show_truncation_tooltip(
+                                            &col.name,
+                                            SQL_ROW_FIELD_LABEL_TOOLTIP_THRESHOLD,
+                                        ),
+                                        |this| {
+                                            let full_name = col.name.clone();
+                                            this.tooltip(move |window, cx| {
+                                                Tooltip::new(full_name.clone()).build(window, cx)
+                                            })
+                                        },
+                                    ),
                             )
                             .child(
                                 div()
+                                    .id(("sql-row-type", field_index))
+                                    .max_w(px(140.))
+                                    .overflow_hidden()
+                                    .whitespace_nowrap()
+                                    .text_ellipsis()
                                     .text_xs()
                                     .px_1()
                                     .py_px()
                                     .rounded(px(3.))
                                     .bg(theme.muted)
                                     .text_color(theme.muted_foreground)
-                                    .child(col.data_type.clone()),
+                                    .child(col.data_type.clone())
+                                    .when(
+                                        should_show_truncation_tooltip(
+                                            &col.data_type,
+                                            SQL_ROW_FIELD_TYPE_TOOLTIP_THRESHOLD,
+                                        ),
+                                        |this| {
+                                            let full_type = col.data_type.clone();
+                                            this.tooltip(move |window, cx| {
+                                                Tooltip::new(full_type.clone()).build(window, cx)
+                                            })
+                                        },
+                                    ),
                             )
                             .when(is_auto, |this| {
                                 this.child(
@@ -2404,15 +2679,22 @@ impl KeyValueEditorPanel {
             .when(is_expanded, |this| {
                 this.child(
                     v_flex()
+                        .w_full()
                         .gap_1()
                         .child(
-                            div().h(px(EXPANDED_ROW_FIELD_HEIGHT)).child(
-                                Input::new(&field.input)
-                                    .w_full()
-                                    .h_full()
-                                    .small()
-                                    .disabled(is_disabled),
-                            ),
+                            div()
+                                .w_full()
+                                .h(px(SQL_ROW_EXPANDED_EDITOR_HEIGHT))
+                                .on_scroll_wheel(|_event, _window, cx| {
+                                    cx.stop_propagation();
+                                })
+                                .child(
+                                    Input::new(&field.input)
+                                        .w_full()
+                                        .h_full()
+                                        .small()
+                                        .disabled(is_disabled),
+                                ),
                         )
                         .when(is_nullable, |this| {
                             this.child(self.render_sql_row_null_toggle(field_index, is_null, cx))
@@ -2422,10 +2704,12 @@ impl KeyValueEditorPanel {
             .when(!is_expanded, |this| {
                 this.child(
                     h_flex()
+                        .w_full()
+                        .min_w_0()
                         .gap_1()
                         .items_center()
                         .child(
-                            div().flex_1().child(
+                            div().flex_1().min_w_0().child(
                                 Input::new(&field.input)
                                     .w_full()
                                     .small()
@@ -2437,6 +2721,25 @@ impl KeyValueEditorPanel {
                         }),
                 )
             })
+    }
+
+    fn render_sql_row_field_by_index(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
+        let Some(data) = &self.row_data else {
+            return div().id(("sql-row-field-empty", index)).into_any_element();
+        };
+        let Some(col) = data.column_meta.get(index) else {
+            return div()
+                .id(("sql-row-field-missing-col", index))
+                .into_any_element();
+        };
+        let Some(field) = self.row_fields.get(index) else {
+            return div()
+                .id(("sql-row-field-missing-value", index))
+                .into_any_element();
+        };
+
+        self.render_sql_row_field(index, col, field, cx)
+            .into_any_element()
     }
 
     /// Render the SQL row editor form
@@ -2453,14 +2756,17 @@ impl KeyValueEditorPanel {
         };
 
         let has_modifications = self.has_row_modifications(cx);
+        let row_count = data.column_meta.len().min(self.row_fields.len());
+        let field_sizes = self.sql_row_field_sizes();
 
         v_flex()
             .id("sql-row-editor-content")
             .size_full()
+            .w_full()
             .gap_1()
             .child(
                 // Header
-                h_flex().px_2().pt_2().pb_1().items_center().child(
+                h_flex().w_full().px_2().pt_2().pb_1().items_center().child(
                     div()
                         .text_sm()
                         .font_weight(FontWeight::MEDIUM)
@@ -2473,20 +2779,67 @@ impl KeyValueEditorPanel {
                 div()
                     .id("sql-row-fields")
                     .flex_1()
+                    .w_full()
                     .px_2()
-                    .overflow_y_scroll()
-                    .child(
-                        v_flex().gap_0p5().children(
-                            data.column_meta
-                                .iter()
-                                .zip(self.row_fields.iter())
-                                .enumerate()
-                                .map(|(index, (col, field))| {
-                                    self.render_sql_row_field(index, col, field, cx)
-                                        .into_any_element()
-                                }),
-                        ),
-                    ),
+                    .relative()
+                    .overflow_hidden()
+                    .when(row_count == 0, |this| {
+                        this.child(
+                            v_flex().size_full().items_center().justify_center().child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("No columns to edit"),
+                            ),
+                        )
+                    })
+                    .when(row_count > 0, |this| {
+                        this.child(
+                            v_virtual_list(
+                                cx.entity(),
+                                "sql-row-fields-list",
+                                field_sizes,
+                                move |state: &mut KeyValueEditorPanel,
+                                      visible_range: Range<usize>,
+                                      _window,
+                                      cx| {
+                                    let total_rows = state
+                                        .row_data
+                                        .as_ref()
+                                        .map(|data| {
+                                            data.column_meta.len().min(state.row_fields.len())
+                                        })
+                                        .unwrap_or(0);
+                                    let start = visible_range.start.min(total_rows);
+                                    let end = visible_range.end.min(total_rows);
+
+                                    (start..end)
+                                        .map(|index| state.render_sql_row_field_by_index(index, cx))
+                                        .collect::<Vec<_>>()
+                                },
+                            )
+                            .w_full()
+                            .h_full()
+                            .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.sql_row_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(row_count > 0, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                                .child(
+                                    Scrollbar::vertical(&self.sql_row_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
             )
             .when_some(self.render_validation_error(cx), |this, error| {
                 this.child(div().px_2().child(error))

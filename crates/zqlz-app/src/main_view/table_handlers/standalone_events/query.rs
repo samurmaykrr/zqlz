@@ -3,13 +3,15 @@
 use gpui::*;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
-use zqlz_services::{BrowseTableWithFiltersRequest, TableService};
+use zqlz_services::BrowseTableWithFiltersRequest;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
-use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
+use crate::main_view::table_handlers_utils::sql::{
+    build_search_clause_for_columns, resolve_search_columns,
+};
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
@@ -22,6 +24,7 @@ pub(in crate::main_view) struct ApplyFiltersRequest {
     pub sorts: Vec<crate::components::SortCriterion>,
     pub visible_columns: Vec<String>,
     pub search_text: String,
+    pub search_columns: Option<Vec<String>>,
 }
 
 pub(in crate::main_view) fn handle_apply_filters_event(
@@ -68,11 +71,7 @@ pub(in crate::main_view) fn handle_apply_filters_event(
     // Build search WHERE clause: search across all string-like columns with CAST/LIKE
     if !request.search_text.is_empty() {
         let column_meta = viewer_entity.read(cx).column_meta.clone();
-        let searchable_columns: Vec<String> = column_meta
-            .iter()
-            .filter(|col| TableService::is_string_type(&col.data_type.to_lowercase()))
-            .map(|col| col.name.clone())
-            .collect();
+        let searchable_columns = resolve_search_columns(&column_meta, request.search_columns);
 
         if let Some(search_clause) = build_search_clause_for_columns(
             &connection,

@@ -113,6 +113,7 @@ impl TableViewerDelegate {
             }
         });
 
+        self.clear_cell_preview_cache();
         self.recompute_filtered_indices();
     }
 
@@ -170,6 +171,7 @@ impl TableViewerDelegate {
             std::cmp::Ordering::Equal
         });
 
+        self.clear_cell_preview_cache();
         self.recompute_filtered_indices();
     }
 

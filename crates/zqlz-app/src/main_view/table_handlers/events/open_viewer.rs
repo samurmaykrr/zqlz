@@ -175,7 +175,6 @@ impl MainView {
                             column_name: column_name.clone(),
                             column_type: column_type.clone(),
                             column_meta: column_meta.clone(),
-                            row_id: None,
                             current_value: current_value.clone(),
                             row_index: *row,
                             col_index: *col,
@@ -368,6 +367,7 @@ impl MainView {
                         sorts,
                         visible_columns,
                         search_text,
+                        search_columns,
                     } => {
                         // Clear cell editor — row indices become stale after filter change
                         cell_editor_panel.update(cx, |editor, cx| {
@@ -381,6 +381,7 @@ impl MainView {
                                 sorts: sorts.clone(),
                                 visible_columns: visible_columns.clone(),
                                 search_text: search_text.clone(),
+                                search_columns: search_columns.clone(),
                             },
                             viewer_entity_for_events.clone(),
                             window,
@@ -841,20 +842,58 @@ impl MainView {
         let task = cx.spawn_in(window, async move |this, cx| {
             tracing::info!("Loading table data: {}", table_name_for_spawn);
 
+            let mut effective_database_name_for_spawn = database_name_for_spawn.clone();
+            let mut postgres_session_database_name: Option<String> = None;
+
+            if matches!(conn.dialect_id(), Some("postgres") | Some("postgresql")) {
+                let postgres_session_schema_name = conn.resolve_session_namespace().await.ok().flatten();
+                postgres_session_database_name = conn
+                    .query("SELECT current_database()", &[])
+                    .await
+                    .ok()
+                    .and_then(|result| {
+                        result
+                            .rows
+                            .first()
+                            .and_then(|row| row.get(0))
+                            .and_then(|value| value.as_str())
+                            .map(ToString::to_string)
+                    });
+
+                if effective_database_name_for_spawn.as_deref()
+                    == postgres_session_schema_name.as_deref()
+                    && effective_database_name_for_spawn.as_deref()
+                        != postgres_session_database_name.as_deref()
+                {
+                    tracing::warn!(
+                        requested_database = ?effective_database_name_for_spawn,
+                        session_schema = ?postgres_session_schema_name,
+                        session_database = ?postgres_session_database_name,
+                        "Received PostgreSQL schema name as database target while opening table; using active connection database"
+                    );
+                    effective_database_name_for_spawn = None;
+                }
+            }
+
             // Get a database-specific connection for drivers (like PostgreSQL)
             // where each connection is scoped to a single database.
-            let conn = match &database_name_for_spawn {
-                Some(db_name) => {
-                    connections.get_for_database(connection_id, db_name).await
-                        .map_err(|e| {
-                            tracing::error!(
-                                database = %db_name,
-                                error = %e,
-                                "Failed to get database-specific connection"
-                            );
-                            e
-                        })?
+            let conn = match &effective_database_name_for_spawn {
+                Some(db_name)
+                    if postgres_session_database_name.as_deref() == Some(db_name.as_str()) =>
+                {
+                    conn
                 }
+                Some(db_name) => connections
+                    .get_for_database(connection_id, db_name)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!(
+                            database = %db_name,
+                            error = %e,
+                            "Failed to get database-specific connection"
+                        );
+                        e
+                    })?,
                 None => conn,
             };
 
@@ -929,7 +968,7 @@ impl MainView {
                             connection_id,
                             conn_name,
                             table_name_for_spawn.clone(),
-                            database_name_for_spawn.clone(),
+                            effective_database_name_for_spawn.clone(),
                             is_view,
                             query_result,
                             driver_category,
