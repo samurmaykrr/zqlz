@@ -11,7 +11,9 @@ use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
 use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
-use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
+use crate::main_view::table_handlers_utils::sql::{
+    build_search_clause_for_columns, resolve_search_columns,
+};
 
 fn begin_viewer_request(viewer_entity: &Entity<TableViewerPanel>, cx: &mut App) -> u64 {
     viewer_entity.update(cx, |viewer, cx| viewer.begin_data_request(cx))
@@ -184,12 +186,16 @@ fn handle_refresh_sql_table(
 
     // Build search WHERE clause if search text is present
     if !search_text.is_empty() {
-        let column_meta = viewer_entity.read(cx).column_meta.clone();
-        let searchable_columns: Vec<String> = column_meta
-            .iter()
-            .filter(|col| TableService::is_string_type(&col.data_type.to_lowercase()))
-            .map(|col| col.name.clone())
-            .collect();
+        let (column_meta, profile_search_columns) = viewer_entity.read_with(cx, |viewer, _cx| {
+            (
+                viewer.column_meta.clone(),
+                viewer
+                    .performance_profile
+                    .as_ref()
+                    .map(|profile| profile.searchable_columns.clone()),
+            )
+        });
+        let searchable_columns = resolve_search_columns(&column_meta, profile_search_columns);
 
         if let Some(search_clause) =
             build_search_clause_for_columns(&connection, &searchable_columns, &search_text, false)

@@ -62,6 +62,9 @@ impl TableViewerDelegate {
             primary_key_columns: Vec::new(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
+            cell_preview_cache: HashMap::new(),
+            visible_rows_range: None,
+            visible_columns_range: None,
         }
     }
 
@@ -99,6 +102,7 @@ impl TableViewerDelegate {
     }
 
     pub fn append_rows(&mut self, new_rows: Vec<Vec<Value>>, has_more: bool) {
+        self.clear_cell_preview_cache();
         self.rows.extend(new_rows);
         self.has_more_data = has_more;
         self.is_loading_more = false;
@@ -106,6 +110,7 @@ impl TableViewerDelegate {
     }
 
     pub fn replace_rows(&mut self, rows: Vec<Vec<Value>>, has_more: bool) {
+        self.clear_cell_preview_cache();
         self.rows = rows;
         self.has_more_data = has_more;
         self.is_loading_more = false;

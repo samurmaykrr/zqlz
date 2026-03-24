@@ -24,6 +24,12 @@ impl TableViewerPanel {
                 .map(|state| state.read(cx).visible_columns())
                 .unwrap_or_else(|| self.column_meta.iter().map(|c| c.name.clone()).collect());
 
+            let search_columns = self
+                .performance_profile
+                .as_ref()
+                .map(|profile| profile.searchable_columns.clone())
+                .filter(|columns| !columns.is_empty());
+
             cx.emit(TableViewerEvent::ApplyFilters {
                 connection_id,
                 table_name,
@@ -31,6 +37,7 @@ impl TableViewerPanel {
                 sorts,
                 visible_columns,
                 search_text: self.search_text.clone(),
+                search_columns,
             });
 
             if let Some(pag_state) = &self.pagination_state {

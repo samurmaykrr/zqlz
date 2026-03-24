@@ -16,6 +16,7 @@ use zqlz_ui::widgets::{
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputState},
+    scroll::{Scrollbar, ScrollbarShow},
     v_flex,
 };
 
@@ -33,13 +34,11 @@ fn parse_editor_value(input: Option<&str>, cell_data: &CellData) -> Value {
 
 /// Cell data being edited
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct CellData {
     pub table_name: String,
     pub column_name: String,
     pub column_type: String,
     pub column_meta: ColumnMeta,
-    pub row_id: Option<String>, // Primary key value for updating
     pub current_value: Value,
     pub row_index: usize,
     pub col_index: usize,
@@ -75,7 +74,6 @@ enum BinaryViewMode {
 }
 
 /// Cell editor panel
-#[allow(dead_code)]
 pub struct CellEditorPanel {
     focus_handle: FocusHandle,
 
@@ -115,30 +113,55 @@ pub struct CellEditorPanel {
     /// Text editor for the decoded UTF-8 view of binary data
     text_view_input: Option<Entity<InputState>>,
 
+    /// Language chosen for the current editable value.
+    ///
+    /// This is cached once when a cell is loaded so rendering does not need
+    /// to repeatedly re-parse large payloads for language inference.
+    editor_language: Option<&'static str>,
+
     /// Scroll handle for the virtualized hex dump list
     hex_scroll_handle: UniformListScrollHandle,
+
+    /// Horizontal scroll handle for wide hex rows.
+    hex_horizontal_scroll_handle: ScrollHandle,
 }
 
 /// A single pre-formatted line of a hex dump.
 ///
-/// Each field is a complete string ready to render as a single text element,
-/// eliminating the per-byte div overhead that caused scroll jank.
+/// Hex and ASCII are stored as fixed cells to keep strict alignment between
+/// rows regardless of font metrics, theme, or panel width changes.
 #[derive(Clone, Debug)]
 struct HexDumpLine {
     /// e.g. "00000000"
     offset: SharedString,
-    /// e.g. "48 54 4D 4C 20 3C 21 44  4F 43 54 59 50 45 20 68"
-    hex: SharedString,
-    /// e.g. "HTML <!DOCTYPE h"
-    ascii: SharedString,
+    /// 16 fixed hex cells (e.g. "4f") with blanks for short trailing rows.
+    hex_cells: [SharedString; HEX_BYTES_PER_LINE],
+    /// 16 fixed ASCII cells with blanks for short trailing rows.
+    ascii_cells: [SharedString; HEX_BYTES_PER_LINE],
 }
 
 /// Bytes per line in the hex dump display
 const HEX_BYTES_PER_LINE: usize = 16;
+const HEX_ROW_HEIGHT: f32 = 20.0;
+const HEX_OFFSET_COLUMN_WIDTH: f32 = 56.0;
+const HEX_BYTE_CELL_WIDTH: f32 = 16.0;
+const HEX_BYTE_CELL_GAP: f32 = 8.0;
+const HEX_BYTE_GROUP_GAP: f32 = 18.0;
+const HEX_HEX_LANE_TO_ASCII_GAP: f32 = 10.0;
+const HEX_HEX_COLUMN_WIDTH: f32 = HEX_BYTE_CELL_WIDTH * HEX_BYTES_PER_LINE as f32
+    + HEX_BYTE_CELL_GAP * (HEX_BYTES_PER_LINE as f32 - 2.0)
+    + HEX_BYTE_GROUP_GAP;
+const HEX_ASCII_CELL_WIDTH: f32 = 11.0;
+const HEX_ASCII_COLUMN_WIDTH: f32 = HEX_ASCII_CELL_WIDTH * HEX_BYTES_PER_LINE as f32 + 8.0;
+const HEX_ROW_HORIZONTAL_PADDING: f32 = 12.0;
+const HEX_DUMP_SCROLLBAR_WIDTH: f32 = 16.0;
+const HEX_MIN_CONTENT_WIDTH: f32 = HEX_OFFSET_COLUMN_WIDTH
+    + HEX_HEX_COLUMN_WIDTH
+    + HEX_HEX_LANE_TO_ASCII_GAP
+    + HEX_ASCII_COLUMN_WIDTH
+    + HEX_ROW_HORIZONTAL_PADDING;
 
-#[allow(dead_code)]
 impl CellEditorPanel {
-    #[allow(dead_code)]
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let editor_input = cx.new(|cx| {
             InputState::new(window, cx)
@@ -161,23 +184,16 @@ impl CellEditorPanel {
             hex_dump_lines: Vec::new(),
             decoded_text: None,
             text_view_input: None,
+            editor_language: None,
             hex_scroll_handle: UniformListScrollHandle::new(),
+            hex_horizontal_scroll_handle: ScrollHandle::new(),
         }
-    }
-
-    /// Check if the current cell has binary data to display
-    fn has_binary_data(&self) -> bool {
-        self.cell_data
-            .as_ref()
-            .map(|d| d.raw_bytes.is_some())
-            .unwrap_or(false)
     }
 
     /// Pre-format all hex dump lines from raw bytes.
     ///
-    /// Each line becomes three `SharedString`s (offset, hex, ascii) so the
-    /// renderer only needs 3 text children per line instead of 30+ individual
-    /// byte divs. Uses lowercase hex to match conventional hex editor style.
+    /// Each row is represented as fixed-width byte cells so the rendered lanes
+    /// always line up like native database hex viewers.
     fn build_hex_dump(bytes: &[u8]) -> Vec<HexDumpLine> {
         bytes
             .chunks(HEX_BYTES_PER_LINE)
@@ -185,37 +201,32 @@ impl CellEditorPanel {
             .map(|(chunk_idx, chunk)| {
                 let offset = format!("{:04x}", chunk_idx * HEX_BYTES_PER_LINE);
 
-                let mut hex = String::with_capacity(3 * HEX_BYTES_PER_LINE + 1);
-                for (byte_idx, byte) in chunk.iter().enumerate() {
-                    if byte_idx == 8 {
-                        hex.push(' ');
-                    }
-                    if byte_idx > 0 && byte_idx != 8 {
-                        hex.push(' ');
-                    }
-                    hex.push_str(&format!("{:02x}", byte));
-                }
-                // Pad to fixed width so the ASCII column stays aligned on short last lines
-                let full_width = HEX_BYTES_PER_LINE * 3 - 1 + 1;
-                while hex.len() < full_width {
-                    hex.push(' ');
-                }
+                let hex_cells = std::array::from_fn(|byte_index| {
+                    chunk
+                        .get(byte_index)
+                        .map(|byte| SharedString::from(format!("{:02x}", byte)))
+                        .unwrap_or_else(|| SharedString::from("  "))
+                });
 
-                let ascii: String = chunk
-                    .iter()
-                    .map(|byte| {
-                        if (0x20..=0x7E).contains(byte) {
-                            *byte as char
-                        } else {
-                            '.'
-                        }
-                    })
-                    .collect();
+                let ascii_cells = std::array::from_fn(|byte_index| {
+                    let ascii_char = chunk
+                        .get(byte_index)
+                        .map(|byte| {
+                            if (0x20..=0x7E).contains(byte) {
+                                *byte as char
+                            } else {
+                                '.'
+                            }
+                        })
+                        .unwrap_or(' ');
+
+                    SharedString::from(ascii_char.to_string())
+                });
 
                 HexDumpLine {
                     offset: SharedString::from(offset),
-                    hex: SharedString::from(hex),
-                    ascii: SharedString::from(ascii),
+                    hex_cells,
+                    ascii_cells,
                 }
             })
             .collect()
@@ -245,7 +256,9 @@ impl CellEditorPanel {
             self.hex_dump_lines = Self::build_hex_dump(bytes);
             self.decoded_text = String::from_utf8(bytes.clone()).ok();
             self.binary_view_mode = BinaryViewMode::Hex;
+            self.editor_language = None;
             self.hex_scroll_handle = UniformListScrollHandle::new();
+            self.hex_horizontal_scroll_handle = ScrollHandle::new();
 
             // Create a read-only text view for the decoded text tab
             if let Some(ref text) = self.decoded_text {
@@ -277,9 +290,11 @@ impl CellEditorPanel {
         self.hex_dump_lines.clear();
         self.decoded_text = None;
         self.text_view_input = None;
+        self.hex_scroll_handle = UniformListScrollHandle::new();
+        self.hex_horizontal_scroll_handle = ScrollHandle::new();
 
         let value = cell_data.current_value.display_for_editor();
-        let language = self.detect_language(&cell_data.column_type);
+        let language = self.detect_language(&cell_data.column_type, &value);
         let is_json = self.is_json_column(&cell_data.column_type);
 
         let formatted_value = if is_json {
@@ -310,6 +325,7 @@ impl CellEditorPanel {
         self._input_subscription = None;
 
         self.cell_data = Some(cell_data);
+        self.editor_language = language;
         self.source_viewer = source_viewer;
         self.is_modified = false;
         self.validation_error = None;
@@ -463,8 +479,27 @@ impl CellEditorPanel {
         Ok(typed_value)
     }
 
-    /// Detect the appropriate syntax highlighting language based on column type
-    fn detect_language(&self, column_type: &str) -> Option<&'static str> {
+    fn looks_like_json_document(value: &str) -> bool {
+        let trimmed = value.trim();
+        if trimmed.is_empty() {
+            return false;
+        }
+
+        if !((trimmed.starts_with('{') && trimmed.ends_with('}'))
+            || (trimmed.starts_with('[') && trimmed.ends_with(']')))
+        {
+            return false;
+        }
+
+        serde_json::from_str::<serde_json::Value>(trimmed).is_ok()
+    }
+
+    /// Detect the syntax highlighting language for the editor.
+    ///
+    /// Column type has priority because it is the least ambiguous signal.
+    /// Content heuristics are a fallback so JSON stored in generic TEXT columns
+    /// still gets highlighting and line numbers.
+    fn detect_language(&self, column_type: &str, value: &str) -> Option<&'static str> {
         let lower = column_type.to_lowercase();
 
         if lower.contains("json") || lower.contains("jsonb") {
@@ -479,10 +514,10 @@ impl CellEditorPanel {
         if lower.contains("sql") {
             return Some("sql");
         }
-        if lower.contains("javascript") || lower.contains("js") {
+        if lower.contains("javascript") {
             return Some("javascript");
         }
-        if lower.contains("typescript") || lower.contains("ts") {
+        if lower.contains("typescript") {
             return Some("typescript");
         }
         if lower.contains("markdown") || lower.contains("md") {
@@ -498,13 +533,8 @@ impl CellEditorPanel {
             return Some("zig");
         }
 
-        let col_name_lower = column_type.to_lowercase();
-        if (lower.contains("text") || lower.contains("varchar") || lower.contains("char"))
-            && (col_name_lower.contains("code")
-                || col_name_lower.contains("script")
-                || col_name_lower.contains("source"))
-        {
-            return Some("text");
+        if Self::looks_like_json_document(value) {
+            return Some("json");
         }
 
         None
@@ -698,15 +728,10 @@ impl CellEditorPanel {
         self.hex_dump_lines.clear();
         self.decoded_text = None;
         self.text_view_input = None;
+        self.editor_language = None;
+        self.hex_scroll_handle = UniformListScrollHandle::new();
+        self.hex_horizontal_scroll_handle = ScrollHandle::new();
         cx.notify();
-    }
-
-    #[allow(dead_code)]
-    pub fn is_editing_row(&self, table_name: &str, row_index: usize) -> bool {
-        self.cell_data
-            .as_ref()
-            .map(|d| d.table_name == table_name && d.row_index == row_index)
-            .unwrap_or(false)
     }
 
     pub fn is_editing_table(&self, table_name: &str) -> bool {
@@ -766,7 +791,7 @@ impl CellEditorPanel {
         let detected_language = if is_binary {
             None
         } else {
-            self.detect_language(&cell_data.column_type)
+            self.editor_language
         };
 
         v_flex()
@@ -1032,42 +1057,65 @@ impl CellEditorPanel {
     fn render_hex_dump(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let line_count = self.hex_dump_lines.len();
+        let min_content_width = px(HEX_MIN_CONTENT_WIDTH);
+        let has_vertical_scrollbar = line_count > 0;
 
         let offset_color = theme.muted_foreground;
         let hex_color = theme.foreground;
-        let ascii_color = theme.green;
+        let ascii_color = theme.muted_foreground;
         let separator_color = theme.border;
-        let muted_bg = theme.muted;
+        let row_alt_bg = theme.muted;
         let mono_font = theme.mono_font_family.clone();
 
         let header = h_flex()
-            .gap_0()
-            .px_2()
-            .py_1()
+            .w_full()
+            .min_w(min_content_width)
+            .h(px(HEX_ROW_HEIGHT))
+            .px_1p5()
+            .items_center()
+            .whitespace_nowrap()
             .border_b_1()
-            .border_color(separator_color)
+            .border_color(separator_color.opacity(0.35))
+            .bg(row_alt_bg.opacity(0.2))
             .child(
                 div()
-                    .w(px(72.))
+                    .w(px(HEX_OFFSET_COLUMN_WIDTH))
                     .flex_shrink_0()
+                    .pr_2()
+                    .text_right()
                     .text_xs()
                     .font_family(mono_font.clone())
                     .text_color(offset_color)
                     .child("Offset"),
             )
             .child(
-                div()
-                    .min_w(px(340.))
-                    .flex_1()
+                h_flex()
+                    .w(px(HEX_HEX_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .text_xs()
                     .font_family(mono_font.clone())
                     .text_color(offset_color)
-                    .child("00 01 02 03 04 05 06 07  08 09 0a 0b 0c 0d 0e 0f"),
+                    .children((0..HEX_BYTES_PER_LINE).map(|byte_index| {
+                        let mut this = div()
+                            .w(px(HEX_BYTE_CELL_WIDTH))
+                            .flex_shrink_0()
+                            .text_center()
+                            .child(SharedString::from(format!("{:02x}", byte_index)));
+
+                        if byte_index < HEX_BYTES_PER_LINE - 1 {
+                            if byte_index == (HEX_BYTES_PER_LINE / 2) - 1 {
+                                this = this.mr(px(HEX_BYTE_GROUP_GAP));
+                            } else {
+                                this = this.mr(px(HEX_BYTE_CELL_GAP));
+                            }
+                        }
+                        this
+                    })),
             )
+            .child(div().w(px(HEX_HEX_LANE_TO_ASCII_GAP)).flex_shrink_0())
             .child(
                 div()
-                    .w(px(140.))
+                    .w(px(HEX_ASCII_COLUMN_WIDTH))
                     .flex_shrink_0()
                     .pl_2()
                     .text_xs()
@@ -1081,47 +1129,98 @@ impl CellEditorPanel {
             line_count,
             cx.processor(
                 move |state: &mut CellEditorPanel, visible_range: Range<usize>, _window, _cx| {
-                    let mut items = Vec::with_capacity(visible_range.len());
+                    let total_rows = state.hex_dump_lines.len();
+                    let start = visible_range.start.min(total_rows);
+                    let end = visible_range.end.min(total_rows);
 
-                    for ix in visible_range {
-                        let line = &state.hex_dump_lines[ix];
+                    if visible_range.end > total_rows {
+                        tracing::debug!(
+                            ?visible_range,
+                            total_rows,
+                            "Hex dump visible range exceeded available rows"
+                        );
+                    }
+
+                    let mut items = Vec::with_capacity(end.saturating_sub(start));
+
+                    for index in start..end {
+                        let Some(line) = state.hex_dump_lines.get(index) else {
+                            continue;
+                        };
+
+                        let mut hex_cells = Vec::with_capacity(HEX_BYTES_PER_LINE + 1);
+                        for byte_index in 0..HEX_BYTES_PER_LINE {
+                            let mut cell = div()
+                                .w(px(HEX_BYTE_CELL_WIDTH))
+                                .flex_shrink_0()
+                                .text_center()
+                                .child(line.hex_cells[byte_index].clone());
+
+                            if byte_index < HEX_BYTES_PER_LINE - 1 {
+                                if byte_index == (HEX_BYTES_PER_LINE / 2) - 1 {
+                                    cell = cell.mr(px(HEX_BYTE_GROUP_GAP));
+                                } else {
+                                    cell = cell.mr(px(HEX_BYTE_CELL_GAP));
+                                }
+                            }
+
+                            hex_cells.push(cell.into_any_element());
+                        }
+
+                        let ascii_cells = (0..HEX_BYTES_PER_LINE)
+                            .map(|byte_index| {
+                                div()
+                                    .w(px(HEX_ASCII_CELL_WIDTH))
+                                    .flex_shrink_0()
+                                    .child(line.ascii_cells[byte_index].clone())
+                                    .into_any_element()
+                            })
+                            .collect::<Vec<_>>();
+
                         let row = h_flex()
-                            .id(ix)
-                            .gap_0()
-                            .px_2()
+                            .id(index)
+                            .w_full()
+                            .min_w(min_content_width)
+                            .h(px(HEX_ROW_HEIGHT))
+                            .px_1p5()
+                            .items_center()
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .hover(|style| style.bg(muted_bg.opacity(0.5)))
+                            .when(index % 2 == 1, |this| this.bg(row_alt_bg.opacity(0.14)))
+                            .hover(|style| style.bg(row_alt_bg.opacity(0.22)))
                             .child(
                                 div()
-                                    .w(px(72.))
+                                    .w(px(HEX_OFFSET_COLUMN_WIDTH))
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .pr_2()
+                                    .text_right()
+                                    .text_sm()
                                     .font_family(mono_font.clone())
                                     .text_color(offset_color)
                                     .child(line.offset.clone()),
                             )
                             .child(
-                                div()
-                                    .min_w(px(340.))
-                                    .flex_1()
+                                h_flex()
+                                    .w(px(HEX_HEX_COLUMN_WIDTH))
                                     .flex_shrink_0()
-                                    .text_xs()
+                                    .text_sm()
+                                    .font_weight(FontWeight::MEDIUM)
                                     .font_family(mono_font.clone())
                                     .text_color(hex_color)
-                                    .child(line.hex.clone()),
+                                    .children(hex_cells),
                             )
+                            .child(div().w(px(HEX_HEX_LANE_TO_ASCII_GAP)).flex_shrink_0())
                             .child(
-                                div()
-                                    .w(px(140.))
+                                h_flex()
+                                    .w(px(HEX_ASCII_COLUMN_WIDTH))
                                     .flex_shrink_0()
                                     .border_l_1()
-                                    .border_color(separator_color.opacity(0.3))
+                                    .border_color(separator_color.opacity(0.45))
                                     .pl_2()
-                                    .text_xs()
+                                    .text_sm()
                                     .font_family(mono_font.clone())
                                     .text_color(ascii_color)
-                                    .child(line.ascii.clone()),
+                                    .children(ascii_cells),
                             );
 
                         items.push(row);
@@ -1132,7 +1231,9 @@ impl CellEditorPanel {
             ),
         )
         .flex_grow()
-        .size_full()
+        .h_full()
+        .w_full()
+        .min_w(min_content_width)
         .track_scroll(&self.hex_scroll_handle)
         .with_sizing_behavior(ListSizingBehavior::Auto);
 
@@ -1142,9 +1243,71 @@ impl CellEditorPanel {
             .rounded_md()
             .border_1()
             .border_color(separator_color)
-            .bg(muted_bg.opacity(0.3))
-            .child(header)
-            .child(virtualized_rows)
+            .bg(theme.background)
+            .overflow_hidden()
+            .child(
+                h_flex()
+                    .w_full()
+                    .child(
+                        h_flex()
+                            .id("hex-header-scroll")
+                            .flex_1()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.hex_horizontal_scroll_handle)
+                            .child(header),
+                    )
+                    .when(has_vertical_scrollbar, |this| {
+                        this.child(div().w(px(HEX_DUMP_SCROLLBAR_WIDTH)).flex_shrink_0())
+                    }),
+            )
+            .child(
+                h_flex()
+                    .flex_1()
+                    .w_full()
+                    .child(
+                        h_flex()
+                            .id("hex-body-scroll")
+                            .flex_1()
+                            .h_full()
+                            .overflow_x_scroll()
+                            .track_scroll(&self.hex_horizontal_scroll_handle)
+                            .child(virtualized_rows),
+                    )
+                    .when(has_vertical_scrollbar, |this| {
+                        this.child(
+                            div()
+                                .h_full()
+                                .w(px(HEX_DUMP_SCROLLBAR_WIDTH))
+                                .flex_shrink_0()
+                                .child(
+                                    Scrollbar::vertical(&self.hex_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .h(px(HEX_DUMP_SCROLLBAR_WIDTH))
+                    .border_t_1()
+                    .border_color(separator_color.opacity(0.3))
+                    .child(
+                        div().flex_1().child(
+                            Scrollbar::horizontal(&self.hex_horizontal_scroll_handle)
+                                .scrollbar_show(ScrollbarShow::Always),
+                        ),
+                    )
+                    .when(has_vertical_scrollbar, |this| {
+                        this.child(
+                            div()
+                                .w(px(HEX_DUMP_SCROLLBAR_WIDTH))
+                                .flex_shrink_0()
+                                .border_l_1()
+                                .border_color(separator_color.opacity(0.2)),
+                        )
+                    }),
+            )
     }
 
     /// Render the text preview for decoded UTF-8 binary data

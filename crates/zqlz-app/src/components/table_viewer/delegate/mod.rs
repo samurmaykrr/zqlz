@@ -5,6 +5,7 @@
 // the original large `delegate.rs` file.
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder;
@@ -231,6 +232,18 @@ pub struct TableViewerDelegate {
 
     /// Redo stack — cleared whenever a new edit is performed.
     pub(super) redo_stack: Vec<UndoEntry>,
+
+    /// Cached inline previews for already-rendered cells.
+    ///
+    /// Keyed by (actual_row_index, data_column_index) so filtered/display row
+    /// remapping does not duplicate cache entries.
+    pub(super) cell_preview_cache: HashMap<(usize, usize), render::InlineCellPreview>,
+
+    /// Last visible display-row range reported by the table virtualization layer.
+    pub(super) visible_rows_range: Option<Range<usize>>,
+
+    /// Last visible column range reported by the table virtualization layer.
+    pub(super) visible_columns_range: Option<Range<usize>>,
 }
 
 // Re-export submodules' public items where appropriate

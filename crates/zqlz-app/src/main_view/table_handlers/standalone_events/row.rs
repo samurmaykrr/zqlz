@@ -28,7 +28,9 @@ use crate::components::{PendingCellChange, TableViewerEvent, TableViewerPanel};
 use super::super::super::table_handlers_utils::{
     conversion::resolve_schema_qualifier, formatting::escape_redis_value,
 };
-use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
+use crate::main_view::table_handlers_utils::sql::{
+    build_search_clause_for_columns, resolve_search_columns,
+};
 
 #[derive(Clone, Debug)]
 struct FailedModifiedCell {
@@ -334,11 +336,13 @@ pub(in crate::main_view) fn handle_delete_rows_event(
 
             if let Some(search_clause) = build_search_clause_for_columns(
                 &connection,
-                &viewer
-                    .column_meta
-                    .iter()
-                    .map(|c| c.name.clone())
-                    .collect::<Vec<_>>(),
+                &resolve_search_columns(
+                    &viewer.column_meta,
+                    viewer
+                        .performance_profile
+                        .as_ref()
+                        .map(|profile| profile.searchable_columns.clone()),
+                ),
                 &viewer.search_text,
                 false,
             ) {

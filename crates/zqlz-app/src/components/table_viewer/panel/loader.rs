@@ -1,6 +1,61 @@
 use super::*;
 
 impl TableViewerPanel {
+    fn is_heavy_column_type(data_type: &str) -> bool {
+        let data_type = data_type.to_ascii_lowercase();
+        ["json", "text", "blob", "bytea", "clob", "xml"]
+            .iter()
+            .any(|token| data_type.contains(token))
+    }
+
+    fn build_table_performance_profile(columns: &[ColumnMeta]) -> TablePerformanceProfile {
+        let mut heavy_count = 0usize;
+        let mut non_heavy_searchable_columns = Vec::new();
+        let mut heavy_searchable_columns = Vec::new();
+
+        for column in columns {
+            let is_heavy = Self::is_heavy_column_type(&column.data_type);
+            if is_heavy {
+                heavy_count = heavy_count.saturating_add(1);
+            }
+
+            let lowered_type = column.data_type.to_ascii_lowercase();
+            if zqlz_services::TableService::is_string_type(&lowered_type) {
+                if is_heavy {
+                    heavy_searchable_columns.push(column.name.clone());
+                } else {
+                    non_heavy_searchable_columns.push(column.name.clone());
+                }
+            }
+        }
+
+        let heavy_ratio = if columns.is_empty() {
+            0.0
+        } else {
+            heavy_count as f32 / columns.len() as f32
+        };
+        let is_heavy_table = heavy_count >= 4 || heavy_ratio >= 0.3;
+        let recommended_page_size = if is_heavy_table {
+            if heavy_count >= 8 || heavy_ratio >= 0.6 {
+                100
+            } else {
+                250
+            }
+        } else {
+            1000
+        };
+
+        let mut searchable_columns = non_heavy_searchable_columns;
+        searchable_columns.extend(heavy_searchable_columns);
+        searchable_columns.truncate(8);
+
+        TablePerformanceProfile {
+            is_heavy_table,
+            recommended_page_size,
+            searchable_columns,
+        }
+    }
+
     fn capture_current_column_widths(&self, cx: &App) -> std::collections::HashMap<String, Pixels> {
         let Some(table_state) = &self.table_state else {
             return std::collections::HashMap::new();
@@ -151,6 +206,22 @@ impl TableViewerPanel {
         // Check if this is a re-load of the same table (filter apply / refresh)
         let is_same_table = self.connection_id == Some(connection_id)
             && self.table_name.as_ref() == Some(&table_name);
+
+        self.performance_profile = if matches!(driver_category, DriverCategory::Relational) {
+            Some(Self::build_table_performance_profile(&result.columns))
+        } else {
+            None
+        };
+
+        if let Some(profile) = &self.performance_profile {
+            tracing::debug!(
+                table = %table_name,
+                is_heavy_table = profile.is_heavy_table,
+                recommended_page_size = profile.recommended_page_size,
+                searchable_columns = profile.searchable_columns.len(),
+                "Computed table performance profile"
+            );
+        }
 
         tracing::info!(
             "load_table: table={}, is_view={}, is_same_table={}, driver={:?}, original_cols={}, result_cols={}, has_col_vis_state={}",
@@ -388,6 +459,9 @@ impl TableViewerPanel {
                         .detach();
                     }
                     TableEvent::CellSelectionChanged(selection) => {
+                        viewer_panel.update(cx, |panel, cx| {
+                            panel.update_selection_stats_from_table(cx);
+                        });
                         cx.notify();
                         let cell_count = selection.cell_count();
                         if cell_count > 1 {
@@ -433,6 +507,7 @@ impl TableViewerPanel {
         .detach();
 
         self.table_state = Some(table_state.clone());
+        self.update_selection_stats_from_table(cx);
 
         // Auto-expand the transaction panel as soon as unsaved edits appear.
         // Doing this in render() would be a side-effecting mutation during rendering,
@@ -615,6 +690,14 @@ impl TableViewerPanel {
         }
 
         if let Some(ref pagination_state) = self.pagination_state {
+            if !is_same_table && let Some(profile) = &self.performance_profile {
+                pagination_state.update(cx, |state, _cx| {
+                    if state.records_per_page == 1000 {
+                        state.records_per_page = profile.recommended_page_size;
+                    }
+                });
+            }
+
             pagination_state.update(cx, |state, cx| {
                 state.update_after_load(records_loaded, total_records, is_estimated, cx);
             });

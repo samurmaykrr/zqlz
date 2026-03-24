@@ -38,16 +38,30 @@ impl TableViewerDelegate {
     }
 
     pub fn discard_pending_changes(&mut self) {
-        for ((row, col), change) in &self.pending_changes.modified_cells {
-            if let Some(row_data) = self.rows.get_mut(*row)
-                && let Some(cell) = row_data.get_mut(*col)
+        let modified_cells: Vec<((usize, usize), CellValue)> = self
+            .pending_changes
+            .modified_cells
+            .iter()
+            .map(|(&(row, col), change)| ((row, col), change.original_value.clone()))
+            .collect();
+
+        for ((row, col), original_value) in modified_cells {
+            let data_type = self
+                .column_meta
+                .get(col)
+                .map(|column| column.data_type.clone())
+                .unwrap_or_else(|| "text".to_string());
+            let restored_value = original_value.to_value(&data_type);
+
+            let mut restored = false;
+            if let Some(row_data) = self.rows.get_mut(row)
+                && let Some(cell) = row_data.get_mut(col)
             {
-                let data_type = self
-                    .column_meta
-                    .get(*col)
-                    .map(|c| c.data_type.as_str())
-                    .unwrap_or("text");
-                *cell = change.original_value.to_value(data_type);
+                *cell = restored_value;
+                restored = true;
+            }
+            if restored {
+                self.invalidate_cell_preview_for(row, col);
             }
         }
 
@@ -69,6 +83,7 @@ impl TableViewerDelegate {
         self.pending_changes.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
+        self.clear_cell_preview_cache();
         tracing::info!("Discarded all pending changes");
     }
 
@@ -126,6 +141,7 @@ impl TableViewerDelegate {
 
         self.pending_changes.new_rows.push(new_row.clone());
         self.rows.push(new_row);
+        self.clear_cell_preview_cache();
 
         if self.is_filtering {
             self.filtered_row_indices.push(self.rows.len() - 1);
@@ -191,6 +207,7 @@ impl TableViewerDelegate {
             && let Some(cell) = row_data.get_mut(data_col)
         {
             *cell = new_value;
+            self.invalidate_cell_preview_for(row, data_col);
         }
     }
 
@@ -278,6 +295,7 @@ impl TableViewerDelegate {
         failed_deleted_rows: Vec<Vec<Value>>,
         failed_new_rows: Vec<Vec<Value>>,
     ) {
+        self.clear_cell_preview_cache();
         self.pending_changes.clear();
         self.undo_stack.clear();
         self.redo_stack.clear();
@@ -306,6 +324,7 @@ impl TableViewerDelegate {
                 && let Some(cell) = row_data.get_mut(column_index)
             {
                 *cell = change.new_value.to_value(data_type);
+                self.invalidate_cell_preview_for(row_index, column_index);
             }
 
             self.pending_changes
@@ -329,6 +348,9 @@ impl TableViewerDelegate {
             self.pending_changes.deleted_rows.insert(row_index);
         }
 
+        if !failed_new_rows.is_empty() {
+            self.clear_cell_preview_cache();
+        }
         for failed_new_row in failed_new_rows {
             self.pending_changes.new_rows.push(failed_new_row.clone());
             self.rows.push(failed_new_row);
@@ -371,6 +393,7 @@ impl TableViewerDelegate {
                 && let Some(cell) = row_data.get_mut(edit.data_col)
             {
                 *cell = edit.old_value.clone();
+                self.invalidate_cell_preview_for(edit.row, edit.data_col);
             }
             // Sync pending_changes: if the old_value matches the original recorded in
             // pending_changes, remove the entry entirely (cell is back to its DB state).
@@ -410,6 +433,7 @@ impl TableViewerDelegate {
                 && let Some(cell) = row_data.get_mut(edit.data_col)
             {
                 *cell = edit.new_value.clone();
+                self.invalidate_cell_preview_for(edit.row, edit.data_col);
             }
             // Re-insert into pending_changes
             let original_value = self

@@ -8,7 +8,9 @@ use gpui::*;
 use crate::app::AppState;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
-use crate::main_view::table_handlers_utils::sql::build_search_clause_for_columns;
+use crate::main_view::table_handlers_utils::sql::{
+    build_search_clause_for_columns, resolve_search_columns,
+};
 
 /// Handle load more event for infinite scroll
 /// Fetches the next batch of rows and appends to existing data
@@ -42,8 +44,13 @@ pub(in crate::main_view) fn handle_load_more_event(
             sorts = current_sorts;
         }
 
-        let all_column_names: Vec<String> =
-            viewer.column_meta.iter().map(|c| c.name.clone()).collect();
+        let search_columns = resolve_search_columns(
+            &viewer.column_meta,
+            viewer
+                .performance_profile
+                .as_ref()
+                .map(|profile| profile.searchable_columns.clone()),
+        );
         let search_text = viewer.search_text.clone();
 
         let visible_columns: Vec<String> = viewer
@@ -61,7 +68,7 @@ pub(in crate::main_view) fn handle_load_more_event(
             visible_columns,
             viewer.database_name.clone(),
             search_text,
-            all_column_names,
+            search_columns,
         ))
     });
 
@@ -74,7 +81,7 @@ pub(in crate::main_view) fn handle_load_more_event(
         visible_columns,
         database_name,
         search_text,
-        all_column_names,
+        search_columns,
     )) = viewer_info
     else {
         tracing::warn!("LoadMore: Missing connection_id, table_name, or pagination state");
@@ -106,7 +113,7 @@ pub(in crate::main_view) fn handle_load_more_event(
         .map(|sort| sort.to_sql_for_connection(connection.as_ref()))
         .collect();
     if let Some(search_clause) =
-        build_search_clause_for_columns(&connection, &all_column_names, &search_text, false)
+        build_search_clause_for_columns(&connection, &search_columns, &search_text, false)
     {
         where_clauses.push(search_clause);
     }

@@ -58,7 +58,7 @@ impl TableViewerDelegate {
             let display_value = if anchor_value.is_null() {
                 String::new()
             } else {
-                let s = anchor_value.display_for_table();
+                let s = anchor_value.display_for_editor();
                 s.replace('\n', " ").replace('\r', "")
             };
             input.update(cx, |state, cx| {

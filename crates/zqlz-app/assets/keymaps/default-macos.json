@@ -19,8 +19,8 @@
       "cmd-1": "zqlz::FocusSidebar",
       "cmd-2": "zqlz::FocusEditor",
       "cmd-3": "zqlz::FocusResults",
-      "cmd-shift-]": "tabs::ActivateNextTab",
-      "cmd-shift-[": "tabs::ActivatePrevTab",
+      "cmd-]": "tabs::ActivateNextTab",
+      "cmd-[": "tabs::ActivatePrevTab",
       "cmd-w": "tabs::CloseActiveTab",
       "cmd-shift-w": "tabs::CloseOtherTabs",
       "cmd-alt-w": "tabs::CloseAllTabs"

@@ -312,8 +312,8 @@ impl TableViewerDelegate {
         window: &mut Window,
         cx: &mut Context<TableState<Self>>,
     ) {
-        let display_str = value.display_for_table();
-        let has_newlines = display_str.contains('\n') || display_str.contains('\r');
+        let editor_str = value.display_for_editor();
+        let has_newlines = editor_str.contains('\n') || editor_str.contains('\r');
         self.editing_cell_has_newlines = has_newlines;
 
         let input = cx.new(|cx| {
@@ -324,10 +324,10 @@ impl TableViewerDelegate {
         });
 
         // Null values should show an empty input with placeholder, not "NULL" as text.
-        let text = if value.is_null() || display_str.is_empty() {
+        let text = if value.is_null() || editor_str.is_empty() {
             String::new()
         } else {
-            display_str.replace('\n', " ").replace('\r', "")
+            editor_str.replace('\n', " ").replace('\r', "")
         };
         input.update(cx, |state, cx| {
             state.replace(text, window, cx);
