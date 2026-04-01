@@ -53,6 +53,12 @@ impl TableViewerDelegate {
         self.last_filter_conditions = filters.to_vec();
         self.last_filter_search_text = search_text.to_string();
 
+        self.search_filter = if search_text.is_empty() {
+            None
+        } else {
+            Some(search_text.to_lowercase())
+        };
+
         let enabled_filters: Vec<&FilterCondition> = filters
             .iter()
             .filter(|f| f.enabled && f.is_valid())

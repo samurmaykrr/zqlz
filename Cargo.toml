@@ -325,7 +325,23 @@ zqlz-command-palette = { path = "crates/zqlz-command-palette" }
 
 [profile.dev]
 opt-level = 0
-debug = true
+debug = 1
+incremental = true
+
+[profile.dev.package."*"]
+debug = 0
+
+[profile.dev.build-override]
+debug = 0
+opt-level = 0
+codegen-units = 256
+
+[profile.dev-fast]
+inherits = "dev"
+debug = 0
+
+[profile.dev-fast.package."*"]
+debug = 0
 
 # Used by bundle-mac for dev-channel distribution builds.
 # Inherits from dev for fast compilation, but disables debug_assertions

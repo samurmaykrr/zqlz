@@ -12,7 +12,7 @@ use zqlz_ui::widgets::{
 };
 
 use crate::main_view::MainView;
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use crate::workspace_state::RefreshScope;
 
 use super::{
     table_handlers_utils::validation::validate_table_name,
@@ -137,11 +137,7 @@ impl RenameTarget {
                 ..
             } => {
                 if let Err(error) = main_view.update(cx, |main_view, cx| {
-                    main_view.refresh_connection_surfaces(
-                        RefreshTarget::Connection(*connection_id),
-                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                        cx,
-                    );
+                    main_view.request_refresh(RefreshScope::ConnectionSurfaces(*connection_id), cx);
                 }) {
                     tracing::warn!(?error, new_name, "Failed to refresh after table rename");
                 }
@@ -152,11 +148,7 @@ impl RenameTarget {
                 ..
             } => {
                 if let Err(error) = main_view.update(cx, |main_view, cx| {
-                    main_view.refresh_connection_surfaces(
-                        RefreshTarget::Connection(*connection_id),
-                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                        cx,
-                    );
+                    main_view.request_refresh(RefreshScope::ConnectionSurfaces(*connection_id), cx);
                 }) {
                     tracing::warn!(?error, new_name, "Failed to refresh after view rename");
                 }

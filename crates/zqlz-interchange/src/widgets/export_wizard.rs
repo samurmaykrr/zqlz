@@ -4,6 +4,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -16,11 +17,17 @@ use zqlz_ui::widgets::{
     h_flex,
     input::{Input, InputEvent, InputState},
     menu::{ContextMenuExt, PopupMenuItem},
-    scroll::ScrollableElement,
+    scroll::{ScrollableElement, Scrollbar, ScrollbarShow},
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     title_bar::TitleBar,
+    tooltip::Tooltip,
     v_flex,
 };
+
+const EXPORT_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
+const EXPORT_TABLE_ROW_HEIGHT: f32 = 34.0;
+const EXPORT_COLUMN_ROW_HEIGHT: f32 = 34.0;
+const EXPORT_LOG_ROW_HEIGHT: f32 = 22.0;
 
 use super::types::*;
 use crate::{
@@ -195,11 +202,10 @@ pub struct ExportWizard {
     binary_encoding_state: Entity<SelectState<SearchableVec<DelimiterItem<BinaryEncoding>>>>,
     decimal_input_state: Entity<InputState>,
 
-    // Scroll state for table list and log
-    #[allow(dead_code)]
-    scroll_handle: ScrollHandle,
-    #[allow(dead_code)]
-    log_scroll_handle: ScrollHandle,
+    // Virtualized list scroll handles
+    table_scroll_handle: UniformListScrollHandle,
+    column_scroll_handle: UniformListScrollHandle,
+    log_scroll_handle: UniformListScrollHandle,
 
     /// Export start time for elapsed calculation
     export_start_time: Option<Instant>,
@@ -512,8 +518,9 @@ impl ExportWizard {
             text_qualifier_state,
             binary_encoding_state,
             decimal_input_state,
-            scroll_handle: ScrollHandle::new(),
-            log_scroll_handle: ScrollHandle::new(),
+            table_scroll_handle: UniformListScrollHandle::new(),
+            column_scroll_handle: UniformListScrollHandle::new(),
+            log_scroll_handle: UniformListScrollHandle::new(),
             export_start_time: None,
             _subscriptions: subscriptions,
         }
@@ -567,6 +574,8 @@ impl ExportWizard {
         cx: &mut Context<Self>,
     ) {
         self.state.tables = tables;
+        self.state.table_selection_validation_error = None;
+        self.state.field_selection_validation_error = None;
         self.update_table_select(window, cx);
         cx.notify();
     }
@@ -611,6 +620,11 @@ impl ExportWizard {
 
     fn go_next(&mut self, cx: &mut Context<Self>) {
         if let Some(next) = self.state.current_step.next() {
+            if !self.can_navigate_to_step(next) {
+                cx.notify();
+                return;
+            }
+
             self.state.current_step = next;
             cx.notify();
         }
@@ -623,10 +637,100 @@ impl ExportWizard {
         }
     }
 
+    fn go_to_step(&mut self, step: ExportWizardStep, cx: &mut Context<Self>) {
+        if self.state.is_exporting {
+            return;
+        }
+
+        if !self.can_navigate_to_step(step) {
+            cx.notify();
+            return;
+        }
+
+        self.state.current_step = step;
+        cx.notify();
+    }
+
+    fn can_navigate_to_step(&mut self, target_step: ExportWizardStep) -> bool {
+        let steps = ExportWizardStep::all();
+        let Some(current_position) = steps
+            .iter()
+            .position(|step| *step == self.state.current_step)
+        else {
+            return false;
+        };
+        let Some(target_position) = steps.iter().position(|step| *step == target_step) else {
+            return false;
+        };
+
+        if target_position <= current_position {
+            return true;
+        }
+
+        for step in &steps[current_position..target_position] {
+            match step {
+                ExportWizardStep::TableSelection => {
+                    if !self.state.validate_table_selection() {
+                        return false;
+                    }
+                }
+                ExportWizardStep::FieldSelection => {
+                    if !self.state.validate_field_selection() {
+                        return false;
+                    }
+                }
+                ExportWizardStep::FormatOptions | ExportWizardStep::Progress => {}
+            }
+        }
+
+        true
+    }
+
+    fn blocked_navigation_tooltip(&self, target_step: ExportWizardStep) -> Option<SharedString> {
+        if self.state.is_exporting {
+            return Some("Step navigation is disabled while export is running".into());
+        }
+
+        let steps = ExportWizardStep::all();
+        let current_step = self.state.current_step;
+
+        let current_position = steps.iter().position(|step| *step == current_step)?;
+        let target_position = steps.iter().position(|step| *step == target_step)?;
+
+        if target_position <= current_position {
+            return None;
+        }
+
+        for step in &steps[current_position..target_position] {
+            match step {
+                ExportWizardStep::TableSelection => {
+                    if !self.state.tables.iter().any(|table| table.selected) {
+                        return Some("Select at least one table before continuing".into());
+                    }
+                }
+                ExportWizardStep::FieldSelection => {
+                    let has_selected_column = self
+                        .state
+                        .current_table()
+                        .map(|table| table.columns.iter().any(|column| column.selected))
+                        .unwrap_or(false);
+
+                    if !has_selected_column {
+                        return Some("Select at least one field before continuing".into());
+                    }
+                }
+                ExportWizardStep::FormatOptions | ExportWizardStep::Progress => {}
+            }
+        }
+
+        None
+    }
+
     /// Toggle selection for a specific table
     fn toggle_table_selection(&mut self, index: usize, cx: &mut Context<Self>) {
         if let Some(table) = self.state.tables.get_mut(index) {
             table.selected = !table.selected;
+            self.state.table_selection_validation_error = None;
             cx.notify();
         }
     }
@@ -636,6 +740,7 @@ impl ExportWizard {
         for table in &mut self.state.tables {
             table.selected = true;
         }
+        self.state.table_selection_validation_error = None;
         cx.notify();
     }
 
@@ -644,6 +749,7 @@ impl ExportWizard {
         for table in &mut self.state.tables {
             table.selected = false;
         }
+        self.state.table_selection_validation_error = None;
         cx.notify();
     }
 
@@ -652,6 +758,7 @@ impl ExportWizard {
         for (i, table) in self.state.tables.iter_mut().enumerate() {
             table.selected = i == index;
         }
+        self.state.table_selection_validation_error = None;
         cx.notify();
     }
 
@@ -662,6 +769,7 @@ impl ExportWizard {
         {
             col.selected = !col.selected;
         }
+        self.state.field_selection_validation_error = None;
         cx.notify();
     }
 
@@ -670,6 +778,7 @@ impl ExportWizard {
         if let Some(table) = self.state.current_table_mut() {
             table.select_all_fields();
         }
+        self.state.field_selection_validation_error = None;
         cx.notify();
     }
 
@@ -678,6 +787,7 @@ impl ExportWizard {
         if let Some(table) = self.state.current_table_mut() {
             table.deselect_all_fields();
         }
+        self.state.field_selection_validation_error = None;
         cx.notify();
     }
 
@@ -690,6 +800,7 @@ impl ExportWizard {
                 table.select_all_fields();
             }
         }
+        self.state.field_selection_validation_error = None;
         cx.notify();
     }
 
@@ -1089,6 +1200,7 @@ impl ExportWizard {
     fn render_step_indicator(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let current = self.state.current_step;
+        let can_switch_steps = !self.state.is_exporting;
 
         h_flex()
             .w_full()
@@ -1103,12 +1215,34 @@ impl ExportWizard {
                     .map(|(visual_idx, step)| {
                         let is_current = *step == current;
                         let is_done = visual_idx < current.index();
+                        let step = *step;
+                        let blocked_reason = self.blocked_navigation_tooltip(step);
 
                         div()
+                            .id(SharedString::from(format!(
+                                "export-step-tab-{}",
+                                step.index()
+                            )))
                             .text_sm()
                             .px_3()
                             .py_2()
                             .border_b_2()
+                            .when(can_switch_steps && blocked_reason.is_none(), |this| {
+                                this.cursor_pointer().on_mouse_down(
+                                    gpui::MouseButton::Left,
+                                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                        this.go_to_step(step, cx);
+                                    }),
+                                )
+                            })
+                            .when(!can_switch_steps || blocked_reason.is_some(), |this| {
+                                this.opacity(0.7)
+                            })
+                            .when_some(blocked_reason, |this, reason| {
+                                this.tooltip(move |window, cx| {
+                                    Tooltip::new(reason.clone()).build(window, cx)
+                                })
+                            })
                             .when(is_current, |s| {
                                 s.border_color(theme.accent)
                                     .text_color(theme.accent)
@@ -1129,6 +1263,7 @@ impl ExportWizard {
 
     fn render_step_1_table_selection(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let table_selection_validation_error = self.state.table_selection_validation_error.clone();
 
         // Clone states needed for handlers
         let folder_input = self.folder_input_state.clone();
@@ -1276,16 +1411,25 @@ impl ExportWizard {
                     )
                     .child(Select::new(&self.timestamp_state).small().w(px(280.0))),
             )
+            .when_some(table_selection_validation_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
+                )
+            })
     }
 
     fn render_table_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let tables = self.state.tables.clone();
+        let tables = Arc::new(self.state.tables.clone());
+        let table_count = tables.len();
         let view = cx.entity().clone();
         div()
             .w_full()
             .h_full()
-            .overflow_y_scrollbar()
+            .overflow_hidden()
             // Single context menu on container
             .context_menu({
                 let view_for_container_menu = view.clone();
@@ -1316,62 +1460,143 @@ impl ExportWizard {
                 }
             })
             .child(
-                v_flex()
-                    .w_full()
-                    .children(tables.iter().enumerate().map(|(idx, table)| {
-                        let table_name = table.table_name.clone();
-                        let output_filename = table.output_filename.clone();
-                        let selected = table.selected;
-                        let view_for_click = view.clone();
-                        let view_for_mouse = view.clone();
+                div()
+                    .size_full()
+                    .relative()
+                    .overflow_hidden()
+                    .when(table_count > 0, |this| {
+                        let tables = tables.clone();
+                        let view = view.clone();
+                        this.child(
+                            uniform_list(
+                                "export-table-rows",
+                                table_count,
+                                cx.processor(
+                                    move |_wizard,
+                                          visible_range: Range<usize>,
+                                          _window,
+                                          cx| {
+                                        let total_rows = tables.len();
+                                        let start = visible_range.start.min(total_rows);
+                                        let end = visible_range.end.min(total_rows);
 
-                        h_flex()
-                            .id(ElementId::Name(format!("table-row-{}", idx).into()))
-                            .w_full()
-                            .px_2()
-                            .py_1()
-                            .gap_3()
-                            .items_center()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.list_active))
-                            // Track which row was right-clicked
-                            .on_mouse_down(gpui::MouseButton::Right, move |_, _, cx| {
-                                view_for_mouse.update(cx, |this, cx| {
-                                    this.context_menu_row = Some(idx);
-                                    cx.notify();
-                                });
-                            })
-                            // Click on row toggles selection
-                            .on_click(move |_, _, cx| {
-                                view_for_click.update(cx, |this, cx| {
-                                    this.toggle_table_selection(idx, cx);
-                                });
-                            })
-                            .child(Checkbox::new(format!("table-{}", idx)).checked(selected))
-                            .child(
-                                div()
-                                    .w(px(180.0))
-                                    .text_sm()
-                                    .text_color(theme.foreground)
-                                    .child(table_name),
+                                        if visible_range.end > total_rows {
+                                            tracing::debug!(
+                                                ?visible_range,
+                                                total_rows,
+                                                "Export table list visible range exceeded available rows"
+                                            );
+                                        }
+
+                                        let theme = cx.theme();
+
+                                        (start..end)
+                                            .filter_map(|index| {
+                                                let table = tables.get(index)?;
+                                                let table_name = table.table_name.clone();
+                                                let output_filename = table.output_filename.clone();
+                                                let selected = table.selected;
+                                                let view_for_click = view.clone();
+                                                let view_for_mouse = view.clone();
+
+                                                Some(
+                                                    h_flex()
+                                                        .id(ElementId::Name(
+                                                            format!("table-row-{}", index).into(),
+                                                        ))
+                                                        .w_full()
+                                                        .h(px(EXPORT_TABLE_ROW_HEIGHT))
+                                                        .px_2()
+                                                        .gap_3()
+                                                        .items_center()
+                                                        .cursor_pointer()
+                                                        .hover(|style| style.bg(theme.list_active))
+                                                        .on_mouse_down(
+                                                            gpui::MouseButton::Right,
+                                                            move |_, _, cx| {
+                                                                view_for_mouse.update(cx, |this, cx| {
+                                                                    this.context_menu_row = Some(index);
+                                                                    cx.notify();
+                                                                });
+                                                            },
+                                                        )
+                                                        .on_click(move |_, _, cx| {
+                                                            view_for_click.update(cx, |this, cx| {
+                                                                this.toggle_table_selection(index, cx);
+                                                            });
+                                                        })
+                                                        .child(
+                                                            Checkbox::new(format!("table-{}", index))
+                                                                .checked(selected),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .w(px(180.0))
+                                                                .text_sm()
+                                                                .text_color(theme.foreground)
+                                                                .child(table_name),
+                                                        )
+                                                        .child(
+                                                            div()
+                                                                .flex_1()
+                                                                .text_sm()
+                                                                .text_color(theme.muted_foreground)
+                                                                .child(output_filename),
+                                                        )
+                                                        .into_any_element(),
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
                             )
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .text_sm()
-                                    .text_color(theme.muted_foreground)
-                                    .child(output_filename),
-                            )
-                    })),
+                            .flex_grow()
+                            .size_full()
+                            .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.table_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(table_count == 0, |this| {
+                        this.child(
+                            v_flex()
+                                .size_full()
+                                .justify_center()
+                                .items_center()
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("No tables available"),
+                                ),
+                        )
+                    })
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                            .when(table_count > 0, |this| {
+                                this.child(
+                                    Scrollbar::vertical(&self.table_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                )
+                            }),
+                    ),
             )
     }
 
     fn render_step_2_field_selection(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let field_selection_validation_error = self.state.field_selection_validation_error.clone();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             // Description
@@ -1450,47 +1675,126 @@ impl ExportWizard {
                             })),
                     ),
             )
+            .when_some(field_selection_validation_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
+                )
+            })
     }
 
     fn render_column_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let columns = self
-            .state
-            .current_table()
-            .map(|t| t.columns.clone())
-            .unwrap_or_default();
+        let columns = Arc::new(
+            self.state
+                .current_table()
+                .map(|table| table.columns.clone())
+                .unwrap_or_default(),
+        );
+        let column_count = columns.len();
         let view = cx.entity().clone();
 
-        v_flex()
-            .w_full()
-            .children(columns.iter().enumerate().map(|(idx, col)| {
-                let col_name = col.name.clone();
-                let selected = col.selected;
-                let view_for_click = view.clone();
+        div()
+            .size_full()
+            .relative()
+            .overflow_hidden()
+            .when(column_count > 0, |this| {
+                let columns = columns.clone();
+                let view = view.clone();
+                this.child(
+                    uniform_list(
+                        "export-column-rows",
+                        column_count,
+                        cx.processor(move |_wizard, visible_range: Range<usize>, _window, cx| {
+                            let total_rows = columns.len();
+                            let start = visible_range.start.min(total_rows);
+                            let end = visible_range.end.min(total_rows);
 
-                h_flex()
-                    .id(ElementId::Name(format!("col-row-{}", idx).into()))
-                    .w_full()
-                    .px_2()
-                    .py_1()
-                    .gap_3()
-                    .items_center()
-                    .hover(|s| s.bg(theme.list_active))
-                    .cursor_pointer()
-                    .on_click(move |_, _, cx| {
-                        view_for_click.update(cx, |this, cx| {
-                            this.toggle_column_selection(idx, cx);
-                        });
-                    })
-                    .child(Checkbox::new(format!("col-{}", idx)).checked(selected))
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_sm()
-                            .text_color(theme.foreground)
-                            .child(col_name),
+                            if visible_range.end > total_rows {
+                                tracing::debug!(
+                                    ?visible_range,
+                                    total_rows,
+                                    "Export column list visible range exceeded available rows"
+                                );
+                            }
+
+                            let theme = cx.theme();
+
+                            (start..end)
+                                .filter_map(|index| {
+                                    let column = columns.get(index)?;
+                                    let column_name = column.name.clone();
+                                    let selected = column.selected;
+                                    let view_for_click = view.clone();
+
+                                    Some(
+                                        h_flex()
+                                            .id(ElementId::Name(
+                                                format!("col-row-{}", index).into(),
+                                            ))
+                                            .w_full()
+                                            .h(px(EXPORT_COLUMN_ROW_HEIGHT))
+                                            .px_2()
+                                            .gap_3()
+                                            .items_center()
+                                            .hover(|style| style.bg(theme.list_active))
+                                            .cursor_pointer()
+                                            .on_click(move |_, _, cx| {
+                                                view_for_click.update(cx, |this, cx| {
+                                                    this.toggle_column_selection(index, cx);
+                                                });
+                                            })
+                                            .child(
+                                                Checkbox::new(format!("col-{}", index))
+                                                    .checked(selected),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .text_sm()
+                                                    .text_color(theme.foreground)
+                                                    .child(column_name),
+                                            )
+                                            .into_any_element(),
+                                    )
+                                })
+                                .collect::<Vec<_>>()
+                        }),
                     )
-            }))
+                    .flex_grow()
+                    .size_full()
+                    .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                    .track_scroll(&self.column_scroll_handle)
+                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                    .into_any_element(),
+                )
+            })
+            .when(column_count == 0, |this| {
+                this.child(
+                    v_flex().size_full().justify_center().items_center().child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("No columns available"),
+                    ),
+                )
+            })
+            .child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .bottom_0()
+                    .w(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                    .when(column_count > 0, |this| {
+                        this.child(
+                            Scrollbar::vertical(&self.column_scroll_handle)
+                                .scrollbar_show(ScrollbarShow::Always),
+                        )
+                    }),
+            )
     }
 
     fn render_step_3_csv_options(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1500,6 +1804,7 @@ impl ExportWizard {
         v_flex()
             .w_full()
             .h_full()
+            .overflow_y_scrollbar()
             .gap_3()
             .p_4()
             // Description
@@ -1657,10 +1962,13 @@ impl ExportWizard {
     fn render_step_4_progress(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let stats = &self.state.stats;
+        let messages = Arc::new(self.state.log_messages.clone());
+        let message_count = messages.len();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             // Description
@@ -1688,7 +1996,7 @@ impl ExportWizard {
             )
             // Log area
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .w_full()
                     .border_1()
@@ -1696,7 +2004,109 @@ impl ExportWizard {
                     .rounded_md()
                     .bg(theme.background)
                     .overflow_hidden()
-                    .child(self.render_log_area(cx)),
+                    .child(
+                        div()
+                            .size_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(message_count > 0, |this| {
+                                let messages = messages.clone();
+                                this.child(
+                                    uniform_list(
+                                        "export-progress-log-rows",
+                                        message_count,
+                                        cx.processor(
+                                            move |_wizard,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let total_rows = messages.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
+
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Export progress log visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let message = messages.get(index)?;
+                                                        let color = match message.level {
+                                                            LogLevel::Error => theme.danger,
+                                                            LogLevel::Warning => theme.warning,
+                                                            LogLevel::Success => theme.success,
+                                                            LogLevel::Info => theme.foreground,
+                                                        };
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(EXPORT_LOG_ROW_HEIGHT))
+                                                                .px_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    div()
+                                                                        .w_full()
+                                                                        .text_xs()
+                                                                        .font_family(
+                                                                            theme
+                                                                                .mono_font_family
+                                                                                .clone(),
+                                                                        )
+                                                                        .text_color(color)
+                                                                        .child(message.format()),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
+                                    )
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.log_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(message_count == 0, |this| {
+                                this.child(
+                                    v_flex()
+                                        .size_full()
+                                        .justify_center()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("No log messages yet"),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(EXPORT_LIST_SCROLLBAR_WIDTH))
+                                    .when(message_count > 0, |this| {
+                                        this.child(
+                                            Scrollbar::vertical(&self.log_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             // Progress bar
             .child(self.render_progress_bar(cx))
@@ -1721,30 +2131,6 @@ impl ExportWizard {
                     .text_color(theme.foreground)
                     .child(value.to_string()),
             )
-    }
-
-    fn render_log_area(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let messages = self.state.log_messages.clone();
-
-        div().w_full().h_full().p_2().overflow_y_scrollbar().child(
-            v_flex()
-                .w_full()
-                .gap_0p5()
-                .children(messages.iter().map(|msg| {
-                    div()
-                        .w_full()
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(match msg.level {
-                            LogLevel::Error => theme.danger,
-                            LogLevel::Warning => theme.warning,
-                            LogLevel::Success => theme.success,
-                            LogLevel::Info => theme.foreground,
-                        })
-                        .child(msg.format())
-                })),
-        )
     }
 
     fn render_progress_bar(&self, cx: &Context<Self>) -> impl IntoElement {

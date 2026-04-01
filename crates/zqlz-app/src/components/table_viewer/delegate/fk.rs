@@ -2,6 +2,18 @@ use super::*;
 
 #[allow(dead_code)]
 impl TableViewerDelegate {
+    pub(super) fn fk_cache_key(foreign_key: &ForeignKeyInfo) -> String {
+        match foreign_key
+            .referenced_schema
+            .as_deref()
+            .map(str::trim)
+            .filter(|schema| !schema.is_empty())
+        {
+            Some(schema) => format!("{}.{}", schema, foreign_key.referenced_table),
+            None => foreign_key.referenced_table.clone(),
+        }
+    }
+
     pub fn set_foreign_keys(&mut self, foreign_keys: Vec<ForeignKeyInfo>) {
         self.fk_by_column.clear();
 
@@ -37,7 +49,7 @@ impl TableViewerDelegate {
 
     pub fn set_fk_values(
         &mut self,
-        table_name: String,
+        cache_key: String,
         values: Vec<FkSelectItem>,
         query: Option<String>,
         request_id: u64,
@@ -47,7 +59,7 @@ impl TableViewerDelegate {
         if request_id != self.fk_request_id {
             tracing::debug!(
                 "Ignoring stale FK values for table {} (request_id={}, current={})",
-                table_name,
+                cache_key,
                 request_id,
                 self.fk_request_id
             );
@@ -60,7 +72,7 @@ impl TableViewerDelegate {
             .unwrap_or(true)
         {
             self.fk_values_cache
-                .insert(table_name.clone(), values.clone());
+                .insert(cache_key.clone(), values.clone());
         }
         self.fk_loading = false;
 
@@ -91,7 +103,7 @@ impl TableViewerDelegate {
             tracing::info!(
                 "Updated FK dropdown with {} values for table {} (query={:?})",
                 values.len(),
-                table_name,
+                cache_key,
                 query
             );
         }

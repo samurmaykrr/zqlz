@@ -13,8 +13,8 @@ use crate::components::{
     ConnectionSidebarEvent, ObjectsPanelEvent, ProjectManagerEvent, QueryEditor, ResultsPanelEvent,
     SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
 };
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 use crate::main_view::table_handlers::table_ops::design::TableDesignSaveRequest;
+use crate::workspace_state::RefreshScope;
 use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
@@ -167,25 +167,7 @@ impl MainView {
                 self.handle_new_query(&NewQuery, window, cx);
             }
             ConnectionSidebarEvent::RefreshConnections => {
-                tracing::debug!("Refreshing connections list and connected schemas");
-                self.refresh_connections_list_preserving_state(cx);
-
-                let connected_connection_ids: Vec<uuid::Uuid> = self
-                    .connection_sidebar
-                    .read(cx)
-                    .connections()
-                    .iter()
-                    .filter(|connection| connection.is_connected)
-                    .map(|connection| connection.id)
-                    .collect();
-
-                for connection_id in connected_connection_ids {
-                    self.refresh_connection_surfaces(
-                        RefreshTarget::Connection(connection_id),
-                        SurfaceRefreshOptions::MANUAL,
-                        cx,
-                    );
-                }
+                self.request_refresh(RefreshScope::ConnectionsList, cx);
             }
             ConnectionSidebarEvent::OpenTable {
                 connection_id,
@@ -322,11 +304,7 @@ impl MainView {
                 self.copy_table_name(&table_name, cx);
             }
             ConnectionSidebarEvent::RefreshSchema { connection_id } => {
-                self.refresh_connection_surfaces(
-                    RefreshTarget::Connection(connection_id),
-                    SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                    cx,
-                );
+                self.request_refresh(RefreshScope::ConnectionSurfaces(connection_id), cx);
             }
 
             // Saved queries events
@@ -468,11 +446,30 @@ impl MainView {
                 database_name,
             } => {
                 tracing::info!(
-                    "Load schema for database '{}' on connection {}",
+                    "Select database '{}' on connection {}",
                     database_name,
                     connection_id
                 );
-                self.load_database_schema(connection_id, database_name, window, cx);
+
+                let active_database_before = {
+                    let workspace_state = self.workspace_state.read(cx);
+                    workspace_state.active_database().map(str::to_owned)
+                };
+                let database_changed =
+                    active_database_before.as_deref() != Some(database_name.as_str());
+
+                self.connection_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.set_database_loading(connection_id, &database_name, true, cx);
+                });
+
+                self.workspace_state.update(cx, |state, cx| {
+                    state.set_active_connection(Some(connection_id), cx);
+                    state.set_active_database(Some(database_name.clone()), cx);
+                });
+
+                if !database_changed {
+                    self.request_refresh(RefreshScope::ConnectionSurfaces(connection_id), cx);
+                }
             }
             ConnectionSidebarEvent::LoadSection {
                 connection_id,
@@ -1008,8 +1005,8 @@ impl MainView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("RefreshConnectionsList action received - refreshing sidebar");
-        self.refresh_connections_list_preserving_state(cx);
+        tracing::info!("RefreshConnectionsList action received - requesting refresh intent");
+        self.request_refresh(RefreshScope::ConnectionsList, cx);
     }
 
     pub(super) fn handle_toggle_left_sidebar(
@@ -1259,12 +1256,8 @@ impl MainView {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("RefreshConnection action received - refreshing active connection");
-        self.refresh_connection_surfaces(
-            RefreshTarget::ActiveConnection,
-            SurfaceRefreshOptions::MANUAL,
-            cx,
-        );
+        tracing::info!("RefreshConnection action received - requesting refresh intent");
+        self.request_refresh(RefreshScope::ActiveConnectionSurfaces, cx);
     }
 
     /// Save the active query through the save dialog, regardless of whether it already has an id.
@@ -1773,20 +1766,10 @@ impl MainView {
                     self.handle_execute_query(&crate::actions::ExecuteQuery, window, cx);
                 }
                 "ConnectionSidebar" => {
-                    // Refresh connections sidebar
-                    self.refresh_connection_surfaces(
-                        RefreshTarget::ActiveConnection,
-                        SurfaceRefreshOptions::MANUAL,
-                        cx,
-                    );
+                    self.request_refresh(RefreshScope::ActiveConnectionSurfaces, cx);
                 }
                 "ObjectsPanel" => {
-                    // Refresh objects panel
-                    self.refresh_connection_surfaces(
-                        RefreshTarget::ActiveConnection,
-                        SurfaceRefreshOptions::OBJECTS_ONLY,
-                        cx,
-                    );
+                    self.request_refresh(RefreshScope::ActiveConnectionSurfaces, cx);
                 }
                 _ => {
                     tracing::debug!("Refresh not implemented for panel: {}", panel_name);
@@ -1795,11 +1778,7 @@ impl MainView {
         } else {
             // No active panel - try connection sidebar if it has focus
             tracing::debug!("No active panel, checking connection sidebar");
-            self.refresh_connection_surfaces(
-                RefreshTarget::ActiveConnection,
-                SurfaceRefreshOptions::MANUAL,
-                cx,
-            );
+            self.request_refresh(RefreshScope::ActiveConnectionSurfaces, cx);
         }
     }
 
@@ -1941,11 +1920,7 @@ impl MainView {
                 self.copy_table_names(table_names, cx);
             }
             ObjectsPanelEvent::Refresh => {
-                self.refresh_connection_surfaces(
-                    RefreshTarget::ActiveConnection,
-                    SurfaceRefreshOptions::OBJECTS_ONLY,
-                    cx,
-                );
+                self.request_refresh(RefreshScope::ActiveConnectionSurfaces, cx);
             }
             // Redis-related events
             ObjectsPanelEvent::OpenRedisDatabase {

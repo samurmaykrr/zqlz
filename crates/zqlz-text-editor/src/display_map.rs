@@ -1,6 +1,6 @@
 use crate::{
-    AnchoredCodeAction, AnchoredDiagnostic, AnchoredInlayHint, BufferSnapshot, FoldRegion,
-    Highlight, buffer::Position, syntax::HighlightKind,
+    AnchoredCodeAction, AnchoredDiagnostic, AnchoredInlayHint, BufferSnapshot, FoldKind,
+    FoldRegion, Highlight, buffer::Position, syntax::HighlightKind,
 };
 use gpui::Pixels;
 use std::{
@@ -1718,6 +1718,10 @@ impl DisplaySnapshot {
             .fold_snapshot
             .fold_regions
             .iter()
+            // Parenthesis folds are useful for collapse behavior, but their header label is
+            // too noisy in SQL (e.g. "(...): (") and degrades readability while scrolling.
+            // Keep sticky headers focused on semantic scopes like blocks/functions/cases.
+            .filter(|region| region.kind != FoldKind::Parenthesis)
             .filter(|region| region.start_line < top_line && region.end_line >= top_line)
             .max_by_key(|region| region.start_line)?;
         let line_text = self
@@ -2043,6 +2047,48 @@ mod tests {
         );
 
         let header = snapshot.sticky_header_excerpt(1).expect("sticky header");
+        assert_eq!(header.buffer_line, 0);
+        assert_eq!(header.text, "BEGIN");
+        assert_eq!(header.kind_label, "block");
+    }
+
+    #[test]
+    fn test_sticky_header_excerpt_ignores_parenthesis_regions() {
+        let buffer = TextBuffer::new("SELECT (\n  1\n)\nSELECT 2");
+        let display_map = DisplayMap::from_display_lines(vec![0, 1, 2, 3]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[FoldRegion::new(0, 2, crate::FoldKind::Parenthesis)],
+            &HashSet::new(),
+            false,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        assert!(snapshot.sticky_header_excerpt(1).is_none());
+    }
+
+    #[test]
+    fn test_sticky_header_excerpt_falls_back_to_non_parenthesis_region() {
+        let buffer = TextBuffer::new("BEGIN\n  SELECT (\n    1\n  )\nEND");
+        let display_map = DisplayMap::from_display_lines(vec![0, 1, 2, 3, 4]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[
+                FoldRegion::new(0, 4, crate::FoldKind::Block),
+                FoldRegion::new(1, 3, crate::FoldKind::Parenthesis),
+            ],
+            &HashSet::new(),
+            false,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        let header = snapshot.sticky_header_excerpt(2).expect("sticky header");
         assert_eq!(header.buffer_line, 0);
         assert_eq!(header.text, "BEGIN");
         assert_eq!(header.kind_label, "block");

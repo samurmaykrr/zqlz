@@ -10609,7 +10609,6 @@ dependencies = [
  "chrono",
  "clap",
  "comfy-table",
- "dirs 4.0.0",
  "serde",
  "serde_json",
  "tokio",
@@ -10660,6 +10659,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "dirs 4.0.0",
  "serde",
  "serde_json",
  "sqlparser",
@@ -10864,8 +10864,8 @@ name = "zqlz-internal-storage"
 version = "0.0.7"
 dependencies = [
  "anyhow",
- "dirs 4.0.0",
  "rusqlite",
+ "zqlz-core",
 ]
 
 [[package]]
@@ -11015,12 +11015,12 @@ name = "zqlz-settings"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "dirs 5.0.1",
  "gpui",
  "serde",
  "serde_json",
  "tracing",
  "uuid",
+ "zqlz-core",
  "zqlz-ui",
 ]
 

@@ -34,7 +34,11 @@ where
         tracing::warn!("Failed to create config directories: {}", err);
     }
 
-    // Load bundled themes first (before watch_dir which may trigger reload)
+    let settings = ZqlzSettings::load().unwrap_or_default();
+    cx.set_global(settings.clone());
+
+    // Load bundled themes after settings are available so loaders can hydrate
+    // only the currently selected theme names at startup.
     load_bundled_themes.clone()(cx);
 
     // Setup theme registry to watch the user themes directory for custom themes
@@ -52,9 +56,6 @@ where
             tracing::warn!("Failed to watch themes directory: {}", err);
         }
     }
-
-    let settings = ZqlzSettings::load().unwrap_or_default();
-    cx.set_global(settings.clone());
 
     // Apply settings - this uses apply_with_fonts internally to ensure fonts are preserved
     settings.apply(cx);
@@ -113,8 +114,7 @@ impl ZqlzSettings {
     }
 
     pub fn settings_path() -> Result<PathBuf> {
-        let config_dir = dirs::config_dir().context("Could not find config directory")?;
-        Ok(config_dir.join("zqlz").join("settings.json"))
+        Ok(zqlz_core::paths::settings_file()?)
     }
 
     pub fn apply(&self, cx: &mut App) {

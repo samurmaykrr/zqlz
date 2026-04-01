@@ -120,6 +120,20 @@ impl TableViewerPanel {
         cx.notify();
     }
 
+    pub fn clear_sort_and_apply(&mut self, cx: &mut Context<Self>) {
+        if let Some(filter_state) = &self.filter_panel_state {
+            filter_state.update(cx, |state, cx| {
+                state.clear_sorts(cx);
+            });
+        }
+
+        if let (Some(connection_id), Some(table_name)) =
+            (self.connection_id, self.table_name.clone())
+        {
+            self.apply_filters(connection_id, table_name, cx);
+        }
+    }
+
     pub fn apply_sort(
         &mut self,
         column_name: String,

@@ -32,12 +32,6 @@ pub struct AppState {
     /// Recent connections for quick access
     pub recent_connections: Arc<RwLock<Vec<RecentConnection>>>,
 
-    /// Currently active connection ID (used across all query editors)
-    pub active_connection_id: Arc<RwLock<Option<Uuid>>>,
-
-    /// Currently active database name (for multi-database connections)
-    pub active_database: Arc<RwLock<Option<String>>>,
-
     /// Local SQLite storage for app data
     pub storage: Arc<LocalStorage>,
 
@@ -127,8 +121,6 @@ impl AppState {
             settings,
             connections,
             recent_connections: Arc::new(RwLock::new(Vec::new())),
-            active_connection_id: Arc::new(RwLock::new(None)),
-            active_database: Arc::new(RwLock::new(None)),
             storage,
             query_service,
             schema_service,
@@ -138,40 +130,6 @@ impl AppState {
             version_repository,
             query_history,
         }
-    }
-
-    /// Set the active connection for all query editors
-    pub fn set_active_connection(&self, connection_id: Option<Uuid>) {
-        *self.active_connection_id.write() = connection_id;
-
-        // Clear active database when connection changes
-        if connection_id.is_none() {
-            *self.active_database.write() = None;
-        }
-    }
-
-    /// Get the active connection ID
-    pub fn active_connection(&self) -> Option<Uuid> {
-        *self.active_connection_id.read()
-    }
-
-    /// Set the active database
-    pub fn set_active_database(&self, database: Option<String>) {
-        *self.active_database.write() = database;
-    }
-
-    /// Get the active database name
-    pub fn active_database(&self) -> Option<String> {
-        self.active_database.read().clone()
-    }
-
-    /// Get the active connection name
-    pub fn active_connection_name(&self) -> Option<String> {
-        let conn_id = self.active_connection()?;
-        self.saved_connections()
-            .into_iter()
-            .find(|c| c.id == conn_id)
-            .map(|c| c.name)
     }
 
     /// Add a connection to recent list

@@ -8,7 +8,7 @@ use crate::components::{
     ExplainResult, QueryEditor, QueryEditorEvent, QueryExecution, QueryExecutionParams,
     StatementResult,
 };
-use crate::workspace_state::{DiagnosticSeverity, EditorDiagnostic, EditorId};
+use crate::workspace_state::{DiagnosticSeverity, EditorDiagnostic, EditorId, RefreshScope};
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
@@ -1156,6 +1156,13 @@ impl MainView {
                             editor.set_current_database(default_database.clone(), cx);
                         });
 
+                        let active_database_before = {
+                            let workspace_state = _this.workspace_state.read(cx);
+                            workspace_state.active_database().map(str::to_owned)
+                        };
+                        let database_changed =
+                            active_database_before.as_deref() != default_database.as_deref();
+
                         _this.workspace_state.update(cx, |state, cx| {
                             state.update_editor(
                                 editor_id,
@@ -1164,10 +1171,18 @@ impl MainView {
                                 },
                                 cx,
                             );
+                            state.set_active_connection(Some(*connection_id), cx);
+                            state.set_active_database(default_database.clone(), cx);
                         });
 
-                        if let Some(database_name) = default_database {
-                            _this.load_database_schema(*connection_id, database_name, window, cx);
+                        if let Some(database_name) = default_database.as_ref() {
+                            _this.connection_sidebar.update(cx, |sidebar, cx| {
+                                sidebar.set_database_loading(*connection_id, database_name, true, cx);
+                            });
+                        }
+
+                        if !database_changed {
+                            _this.request_refresh(RefreshScope::ConnectionSurfaces(*connection_id), cx);
                         }
 
                         tracing::info!(
@@ -1191,16 +1206,35 @@ impl MainView {
                             return;
                         };
 
+                        let active_database_before = {
+                            let workspace_state = _this.workspace_state.read(cx);
+                            workspace_state.active_database().map(str::to_owned)
+                        };
+                        let database_changed =
+                            active_database_before.as_deref() != Some(database_name.as_str());
+
                         editor.update(cx, |editor, cx| {
                             editor.set_current_database(Some(database_name.clone()), cx);
                         });
+
+                        _this.connection_sidebar.update(cx, |sidebar, cx| {
+                            sidebar.set_database_loading(connection_id, database_name.as_str(), true, cx);
+                        });
+
+                        _this.workspace_state.update(cx, |state, cx| {
+                            state.set_active_connection(Some(connection_id), cx);
+                            state.set_active_database(Some(database_name.clone()), cx);
+                        });
+
+                        if !database_changed {
+                            _this.request_refresh(RefreshScope::ConnectionSurfaces(connection_id), cx);
+                        }
 
                         tracing::info!(
                             "Switch database requested for editor {} to database {}",
                             editor_id.0,
                             database_name
                         );
-                        _this.load_database_schema(connection_id, database_name.clone(), window, cx);
                     }
                 }
             }

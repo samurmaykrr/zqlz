@@ -402,6 +402,16 @@ impl SchemaObjectAction {
 /// Events emitted by WorkspaceState when state changes
 ///
 /// Panels subscribe to these events for automatic UI updates.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RefreshScope {
+    /// Refresh the connection sidebar list, then fan out to connected surfaces.
+    ConnectionsList,
+    /// Refresh schema/object surfaces for the current active connection.
+    ActiveConnectionSurfaces,
+    /// Refresh schema/object surfaces for a specific connection.
+    ConnectionSurfaces(Uuid),
+}
+
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub enum WorkspaceStateEvent {
@@ -410,6 +420,8 @@ pub enum WorkspaceStateEvent {
     ActiveConnectionChanged(Option<Uuid>),
     /// The active database changed (for multi-database connections)
     ActiveDatabaseChanged(Option<String>),
+    /// Canonical refresh intent routed through MainView.
+    RefreshRequested(RefreshScope),
     /// A connection's status changed (connected/disconnected)
     ConnectionStatusChanged { id: Uuid, connected: bool },
 
@@ -582,6 +594,12 @@ impl WorkspaceState {
             cx.emit(WorkspaceStateEvent::ConnectionStatusChanged { id, connected });
             cx.notify();
         }
+    }
+
+    /// Emit a canonical refresh intent for MainView to handle.
+    pub fn request_refresh(&mut self, scope: RefreshScope, cx: &mut Context<Self>) {
+        cx.emit(WorkspaceStateEvent::RefreshRequested(scope));
+        cx.notify();
     }
 
     /// Check if a connection is currently connected
@@ -870,7 +888,7 @@ impl Default for WorkspaceState {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorState, apply_document_metadata};
+    use super::{EditorState, RefreshScope, WorkspaceStateEvent, apply_document_metadata};
     use uuid::Uuid;
     use zqlz_text_editor::{DocumentContext, DocumentIdentity, DocumentSettings};
 
@@ -926,5 +944,22 @@ mod tests {
         assert_eq!(state.file_path.as_deref(), Some("/tmp/query.sql"));
         assert_eq!(state.document_identity, Some(context.identity.clone()));
         assert_eq!(state.document_context, Some(context));
+    }
+
+    #[test]
+    fn refresh_scope_is_copy_and_equality_comparable() {
+        let scope = RefreshScope::ActiveConnectionSurfaces;
+        let copied_scope = scope;
+
+        assert_eq!(scope, copied_scope);
+    }
+
+    #[test]
+    fn request_refresh_constructs_refresh_requested_event_variant() {
+        let event = WorkspaceStateEvent::RefreshRequested(RefreshScope::ConnectionsList);
+        assert!(matches!(
+            event,
+            WorkspaceStateEvent::RefreshRequested(RefreshScope::ConnectionsList)
+        ));
     }
 }

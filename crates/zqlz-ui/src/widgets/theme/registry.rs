@@ -5,7 +5,7 @@ use anyhow::Result;
 use gpui::{App, Global, SharedString};
 use notify::Watcher as _;
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
     path::PathBuf,
     rc::Rc,
@@ -75,11 +75,26 @@ pub(super) fn init(cx: &mut App) {
     .detach();
 }
 
+/// Lightweight metadata for a discoverable theme that may not yet be loaded.
+#[derive(Clone, Debug)]
+pub struct ThemeCatalogEntry {
+    pub name: SharedString,
+    pub is_default: bool,
+}
+
+/// Loads one or more concrete theme configs when a specific theme name is requested.
+///
+/// Implementations are expected to return all themes from the backing source file
+/// when available so related themes become available after a single parse.
+pub type LazyThemeLoader = fn(&str) -> Result<Vec<ThemeConfig>>;
+
 #[derive(Default, Debug)]
 pub struct ThemeRegistry {
     themes_dir: PathBuf,
     default_themes: HashMap<ThemeMode, Rc<ThemeConfig>>,
     themes: HashMap<SharedString, Rc<ThemeConfig>>,
+    bundled_theme_catalog: HashMap<SharedString, ThemeCatalogEntry>,
+    lazy_theme_loaders: Vec<LazyThemeLoader>,
     has_custom_themes: bool,
 }
 
@@ -141,6 +156,84 @@ impl ThemeRegistry {
         themes
     }
 
+    /// Returns a sorted list of all discoverable theme names.
+    ///
+    /// This includes already loaded themes as well as catalog-only bundled themes
+    /// that can be loaded on demand later.
+    pub fn sorted_theme_names(&self) -> Vec<SharedString> {
+        let mut names: HashSet<SharedString> = self.themes.keys().cloned().collect();
+        names.extend(self.bundled_theme_catalog.keys().cloned());
+
+        let mut names: Vec<SharedString> = names.into_iter().collect();
+        names.sort_by(|left, right| {
+            self.theme_is_default(right)
+                .cmp(&self.theme_is_default(left))
+                .then(left.to_lowercase().cmp(&right.to_lowercase()))
+        });
+        names
+    }
+
+    /// Registers catalog entries for bundled themes that may be lazily loaded.
+    pub fn register_theme_catalog<I>(&mut self, entries: I)
+    where
+        I: IntoIterator<Item = ThemeCatalogEntry>,
+    {
+        for entry in entries {
+            self.bundled_theme_catalog
+                .entry(entry.name.clone())
+                .or_insert(entry);
+        }
+    }
+
+    /// Registers a lazy loader callback for theme configs.
+    pub fn register_lazy_theme_loader(&mut self, loader: LazyThemeLoader) {
+        if self
+            .lazy_theme_loaders
+            .iter()
+            .any(|existing_loader| *existing_loader as usize == loader as usize)
+        {
+            return;
+        }
+
+        self.lazy_theme_loaders.push(loader);
+    }
+
+    /// Ensures a theme config exists in the in-memory registry.
+    ///
+    /// Returns true if the requested theme is available after attempting lazy
+    /// loaders, false otherwise.
+    pub fn ensure_theme_loaded_by_name(&mut self, theme_name: &SharedString) -> bool {
+        if self.themes.contains_key(theme_name) {
+            return true;
+        }
+
+        let loaders = self.lazy_theme_loaders.clone();
+        for loader in loaders {
+            match loader(theme_name.as_ref()) {
+                Ok(loaded_themes) => {
+                    for theme in loaded_themes {
+                        self.themes
+                            .entry(theme.name.clone())
+                            .or_insert_with(|| Rc::new(theme));
+                    }
+
+                    if self.themes.contains_key(theme_name) {
+                        return true;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        %error,
+                        theme = %theme_name,
+                        "failed to lazily load theme"
+                    );
+                }
+            }
+        }
+
+        false
+    }
+
     /// Returns a reference to the map of default themes.
     pub fn default_themes(&self) -> &HashMap<ThemeMode, Rc<ThemeConfig>> {
         &self.default_themes
@@ -152,6 +245,18 @@ impl ThemeRegistry {
 
     pub fn default_dark_theme(&self) -> &Rc<ThemeConfig> {
         &self.default_themes[&ThemeMode::Dark]
+    }
+
+    fn theme_is_default(&self, theme_name: &SharedString) -> bool {
+        self.themes
+            .get(theme_name)
+            .map(|theme| theme.is_default)
+            .or_else(|| {
+                self.bundled_theme_catalog
+                    .get(theme_name)
+                    .map(|entry| entry.is_default)
+            })
+            .unwrap_or(false)
     }
 
     fn init_default_themes(&mut self) {

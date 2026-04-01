@@ -30,7 +30,6 @@ zqlz-internal-storage = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
 anyhow = { workspace = true }
-dirs = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

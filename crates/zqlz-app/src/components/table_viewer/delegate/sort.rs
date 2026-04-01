@@ -36,6 +36,17 @@ impl TableViewerDelegate {
         }
 
         if sort == ColumnSort::Default {
+            if self.uses_client_side_sort() {
+                self.restore_original_row_order();
+                tracing::info!("Client-side sort cleared and original order restored");
+            } else {
+                let viewer_panel = self.viewer_panel.clone();
+                if let Err(error) = viewer_panel.update(cx, |panel, cx| {
+                    panel.clear_sort_and_apply(cx);
+                }) {
+                    tracing::error!("Failed to clear server-side sort: {:?}", error);
+                }
+            }
             cx.notify();
             return;
         }
@@ -53,7 +64,10 @@ impl TableViewerDelegate {
         let direction = match sort {
             ColumnSort::Ascending => SortDirection::Ascending,
             ColumnSort::Descending => SortDirection::Descending,
-            ColumnSort::Default => return,
+            ColumnSort::Default => {
+                cx.notify();
+                return;
+            }
         };
 
         if self.uses_client_side_sort() {
@@ -91,7 +105,10 @@ impl TableViewerDelegate {
     ) {
         use super::super::filter_types::SortDirection;
 
-        self.rows.sort_by(|a, b| {
+        self.ensure_row_order_tracking();
+        let mut rows_with_order = self.take_rows_with_order();
+
+        rows_with_order.sort_by(|(_, a), (_, b)| {
             let val_a = a
                 .get(data_col_ix)
                 .map(|v| v.display_for_table())
@@ -112,6 +129,8 @@ impl TableViewerDelegate {
                 SortDirection::Descending => ordering.reverse(),
             }
         });
+
+        self.restore_rows_with_order(rows_with_order);
 
         self.clear_cell_preview_cache();
         self.recompute_filtered_indices();
@@ -141,7 +160,10 @@ impl TableViewerDelegate {
             return;
         }
 
-        self.rows.sort_by(|a, b| {
+        self.ensure_row_order_tracking();
+        let mut rows_with_order = self.take_rows_with_order();
+
+        rows_with_order.sort_by(|(_, a), (_, b)| {
             for (col_ix, direction) in &resolved_sorts {
                 let val_a = a
                     .get(*col_ix)
@@ -171,6 +193,8 @@ impl TableViewerDelegate {
             std::cmp::Ordering::Equal
         });
 
+        self.restore_rows_with_order(rows_with_order);
+
         self.clear_cell_preview_cache();
         self.recompute_filtered_indices();
     }
@@ -185,6 +209,44 @@ impl TableViewerDelegate {
         let conditions = self.last_filter_conditions.clone();
         let search_text = self.last_filter_search_text.clone();
         self.apply_advanced_filters(&conditions, &search_text);
+    }
+
+    fn restore_original_row_order(&mut self) {
+        self.ensure_row_order_tracking();
+        let mut rows_with_order = self.take_rows_with_order();
+        rows_with_order.sort_by_key(|(original_order, _)| *original_order);
+        self.restore_rows_with_order(rows_with_order);
+        self.clear_cell_preview_cache();
+        self.recompute_filtered_indices();
+    }
+
+    fn ensure_row_order_tracking(&mut self) {
+        if self.row_original_order.len() == self.rows.len() {
+            return;
+        }
+
+        tracing::warn!(
+            "Row order tracking out of sync (rows={}, order_tokens={}); rebuilding in current order",
+            self.rows.len(),
+            self.row_original_order.len()
+        );
+
+        let row_count = self.rows.len() as u64;
+        self.row_original_order = (0..row_count).collect();
+        self.next_row_order_token = row_count;
+    }
+
+    fn take_rows_with_order(&mut self) -> Vec<(u64, Vec<Value>)> {
+        let rows = std::mem::take(&mut self.rows);
+        let order = std::mem::take(&mut self.row_original_order);
+        order.into_iter().zip(rows).collect()
+    }
+
+    fn restore_rows_with_order(&mut self, rows_with_order: Vec<(u64, Vec<Value>)>) {
+        let (row_original_order, rows): (Vec<u64>, Vec<Vec<Value>>) =
+            rows_with_order.into_iter().unzip();
+        self.row_original_order = row_original_order;
+        self.rows = rows;
     }
 }
 

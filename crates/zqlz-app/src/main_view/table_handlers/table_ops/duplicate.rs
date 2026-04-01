@@ -15,8 +15,8 @@ use zqlz_ui::widgets::{
 
 use crate::MainView;
 use crate::app::AppState;
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
 use crate::main_view::table_handlers_utils::validation::validate_table_name;
+use crate::workspace_state::RefreshScope;
 
 impl MainView {
     /// Duplicates a table (creates a copy with a new name)
@@ -159,9 +159,8 @@ impl MainView {
 
                                     let _ = cx.update_window(window_handle, |_, _window, cx| {
                                         let _ = main_view.update(cx, |main_view, cx| {
-                                            main_view.refresh_connection_surfaces(
-                                                RefreshTarget::Connection(connection_id),
-                                                SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                            main_view.request_refresh(
+                                                RefreshScope::ConnectionSurfaces(connection_id),
                                                 cx,
                                             );
                                         });
@@ -332,9 +331,8 @@ impl MainView {
 
                             let _ = cx.update_window(window_handle, |_, _window, cx| {
                                 let _ = main_view.update(cx, |main_view, cx| {
-                                    main_view.refresh_connection_surfaces(
-                                        RefreshTarget::Connection(connection_id),
-                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                    main_view.request_refresh(
+                                        RefreshScope::ConnectionSurfaces(connection_id),
                                         cx,
                                     );
                                 });

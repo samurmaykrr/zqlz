@@ -72,7 +72,7 @@ use crate::components::{
     ResultsPanel, ResultsPanelEvent, SchemaDetailsPanel, SettingsPanel,
 };
 use crate::workspace_state::{
-    DiagnosticSeverity, EditorDiagnostic, WorkspaceState, WorkspaceStateEvent,
+    DiagnosticSeverity, EditorDiagnostic, RefreshScope, WorkspaceState, WorkspaceStateEvent,
 };
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
 
@@ -147,6 +147,14 @@ pub struct MainView {
 }
 
 impl MainView {
+    /// Request a canonical refresh scope through workspace state so all refresh
+    /// entry points converge into a single handling path.
+    fn request_refresh(&mut self, scope: RefreshScope, cx: &mut Context<Self>) {
+        self.workspace_state.update(cx, |workspace_state, cx| {
+            workspace_state.request_refresh(scope, cx);
+        });
+    }
+
     /// Creates a new MainView with the default 4-panel dock layout.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace_id = WorkspaceId::default_workspace();
@@ -522,13 +530,61 @@ impl MainView {
                 if connection_id.is_some() {
                     self.refresh_connection_surfaces(
                         crate::main_view::refresh::RefreshTarget::ActiveConnection,
-                        crate::main_view::refresh::SurfaceRefreshOptions {
-                            invalidate_schema_cache: false,
-                            refresh_sidebar: false,
-                            refresh_objects_panel: true,
-                        },
+                        crate::main_view::refresh::SurfaceRefreshOptions::SELECTION_SYNC_OBJECTS_ONLY,
                         cx,
                     );
+                }
+            }
+
+            WorkspaceStateEvent::ActiveDatabaseChanged(database_name) => {
+                tracing::debug!(
+                    "MainView: handling ActiveDatabaseChanged({:?})",
+                    database_name
+                );
+
+                if let Some(connection_id) = self.workspace_state.read(cx).active_connection_id() {
+                    self.request_refresh(RefreshScope::ConnectionSurfaces(connection_id), cx);
+                }
+            }
+
+            WorkspaceStateEvent::RefreshRequested(scope) => {
+                tracing::debug!("MainView: handling RefreshRequested({:?})", scope);
+
+                match scope {
+                    RefreshScope::ConnectionsList => {
+                        self.refresh_connections_list_preserving_state(cx);
+
+                        let connected_connection_ids: Vec<Uuid> = self
+                            .connection_sidebar
+                            .read(cx)
+                            .connections()
+                            .iter()
+                            .filter(|connection| connection.is_connected)
+                            .map(|connection| connection.id)
+                            .collect();
+
+                        for connection_id in connected_connection_ids {
+                            self.refresh_connection_surfaces(
+                                crate::main_view::refresh::RefreshTarget::Connection(connection_id),
+                                crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                cx,
+                            );
+                        }
+                    }
+                    RefreshScope::ActiveConnectionSurfaces => {
+                        self.refresh_connection_surfaces(
+                            crate::main_view::refresh::RefreshTarget::ActiveConnection,
+                            crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                            cx,
+                        );
+                    }
+                    RefreshScope::ConnectionSurfaces(connection_id) => {
+                        self.refresh_connection_surfaces(
+                            crate::main_view::refresh::RefreshTarget::Connection(*connection_id),
+                            crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                            cx,
+                        );
+                    }
                 }
             }
 

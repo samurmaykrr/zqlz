@@ -5,6 +5,10 @@
 //! - macOS: Sets deployment target and framework linking
 
 fn main() {
+    if let Err(error) = generate_bundled_theme_manifest() {
+        panic!("failed to generate bundled theme manifest: {error}");
+    }
+
     // Set macOS deployment target
     #[cfg(target_os = "macos")]
     {
@@ -27,6 +31,93 @@ fn main() {
     {
         windows_build();
     }
+}
+
+fn generate_bundled_theme_manifest() -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::io::Write;
+    use std::path::PathBuf;
+
+    let manifest_directory = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let themes_directory = manifest_directory.join("assets/themes");
+
+    println!("cargo:rerun-if-changed={}", themes_directory.display());
+
+    let mut theme_to_file: BTreeMap<String, (String, bool)> = BTreeMap::new();
+
+    let mut theme_paths = fs::read_dir(&themes_directory)?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_file()
+                && path.extension().and_then(|extension| extension.to_str()) == Some("json")
+        })
+        .collect::<Vec<_>>();
+    theme_paths.sort();
+
+    for path in theme_paths {
+        let file_name = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .ok_or_else(|| format!("invalid UTF-8 theme file name for '{}'", path.display()))?
+            .to_owned();
+        let file_content = fs::read_to_string(&path)?;
+        let parsed: serde_json::Value = serde_json::from_str(&file_content)?;
+        let themes = parsed
+            .get("themes")
+            .and_then(|value| value.as_array())
+            .ok_or_else(|| format!("theme file '{}' has no themes array", path.display()))?;
+
+        for theme in themes {
+            let Some(theme_name) = theme.get("name").and_then(|value| value.as_str()) else {
+                continue;
+            };
+
+            if theme_name.trim().is_empty() {
+                continue;
+            }
+
+            let is_default = theme
+                .get("is_default")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+
+            if let Some((existing_file, _)) = theme_to_file.get(theme_name)
+                && existing_file != &file_name
+            {
+                println!(
+                    "cargo:warning=Duplicate bundled theme name '{}' in '{}' and '{}' (keeping first)",
+                    theme_name, existing_file, file_name
+                );
+                continue;
+            }
+
+            theme_to_file
+                .entry(theme_name.to_owned())
+                .or_insert((file_name.clone(), is_default));
+        }
+    }
+
+    let output_directory = PathBuf::from(std::env::var("OUT_DIR")?);
+    let output_path = output_directory.join("bundled_theme_manifest.rs");
+    let mut output_file = fs::File::create(output_path)?;
+
+    writeln!(
+        output_file,
+        "const BUNDLED_THEME_MANIFEST: &[BundledThemeManifestEntry] = &["
+    )?;
+    for (theme_name, (file_name, is_default)) in theme_to_file {
+        let theme_name = serde_json::to_string(&theme_name)?;
+        let file_name = serde_json::to_string(&file_name)?;
+        writeln!(
+            output_file,
+            "    BundledThemeManifestEntry {{ theme_name: {theme_name}, file_name: {file_name}, is_default: {is_default} }},"
+        )?;
+    }
+    writeln!(output_file, "];")?;
+
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]

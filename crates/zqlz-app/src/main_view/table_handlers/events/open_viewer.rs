@@ -562,6 +562,8 @@ impl MainView {
                     TableViewerEvent::LoadFkValues {
                         connection_id,
                         referenced_table,
+                        referenced_schema,
+                        cache_key,
                         referenced_columns,
                         query,
                         limit,
@@ -570,6 +572,8 @@ impl MainView {
                         handle_load_fk_values_event(
                             *connection_id,
                             referenced_table,
+                            referenced_schema.as_deref(),
+                            cache_key,
                             referenced_columns,
                             query.as_deref(),
                             *limit,

@@ -371,11 +371,10 @@ impl MainView {
 
                 // Refresh both schema-backed surfaces through the shared coordinator.
                 _ = this.update(cx, |main_view, cx| {
-                    main_view.refresh_connection_surfaces(
-                        crate::main_view::refresh::RefreshTarget::Connection(connection_id),
-                        crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                        cx,
-                    );
+                    main_view
+                        .request_refresh(crate::workspace_state::RefreshScope::ConnectionSurfaces(
+                            connection_id,
+                        ), cx);
                 });
             });
 

@@ -340,6 +340,10 @@ pub enum TableViewerEvent {
         connection_id: Uuid,
         /// The referenced table to query for values
         referenced_table: String,
+        /// Optional referenced schema/namespace for disambiguating same-name tables
+        referenced_schema: Option<String>,
+        /// Cache key used to store and retrieve FK values for this relation
+        cache_key: String,
         /// The columns in the referenced table to fetch (typically the PK columns)
         referenced_columns: Vec<String>,
         /// Search query for server-side FK typeahead (None/empty means initial suggestions)

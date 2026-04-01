@@ -101,15 +101,7 @@ impl TableViewerDelegate {
             state.focus(window, cx);
         });
 
-        let viewer_panel = self.viewer_panel.clone();
-        if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
-            cx.emit(TableViewerEvent::InlineEditStarted);
-        }) {
-            tracing::error!(
-                "Failed to emit InlineEditStarted from start_bulk_editing: {:?}",
-                e
-            );
-        }
+        self.emit_inline_edit_started(cx);
 
         cx.notify();
     }

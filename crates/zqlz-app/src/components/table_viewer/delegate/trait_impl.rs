@@ -1,5 +1,8 @@
 use super::*;
 
+const ROW_NUMBER_SELECTION_TOOLTIP: &str =
+    "Tip: Cmd/Ctrl+Click toggles multi-selection. Shift+Click selects a range.";
+
 impl TableDelegate for TableViewerDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
         self.columns.len()
@@ -35,12 +38,19 @@ impl TableDelegate for TableViewerDelegate {
         let actual_row_ix = self.get_actual_row_index(row_ix);
 
         let is_deleted = self.pending_changes.is_row_deleted(actual_row_ix);
-        let original_row_count = self.rows.len() - self.pending_changes.new_row_count();
+        let original_row_count = self
+            .rows
+            .len()
+            .saturating_sub(self.pending_changes.new_row_count());
         let is_new_row = actual_row_ix >= original_row_count;
 
         // Row number column
         if col_ix == 0 {
             return div()
+                .id(ElementId::NamedInteger(
+                    "row-number-tip".into(),
+                    (self.row_offset + actual_row_ix + 1) as u64,
+                ))
                 .h_full()
                 .flex()
                 .items_center()
@@ -55,6 +65,7 @@ impl TableDelegate for TableViewerDelegate {
                     this.bg(theme.success.opacity(0.15))
                 })
                 .child((self.row_offset + actual_row_ix + 1).to_string())
+                .tooltip(|window, cx| Tooltip::new(ROW_NUMBER_SELECTION_TOOLTIP).build(window, cx))
                 .into_any_element();
         }
 
@@ -115,6 +126,10 @@ impl TableDelegate for TableViewerDelegate {
                             .w_full()
                             .with_size(Size::Small)
                             .appearance(false)
+                            // Select keeps a transparent 1px border even with appearance(false).
+                            // In table cells that introduces a subtle 1px geometry jump when
+                            // switching between display and edit modes, so force border width to 0.
+                            .border_0()
                             .focus_border(false)
                             .placeholder(display_value),
                     )
@@ -160,6 +175,8 @@ impl TableDelegate for TableViewerDelegate {
                                         .w_full()
                                         .with_size(Size::Small)
                                         .appearance(false)
+                                        // Keep inline-edit geometry stable with non-edit cell rendering.
+                                        .border_0()
                                         .focus_border(false)
                                         .menu_min_width(px(180.))
                                         .placeholder(display_value),
@@ -202,7 +219,10 @@ impl TableDelegate for TableViewerDelegate {
             .pending_changes
             .is_cell_modified(actual_row_ix, data_col_ix);
         let is_deleted = self.pending_changes.is_row_deleted(actual_row_ix);
-        let original_row_count = self.rows.len() - self.pending_changes.new_row_count();
+        let original_row_count = self
+            .rows
+            .len()
+            .saturating_sub(self.pending_changes.new_row_count());
         let is_new_row = actual_row_ix >= original_row_count;
         let is_boolean_column = self.is_boolean_column(data_col_ix);
 

@@ -4,9 +4,14 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Instant;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+    mpsc::{self, TryRecvError},
+};
+use std::time::{Duration, Instant};
 use zqlz_core::Connection;
 use zqlz_ui::widgets::{
     ActiveTheme, IndexPath, Root, Sizable,
@@ -14,16 +19,28 @@ use zqlz_ui::widgets::{
     checkbox::Checkbox,
     h_flex,
     input::{Input, InputEvent, InputState},
-    scroll::ScrollableElement,
+    scroll::{ScrollableElement, Scrollbar, ScrollbarShow},
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
     title_bar::TitleBar,
+    tooltip::Tooltip,
     v_flex,
 };
+
+const IMPORT_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
+const IMPORT_UDIF_TABLE_ROW_HEIGHT: f32 = 28.0;
+const IMPORT_SOURCE_ROW_HEIGHT: f32 = 40.0;
+const IMPORT_TARGET_ROW_HEIGHT: f32 = 34.0;
+const IMPORT_MAPPING_ROW_HEIGHT: f32 = 34.0;
+const IMPORT_LOG_ROW_HEIGHT: f32 = 22.0;
+const IMPORT_DEGRADATION_ROW_HEIGHT: f32 = 30.0;
 
 use super::types::*;
 use crate::{
     CsvImporter,
-    importer::{DegradationSeverity, GenericImporter, Importer, helpers as udif_helpers},
+    importer::{
+        DegradationSeverity, GenericImporter, ImportPhase, ImportProgress, Importer,
+        helpers as udif_helpers,
+    },
 };
 
 /// Events emitted by the import wizard
@@ -190,11 +207,13 @@ pub struct ImportWizard {
     #[allow(dead_code)]
     import_mode_state: Entity<SelectState<SearchableVec<ImportModeItem>>>,
 
-    // Scroll handles
-    #[allow(dead_code)]
-    scroll_handle: ScrollHandle,
-    #[allow(dead_code)]
-    log_scroll_handle: ScrollHandle,
+    // Virtualized list scroll handles
+    udif_table_scroll_handle: UniformListScrollHandle,
+    source_scroll_handle: UniformListScrollHandle,
+    target_table_scroll_handle: UniformListScrollHandle,
+    field_mapping_scroll_handle: UniformListScrollHandle,
+    log_scroll_handle: UniformListScrollHandle,
+    summary_scroll_handle: UniformListScrollHandle,
 
     /// Import start time for elapsed calculation
     import_start_time: Option<Instant>,
@@ -554,8 +573,12 @@ impl ImportWizard {
             source_select_state,
             target_table_inputs,
             import_mode_state,
-            scroll_handle: ScrollHandle::new(),
-            log_scroll_handle: ScrollHandle::new(),
+            udif_table_scroll_handle: UniformListScrollHandle::new(),
+            source_scroll_handle: UniformListScrollHandle::new(),
+            target_table_scroll_handle: UniformListScrollHandle::new(),
+            field_mapping_scroll_handle: UniformListScrollHandle::new(),
+            log_scroll_handle: UniformListScrollHandle::new(),
+            summary_scroll_handle: UniformListScrollHandle::new(),
             import_start_time: None,
             _subscriptions: subscriptions,
         }
@@ -683,6 +706,48 @@ impl ImportWizard {
         cx.notify();
     }
 
+    fn udif_phase_label(phase: ImportPhase) -> &'static str {
+        match phase {
+            ImportPhase::Validating => "Validating document",
+            ImportPhase::CreatingEnumTypes => "Creating enum types",
+            ImportPhase::CreatingTables => "Creating tables",
+            ImportPhase::ImportingData => "Importing rows",
+            ImportPhase::CreatingIndexes => "Creating indexes",
+            ImportPhase::CreatingForeignKeys => "Creating foreign keys",
+            ImportPhase::RestoringSequences => "Restoring sequences",
+            ImportPhase::Finalizing => "Finalizing",
+            ImportPhase::Complete => "Complete",
+        }
+    }
+
+    fn udif_progress_fraction(progress: &ImportProgress) -> f32 {
+        let table_fraction = if progress.total_tables > 0 {
+            (progress.tables_completed as f32 / progress.total_tables as f32).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+
+        match progress.phase {
+            ImportPhase::Validating => 0.03,
+            ImportPhase::CreatingEnumTypes => 0.08,
+            ImportPhase::CreatingTables => 0.12 + table_fraction * 0.23,
+            ImportPhase::ImportingData => {
+                let row_fraction = progress
+                    .total_rows
+                    .filter(|rows| *rows > 0)
+                    .map(|rows| (progress.rows_imported as f32 / rows as f32).clamp(0.0, 1.0))
+                    .unwrap_or(0.0);
+                0.35 + (table_fraction * 0.35) + (row_fraction * 0.1)
+            }
+            ImportPhase::CreatingIndexes => 0.82,
+            ImportPhase::CreatingForeignKeys => 0.9,
+            ImportPhase::RestoringSequences => 0.96,
+            ImportPhase::Finalizing => 0.98,
+            ImportPhase::Complete => 1.0,
+        }
+        .clamp(0.0, 1.0)
+    }
+
     pub fn set_complete(&mut self, cx: &mut Context<Self>) {
         self.state.is_complete = true;
         self.state.is_importing = false;
@@ -737,26 +802,13 @@ impl ImportWizard {
     }
 
     fn go_next(&mut self, cx: &mut Context<Self>) {
-        // Block navigation from the TargetTable step when any table name is blank so the
-        // importer always has a valid destination rather than silently using an empty string.
-        if self.state.current_step == ImportWizardStep::TargetTable
-            && !self.state.validate_target_tables()
-        {
-            cx.notify();
-            return;
-        }
-
-        // Block navigation from the FieldMapping step when every column is skipped;
-        // importing with zero active columns is always an error.
-        if self.state.current_step == ImportWizardStep::FieldMapping
-            && !self.state.validate_field_mappings()
-        {
-            cx.notify();
-            return;
-        }
-
         let is_udif = self.state.is_udif_import();
         if let Some(next) = self.state.current_step.next_for_format(is_udif) {
+            if !self.can_navigate_to_step(next) {
+                cx.notify();
+                return;
+            }
+
             self.state.current_step = next;
             cx.notify();
         }
@@ -768,6 +820,128 @@ impl ImportWizard {
             self.state.current_step = prev;
             cx.notify();
         }
+    }
+
+    fn go_to_step(&mut self, step: ImportWizardStep, cx: &mut Context<Self>) {
+        if self.state.is_importing {
+            return;
+        }
+
+        let is_udif = self.state.is_udif_import();
+        let is_step_available = ImportWizardStep::all_for_format(is_udif)
+            .into_iter()
+            .any(|available_step| available_step == step);
+
+        if !is_step_available {
+            return;
+        }
+
+        if !self.can_navigate_to_step(step) {
+            cx.notify();
+            return;
+        }
+
+        self.state.current_step = step;
+        cx.notify();
+    }
+
+    fn blocked_navigation_tooltip(&self, target_step: ImportWizardStep) -> Option<SharedString> {
+        if self.state.is_importing {
+            return Some("Step navigation is disabled while import is running".into());
+        }
+
+        let is_udif = self.state.is_udif_import();
+        let steps = ImportWizardStep::all_for_format(is_udif);
+        let current_step = self.state.current_step;
+
+        let current_position = steps.iter().position(|step| *step == current_step)?;
+        let target_position = steps.iter().position(|step| *step == target_step)?;
+
+        if target_position <= current_position {
+            return None;
+        }
+
+        for step in &steps[current_position..target_position] {
+            match step {
+                ImportWizardStep::TargetTable => {
+                    if self
+                        .state
+                        .target_configs
+                        .iter()
+                        .any(|config| config.target_table.trim().is_empty())
+                    {
+                        return Some("Fill in all target table names before continuing".into());
+                    }
+                }
+                ImportWizardStep::FieldMapping => {
+                    let source_index = self.state.selected_mapping_index;
+                    if let Some(mappings) = self.state.field_mappings.get(&source_index)
+                        && !mappings.is_empty()
+                    {
+                        let has_importable_field = mappings
+                            .iter()
+                            .any(|mapping| !mapping.skip && !mapping.is_auto_increment);
+
+                        if !has_importable_field {
+                            return Some(
+                                "Select at least one field to import before continuing".into(),
+                            );
+                        }
+                    }
+                }
+                ImportWizardStep::Progress => {
+                    if target_step == ImportWizardStep::Summary && !self.state.is_complete {
+                        return Some("Summary becomes available after import completes".into());
+                    }
+                }
+                ImportWizardStep::FileSource
+                | ImportWizardStep::SourceFormat
+                | ImportWizardStep::ImportMode
+                | ImportWizardStep::Summary => {}
+            }
+        }
+
+        None
+    }
+
+    fn can_navigate_to_step(&mut self, target_step: ImportWizardStep) -> bool {
+        if target_step == ImportWizardStep::Summary && !self.state.is_complete {
+            return false;
+        }
+
+        let is_udif = self.state.is_udif_import();
+        let steps = ImportWizardStep::all_for_format(is_udif);
+        let Some(current_position) = steps
+            .iter()
+            .position(|step| *step == self.state.current_step)
+        else {
+            return false;
+        };
+        let Some(target_position) = steps.iter().position(|step| *step == target_step) else {
+            return false;
+        };
+
+        if target_position <= current_position {
+            return true;
+        }
+
+        for step in &steps[current_position..target_position] {
+            match step {
+                ImportWizardStep::TargetTable => {
+                    if !self.state.validate_target_tables() {
+                        return false;
+                    }
+                }
+                ImportWizardStep::FieldMapping => {
+                    if !self.state.validate_field_mappings() {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        true
     }
 
     fn start_import(&mut self, cx: &mut Context<Self>) {
@@ -794,6 +968,7 @@ impl ImportWizard {
         self.state.is_importing = true;
         self.state.is_complete = false;
         self.state.progress = 0.0;
+        self.state.stats = ImportStats::default();
         self.state.log_messages.clear();
         self.import_start_time = Some(Instant::now());
 
@@ -820,6 +995,126 @@ impl ImportWizard {
     fn start_udif_import(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         let import_state = self.state.clone();
         let driver_name = connection.driver_name().to_string();
+        let (progress_tx, progress_rx) = mpsc::channel::<ImportProgress>();
+        let import_finished = Arc::new(AtomicBool::new(false));
+
+        cx.spawn({
+            let import_finished = import_finished.clone();
+            async move |this, cx| {
+                let mut last_phase: Option<ImportPhase> = None;
+
+                loop {
+                    let mut received_any_progress = false;
+
+                    loop {
+                        match progress_rx.try_recv() {
+                            Ok(progress) => {
+                                received_any_progress = true;
+                                let phase_label = Self::udif_phase_label(progress.phase).to_string();
+                                let phase_for_log = phase_label.clone();
+                                let table_position = if progress.total_tables > 0 {
+                                    format!(
+                                        "{}/{}",
+                                        progress.tables_completed.min(progress.total_tables),
+                                        progress.total_tables
+                                    )
+                                } else {
+                                    "-".to_string()
+                                };
+                                let table_status = progress.current_table.as_ref().map_or_else(
+                                    || format!("{} • {}", phase_label, table_position),
+                                    |table_name| {
+                                        format!(
+                                            "{} • {} ({})",
+                                            phase_label, table_name, table_position
+                                        )
+                                    },
+                                );
+                                let progress_fraction = Self::udif_progress_fraction(&progress);
+
+                                if let Err(error) = this.update(cx, |this, cx| {
+                                    if last_phase != Some(progress.phase) {
+                                        this.state
+                                            .add_log(LogLevel::Info, format!("Phase: {}", phase_for_log));
+                                    }
+
+                                    if let Some(start) = this.import_start_time {
+                                        this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
+                                    }
+
+                                    this.state.stats.current_table = table_status;
+                                    if matches!(progress.phase, ImportPhase::ImportingData) {
+                                        this.state.stats.processed = progress.rows_imported;
+                                    }
+                                    this.state.progress = progress_fraction;
+                                    cx.notify();
+                                }) {
+                                    tracing::debug!(
+                                        "Failed to update import wizard with UDIF progress: {error}"
+                                    );
+                                    return anyhow::Ok(());
+                                }
+
+                                last_phase = Some(progress.phase);
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => return anyhow::Ok(()),
+                        }
+                    }
+
+                    if import_finished.load(Ordering::SeqCst) {
+                        // Drain any final progress updates that may have arrived between
+                        // the previous poll cycle and completion signal.
+                        while let Ok(progress) = progress_rx.try_recv() {
+                            let phase_label = Self::udif_phase_label(progress.phase).to_string();
+                            let table_position = if progress.total_tables > 0 {
+                                format!(
+                                    "{}/{}",
+                                    progress.tables_completed.min(progress.total_tables),
+                                    progress.total_tables
+                                )
+                            } else {
+                                "-".to_string()
+                            };
+                            let table_status = progress.current_table.as_ref().map_or_else(
+                                || format!("{} • {}", phase_label, table_position),
+                                |table_name| {
+                                    format!("{} • {} ({})", phase_label, table_name, table_position)
+                                },
+                            );
+                            let progress_fraction = Self::udif_progress_fraction(&progress);
+
+                            if let Err(error) = this.update(cx, |this, cx| {
+                                if let Some(start) = this.import_start_time {
+                                    this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
+                                }
+
+                                this.state.stats.current_table = table_status;
+                                if matches!(progress.phase, ImportPhase::ImportingData) {
+                                    this.state.stats.processed = progress.rows_imported;
+                                }
+                                this.state.progress = progress_fraction;
+                                cx.notify();
+                            }) {
+                                tracing::debug!(
+                                    "Failed to update import wizard with final UDIF progress: {error}"
+                                );
+                            }
+                        }
+
+                        return anyhow::Ok(());
+                    }
+
+                    if !received_any_progress {
+                        cx.background_spawn(async {
+                            std::thread::sleep(Duration::from_millis(75));
+                        })
+                        .await;
+                    }
+                }
+            }
+        })
+        .detach();
 
         cx.spawn(async move |this, cx| {
             // Get the first source file path
@@ -827,7 +1122,7 @@ impl ImportWizard {
                 Some(source) => match &source.source_type {
                     ImportSourceType::File(path) => path.clone(),
                     ImportSourceType::Url(_) => {
-                        _ = this.update(cx, |this, cx| {
+                        if let Err(error) = this.update(cx, |this, cx| {
                             this.state.is_importing = false;
                             this.state
                                 .add_log(LogLevel::Error, "UDIF import from URL not yet supported");
@@ -835,12 +1130,17 @@ impl ImportWizard {
                                 "UDIF import from URL not yet supported".to_string(),
                             ));
                             cx.notify();
-                        });
+                        }) {
+                            tracing::debug!(
+                                "Failed to publish URL-source error in import wizard: {error}"
+                            );
+                        }
+                        import_finished.store(true, Ordering::SeqCst);
                         return anyhow::Ok(());
                     }
                 },
                 None => {
-                    _ = this.update(cx, |this, cx| {
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state
                             .add_log(LogLevel::Error, "No source file specified");
@@ -848,7 +1148,12 @@ impl ImportWizard {
                             "No source file".to_string(),
                         ));
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!(
+                            "Failed to publish missing-source error in import wizard: {error}"
+                        );
+                    }
+                    import_finished.store(true, Ordering::SeqCst);
                     return anyhow::Ok(());
                 }
             };
@@ -868,13 +1173,18 @@ impl ImportWizard {
             let doc = match doc_result {
                 Ok(doc) => doc,
                 Err(e) => {
-                    _ = this.update(cx, |this, cx| {
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state
                             .add_log(LogLevel::Error, format!("Failed to parse UDIF file: {}", e));
                         cx.emit(ImportWizardEvent::ImportFailed(e.to_string()));
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!(
+                            "Failed to publish UDIF parse error in import wizard: {error}"
+                        );
+                    }
+                    import_finished.store(true, Ordering::SeqCst);
                     return anyhow::Ok(());
                 }
             };
@@ -883,27 +1193,47 @@ impl ImportWizard {
             let options = match import_state.to_import_options() {
                 Ok(options) => options,
                 Err(e) => {
-                    _ = this.update(cx, |this, cx| {
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state
                             .add_log(LogLevel::Error, format!("Invalid import mode: {}", e));
                         cx.emit(ImportWizardEvent::ImportFailed(e.to_string()));
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!(
+                            "Failed to publish invalid-mode error in import wizard: {error}"
+                        );
+                    }
+                    import_finished.store(true, Ordering::SeqCst);
                     return anyhow::Ok(());
                 }
             };
 
             // Perform the import
             let importer = GenericImporter::new(connection);
-            let result = importer.import(&doc, &options).await;
+            let result = importer
+                .import_with_progress(
+                    &doc,
+                    &options,
+                    Box::new(move |progress| {
+                        if progress_tx.send(progress).is_err() {
+                            tracing::debug!(
+                                "UDIF progress receiver dropped before import finished"
+                            );
+                        }
+                    }),
+                )
+                .await;
+
+            import_finished.store(true, Ordering::SeqCst);
 
             match result {
                 Ok(result) => {
-                    _ = this.update(cx, |this, cx| {
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state.is_complete = true;
                         this.state.progress = 1.0;
+                        this.state.stats.current_table = "Complete".to_string();
 
                         if let Some(start) = this.import_start_time {
                             this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
@@ -948,10 +1278,10 @@ impl ImportWizard {
                                 .add_log(LogLevel::Warning, warning.message.clone());
                         }
 
-                        // Store the consolidated degradation report for the Summary step
-                        // and navigate there so the user sees what was preserved vs. lost.
+                        // Store the consolidated degradation report for the Summary step.
+                        // We intentionally keep the user on the Import step so they can
+                        // inspect final logs and stats before moving on.
                         this.state.degradation_warnings = result.degradation_warnings;
-                        this.state.current_step = ImportWizardStep::Summary;
 
                         let source_label = this
                             .state
@@ -968,16 +1298,22 @@ impl ImportWizard {
 
                         cx.emit(ImportWizardEvent::ImportComplete);
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!(
+                            "Failed to publish UDIF import completion in wizard: {error}"
+                        );
+                    }
                 }
                 Err(e) => {
-                    _ = this.update(cx, |this, cx| {
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state
                             .add_log(LogLevel::Error, format!("Import failed: {}", e));
                         cx.emit(ImportWizardEvent::ImportFailed(e.to_string()));
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!("Failed to publish UDIF import failure in wizard: {error}");
+                    }
                 }
             }
 
@@ -989,16 +1325,138 @@ impl ImportWizard {
     fn start_csv_import(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
         let import_state = self.state.clone();
         let driver_name = connection.driver_name().to_string();
+        let (progress_tx, progress_rx) = mpsc::channel::<crate::CsvImportProgress>();
+        let import_finished = Arc::new(AtomicBool::new(false));
+
+        cx.spawn({
+            let import_finished = import_finished.clone();
+            async move |this, cx| {
+                loop {
+                    let mut received_any_progress = false;
+
+                    loop {
+                        match progress_rx.try_recv() {
+                            Ok(progress) => {
+                                received_any_progress = true;
+
+                                if let Err(error) = this.update(cx, |this, cx| {
+                                    let total_sources = progress.total_sources.max(1);
+                                    let source_label = if progress.current_source.is_empty() {
+                                        format!("{}/{}", progress.source_index, total_sources)
+                                    } else {
+                                        format!(
+                                            "{}/{} • {}",
+                                            progress.source_index,
+                                            total_sources,
+                                            progress.current_source
+                                        )
+                                    };
+
+                                    if let Some(start) = this.import_start_time {
+                                        this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
+                                    }
+
+                                    this.state.stats.current_table = source_label;
+                                    this.state.stats.processed = progress.rows_processed;
+                                    this.state.stats.added = progress.rows_added;
+                                    this.state.stats.updated = progress.rows_updated;
+                                    this.state.stats.deleted = progress.rows_deleted;
+                                    this.state.stats.errors = progress.error_count;
+
+                                    let completed_sources = if progress
+                                        .message
+                                        .starts_with("Completed:")
+                                        || progress.message.starts_with("Skipped '")
+                                        || progress.message.starts_with("Import complete.")
+                                    {
+                                        progress.source_index as f32
+                                    } else {
+                                        progress.source_index.saturating_sub(1) as f32
+                                    };
+                                    this.state.progress =
+                                        (completed_sources / total_sources as f32).clamp(0.0, 1.0);
+
+                                    this.state
+                                        .add_log(progress.log_level, progress.message.clone());
+                                    cx.notify();
+                                }) {
+                                    tracing::debug!(
+                                        "Failed to update import wizard with CSV progress: {error}"
+                                    );
+                                    return anyhow::Ok(());
+                                }
+                            }
+                            Err(TryRecvError::Empty) => break,
+                            Err(TryRecvError::Disconnected) => return anyhow::Ok(()),
+                        }
+                    }
+
+                    if import_finished.load(Ordering::SeqCst) {
+                        // Drain any trailing updates before exiting.
+                        while let Ok(progress) = progress_rx.try_recv() {
+                            if let Err(error) = this.update(cx, |this, cx| {
+                                let total_sources = progress.total_sources.max(1);
+                                if let Some(start) = this.import_start_time {
+                                    this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
+                                }
+
+                                this.state.stats.current_table = if progress.current_source.is_empty() {
+                                    format!("{}/{}", progress.source_index, total_sources)
+                                } else {
+                                    format!(
+                                        "{}/{} • {}",
+                                        progress.source_index,
+                                        total_sources,
+                                        progress.current_source
+                                    )
+                                };
+                                this.state.stats.processed = progress.rows_processed;
+                                this.state.stats.added = progress.rows_added;
+                                this.state.stats.updated = progress.rows_updated;
+                                this.state.stats.deleted = progress.rows_deleted;
+                                this.state.stats.errors = progress.error_count;
+                                this.state
+                                    .add_log(progress.log_level, progress.message.clone());
+                                cx.notify();
+                            }) {
+                                tracing::debug!(
+                                    "Failed to update import wizard with final CSV progress: {error}"
+                                );
+                            }
+                        }
+
+                        return anyhow::Ok(());
+                    }
+
+                    if !received_any_progress {
+                        cx.background_spawn(async {
+                            std::thread::sleep(Duration::from_millis(75));
+                        })
+                        .await;
+                    }
+                }
+            }
+        })
+        .detach();
 
         cx.spawn(async move |this, cx| {
-            let importer = CsvImporter::new(connection, import_state);
+            let importer = CsvImporter::new(connection, import_state).with_progress_callback(
+                Box::new(move |progress| {
+                    if progress_tx.send(progress).is_err() {
+                        tracing::debug!("CSV progress receiver dropped before import finished");
+                    }
+                }),
+            );
 
             match importer.import().await {
                 Ok(result) => {
-                    _ = this.update(cx, |this, cx| {
+                    import_finished.store(true, Ordering::SeqCst);
+
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state.is_complete = true;
                         this.state.progress = 1.0;
+                        this.state.stats.current_table = "Complete".to_string();
 
                         if let Some(start) = this.import_start_time {
                             this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
@@ -1037,9 +1495,9 @@ impl ImportWizard {
                             );
                         }
 
-                        // CSV imports carry no schema, so the degradation report is always empty.
+                        // CSV imports carry no schema, so the degradation report is empty.
+                        // We intentionally keep the user on the Import step after completion.
                         this.state.degradation_warnings = Vec::new();
-                        this.state.current_step = ImportWizardStep::Summary;
 
                         let source_label = this
                             .state
@@ -1062,16 +1520,24 @@ impl ImportWizard {
 
                         cx.emit(ImportWizardEvent::ImportComplete);
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!(
+                            "Failed to publish CSV import completion in wizard: {error}"
+                        );
+                    }
                 }
                 Err(e) => {
-                    _ = this.update(cx, |this, cx| {
+                    import_finished.store(true, Ordering::SeqCst);
+
+                    if let Err(error) = this.update(cx, |this, cx| {
                         this.state.is_importing = false;
                         this.state
                             .add_log(LogLevel::Error, format!("Import failed: {}", e));
                         cx.emit(ImportWizardEvent::ImportFailed(e.to_string()));
                         cx.notify();
-                    });
+                    }) {
+                        tracing::debug!("Failed to publish CSV import failure in wizard: {error}");
+                    }
                 }
             }
 
@@ -1091,6 +1557,7 @@ impl ImportWizard {
         let current = self.state.current_step;
         let is_udif = self.state.is_udif_import();
         let steps = ImportWizardStep::all_for_format(is_udif);
+        let can_switch_steps = !self.state.is_importing;
 
         h_flex()
             .w_full()
@@ -1103,12 +1570,34 @@ impl ImportWizard {
                 // For determining "done", we need to check position in the steps list
                 let current_pos = steps.iter().position(|s| *s == current).unwrap_or(0);
                 let is_done = visual_idx < current_pos;
+                let step = *step;
+                let blocked_reason = self.blocked_navigation_tooltip(step);
 
                 div()
+                    .id(SharedString::from(format!(
+                        "import-step-tab-{}",
+                        step.index()
+                    )))
                     .text_sm()
                     .px_3()
                     .py_2()
                     .border_b_2()
+                    .when(can_switch_steps && blocked_reason.is_none(), |this| {
+                        this.cursor_pointer().on_mouse_down(
+                            gpui::MouseButton::Left,
+                            cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                                this.go_to_step(step, cx);
+                            }),
+                        )
+                    })
+                    .when(!can_switch_steps || blocked_reason.is_some(), |this| {
+                        this.opacity(0.7)
+                    })
+                    .when_some(blocked_reason, |this, reason| {
+                        this.tooltip(move |window, cx| {
+                            Tooltip::new(reason.clone()).build(window, cx)
+                        })
+                    })
                     .when(is_current, |s| {
                         s.border_color(theme.accent)
                             .text_color(theme.accent)
@@ -1176,9 +1665,33 @@ impl ImportWizard {
                     .map(|t| t.foreign_keys.len())
                     .sum();
 
-                // Sort tables by name for consistent display
-                let mut tables: Vec<_> = doc.schema.tables.values().collect();
-                tables.sort_by(|a, b| a.name.cmp(&b.name));
+                let mut table_rows: Vec<(String, usize, usize, String)> = doc
+                    .schema
+                    .tables
+                    .values()
+                    .map(|table| {
+                        let row_count = doc
+                            .data
+                            .get(&table.name)
+                            .map(|data_set| data_set.rows.len())
+                            .unwrap_or(0);
+                        let primary_key_columns = table
+                            .primary_key
+                            .as_ref()
+                            .map(|primary_key| primary_key.columns.join(", "))
+                            .unwrap_or_else(|| "-".to_string());
+
+                        (
+                            table.name.clone(),
+                            table.columns.len(),
+                            row_count,
+                            primary_key_columns,
+                        )
+                    })
+                    .collect();
+                table_rows.sort_by(|left, right| left.0.cmp(&right.0));
+                let table_rows = Arc::new(table_rows);
+                let table_row_count = table_rows.len();
 
                 v_flex()
                     .w_full()
@@ -1285,103 +1798,177 @@ impl ImportWizard {
                     )
                     // Table list
                     .child(
-                        div()
+                        v_flex()
                             .w_full()
-                            .max_h(px(200.0))
+                            .h(px(220.0))
                             .border_1()
                             .border_color(theme.border)
                             .rounded_md()
-                            .overflow_y_scrollbar()
+                            .overflow_hidden()
                             .child(
-                                v_flex()
+                                h_flex()
                                     .w_full()
-                                    // Header row
+                                    .h(px(IMPORT_UDIF_TABLE_ROW_HEIGHT))
+                                    .px_2()
+                                    .items_center()
+                                    .bg(theme.secondary)
+                                    .border_b_1()
+                                    .border_color(theme.border)
                                     .child(
-                                        h_flex()
-                                            .w_full()
-                                            .px_2()
-                                            .py_1()
-                                            .bg(theme.secondary)
-                                            .child(
-                                                div()
-                                                    .w(px(180.0))
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Table"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(80.0))
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Columns"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(80.0))
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Rows"),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .text_xs()
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .text_color(theme.muted_foreground)
-                                                    .child("Primary Key"),
-                                            ),
+                                        div()
+                                            .w(px(180.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Table"),
                                     )
-                                    // Table rows
-                                    .children(tables.iter().map(|table| {
-                                        let row_count = doc
-                                            .data
-                                            .get(&table.name)
-                                            .map(|d| d.rows.len())
-                                            .unwrap_or(0);
-                                        let pk_cols = table
-                                            .primary_key
-                                            .as_ref()
-                                            .map(|pk| pk.columns.join(", "))
-                                            .unwrap_or_else(|| "-".to_string());
+                                    .child(
+                                        div()
+                                            .w(px(80.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Columns"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(80.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Rows"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Primary Key"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .relative()
+                                    .overflow_hidden()
+                                    .when(table_row_count > 0, |this| {
+                                        let table_rows = table_rows.clone();
+                                        this.child(
+                                            uniform_list(
+                                                "import-udif-preview-rows",
+                                                table_row_count,
+                                                cx.processor(
+                                                    move |_wizard,
+                                                          visible_range: Range<usize>,
+                                                          _window,
+                                                          cx| {
+                                                        let total_rows = table_rows.len();
+                                                        let start = visible_range.start.min(total_rows);
+                                                        let end = visible_range.end.min(total_rows);
 
-                                        h_flex()
-                                            .w_full()
-                                            .px_2()
-                                            .py_1()
-                                            .hover(|s| s.bg(theme.list_active))
-                                            .child(
-                                                div()
-                                                    .w(px(180.0))
-                                                    .text_sm()
-                                                    .text_color(theme.foreground)
-                                                    .child(table.name.clone()),
+                                                        if visible_range.end > total_rows {
+                                                            tracing::debug!(
+                                                                ?visible_range,
+                                                                total_rows,
+                                                                "Import UDIF preview visible range exceeded available rows"
+                                                            );
+                                                        }
+
+                                                        let theme = cx.theme();
+
+                                                        (start..end)
+                                                            .filter_map(|index| {
+                                                                let row = table_rows.get(index)?;
+                                                                Some(
+                                                                    h_flex()
+                                                                        .id(index)
+                                                                        .w_full()
+                                                                        .h(px(IMPORT_UDIF_TABLE_ROW_HEIGHT))
+                                                                        .px_2()
+                                                                        .gap_2()
+                                                                        .items_center()
+                                                                        .hover(|style| {
+                                                                            style.bg(theme.list_active)
+                                                                        })
+                                                                        .child(
+                                                                            div()
+                                                                                .w(px(180.0))
+                                                                                .text_sm()
+                                                                                .text_color(theme.foreground)
+                                                                                .overflow_hidden()
+                                                                                .text_ellipsis()
+                                                                                .child(row.0.clone()),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .w(px(80.0))
+                                                                                .text_sm()
+                                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                                .text_color(theme.muted_foreground)
+                                                                                .child(row.1.to_string()),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .w(px(80.0))
+                                                                                .text_sm()
+                                                                                .font_weight(FontWeight::SEMIBOLD)
+                                                                                .text_color(theme.muted_foreground)
+                                                                                .child(row.2.to_string()),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .flex_1()
+                                                                                .text_xs()
+                                                                                .text_color(theme.muted_foreground)
+                                                                                .overflow_hidden()
+                                                                                .text_ellipsis()
+                                                                                .child(row.3.clone()),
+                                                                        )
+                                                                        .into_any_element(),
+                                                                )
+                                                            })
+                                                            .collect::<Vec<_>>()
+                                                    },
+                                                ),
                                             )
-                                            .child(
-                                                div()
-                                                    .w(px(80.0))
-                                                    .text_sm()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(table.columns.len().to_string()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .w(px(80.0))
-                                                    .text_sm()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(row_count.to_string()),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(pk_cols),
-                                            )
-                                    })),
+                                            .flex_grow()
+                                            .size_full()
+                                            .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                            .track_scroll(&self.udif_table_scroll_handle)
+                                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                                            .into_any_element(),
+                                        )
+                                    })
+                                    .when(table_row_count == 0, |this| {
+                                        this.child(
+                                            v_flex()
+                                                .size_full()
+                                                .justify_center()
+                                                .items_center()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child("No tables found in UDIF document"),
+                                                ),
+                                        )
+                                    })
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .right_0()
+                                            .bottom_0()
+                                            .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                            .when(table_row_count > 0, |this| {
+                                                this.child(
+                                                    Scrollbar::vertical(&self.udif_table_scroll_handle)
+                                                        .scrollbar_show(ScrollbarShow::Always),
+                                                )
+                                            }),
+                                    ),
                             ),
                     )
                     .into_any_element()
@@ -1445,6 +2032,19 @@ impl ImportWizard {
     fn render_step_1_file_source(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let sources = self.state.sources.clone();
+        let source_rows: Arc<Vec<(String, String, bool)>> = Arc::new(
+            sources
+                .iter()
+                .map(|source| {
+                    (
+                        source.source_name.clone(),
+                        source.source_type.short_display(),
+                        source.selected,
+                    )
+                })
+                .collect(),
+        );
+        let source_row_count = source_rows.len();
         let detected_format = self.state.detected_format;
         let is_udif = self.state.is_udif_import();
         let add_file_error = self.state.add_file_error.clone();
@@ -1536,50 +2136,147 @@ impl ImportWizard {
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
-                    .overflow_y_scrollbar()
-                    .child(v_flex().w_full().children(sources.iter().enumerate().map(
-                        |(idx, source)| {
-                            let source_name = source.source_name.clone();
-                            let source_display = source.source_type.short_display();
-                            let selected = source.selected;
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .size_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(source_row_count > 0, |this| {
+                                let source_rows = source_rows.clone();
+                                this.child(
+                                    uniform_list(
+                                        "import-source-rows",
+                                        source_row_count,
+                                        cx.processor(
+                                            move |_wizard,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let total_rows = source_rows.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
 
-                            h_flex()
-                                .w_full()
-                                .px_2()
-                                .py_1()
-                                .gap_3()
-                                .items_center()
-                                .hover(|s| s.bg(theme.list_active))
-                                .child(Checkbox::new(format!("source-{}", idx)).checked(selected))
-                                .child(
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Import source list visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let (source_name, source_display, selected) =
+                                                            source_rows.get(index)?;
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(IMPORT_SOURCE_ROW_HEIGHT))
+                                                                .px_2()
+                                                                .gap_3()
+                                                                .items_center()
+                                                                .hover(|style| {
+                                                                    style.bg(theme.list_active)
+                                                                })
+                                                                .child(
+                                                                    Checkbox::new(format!(
+                                                                        "source-{}",
+                                                                        index
+                                                                    ))
+                                                                    .checked(*selected),
+                                                                )
+                                                                .child(
+                                                                    v_flex()
+                                                                        .flex_1()
+                                                                        .child(
+                                                                            div()
+                                                                                .text_sm()
+                                                                                .text_color(
+                                                                                    theme.foreground,
+                                                                                )
+                                                                                .child(
+                                                                                    source_name
+                                                                                        .clone(),
+                                                                                ),
+                                                                        )
+                                                                        .child(
+                                                                            div()
+                                                                                .text_xs()
+                                                                                .text_color(theme.muted_foreground)
+                                                                                .child(
+                                                                                    source_display
+                                                                                        .clone(),
+                                                                                ),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    Button::new(format!(
+                                                                        "remove-source-{}",
+                                                                        index
+                                                                    ))
+                                                                    .child("Remove")
+                                                                    .small()
+                                                                    .ghost()
+                                                                    .on_click(cx.listener(
+                                                                        move |this,
+                                                                              _: &ClickEvent,
+                                                                              window,
+                                                                              cx| {
+                                                                            this.remove_file(
+                                                                                index, window, cx,
+                                                                            );
+                                                                        },
+                                                                    )),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
+                                    )
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.source_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(source_row_count == 0, |this| {
+                                this.child(
                                     v_flex()
-                                        .flex_1()
+                                        .size_full()
+                                        .justify_center()
+                                        .items_center()
                                         .child(
                                             div()
                                                 .text_sm()
-                                                .text_color(theme.foreground)
-                                                .child(source_name),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_xs()
                                                 .text_color(theme.muted_foreground)
-                                                .child(source_display),
+                                                .child("No files or URLs added yet"),
                                         ),
                                 )
-                                .child(
-                                    Button::new(format!("remove-{}", idx))
-                                        .child("Remove")
-                                        .small()
-                                        .ghost()
-                                        .on_click(cx.listener(
-                                            move |this, _: &ClickEvent, window, cx| {
-                                                this.remove_file(idx, window, cx);
-                                            },
-                                        )),
-                                )
-                        },
-                    ))),
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .when(source_row_count > 0, |this| {
+                                        this.child(
+                                            Scrollbar::vertical(&self.source_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             // Inline format-conflict error shown immediately below the file list so the
             // user knows why their file was not added without having to read logs.
@@ -1695,12 +2392,15 @@ impl ImportWizard {
 
     fn render_step_3_target_table(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let configs = self.state.target_configs.clone();
+        let configs = Arc::new(self.state.target_configs.clone());
+        let config_count = configs.len();
+        let target_table_inputs = Arc::new(self.target_table_inputs.clone());
         let target_table_validation_error = self.state.target_table_validation_error.clone();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             .child(
@@ -1710,87 +2410,186 @@ impl ImportWizard {
                     .child("Map source files to target tables. You can create new tables or use existing ones."),
             )
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .w_full()
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
-                    .overflow_y_scrollbar()
+                    .overflow_hidden()
                     .child(
-                        v_flex()
+                        h_flex()
                             .w_full()
+                            .h(px(IMPORT_TARGET_ROW_HEIGHT))
+                            .px_2()
+                            .items_center()
+                            .bg(theme.secondary)
+                            .border_b_1()
+                            .border_color(theme.border)
                             .child(
-                                h_flex()
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .bg(theme.secondary)
-                                    .child(
-                                        div()
-                                            .w(px(200.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Source"),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Target Table"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(100.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Create New"),
-                                    ),
+                                div()
+                                    .w(px(200.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Source"),
                             )
-                            .children(configs.iter().enumerate().map(|(idx, config)| {
-                                let input = self.target_table_inputs.get(idx).cloned();
-                                h_flex()
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .hover(|s| s.bg(theme.list_active))
-                                    .child(
-                                        div()
-                                            .w(px(200.0))
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .child(config.source_name.clone()),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Target Table"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(100.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Create New"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(config_count > 0, |this| {
+                                let configs = configs.clone();
+                                let target_table_inputs = target_table_inputs.clone();
+                                this.child(
+                                    uniform_list(
+                                        "import-target-table-rows",
+                                        config_count,
+                                        cx.processor(
+                                            move |_wizard,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let total_rows = configs.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
+
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Import target table visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let config = configs.get(index)?;
+                                                        let input_state =
+                                                            target_table_inputs.get(index).cloned();
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(IMPORT_TARGET_ROW_HEIGHT))
+                                                                .px_2()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .hover(|style| {
+                                                                    style.bg(theme.list_active)
+                                                                })
+                                                                .child(
+                                                                    div()
+                                                                        .w(px(200.0))
+                                                                        .text_sm()
+                                                                        .text_color(theme.foreground)
+                                                                        .child(config.source_name.clone()),
+                                                                )
+                                                                .child(
+                                                                    div().flex_1().when_some(
+                                                                        input_state,
+                                                                        |this, state| {
+                                                                            this.child(
+                                                                                Input::new(&state)
+                                                                                    .small(),
+                                                                            )
+                                                                        },
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    div().w(px(100.0)).child(
+                                                                        Checkbox::new(format!(
+                                                                            "create-{}",
+                                                                            index
+                                                                        ))
+                                                                        .checked(
+                                                                            config.create_new_table,
+                                                                        )
+                                                                        .on_click(cx.listener(
+                                                                            move |this,
+                                                                                  _new_checked: &bool,
+                                                                                  _,
+                                                                                  cx| {
+                                                                                if let Some(
+                                                                                    table_config,
+                                                                                ) = this
+                                                                                    .state
+                                                                                    .target_configs
+                                                                                    .get_mut(index)
+                                                                                {
+                                                                                    table_config
+                                                                                        .create_new_table = !table_config.create_new_table;
+                                                                                }
+                                                                                cx.notify();
+                                                                            },
+                                                                        )),
+                                                                    ),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
                                     )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .when_some(input, |this, input_state| {
-                                                this.child(Input::new(&input_state).small())
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(100.0))
-                                            .child(
-                                                Checkbox::new(format!("create-{}", idx))
-                                                    .checked(config.create_new_table)
-                                                    .on_click(cx.listener(
-                                                        move |this, _new_checked: &bool, _, cx| {
-                                                            if let Some(cfg) = this.state.target_configs.get_mut(idx) {
-                                                                cfg.create_new_table = !cfg.create_new_table;
-                                                            }
-                                                            cx.notify();
-                                                        },
-                                                    )),
-                                            ),
-                                    )
-                            })),
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.target_table_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(config_count == 0, |this| {
+                                this.child(
+                                    v_flex()
+                                        .size_full()
+                                        .justify_center()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("No source mappings available"),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .when(config_count > 0, |this| {
+                                        this.child(
+                                            Scrollbar::vertical(&self.target_table_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        )
+                                    }),
+                            ),
                     ),
             )
             // Inline error shown below the table when any target table name is blank.
@@ -1806,17 +2605,20 @@ impl ImportWizard {
 
     fn render_step_4_field_mapping(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let mappings = self
-            .state
-            .field_mappings
-            .get(&self.state.selected_mapping_index)
-            .cloned()
-            .unwrap_or_default();
+        let mappings = Arc::new(
+            self.state
+                .field_mappings
+                .get(&self.state.selected_mapping_index)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        let mapping_count = mappings.len();
         let field_mapping_validation_error = self.state.field_mapping_validation_error.clone();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             .child(
@@ -1842,120 +2644,245 @@ impl ImportWizard {
                     ),
             )
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .w_full()
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
-                    .overflow_y_scrollbar()
+                    .overflow_hidden()
                     .child(
-                        v_flex()
+                        h_flex()
                             .w_full()
+                            .h(px(IMPORT_MAPPING_ROW_HEIGHT))
+                            .px_2()
+                            .items_center()
+                            .bg(theme.secondary)
+                            .border_b_1()
+                            .border_color(theme.border)
                             .child(
-                                h_flex()
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .bg(theme.secondary)
-                                    .child(
-                                        div()
-                                            .w(px(180.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Source Field"),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Target Field"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(60.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("PK"),
-                                    )
-                                    .child(
-                                        div()
-                                            .w(px(60.0))
-                                            .text_xs()
-                                            .font_weight(FontWeight::SEMIBOLD)
-                                            .text_color(theme.muted_foreground)
-                                            .child("Skip"),
-                                    ),
+                                div()
+                                    .w(px(180.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Source Field"),
                             )
-                            .children(mappings.iter().enumerate().map(|(idx, mapping)| {
-                                h_flex()
-                                    .w_full()
-                                    .px_2()
-                                    .py_1()
-                                    .gap_2()
-                                    .items_center()
-                                    .hover(|s| s.bg(theme.list_active))
-                                    .child(
-                                        div()
-                                            .w(px(180.0))
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .child(mapping.source_field.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .flex_1()
-                                            .text_sm()
-                                            .text_color(theme.foreground)
-                                            .child(mapping.target_field.clone()),
-                                    )
-                                    .child(
-                                        div().w(px(60.0)).child(
-                                            Checkbox::new(format!("pk-{}", idx))
-                                                .checked(mapping.is_primary_key)
-                                                .on_click(cx.listener(
-                                                    move |this, _new_checked: &bool, _, cx| {
-                                                        let source_idx =
-                                                            this.state.selected_mapping_index;
-                                                        if let Some(mappings) = this
-                                                            .state
-                                                            .field_mappings
-                                                            .get_mut(&source_idx)
-                                                            && let Some(m) = mappings.get_mut(idx)
-                                                        {
-                                                            m.is_primary_key = !m.is_primary_key;
-                                                        }
-                                                        cx.notify();
-                                                    },
-                                                )),
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Target Field"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(60.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("PK"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(60.0))
+                                    .text_xs()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(theme.muted_foreground)
+                                    .child("Skip"),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(mapping_count > 0, |this| {
+                                let mappings = mappings.clone();
+                                this.child(
+                                    uniform_list(
+                                        "import-field-mapping-rows",
+                                        mapping_count,
+                                        cx.processor(
+                                            move |_wizard,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let total_rows = mappings.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
+
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Import field mapping visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let mapping = mappings.get(index)?;
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(IMPORT_MAPPING_ROW_HEIGHT))
+                                                                .px_2()
+                                                                .gap_2()
+                                                                .items_center()
+                                                                .hover(|style| {
+                                                                    style.bg(theme.list_active)
+                                                                })
+                                                                .child(
+                                                                    div()
+                                                                        .w(px(180.0))
+                                                                        .text_sm()
+                                                                        .text_color(theme.foreground)
+                                                                        .child(
+                                                                            mapping
+                                                                                .source_field
+                                                                                .clone(),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    div()
+                                                                        .flex_1()
+                                                                        .text_sm()
+                                                                        .text_color(theme.foreground)
+                                                                        .child(
+                                                                            mapping
+                                                                                .target_field
+                                                                                .clone(),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    div().w(px(60.0)).child(
+                                                                        Checkbox::new(format!(
+                                                                            "pk-{}",
+                                                                            index
+                                                                        ))
+                                                                        .checked(
+                                                                            mapping
+                                                                                .is_primary_key,
+                                                                        )
+                                                                        .on_click(cx.listener(
+                                                                            move |this,
+                                                                                  _new_checked: &bool,
+                                                                                  _,
+                                                                                  cx| {
+                                                                                let source_index = this
+                                                                                    .state
+                                                                                    .selected_mapping_index;
+                                                                                if let Some(
+                                                                                    source_mappings,
+                                                                                ) = this
+                                                                                    .state
+                                                                                    .field_mappings
+                                                                                    .get_mut(
+                                                                                        &source_index,
+                                                                                    )
+                                                                                    && let Some(
+                                                                                        source_mapping,
+                                                                                    ) = source_mappings
+                                                                                        .get_mut(
+                                                                                            index,
+                                                                                        )
+                                                                                {
+                                                                                    source_mapping
+                                                                                        .is_primary_key = !source_mapping.is_primary_key;
+                                                                                }
+                                                                                cx.notify();
+                                                                            },
+                                                                        )),
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    div().w(px(60.0)).child(
+                                                                        Checkbox::new(format!(
+                                                                            "skip-{}",
+                                                                            index
+                                                                        ))
+                                                                        .checked(mapping.skip)
+                                                                        .on_click(cx.listener(
+                                                                            move |this,
+                                                                                  _new_checked: &bool,
+                                                                                  _,
+                                                                                  cx| {
+                                                                                let source_index = this
+                                                                                    .state
+                                                                                    .selected_mapping_index;
+                                                                                if let Some(
+                                                                                    source_mappings,
+                                                                                ) = this
+                                                                                    .state
+                                                                                    .field_mappings
+                                                                                    .get_mut(
+                                                                                        &source_index,
+                                                                                    )
+                                                                                    && let Some(
+                                                                                        source_mapping,
+                                                                                    ) = source_mappings
+                                                                                        .get_mut(
+                                                                                            index,
+                                                                                        )
+                                                                                {
+                                                                                    source_mapping
+                                                                                        .skip = !source_mapping.skip;
+                                                                                }
+                                                                                cx.notify();
+                                                                            },
+                                                                        )),
+                                                                    ),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
                                         ),
                                     )
-                                    .child(
-                                        div().w(px(60.0)).child(
-                                            Checkbox::new(format!("skip-{}", idx))
-                                                .checked(mapping.skip)
-                                                .on_click(cx.listener(
-                                                    move |this, _new_checked: &bool, _, cx| {
-                                                        let source_idx =
-                                                            this.state.selected_mapping_index;
-                                                        if let Some(mappings) = this
-                                                            .state
-                                                            .field_mappings
-                                                            .get_mut(&source_idx)
-                                                            && let Some(m) = mappings.get_mut(idx)
-                                                        {
-                                                            m.skip = !m.skip;
-                                                        }
-                                                        cx.notify();
-                                                    },
-                                                )),
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.field_mapping_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(mapping_count == 0, |this| {
+                                this.child(
+                                    v_flex()
+                                        .size_full()
+                                        .justify_center()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("No field mappings available"),
                                         ),
-                                    )
-                            })),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .when(mapping_count > 0, |this| {
+                                        this.child(
+                                            Scrollbar::vertical(&self.field_mapping_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        )
+                                    }),
+                            ),
                     ),
             )
             // Inline error shown below the mapping table when all columns are skipped.
@@ -2301,10 +3228,13 @@ impl ImportWizard {
     fn render_step_6_progress(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let stats = &self.state.stats;
+        let messages = Arc::new(self.state.log_messages.clone());
+        let message_count = messages.len();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             .child(
@@ -2332,15 +3262,114 @@ impl ImportWizard {
                     .child(self.render_stat_row("Time:", &stats.elapsed_display(), cx)),
             )
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .w_full()
                     .border_1()
                     .border_color(theme.border)
                     .rounded_md()
-                    .p_2()
-                    .overflow_y_scrollbar()
-                    .child(self.render_log_messages(cx)),
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(message_count > 0, |this| {
+                                let messages = messages.clone();
+                                this.child(
+                                    uniform_list(
+                                        "import-progress-log-rows",
+                                        message_count,
+                                        cx.processor(
+                                            move |_wizard,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let total_rows = messages.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
+
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Import progress log visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let message = messages.get(index)?;
+                                                        let color = match message.level {
+                                                            LogLevel::Error => theme.danger,
+                                                            LogLevel::Warning => theme.warning,
+                                                            LogLevel::Success => theme.success,
+                                                            LogLevel::Info => theme.foreground,
+                                                        };
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(IMPORT_LOG_ROW_HEIGHT))
+                                                                .px_2()
+                                                                .items_center()
+                                                                .child(
+                                                                    div()
+                                                                        .w_full()
+                                                                        .text_xs()
+                                                                        .text_color(color)
+                                                                        .overflow_hidden()
+                                                                        .text_ellipsis()
+                                                                        .child(message.format()),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
+                                    )
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.log_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(message_count == 0, |this| {
+                                this.child(
+                                    v_flex()
+                                        .size_full()
+                                        .justify_center()
+                                        .items_center()
+                                        .child(
+                                            div()
+                                                .text_sm()
+                                                .text_color(theme.muted_foreground)
+                                                .child("No log messages yet"),
+                                        ),
+                                )
+                            })
+                            .child(
+                                div()
+                                    .absolute()
+                                    .top_0()
+                                    .right_0()
+                                    .bottom_0()
+                                    .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                    .when(message_count > 0, |this| {
+                                        this.child(
+                                            Scrollbar::vertical(&self.log_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        )
+                                    }),
+                            ),
+                    ),
             )
             .child(self.render_progress_bar(cx))
     }
@@ -2366,29 +3395,6 @@ impl ImportWizard {
                     .text_color(theme.foreground)
                     .child(value),
             )
-    }
-
-    fn render_log_messages(&self, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let messages = self.state.log_messages.clone();
-
-        v_flex()
-            .w_full()
-            .gap_px()
-            .children(messages.iter().map(|msg| {
-                let color = match msg.level {
-                    LogLevel::Error => theme.danger,
-                    LogLevel::Warning => theme.warning,
-                    LogLevel::Success => theme.success,
-                    LogLevel::Info => theme.foreground,
-                };
-
-                div()
-                    .w_full()
-                    .text_xs()
-                    .text_color(color)
-                    .child(msg.format())
-            }))
     }
 
     fn render_progress_bar(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -2418,11 +3424,13 @@ impl ImportWizard {
     /// would otherwise go unnoticed.
     fn render_step_7_summary(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        let warnings = &self.state.degradation_warnings;
+        let warnings = Arc::new(self.state.degradation_warnings.clone());
+        let warning_count = warnings.len();
 
         v_flex()
             .w_full()
             .h_full()
+            .overflow_hidden()
             .gap_3()
             .p_4()
             // Header
@@ -2439,7 +3447,7 @@ impl ImportWizard {
                             .child("Schema Degradation Report"),
                     ),
             )
-            .child(if warnings.is_empty() {
+            .child(if warning_count == 0 {
                 div()
                     .w_full()
                     .p_3()
@@ -2464,74 +3472,212 @@ impl ImportWizard {
                             )),
                     )
                     .child(
-                        div()
+                        v_flex()
                             .flex_1()
                             .w_full()
                             .border_1()
                             .border_color(theme.border)
                             .rounded_md()
-                            .overflow_y_scrollbar()
+                            .overflow_hidden()
                             .child(
-                                v_flex()
+                                h_flex()
                                     .w_full()
-                                    .gap_px()
-                                    .children(warnings.iter().map(|w| {
-                                        let severity_color = match w.severity {
-                                            DegradationSeverity::Warning => theme.warning,
-                                            DegradationSeverity::Dropped => theme.danger,
-                                        };
-                                        let category_label = w.category.display_name().to_string();
-                                        let table = w.table_name.clone();
-                                        let object = w.object_name.clone().unwrap_or_default();
-                                        let source = w.source_feature.clone();
-                                        let action = w.target_action.clone();
-                                        let severity_label = w.severity.display_name().to_string();
+                                    .h(px(IMPORT_DEGRADATION_ROW_HEIGHT))
+                                    .px_2()
+                                    .items_center()
+                                    .bg(theme.secondary)
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        div()
+                                            .w(px(60.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Severity"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(100.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Category"),
+                                    )
+                                    .child(
+                                        div()
+                                            .w(px(220.0))
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Object"),
+                                    )
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .text_xs()
+                                            .font_weight(FontWeight::SEMIBOLD)
+                                            .text_color(theme.muted_foreground)
+                                            .child("Conversion"),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .w_full()
+                                    .relative()
+                                    .overflow_hidden()
+                                    .child(
+                                        uniform_list(
+                                            "import-summary-warning-rows",
+                                            warning_count,
+                                            cx.processor(
+                                                move |_wizard,
+                                                      visible_range: Range<usize>,
+                                                      _window,
+                                                      cx| {
+                                                    let total_rows = warnings.len();
+                                                    let start = visible_range.start.min(total_rows);
+                                                    let end = visible_range.end.min(total_rows);
 
-                                        h_flex()
-                                            .w_full()
-                                            .gap_2()
-                                            .px_2()
-                                            .py_1()
-                                            .border_b_1()
-                                            .border_color(theme.border)
-                                            // Severity badge
+                                                    if visible_range.end > total_rows {
+                                                        tracing::debug!(
+                                                            ?visible_range,
+                                                            total_rows,
+                                                            "Import summary visible range exceeded available rows"
+                                                        );
+                                                    }
+
+                                                    let theme = cx.theme();
+
+                                                    (start..end)
+                                                        .filter_map(|index| {
+                                                            let warning = warnings.get(index)?;
+                                                            let severity_color =
+                                                                match warning.severity {
+                                                                    DegradationSeverity::Warning => {
+                                                                        theme.warning
+                                                                    }
+                                                                    DegradationSeverity::Dropped => {
+                                                                        theme.danger
+                                                                    }
+                                                                };
+                                                            let category_label = warning
+                                                                .category
+                                                                .display_name()
+                                                                .to_string();
+                                                            let table_name =
+                                                                warning.table_name.clone();
+                                                            let object_name = warning
+                                                                .object_name
+                                                                .clone()
+                                                                .unwrap_or_default();
+                                                            let source_feature =
+                                                                warning.source_feature.clone();
+                                                            let target_action =
+                                                                warning.target_action.clone();
+                                                            let severity_label = warning
+                                                                .severity
+                                                                .display_name()
+                                                                .to_string();
+
+                                                            Some(
+                                                                h_flex()
+                                                                    .id(index)
+                                                                    .w_full()
+                                                                    .h(px(
+                                                                        IMPORT_DEGRADATION_ROW_HEIGHT,
+                                                                    ))
+                                                                    .gap_2()
+                                                                    .px_2()
+                                                                    .items_center()
+                                                                    .border_b_1()
+                                                                    .border_color(theme.border)
+                                                                    .child(
+                                                                        div()
+                                                                            .w(px(60.0))
+                                                                            .text_xs()
+                                                                            .text_color(severity_color)
+                                                                            .font_weight(
+                                                                                FontWeight::SEMIBOLD,
+                                                                            )
+                                                                            .child(severity_label),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .w(px(100.0))
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                theme.muted_foreground,
+                                                                            )
+                                                                            .overflow_hidden()
+                                                                            .text_ellipsis()
+                                                                            .child(category_label),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .w(px(220.0))
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                theme.foreground,
+                                                                            )
+                                                                            .overflow_hidden()
+                                                                            .text_ellipsis()
+                                                                            .child(
+                                                                                if object_name
+                                                                                    .is_empty()
+                                                                                {
+                                                                                    table_name
+                                                                                } else {
+                                                                                    format!(
+                                                                                        "{}.{}",
+                                                                                        table_name,
+                                                                                        object_name
+                                                                                    )
+                                                                                },
+                                                                            ),
+                                                                    )
+                                                                    .child(
+                                                                        div()
+                                                                            .flex_1()
+                                                                            .text_xs()
+                                                                            .text_color(
+                                                                                theme.muted_foreground,
+                                                                            )
+                                                                            .overflow_hidden()
+                                                                            .text_ellipsis()
+                                                                            .child(format!(
+                                                                                "{} → {}",
+                                                                                source_feature,
+                                                                                target_action
+                                                                            )),
+                                                                    )
+                                                                    .into_any_element(),
+                                                            )
+                                                        })
+                                                        .collect::<Vec<_>>()
+                                                },
+                                            ),
+                                        )
+                                        .flex_grow()
+                                        .size_full()
+                                        .pr(px(IMPORT_LIST_SCROLLBAR_WIDTH))
+                                        .track_scroll(&self.summary_scroll_handle)
+                                        .with_sizing_behavior(ListSizingBehavior::Auto)
+                                        .into_any_element(),
+                                    )
+                                    .child(
+                                        div()
+                                            .absolute()
+                                            .top_0()
+                                            .right_0()
+                                            .bottom_0()
+                                            .w(px(IMPORT_LIST_SCROLLBAR_WIDTH))
                                             .child(
-                                                div()
-                                                    .w(px(60.0))
-                                                    .text_xs()
-                                                    .text_color(severity_color)
-                                                    .font_weight(FontWeight::SEMIBOLD)
-                                                    .child(severity_label),
-                                            )
-                                            // Category
-                                            .child(
-                                                div()
-                                                    .w(px(100.0))
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(category_label),
-                                            )
-                                            // Table + object
-                                            .child(
-                                                div()
-                                                    .w(px(140.0))
-                                                    .text_xs()
-                                                    .text_color(theme.foreground)
-                                                    .child(if object.is_empty() {
-                                                        table
-                                                    } else {
-                                                        format!("{}.{}", table, object)
-                                                    }),
-                                            )
-                                            // Source feature → target action
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .text_xs()
-                                                    .text_color(theme.muted_foreground)
-                                                    .child(format!("{} → {}", source, action)),
-                                            )
-                                    })),
+                                                Scrollbar::vertical(&self.summary_scroll_handle)
+                                                    .scrollbar_show(ScrollbarShow::Always),
+                                            ),
+                                    ),
                             ),
                     )
                     .into_any_element()
@@ -2577,17 +3723,20 @@ impl ImportWizard {
                         })),
                 )
             })
-            .when(can_go_next, |s| {
-                s.child(
-                    Button::new("next")
-                        .child("Next")
-                        .small()
-                        .primary()
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.go_next(cx);
-                        })),
-                )
-            })
+            .when(
+                can_go_next && (!matches!(step, ImportWizardStep::Progress) || is_complete),
+                |s| {
+                    s.child(
+                        Button::new("next")
+                            .child("Next")
+                            .small()
+                            .primary()
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.go_next(cx);
+                            })),
+                    )
+                },
+            )
             .when(
                 matches!(step, ImportWizardStep::Progress) && !is_importing && !is_complete,
                 |s| {

@@ -25,7 +25,7 @@ use zqlz_versioning::{
 };
 
 use crate::app::AppState;
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use crate::workspace_state::RefreshScope;
 
 use super::MainView;
 
@@ -525,9 +525,8 @@ impl MainView {
                                                             }
 
                                                             let _ = main_view.update(cx, |main_view, cx| {
-                                                                main_view.refresh_connection_surfaces(
-                                                                    RefreshTarget::Connection(plan.version.connection_id),
-                                                                    SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                                                main_view.request_refresh(
+                                                                    RefreshScope::ConnectionSurfaces(plan.version.connection_id),
                                                                     cx,
                                                                 );
 

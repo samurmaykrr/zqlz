@@ -627,6 +627,10 @@ pub struct ExportWizardState {
     pub output_file_path: Option<PathBuf>,
     /// Path to log file saved after export completes (for View Log button)
     pub log_file_path: Option<PathBuf>,
+    /// Inline validation error shown on step 1 when no tables are selected.
+    pub table_selection_validation_error: Option<String>,
+    /// Inline validation error shown on step 2 when no columns are selected.
+    pub field_selection_validation_error: Option<String>,
 }
 
 impl Default for ExportWizardState {
@@ -654,6 +658,8 @@ impl Default for ExportWizardState {
             log_messages: Vec::new(),
             output_file_path: None,
             log_file_path: None,
+            table_selection_validation_error: None,
+            field_selection_validation_error: None,
         }
     }
 }
@@ -768,6 +774,35 @@ impl ExportWizardState {
             ..Default::default()
         }
     }
+
+    /// Validate that at least one table is selected for export.
+    pub fn validate_table_selection(&mut self) -> bool {
+        let has_selected_table = self.tables.iter().any(|table| table.selected);
+        if has_selected_table {
+            self.table_selection_validation_error = None;
+        } else {
+            self.table_selection_validation_error =
+                Some("Select at least one table before continuing.".to_string());
+        }
+        has_selected_table
+    }
+
+    /// Validate that the currently selected table has at least one selected column.
+    pub fn validate_field_selection(&mut self) -> bool {
+        let has_selected_column = self
+            .current_table()
+            .map(|table| table.columns.iter().any(|column| column.selected))
+            .unwrap_or(false);
+
+        if has_selected_column {
+            self.field_selection_validation_error = None;
+        } else {
+            self.field_selection_validation_error =
+                Some("Select at least one field before continuing.".to_string());
+        }
+
+        has_selected_column
+    }
 }
 
 /// Export profile for saving/loading wizard configurations
@@ -872,11 +907,12 @@ impl ImportWizardStep {
     /// Get the next step, skipping CSV-specific steps for UDIF imports
     pub fn next_for_format(&self, is_udif: bool) -> Option<Self> {
         if is_udif {
-            // For UDIF: FileSource -> ImportMode -> Progress
-            // Summary is entered programmatically after import completion, not via Next
+            // For UDIF: FileSource -> ImportMode -> Progress -> Summary
+            // Summary remains gated by completion checks in `ImportWizard::can_navigate_to_step`.
             match self {
                 Self::FileSource => Some(Self::ImportMode),
                 Self::ImportMode => Some(Self::Progress),
+                Self::Progress => Some(Self::Summary),
                 _ => None,
             }
         } else {
@@ -1339,10 +1375,10 @@ impl ImportStats {
 /// Mirrors the path used by `zqlz-app`'s logging module so all logs live
 /// together under `{data_local_dir}/zqlz/logs/`.
 fn wizard_log_dir() -> std::path::PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| std::path::PathBuf::from("."))
-        .join("zqlz")
-        .join("logs")
+    match zqlz_core::paths::logs_dir() {
+        Ok(path) => path,
+        Err(_) => std::path::PathBuf::from("."),
+    }
 }
 
 /// Strips characters that are unsafe in file names, replacing runs of them
@@ -2248,6 +2284,102 @@ mod tests {
         state.field_mappings.get_mut(&0).unwrap()[0].skip = false;
         assert!(state.validate_field_mappings());
         assert!(state.field_mapping_validation_error.is_none());
+    }
+
+    // -------------------------------------------------------------------------
+    // ExportWizardState validation tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn validate_table_selection_fails_when_none_selected() {
+        let mut state = ExportWizardState {
+            tables: vec![
+                TableExportConfig {
+                    table_name: "users".to_string(),
+                    output_filename: "users.csv".to_string(),
+                    selected: false,
+                    columns: Vec::new(),
+                },
+                TableExportConfig {
+                    table_name: "posts".to_string(),
+                    output_filename: "posts.csv".to_string(),
+                    selected: false,
+                    columns: Vec::new(),
+                },
+            ],
+            ..Default::default()
+        };
+
+        assert!(!state.validate_table_selection());
+        assert!(state.table_selection_validation_error.is_some());
+    }
+
+    #[test]
+    fn validate_table_selection_passes_with_selected_table() {
+        let mut state = ExportWizardState {
+            tables: vec![TableExportConfig {
+                table_name: "users".to_string(),
+                output_filename: "users.csv".to_string(),
+                selected: true,
+                columns: Vec::new(),
+            }],
+            ..Default::default()
+        };
+
+        assert!(state.validate_table_selection());
+        assert!(state.table_selection_validation_error.is_none());
+    }
+
+    #[test]
+    fn validate_field_selection_fails_when_no_columns_selected() {
+        let mut state = ExportWizardState {
+            tables: vec![TableExportConfig {
+                table_name: "users".to_string(),
+                output_filename: "users.csv".to_string(),
+                selected: true,
+                columns: vec![
+                    ExportColumn {
+                        name: "id".to_string(),
+                        selected: false,
+                    },
+                    ExportColumn {
+                        name: "email".to_string(),
+                        selected: false,
+                    },
+                ],
+            }],
+            selected_table_index: 0,
+            ..Default::default()
+        };
+
+        assert!(!state.validate_field_selection());
+        assert!(state.field_selection_validation_error.is_some());
+    }
+
+    #[test]
+    fn validate_field_selection_passes_with_selected_column() {
+        let mut state = ExportWizardState {
+            tables: vec![TableExportConfig {
+                table_name: "users".to_string(),
+                output_filename: "users.csv".to_string(),
+                selected: true,
+                columns: vec![
+                    ExportColumn {
+                        name: "id".to_string(),
+                        selected: true,
+                    },
+                    ExportColumn {
+                        name: "email".to_string(),
+                        selected: false,
+                    },
+                ],
+            }],
+            selected_table_index: 0,
+            ..Default::default()
+        };
+
+        assert!(state.validate_field_selection());
+        assert!(state.field_selection_validation_error.is_none());
     }
 
     // -------------------------------------------------------------------------

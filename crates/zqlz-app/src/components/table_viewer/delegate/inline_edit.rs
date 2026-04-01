@@ -226,9 +226,10 @@ impl TableViewerDelegate {
 
         self.fk_request_id = self.fk_request_id.saturating_add(1);
         let request_id = self.fk_request_id;
+        let fk_cache_key = Self::fk_cache_key(&fk_info);
 
         let cached_values = self
-            .get_fk_values(&fk_info.referenced_table)
+            .get_fk_values(&fk_cache_key)
             .cloned()
             .unwrap_or_default();
 
@@ -247,6 +248,8 @@ impl TableViewerDelegate {
         let fk_delegate = FkSelectDelegate {
             items: cached_values,
             table_name: fk_info.referenced_table.clone(),
+            schema_name: fk_info.referenced_schema.clone(),
+            cache_key: fk_cache_key.clone(),
             referenced_columns: fk_info.referenced_columns.clone(),
             connection_id: self.connection_id,
             viewer_panel: self.viewer_panel.clone(),
@@ -278,17 +281,21 @@ impl TableViewerDelegate {
         self.editing_cell = Some((actual_row, col));
 
         // Trigger FK value loading if cache is empty
-        if self.get_fk_values(&fk_info.referenced_table).is_none() {
+        if self.get_fk_values(&fk_cache_key).is_none() {
             self.fk_loading = true;
             let viewer_panel = self.viewer_panel.clone();
             let connection_id = self.connection_id;
             let referenced_table = fk_info.referenced_table.clone();
+            let referenced_schema = fk_info.referenced_schema.clone();
+            let cache_key = fk_cache_key;
             let referenced_columns = fk_info.referenced_columns.clone();
             cx.defer(move |cx| {
                 if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                     cx.emit(TableViewerEvent::LoadFkValues {
                         connection_id,
                         referenced_table,
+                        referenced_schema,
+                        cache_key,
                         referenced_columns,
                         query: None,
                         limit: 10,
@@ -443,7 +450,7 @@ impl TableViewerDelegate {
         cx.notify();
     }
 
-    fn emit_inline_edit_started(&self, cx: &mut Context<TableState<Self>>) {
+    pub(super) fn emit_inline_edit_started(&self, cx: &mut Context<TableState<Self>>) {
         let viewer_panel = self.viewer_panel.clone();
         cx.defer(move |cx| {
             if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
@@ -624,7 +631,10 @@ impl TableViewerDelegate {
     }
 
     fn is_new_row(&self, row: usize) -> bool {
-        let original_row_count = self.rows.len() - self.pending_changes.new_row_count();
+        let original_row_count = self
+            .rows
+            .len()
+            .saturating_sub(self.pending_changes.new_row_count());
         row >= original_row_count
     }
 }

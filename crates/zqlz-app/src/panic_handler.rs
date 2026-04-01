@@ -234,12 +234,10 @@ impl PanicHandler {
 
     /// Get the directory for storing crash logs
     pub fn log_directory() -> PathBuf {
-        // Try to use platform-specific directories, fallback to current directory
-        if let Some(data_dir) = dirs::data_local_dir() {
-            let zqlz_dir = data_dir.join("zqlz").join("logs");
-            if std::fs::create_dir_all(&zqlz_dir).is_ok() {
-                return zqlz_dir;
-            }
+        if let Ok(log_directory) = zqlz_core::paths::logs_dir()
+            && std::fs::create_dir_all(&log_directory).is_ok()
+        {
+            return log_directory;
         }
 
         // Fallback to current directory
