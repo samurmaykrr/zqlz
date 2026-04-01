@@ -24,11 +24,15 @@ impl TableViewerDelegate {
         }));
 
         let rows: Vec<Vec<Value>> = result.rows.iter().map(|row| row.values.clone()).collect();
+        let row_original_order: Vec<u64> = (0..rows.len() as u64).collect();
+        let next_row_order_token = rows.len() as u64;
 
         Self {
             columns,
             column_meta: result.columns.clone(),
             rows,
+            row_original_order,
+            next_row_order_token,
             size: Size::Small,
             table_name,
             connection_id,
@@ -103,7 +107,11 @@ impl TableViewerDelegate {
 
     pub fn append_rows(&mut self, new_rows: Vec<Vec<Value>>, has_more: bool) {
         self.clear_cell_preview_cache();
+        let appended_count = new_rows.len() as u64;
         self.rows.extend(new_rows);
+        self.row_original_order
+            .extend((0..appended_count).map(|offset| self.next_row_order_token + offset));
+        self.next_row_order_token = self.next_row_order_token.saturating_add(appended_count);
         self.has_more_data = has_more;
         self.is_loading_more = false;
         self.resize_row_number_column();
@@ -111,7 +119,10 @@ impl TableViewerDelegate {
 
     pub fn replace_rows(&mut self, rows: Vec<Vec<Value>>, has_more: bool) {
         self.clear_cell_preview_cache();
+        let row_count = rows.len() as u64;
         self.rows = rows;
+        self.row_original_order = (0..row_count).collect();
+        self.next_row_order_token = row_count;
         self.has_more_data = has_more;
         self.is_loading_more = false;
         self.resize_row_number_column();

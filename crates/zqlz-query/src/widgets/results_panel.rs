@@ -2,6 +2,8 @@
 //!
 //! Displays query results in tabs: Message, Summary, Result, Explain, Problems, Info
 
+use std::ops::Range;
+
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_analyzer::QueryAnalysis;
@@ -11,6 +13,7 @@ use zqlz_ui::widgets::{
     button::{Button, ButtonRounded, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
+    scroll::{Scrollbar, ScrollbarShow},
     table::{Column, ColumnSort, Table, TableDelegate, TableState},
     v_flex,
 };
@@ -18,6 +21,9 @@ use zqlz_ui::widgets::{
 use super::{DiagnosticInfo, DiagnosticInfoSeverity};
 
 const RESULTS_MAX_MATERIALIZED_ROWS: usize = 20_000;
+const RESULTS_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
+const RESULTS_MESSAGE_ROW_HEIGHT: f32 = 34.0;
+const RESULTS_PROBLEM_ROW_HEIGHT: f32 = 52.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResultTab {
@@ -295,6 +301,12 @@ pub struct ResultsPanel {
     /// Focus handle
     focus_handle: FocusHandle,
 
+    /// Scroll handle for the Message tab statement list.
+    message_scroll_handle: UniformListScrollHandle,
+
+    /// Scroll handle for the Problems tab diagnostics list.
+    problems_scroll_handle: UniformListScrollHandle,
+
     /// Current query execution data
     execution: Option<QueryExecution>,
 
@@ -342,6 +354,8 @@ impl ResultsPanel {
     pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             focus_handle: cx.focus_handle(),
+            message_scroll_handle: UniformListScrollHandle::new(),
+            problems_scroll_handle: UniformListScrollHandle::new(),
             execution: None,
             table_states: Vec::new(),
             explain_results: Vec::new(),
@@ -379,6 +393,7 @@ impl ResultsPanel {
     /// Only diagnostics matching the active_editor_id will be displayed
     pub fn set_problems(&mut self, problems: Vec<DiagnosticInfo>, cx: &mut Context<Self>) {
         self.problems = problems;
+        self.problems_scroll_handle = UniformListScrollHandle::new();
         self.diagnostics_loading = false;
         cx.notify();
     }
@@ -467,6 +482,7 @@ impl ResultsPanel {
         }
 
         self.execution = Some(execution);
+        self.message_scroll_handle = UniformListScrollHandle::new();
         self.is_loading = false;
         self.active_tab = ResultTab::Message;
         cx.notify();
@@ -501,6 +517,8 @@ impl ResultsPanel {
     /// Clear results
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.execution = None;
+        self.message_scroll_handle = UniformListScrollHandle::new();
+        self.problems_scroll_handle = UniformListScrollHandle::new();
         self.table_states.clear();
         self.explain_results.clear();
         self.explain_op_table_states.clear();
@@ -687,6 +705,19 @@ impl ResultsPanel {
         } else {
             // DDL or other statement without row counts
             format!("Statement {} - {}", idx + 1, duration_str)
+        }
+    }
+
+    /// Return the first SQL line, truncated to a fixed character count for compact row rendering.
+    fn first_line_preview(sql: &str, max_chars: usize) -> String {
+        let first_line = sql.lines().next().unwrap_or(sql);
+        let mut chars = first_line.chars();
+        let preview: String = chars.by_ref().take(max_chars).collect();
+
+        if chars.next().is_some() {
+            format!("{preview}...")
+        } else {
+            first_line.to_string()
         }
     }
 
@@ -1034,175 +1065,284 @@ impl ResultsPanel {
         let error_count = exec.error_count();
         let total_count = exec.statements.len();
 
-        v_flex().size_full().child(
-            div()
-                .id("message-content")
-                .flex_1()
-                .w_full()
-                .overflow_y_scroll()
-                .child(
-                    v_flex()
-                        .p_4()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .gap_4()
-                                .text_sm()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Processed Query:"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme.foreground)
-                                                .child(total_count.to_string()),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Success:"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme.foreground)
-                                                .child(success_count.to_string()),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Error:"),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_color(theme.foreground)
-                                                .child(error_count.to_string()),
-                                        ),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Start Time:"),
-                                        )
-                                        .child(div().text_color(theme.foreground).child(
-                                            exec.start_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-                                        )),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("End Time:"),
-                                        )
-                                        .child(div().text_color(theme.foreground).child(
-                                            exec.end_time.format("%Y-%m-%d %H:%M:%S").to_string(),
-                                        )),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .child(
-                                            div()
-                                                .text_color(theme.muted_foreground)
-                                                .child("Elapsed Time:"),
-                                        )
-                                        .child(div().text_color(theme.foreground).child(format!(
-                                            "{:.3}s",
-                                            exec.duration_ms as f64 / 1000.0
-                                        ))),
-                                ),
-                        )
-                        .child(div().h(px(1.0)).w_full().bg(theme.border))
-                        .child(
-                            v_flex()
-                                .gap_2()
-                                .text_sm()
-                                .child(
-                                    h_flex()
-                                        .gap_8()
-                                        .child(h_flex().min_w(px(400.0)).child(
-                                            div().text_color(theme.muted_foreground).child("Query"),
-                                        ))
-                                        .child(
-                                            h_flex().min_w(px(120.0)).child(
+        v_flex()
+            .size_full()
+            .child(
+                v_flex()
+                    .id("message-content")
+                    .flex_1()
+                    .w_full()
+                    .overflow_hidden()
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .px_4()
+                            .pt_4()
+                            .gap_2()
+                            .text_sm()
+                            .child(
+                                h_flex()
+                                    .gap_4()
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
                                                 div()
                                                     .text_color(theme.muted_foreground)
-                                                    .child("Message"),
+                                                    .child("Processed Query:"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(theme.foreground)
+                                                    .child(total_count.to_string()),
                                             ),
-                                        )
-                                        .child(
-                                            h_flex().min_w(px(120.0)).child(
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
                                                 div()
                                                     .text_color(theme.muted_foreground)
-                                                    .child("Query Time"),
+                                                    .child("Success:"),
+                                            )
+                                            .child(
+                                                div()
+                                                    .text_color(theme.foreground)
+                                                    .child(success_count.to_string()),
                                             ),
-                                        )
-                                        .child(
-                                            h_flex().min_w(px(120.0)).child(
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
                                                 div()
                                                     .text_color(theme.muted_foreground)
-                                                    .child("Fetch Time"),
-                                            ),
-                                        ),
-                                )
-                                .children(exec.statements.iter().map(|statement| {
-                                    let sql_preview =
-                                        statement.sql.lines().next().unwrap_or(&statement.sql);
-                                    let sql_preview = if sql_preview.len() > 60 {
-                                        format!("{}...", &sql_preview[..60])
-                                    } else {
-                                        sql_preview.to_string()
-                                    };
-
-                                    h_flex()
-                                        .gap_8()
-                                        .child(h_flex().min_w(px(400.0)).child(
-                                            div().text_color(theme.foreground).child(sql_preview),
-                                        ))
-                                        .child(
-                                            h_flex().min_w(px(120.0)).child(
+                                                    .child("Error:"),
+                                            )
+                                            .child(
                                                 div()
-                                                    .text_color(if statement.error.is_none() {
-                                                        theme.success
-                                                    } else {
-                                                        theme.danger
-                                                    })
-                                                    .child(if statement.error.is_none() {
-                                                        "OK"
-                                                    } else {
-                                                        "Error"
-                                                    }),
+                                                    .text_color(theme.foreground)
+                                                    .child(error_count.to_string()),
                                             ),
-                                        )
-                                        .child(h_flex().min_w(px(120.0)).child(
-                                            div().text_color(theme.foreground).child(format!(
-                                                "{:.3}s",
-                                                statement.duration_ms as f64 / 1000.0
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Start Time:"),
+                                            )
+                                            .child(div().text_color(theme.foreground).child(
+                                                exec.start_time
+                                                    .format("%Y-%m-%d %H:%M:%S")
+                                                    .to_string(),
                                             )),
-                                        ))
-                                        .child(h_flex().min_w(px(120.0)).child(
-                                            div().text_color(theme.foreground).child("0.000s"),
-                                        ))
-                                })),
-                        ),
-                ),
-        )
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("End Time:"),
+                                            )
+                                            .child(div().text_color(theme.foreground).child(
+                                                exec.end_time
+                                                    .format("%Y-%m-%d %H:%M:%S")
+                                                    .to_string(),
+                                            )),
+                                    )
+                                    .child(
+                                        h_flex()
+                                            .gap_2()
+                                            .child(
+                                                div()
+                                                    .text_color(theme.muted_foreground)
+                                                    .child("Elapsed Time:"),
+                                            )
+                                            .child(div().text_color(theme.foreground).child(
+                                                format!("{:.3}s", exec.duration_ms as f64 / 1000.0),
+                                            )),
+                                    ),
+                            )
+                            .child(div().h(px(1.0)).w_full().bg(theme.border))
+                            .child(
+                                h_flex()
+                                    .w_full()
+                                    .h(px(RESULTS_MESSAGE_ROW_HEIGHT))
+                                    .px_3()
+                                    .gap_8()
+                                    .items_center()
+                                    .text_sm()
+                                    .border_b_1()
+                                    .border_color(theme.border)
+                                    .child(
+                                        h_flex().min_w(px(400.0)).child(
+                                            div().text_color(theme.muted_foreground).child("Query"),
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex().min_w(px(120.0)).child(
+                                            div().text_color(theme.muted_foreground).child("Message"),
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex().min_w(px(120.0)).child(
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .child("Query Time"),
+                                        ),
+                                    )
+                                    .child(
+                                        h_flex().min_w(px(120.0)).child(
+                                            div()
+                                                .text_color(theme.muted_foreground)
+                                                .child("Fetch Time"),
+                                        ),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("message-statements-container")
+                            .flex_1()
+                            .w_full()
+                            .relative()
+                            .overflow_hidden()
+                            .when(total_count > 0, |this| {
+                                this.child(
+                                    uniform_list(
+                                        "message-statements-list",
+                                        total_count,
+                                        cx.processor(
+                                            move |state: &mut ResultsPanel,
+                                                  visible_range: Range<usize>,
+                                                  _window,
+                                                  cx| {
+                                                let Some(execution) = state.execution.as_ref() else {
+                                                    return Vec::new();
+                                                };
+
+                                                let total_rows = execution.statements.len();
+                                                let start = visible_range.start.min(total_rows);
+                                                let end = visible_range.end.min(total_rows);
+
+                                                if visible_range.end > total_rows {
+                                                    tracing::debug!(
+                                                        ?visible_range,
+                                                        total_rows,
+                                                        "Message list visible range exceeded available rows"
+                                                    );
+                                                }
+
+                                                let theme = cx.theme();
+
+                                                (start..end)
+                                                    .filter_map(|index| {
+                                                        let statement = execution.statements.get(index)?;
+                                                        let sql_preview =
+                                                            Self::first_line_preview(&statement.sql, 60);
+
+                                                        Some(
+                                                            h_flex()
+                                                                .id(index)
+                                                                .w_full()
+                                                                .h(px(RESULTS_MESSAGE_ROW_HEIGHT))
+                                                                .px_3()
+                                                                .gap_8()
+                                                                .items_center()
+                                                                .border_b_1()
+                                                                .border_color(theme.border)
+                                                                .when(index % 2 == 1, |this| {
+                                                                    this.bg(theme.muted.opacity(0.18))
+                                                                })
+                                                                .hover(|this| {
+                                                                    this.bg(theme.muted.opacity(0.32))
+                                                                })
+                                                                .child(
+                                                                    h_flex()
+                                                                        .min_w(px(400.0))
+                                                                        .child(
+                                                                            div()
+                                                                                .text_color(theme.foreground)
+                                                                                .overflow_hidden()
+                                                                                .text_ellipsis()
+                                                                                .whitespace_nowrap()
+                                                                                .child(sql_preview),
+                                                                        ),
+                                                                )
+                                                                .child(
+                                                                    h_flex().min_w(px(120.0)).child(
+                                                                        div()
+                                                                            .text_color(if statement
+                                                                                .error
+                                                                                .is_none()
+                                                                            {
+                                                                                theme.success
+                                                                            } else {
+                                                                                theme.danger
+                                                                            })
+                                                                            .child(if statement
+                                                                                .error
+                                                                                .is_none()
+                                                                            {
+                                                                                "OK"
+                                                                            } else {
+                                                                                "Error"
+                                                                            }),
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    h_flex().min_w(px(120.0)).child(
+                                                                        div().text_color(theme.foreground).child(
+                                                                            format!(
+                                                                                "{:.3}s",
+                                                                                statement.duration_ms
+                                                                                    as f64
+                                                                                    / 1000.0
+                                                                            ),
+                                                                        ),
+                                                                    ),
+                                                                )
+                                                                .child(
+                                                                    h_flex().min_w(px(120.0)).child(
+                                                                        div()
+                                                                            .text_color(theme.foreground)
+                                                                            .child("0.000s"),
+                                                                    ),
+                                                                )
+                                                                .into_any_element(),
+                                                        )
+                                                    })
+                                                    .collect::<Vec<_>>()
+                                            },
+                                        ),
+                                    )
+                                    .flex_grow()
+                                    .size_full()
+                                    .pr(px(RESULTS_LIST_SCROLLBAR_WIDTH))
+                                    .track_scroll(&self.message_scroll_handle)
+                                    .with_sizing_behavior(ListSizingBehavior::Auto)
+                                    .into_any_element(),
+                                )
+                            })
+                            .when(total_count > 0, |this| {
+                                this.child(
+                                    div()
+                                        .absolute()
+                                        .top_0()
+                                        .right_0()
+                                        .bottom_0()
+                                        .w(px(RESULTS_LIST_SCROLLBAR_WIDTH))
+                                        .child(
+                                            Scrollbar::vertical(&self.message_scroll_handle)
+                                                .scrollbar_show(ScrollbarShow::Always),
+                                        ),
+                                )
+                            }),
+                    ),
+            )
     }
 
     /// Render Summary tab
@@ -1617,6 +1757,7 @@ impl ResultsPanel {
         let theme = cx.theme();
 
         let filtered_problems = self.get_filtered_problems();
+        let filtered_count = filtered_problems.len();
 
         v_flex()
             .size_full()
@@ -1661,6 +1802,7 @@ impl ResultsPanel {
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_errors = !this.problems_show_errors;
+                                this.problems_scroll_handle = UniformListScrollHandle::new();
                                 cx.notify();
                             }))
                     })
@@ -1694,6 +1836,7 @@ impl ResultsPanel {
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_warnings = !this.problems_show_warnings;
+                                this.problems_scroll_handle = UniformListScrollHandle::new();
                                 cx.notify();
                             }))
                     })
@@ -1723,6 +1866,7 @@ impl ResultsPanel {
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_info = !this.problems_show_info;
+                                this.problems_scroll_handle = UniformListScrollHandle::new();
                                 cx.notify();
                             }))
                     })
@@ -1761,6 +1905,7 @@ impl ResultsPanel {
                             )
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.problems_show_hints = !this.problems_show_hints;
+                                this.problems_scroll_handle = UniformListScrollHandle::new();
                                 cx.notify();
                             }))
                     }),
@@ -1780,59 +1925,156 @@ impl ResultsPanel {
                     ))
                     .into_any_element()
             } else {
-                v_flex()
+                div()
                     .id("problems-list")
                     .flex_1()
-                    .overflow_y_scroll()
-                    .children(filtered_problems.iter().enumerate().map(|(idx, problem)| {
-                        let line = problem.line + 1; // Convert to 1-indexed for display
-                        let col = problem.column + 1;
-                        let severity = problem.severity;
-                        let message = problem.message.clone();
-                        let source = problem.source.clone();
+                    .w_full()
+                    .relative()
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "results-problems-list",
+                            filtered_count,
+                            cx.processor(
+                                move |state: &mut ResultsPanel,
+                                      visible_range: Range<usize>,
+                                      _window,
+                                      cx| {
+                                    let filtered = state.get_filtered_problems();
+                                    let total_rows = filtered.len();
+                                    let start = visible_range.start.min(total_rows);
+                                    let end = visible_range.end.min(total_rows);
 
-                        h_flex()
-                            .id(ElementId::Name(format!("problem-{}", idx).into()))
-                            .w_full()
-                            .px_3()
-                            .py_2()
-                            .gap_3()
-                            .items_start()
-                            .cursor_pointer()
-                            .hover(|s| s.bg(theme.muted))
-                            .on_click(cx.listener(move |_this, _, _, cx| {
-                                // Emit event to jump to line
-                                cx.emit(ResultsPanelEvent::GoToLine { line, column: col });
-                            }))
-                            // Severity indicator
-                            .child(div().size(px(8.0)).mt(px(5.0)).rounded_full().bg(
-                                match severity {
-                                    DiagnosticInfoSeverity::Error => theme.danger,
-                                    DiagnosticInfoSeverity::Warning => theme.warning,
-                                    DiagnosticInfoSeverity::Info => theme.info,
-                                    DiagnosticInfoSeverity::Hint => theme.muted_foreground,
+                                    if visible_range.end > total_rows {
+                                        tracing::debug!(
+                                            ?visible_range,
+                                            total_rows,
+                                            "Problems list visible range exceeded available rows"
+                                        );
+                                    }
+
+                                    let theme = cx.theme();
+
+                                    (start..end)
+                                        .filter_map(|index| {
+                                            let problem = filtered.get(index)?;
+                                            let line = problem.line + 1;
+                                            let column = problem.column + 1;
+                                            let severity = problem.severity;
+                                            let message = problem.message.clone();
+                                            let source = problem.source.clone();
+
+                                            Some(
+                                                h_flex()
+                                                    .id(ElementId::Name(
+                                                        format!("problem-{index}").into(),
+                                                    ))
+                                                    .w_full()
+                                                    .h(px(RESULTS_PROBLEM_ROW_HEIGHT))
+                                                    .px_3()
+                                                    .gap_3()
+                                                    .items_start()
+                                                    .justify_center()
+                                                    .cursor_pointer()
+                                                    .border_b_1()
+                                                    .border_color(theme.border)
+                                                    .when(index % 2 == 1, |this| {
+                                                        this.bg(theme.muted.opacity(0.18))
+                                                    })
+                                                    .hover(|styles| {
+                                                        styles.bg(theme.muted.opacity(0.32))
+                                                    })
+                                                    .on_click(cx.listener(
+                                                        move |_this, _, _, cx| {
+                                                            cx.emit(ResultsPanelEvent::GoToLine {
+                                                                line,
+                                                                column,
+                                                            });
+                                                        },
+                                                    ))
+                                                    .child(
+                                                        div()
+                                                            .size(px(8.0))
+                                                            .mt(px(5.0))
+                                                            .rounded_full()
+                                                            .bg(match severity {
+                                                                DiagnosticInfoSeverity::Error => {
+                                                                    theme.danger
+                                                                }
+                                                                DiagnosticInfoSeverity::Warning => {
+                                                                    theme.warning
+                                                                }
+                                                                DiagnosticInfoSeverity::Info => {
+                                                                    theme.info
+                                                                }
+                                                                DiagnosticInfoSeverity::Hint => {
+                                                                    theme.muted_foreground
+                                                                }
+                                                            }),
+                                                    )
+                                                    .child(
+                                                        v_flex()
+                                                            .flex_1()
+                                                            .gap_1()
+                                                            .child(
+                                                                div()
+                                                                    .text_sm()
+                                                                    .text_color(theme.foreground)
+                                                                    .overflow_hidden()
+                                                                    .text_ellipsis()
+                                                                    .whitespace_nowrap()
+                                                                    .child(message),
+                                                            )
+                                                            .child(
+                                                                h_flex()
+                                                                    .gap_2()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    )
+                                                                    .child(format!(
+                                                                        "Ln {}, Col {}",
+                                                                        line, column
+                                                                    ))
+                                                                    .when_some(
+                                                                        source,
+                                                                        |this, src| {
+                                                                            this.child(div().child(
+                                                                                format!(
+                                                                                    "[{}]",
+                                                                                    src
+                                                                                ),
+                                                                            ))
+                                                                        },
+                                                                    ),
+                                                            ),
+                                                    )
+                                                    .into_any_element(),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
                                 },
-                            ))
-                            // Message and details
+                            ),
+                        )
+                        .flex_grow()
+                        .size_full()
+                        .pr(px(RESULTS_LIST_SCROLLBAR_WIDTH))
+                        .track_scroll(&self.problems_scroll_handle)
+                        .with_sizing_behavior(ListSizingBehavior::Auto)
+                        .into_any_element(),
+                    )
+                    .child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .right_0()
+                            .bottom_0()
+                            .w(px(RESULTS_LIST_SCROLLBAR_WIDTH))
                             .child(
-                                v_flex()
-                                    .flex_1()
-                                    .gap_1()
-                                    .child(
-                                        div().text_sm().text_color(theme.foreground).child(message),
-                                    )
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(format!("Ln {}, Col {}", line, col))
-                                            .when_some(source, |this, src| {
-                                                this.child(div().child(format!("[{}]", src)))
-                                            }),
-                                    ),
-                            )
-                    }))
+                                Scrollbar::vertical(&self.problems_scroll_handle)
+                                    .scrollbar_show(ScrollbarShow::Always),
+                            ),
+                    )
                     .into_any_element()
             })
             .into_any_element()

@@ -1141,6 +1141,7 @@ impl ObjectsTableDelegate {
         let selected_keys = self.get_selected_key_names(&key_name);
         let count = selected_keys.len();
         let is_multi = count > 1;
+        let database_name = self.database_name.clone();
 
         menu
             // Open Key(s)
@@ -1159,7 +1160,7 @@ impl ObjectsTableDelegate {
                             cx.emit(ObjectsPanelEvent::OpenTables {
                                 connection_id,
                                 table_names: keys.clone(),
-                                database_name: None,
+                                database_name: database_name.clone(),
                             });
                         });
                     },
@@ -1207,25 +1208,6 @@ impl ObjectsTableDelegate {
                         });
                     },
                 ))
-            })
-            // Rename Key (single key only)
-            .when(!is_multi, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let key_name = key_name.clone();
-                    PopupMenuItem::new("Rename Key").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::RenameTable {
-                                    connection_id,
-                                    table_name: key_name.clone(),
-                                    database_name: None,
-                                });
-                            });
-                        },
-                    ))
-                })
             })
             .separator()
             // Refresh
@@ -1888,20 +1870,6 @@ impl Render for ObjectsPanel {
                             .on_click(export_handler),
                     )
                     .child(div().flex_1())
-                    .child(
-                        Button::new("list-view")
-                            .ghost()
-                            .xsmall()
-                            .icon(ZqlzIcon::ListBullets)
-                            .tooltip("List View"),
-                    )
-                    .child(
-                        Button::new("grid-view")
-                            .ghost()
-                            .xsmall()
-                            .icon(IconName::ChevronRight)
-                            .tooltip("Grid View"),
-                    )
                     .child(
                         div().w(px(200.)).child(
                             Input::new(&self.search_input)

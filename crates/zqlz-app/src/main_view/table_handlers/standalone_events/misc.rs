@@ -137,6 +137,8 @@ pub(in crate::main_view) fn handle_generate_sql_event(
 pub(in crate::main_view) fn handle_load_fk_values_event(
     connection_id: Uuid,
     referenced_table: &str,
+    referenced_schema: Option<&str>,
+    cache_key: &str,
     referenced_columns: &[String],
     query: Option<&str>,
     limit: usize,
@@ -171,16 +173,31 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
 
     let connection = connection.clone();
     let referenced_table = referenced_table.to_string();
+    let referenced_schema = referenced_schema
+        .map(str::trim)
+        .filter(|schema| !schema.is_empty())
+        .map(ToString::to_string);
+    let cache_key = cache_key.to_string();
     let referenced_columns = referenced_columns.to_vec();
     let query = query.map(|value| value.to_string());
     let effective_limit = limit.clamp(1, 10);
 
     window
         .spawn(cx, async move |cx| {
-            let table_object_name = parse_sql_object_name(&referenced_table);
+            let table_object_name = sql_object_name_with_namespace_hint(
+                &referenced_table,
+                referenced_schema.as_deref(),
+            );
+            let qualified_table_name = if referenced_table.contains('.') {
+                referenced_table.clone()
+            } else if let Some(schema) = referenced_schema.as_deref() {
+                format!("{}.{}", schema, referenced_table)
+            } else {
+                referenced_table.clone()
+            };
             let label_column = best_fk_label_column(
                 connection.as_schema_introspection(),
-                &referenced_table,
+                &qualified_table_name,
                 &referenced_columns,
             )
             .await;
@@ -290,7 +307,7 @@ pub(in crate::main_view) fn handle_load_fk_values_event(
 
                     _ = viewer_entity.update_in(cx, |viewer, window, cx| {
                         viewer.set_fk_values(
-                            referenced_table.clone(),
+                            cache_key.clone(),
                             values,
                             query.clone(),
                             request_id,
@@ -495,5 +512,22 @@ fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
         }
     } else {
         SqlObjectName::new(object_name)
+    }
+}
+
+fn sql_object_name_with_namespace_hint(
+    object_name: &str,
+    namespace_hint: Option<&str>,
+) -> SqlObjectName {
+    if object_name.contains('.') {
+        return parse_sql_object_name(object_name);
+    }
+
+    match namespace_hint
+        .map(str::trim)
+        .filter(|namespace| !namespace.is_empty())
+    {
+        Some(namespace) => SqlObjectName::with_namespace(namespace, object_name),
+        None => SqlObjectName::new(object_name),
     }
 }

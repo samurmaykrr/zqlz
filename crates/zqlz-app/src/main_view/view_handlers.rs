@@ -24,7 +24,7 @@ use zqlz_versioning::{DatabaseObjectType, VersionRepository};
 
 use crate::app::AppState;
 use crate::components::QueryEditor;
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use crate::workspace_state::RefreshScope;
 use zqlz_services::SchemaService;
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
@@ -997,9 +997,8 @@ impl MainView {
 
                                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                                     let _ = main_view.update(cx, |main_view, cx| {
-                                        main_view.refresh_connection_surfaces(
-                                            RefreshTarget::Connection(connection_id),
-                                            SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                        main_view.request_refresh(
+                                            RefreshScope::ConnectionSurfaces(connection_id),
                                             cx,
                                         );
                                     });
@@ -1169,9 +1168,10 @@ impl MainView {
 
                                             let _ = cx.update_window(window_handle, |_, _window, cx| {
                                                 let _ = main_view.update(cx, |main_view, cx| {
-                                                    main_view.refresh_connection_surfaces(
-                                                        RefreshTarget::Connection(connection_id),
-                                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                                    main_view.request_refresh(
+                                                        RefreshScope::ConnectionSurfaces(
+                                                            connection_id,
+                                                        ),
                                                         cx,
                                                     );
                                                 });
@@ -1550,9 +1550,8 @@ impl MainView {
                     });
 
                     _ = _this.update(cx, |main_view, cx| {
-                        main_view.refresh_connection_surfaces(
-                            RefreshTarget::Connection(connection_id),
-                            SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                        main_view.request_refresh(
+                            RefreshScope::ConnectionSurfaces(connection_id),
                             cx,
                         );
                     });
@@ -2175,7 +2174,12 @@ END;"#
             .connection_manager()
             .get_saved(connection_id)
             .and_then(|saved| saved.params.get("database").cloned())
-            .or_else(|| app_state.active_database());
+            .or_else(|| {
+                self.workspace_state
+                    .read(cx)
+                    .active_database()
+                    .map(str::to_owned)
+            });
 
         if let Some(trigger_name) = trigger_name {
             // Editing an existing trigger - need to load its definition first
@@ -2907,9 +2911,8 @@ END;"#
 
                             let _ = cx.update_window(window_handle, |_, _window, cx| {
                                 let _ = main_view.update(cx, |main_view, cx| {
-                                    main_view.refresh_connection_surfaces(
-                                        RefreshTarget::Connection(connection_id),
-                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                    main_view.request_refresh(
+                                        RefreshScope::ConnectionSurfaces(connection_id),
                                         cx,
                                     );
                                 });
@@ -3107,9 +3110,8 @@ END;"#
 
                             let _ = cx.update_window(window_handle, |_, _window, cx| {
                                 let _ = main_view.update(cx, |main_view, cx| {
-                                    main_view.refresh_connection_surfaces(
-                                        RefreshTarget::Connection(connection_id),
-                                        SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
+                                    main_view.request_refresh(
+                                        RefreshScope::ConnectionSurfaces(connection_id),
                                         cx,
                                     );
                                 });

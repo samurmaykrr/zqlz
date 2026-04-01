@@ -32,6 +32,14 @@ enum SelectionState {
     Row,
 }
 
+fn next_sort_state(sort: ColumnSort) -> ColumnSort {
+    match sort {
+        ColumnSort::Ascending => ColumnSort::Descending,
+        ColumnSort::Descending => ColumnSort::Default,
+        ColumnSort::Default => ColumnSort::Ascending,
+    }
+}
+
 /// The Table event.
 #[derive(Clone)]
 pub enum TableEvent {
@@ -1264,11 +1272,7 @@ where
             return;
         };
 
-        let sort = match sort {
-            ColumnSort::Ascending => ColumnSort::Descending,
-            ColumnSort::Descending => ColumnSort::Ascending,
-            ColumnSort::Default => ColumnSort::Ascending,
-        };
+        let sort = next_sort_state(sort);
 
         for (ix, col_group) in self.col_groups.iter_mut().enumerate() {
             if ix == col_ix {
@@ -2403,6 +2407,9 @@ where
                             let cells = state.cell_selection.selected_cells();
                             let mut rows: std::collections::HashSet<usize> =
                                 cells.iter().map(|c| c.row).collect();
+                            if let Some(selected_row) = state.selected_row {
+                                rows.insert(selected_row);
+                            }
                             // Include the right-clicked row if any
                             if let Some(row) = state.right_clicked_row {
                                 rows.insert(row);
@@ -2420,6 +2427,9 @@ where
                     if let Some(header_col_ix) = header_col_ix {
                         // Column header was right-clicked
                         view.update(cx, |menu, cx| {
+                            menu.context_menu_selected_rows = selected_rows.clone();
+                            menu.delegate_mut()
+                                .set_context_menu_selection(selected_rows);
                             menu.delegate_mut()
                                 .column_context_menu(header_col_ix, this, window, cx)
                         })
@@ -2565,5 +2575,20 @@ where
                         ),
                 )
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_sort_state_cycles_default_asc_desc_default() {
+        assert_eq!(next_sort_state(ColumnSort::Default), ColumnSort::Ascending);
+        assert_eq!(
+            next_sort_state(ColumnSort::Ascending),
+            ColumnSort::Descending
+        );
+        assert_eq!(next_sort_state(ColumnSort::Descending), ColumnSort::Default);
     }
 }

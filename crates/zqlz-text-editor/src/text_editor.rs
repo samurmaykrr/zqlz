@@ -9718,6 +9718,7 @@ mod tests {
         let header = snapshot.sticky_header_excerpt(1).expect("sticky header");
         assert_eq!(header.buffer_line, 0);
         assert_eq!(header.kind_label, "block");
+        assert_eq!(header.text, "BEGIN");
     }
 
     #[test]

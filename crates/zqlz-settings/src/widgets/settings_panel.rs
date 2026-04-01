@@ -406,13 +406,12 @@ impl SettingsPanel {
             .iter()
             .position(|item| item.value == theme_mode);
 
-        // Build theme items from registry
+        // Build theme items from the discoverable registry catalog so users can
+        // select themes that are not yet loaded into memory.
         let themes: Vec<ThemeItem> = zqlz_ui::widgets::ThemeRegistry::global(cx)
-            .sorted_themes()
-            .iter()
-            .map(|t| ThemeItem {
-                name: t.name.clone(),
-            })
+            .sorted_theme_names()
+            .into_iter()
+            .map(|name| ThemeItem { name })
             .collect();
 
         let light_theme_index = themes.iter().position(|t| t.name == light_theme);
@@ -695,6 +694,9 @@ impl SettingsPanel {
         // Create AI API key input (masked)
         let ai_api_key_state = cx.new(|cx| {
             let mut state = InputState::new(window, cx);
+            if let Some(api_key) = _ai_api_key {
+                state.set_value(api_key, window, cx);
+            }
             state.set_masked(true, window, cx);
             state
         });
@@ -706,14 +708,12 @@ impl SettingsPanel {
             &theme_mode_state,
             |this, _, event: &SelectEvent<SearchableVec<ThemeModeItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let (appearance, fonts) = {
-                        let settings = ZqlzSettings::global_mut(cx);
+                    let (appearance, fonts) = Self::mutate_settings(cx, |settings| {
                         settings.appearance.theme_mode = *value;
                         (settings.appearance.clone(), settings.fonts.clone())
-                    };
+                    });
                     appearance.apply_with_fonts(&fonts, cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -722,14 +722,27 @@ impl SettingsPanel {
             &light_theme_state,
             |this, _, event: &SelectEvent<SearchableVec<ThemeItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let (appearance, fonts) = {
-                        let settings = ZqlzSettings::global_mut(cx);
-                        settings.appearance.light_theme = value.clone();
-                        (settings.appearance.clone(), settings.fonts.clone())
-                    };
+                    let (appearance, fonts, selected_theme_name) =
+                        Self::mutate_settings(cx, |settings| {
+                            settings.appearance.light_theme = value.clone();
+                            (
+                                settings.appearance.clone(),
+                                settings.fonts.clone(),
+                                settings.appearance.light_theme.clone(),
+                            )
+                        });
+
+                    if !zqlz_ui::widgets::ThemeRegistry::global_mut(cx)
+                        .ensure_theme_loaded_by_name(&selected_theme_name)
+                    {
+                        tracing::warn!(
+                            theme = %selected_theme_name,
+                            "selected light theme could not be loaded"
+                        );
+                    }
+
                     appearance.apply_with_fonts(&fonts, cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -738,14 +751,27 @@ impl SettingsPanel {
             &dark_theme_state,
             |this, _, event: &SelectEvent<SearchableVec<ThemeItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let (appearance, fonts) = {
-                        let settings = ZqlzSettings::global_mut(cx);
-                        settings.appearance.dark_theme = value.clone();
-                        (settings.appearance.clone(), settings.fonts.clone())
-                    };
+                    let (appearance, fonts, selected_theme_name) =
+                        Self::mutate_settings(cx, |settings| {
+                            settings.appearance.dark_theme = value.clone();
+                            (
+                                settings.appearance.clone(),
+                                settings.fonts.clone(),
+                                settings.appearance.dark_theme.clone(),
+                            )
+                        });
+
+                    if !zqlz_ui::widgets::ThemeRegistry::global_mut(cx)
+                        .ensure_theme_loaded_by_name(&selected_theme_name)
+                    {
+                        tracing::warn!(
+                            theme = %selected_theme_name,
+                            "selected dark theme could not be loaded"
+                        );
+                    }
+
                     appearance.apply_with_fonts(&fonts, cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -754,14 +780,12 @@ impl SettingsPanel {
             &scrollbar_state,
             |this, _, event: &SelectEvent<SearchableVec<ScrollbarItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let (appearance, fonts) = {
-                        let settings = ZqlzSettings::global_mut(cx);
+                    let (appearance, fonts) = Self::mutate_settings(cx, |settings| {
                         settings.appearance.show_scrollbars = *value;
                         (settings.appearance.clone(), settings.fonts.clone())
-                    };
+                    });
                     appearance.apply_with_fonts(&fonts, cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -770,14 +794,12 @@ impl SettingsPanel {
             &ui_font_size_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let fonts = {
-                    let settings = ZqlzSettings::global_mut(cx);
+                let fonts = Self::mutate_settings(cx, |settings| {
                     settings.fonts.ui_font_size = value.end();
                     settings.fonts.clone()
-                };
+                });
                 fonts.apply(cx);
-                cx.notify();
-                this.emit_changed(cx);
+                this.mark_settings_changed(cx);
             },
         ));
 
@@ -785,14 +807,12 @@ impl SettingsPanel {
             &ui_font_weight_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let fonts = {
-                    let settings = ZqlzSettings::global_mut(cx);
+                let fonts = Self::mutate_settings(cx, |settings| {
                     settings.fonts.ui_font_weight = value.end() as u16;
                     settings.fonts.clone()
-                };
+                });
                 fonts.apply(cx);
-                cx.notify();
-                this.emit_changed(cx);
+                this.mark_settings_changed(cx);
             },
         ));
 
@@ -800,14 +820,12 @@ impl SettingsPanel {
             &editor_font_size_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let fonts = {
-                    let settings = ZqlzSettings::global_mut(cx);
+                let fonts = Self::mutate_settings(cx, |settings| {
                     settings.fonts.editor_font_size = value.end();
                     settings.fonts.clone()
-                };
+                });
                 fonts.apply(cx);
-                cx.notify();
-                this.emit_changed(cx);
+                this.mark_settings_changed(cx);
             },
         ));
 
@@ -815,24 +833,21 @@ impl SettingsPanel {
             &editor_font_weight_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let fonts = {
-                    let settings = ZqlzSettings::global_mut(cx);
+                let fonts = Self::mutate_settings(cx, |settings| {
                     settings.fonts.editor_font_weight = value.end() as u16;
                     settings.fonts.clone()
-                };
+                });
                 fonts.apply(cx);
-                cx.notify();
-                this.emit_changed(cx);
+                this.mark_settings_changed(cx);
             },
         ));
 
         subscriptions.push(
             cx.subscribe(&tab_size_state, |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let settings = ZqlzSettings::global_mut(cx);
-                settings.editor.tab_size = value.end() as u32;
-                cx.notify();
-                this.emit_changed(cx);
+                this.mutate_settings_and_emit(cx, |settings| {
+                    settings.editor.tab_size = value.end() as u32;
+                });
             }),
         );
 
@@ -840,14 +855,12 @@ impl SettingsPanel {
             &ui_font_state,
             |this, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let fonts = {
-                        let settings = ZqlzSettings::global_mut(cx);
+                    let fonts = Self::mutate_settings(cx, |settings| {
                         settings.fonts.ui_font_family = value.clone();
                         settings.fonts.clone()
-                    };
+                    });
                     fonts.apply(cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -856,14 +869,12 @@ impl SettingsPanel {
             &editor_font_state,
             |this, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let fonts = {
-                        let settings = ZqlzSettings::global_mut(cx);
+                    let fonts = Self::mutate_settings(cx, |settings| {
                         settings.fonts.editor_font_family = value.clone();
                         settings.fonts.clone()
-                    };
+                    });
                     fonts.apply(cx);
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mark_settings_changed(cx);
                 }
             },
         ));
@@ -872,10 +883,9 @@ impl SettingsPanel {
             &inline_suggestions_provider_state,
             |this, _, event: &SelectEvent<SearchableVec<InlineSuggestionProviderItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.inline_suggestions_provider = *value;
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.inline_suggestions_provider = *value;
+                    });
                 }
             },
         ));
@@ -884,10 +894,9 @@ impl SettingsPanel {
             &inline_suggestions_delay_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let settings = ZqlzSettings::global_mut(cx);
-                settings.editor.inline_suggestions_delay_ms = value.end() as u32;
-                cx.notify();
-                this.emit_changed(cx);
+                this.mutate_settings_and_emit(cx, |settings| {
+                    settings.editor.inline_suggestions_delay_ms = value.end() as u32;
+                });
             },
         ));
 
@@ -895,12 +904,11 @@ impl SettingsPanel {
             &ai_provider_state,
             |this, _, event: &SelectEvent<SearchableVec<AiProviderItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.ai_provider = *value;
-                    // Update default model for the new provider
-                    settings.editor.ai_model = value.default_model().into();
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.ai_provider = *value;
+                        // Update default model for the new provider
+                        settings.editor.ai_model = value.default_model().into();
+                    });
                 }
             },
         ));
@@ -913,10 +921,10 @@ impl SettingsPanel {
                         let api_key = this.ai_api_key_state.read(cx);
                         api_key.unmask_value()
                     };
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.ai_api_key = if value.is_empty() { None } else { Some(value) };
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.ai_api_key =
+                            if value.is_empty() { None } else { Some(value) };
+                    });
                 }
             }),
         );
@@ -926,11 +934,9 @@ impl SettingsPanel {
             &cursor_blink_state,
             |this, _, event: &SelectEvent<SearchableVec<CursorBlinkItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.cursor_blink = *value;
-
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.cursor_blink = *value;
+                    });
                 }
             },
         ));
@@ -939,11 +945,9 @@ impl SettingsPanel {
             &cursor_shape_state,
             |this, _, event: &SelectEvent<SearchableVec<CursorShapeItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.cursor_shape = *value;
-
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.cursor_shape = *value;
+                    });
                 }
             },
         ));
@@ -952,11 +956,9 @@ impl SettingsPanel {
             &scroll_beyond_last_line_state,
             |this, _, event: &SelectEvent<SearchableVec<ScrollBeyondLastLineItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.scroll_beyond_last_line = *value;
-
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.scroll_beyond_last_line = *value;
+                    });
                 }
             },
         ));
@@ -965,10 +967,9 @@ impl SettingsPanel {
             &vertical_scroll_margin_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let settings = ZqlzSettings::global_mut(cx);
-                settings.editor.vertical_scroll_margin = value.end() as u32;
-                cx.notify();
-                this.emit_changed(cx);
+                this.mutate_settings_and_emit(cx, |settings| {
+                    settings.editor.vertical_scroll_margin = value.end() as u32;
+                });
             },
         ));
 
@@ -976,10 +977,9 @@ impl SettingsPanel {
             &horizontal_scroll_margin_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let settings = ZqlzSettings::global_mut(cx);
-                settings.editor.horizontal_scroll_margin = value.end() as u32;
-                cx.notify();
-                this.emit_changed(cx);
+                this.mutate_settings_and_emit(cx, |settings| {
+                    settings.editor.horizontal_scroll_margin = value.end() as u32;
+                });
             },
         ));
 
@@ -987,10 +987,9 @@ impl SettingsPanel {
             &scroll_sensitivity_state,
             |this, _, event: &SliderEvent, cx| {
                 let SliderEvent::Change(value) = event;
-                let settings = ZqlzSettings::global_mut(cx);
-                settings.editor.scroll_sensitivity = value.end();
-                cx.notify();
-                this.emit_changed(cx);
+                this.mutate_settings_and_emit(cx, |settings| {
+                    settings.editor.scroll_sensitivity = value.end();
+                });
             },
         ));
 
@@ -998,11 +997,9 @@ impl SettingsPanel {
             &search_wrap_state,
             |this, _, event: &SelectEvent<SearchableVec<SearchWrapItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.search_wrap = *value;
-
-                    cx.notify();
-                    this.emit_changed(cx);
+                    this.mutate_settings_and_emit(cx, |settings| {
+                        settings.editor.search_wrap = *value;
+                    });
                 }
             },
         ));
@@ -1040,6 +1037,25 @@ impl SettingsPanel {
 
     fn emit_changed(&self, cx: &mut Context<Self>) {
         cx.emit(SettingsPanelEvent::SettingsChanged);
+    }
+
+    fn mark_settings_changed(&self, cx: &mut Context<Self>) {
+        cx.notify();
+        self.emit_changed(cx);
+    }
+
+    fn mutate_settings<T>(cx: &mut App, mutate: impl FnOnce(&mut ZqlzSettings) -> T) -> T {
+        let settings = ZqlzSettings::global_mut(cx);
+        mutate(settings)
+    }
+
+    fn mutate_settings_and_emit(
+        &mut self,
+        cx: &mut Context<Self>,
+        mutate: impl FnOnce(&mut ZqlzSettings),
+    ) {
+        Self::mutate_settings(cx, mutate);
+        self.mark_settings_changed(cx);
     }
 
     fn render_section_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
@@ -1122,6 +1138,8 @@ impl SettingsPanel {
         // handler (label/description area) and the Switch widget itself.
         let on_change = std::rc::Rc::new(on_change);
         let on_change_row = on_change.clone();
+        let panel = cx.entity().downgrade();
+        let panel_row = panel.clone();
         h_flex()
             .w_full()
             .min_h(px(44.0))
@@ -1134,6 +1152,11 @@ impl SettingsPanel {
             .on_mouse_down(gpui::MouseButton::Left, move |_, window, cx| {
                 cx.stop_propagation();
                 on_change_row(!checked, window, cx);
+                if let Err(error) = panel_row.update(cx, |this, cx| {
+                    this.mark_settings_changed(cx);
+                }) {
+                    tracing::warn!(%error, "Failed to emit settings change from toggle row click");
+                }
             })
             .child(
                 v_flex()
@@ -1159,6 +1182,14 @@ impl SettingsPanel {
                     .checked(checked)
                     .on_click(move |new_checked, window, cx| {
                         on_change(*new_checked, window, cx);
+                        if let Err(error) = panel.update(cx, |this, cx| {
+                            this.mark_settings_changed(cx);
+                        }) {
+                            tracing::warn!(
+                                %error,
+                                "Failed to emit settings change from toggle switch click"
+                            );
+                        }
                     }),
             )
     }

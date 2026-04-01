@@ -10,7 +10,7 @@ use zqlz_ui::widgets::{
 
 use crate::app::AppState;
 use crate::main_view::MainView;
-use crate::main_view::refresh::{RefreshTarget, SurfaceRefreshOptions};
+use crate::workspace_state::RefreshScope;
 
 impl MainView {
     pub(in crate::main_view) fn empty_table(
@@ -100,9 +100,8 @@ impl MainView {
 
                                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                                     let _ = main_view.update(cx, |main_view, cx| {
-                                        main_view.refresh_connection_surfaces(
-                                            RefreshTarget::Connection(connection_id),
-                                            SurfaceRefreshOptions::OBJECTS_ONLY,
+                                        main_view.request_refresh(
+                                            RefreshScope::ConnectionSurfaces(connection_id),
                                             cx,
                                         );
                                     });
@@ -271,9 +270,8 @@ impl MainView {
                         if !emptied_tables.is_empty() {
                             let _ = cx.update_window(window_handle, |_, _window, cx| {
                                 let _ = main_view.update(cx, |main_view, cx| {
-                                    main_view.refresh_connection_surfaces(
-                                        RefreshTarget::Connection(connection_id),
-                                        SurfaceRefreshOptions::OBJECTS_ONLY,
+                                    main_view.request_refresh(
+                                        RefreshScope::ConnectionSurfaces(connection_id),
                                         cx,
                                     );
                                 });

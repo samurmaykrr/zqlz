@@ -3,8 +3,6 @@
 //! Listens on a platform-specific endpoint and dispatches requests from the CLI.
 //! Wire protocol: 4-byte big-endian u32 length prefix + JSON payload.
 
-#[cfg(windows)]
-use std::hash::{Hash, Hasher};
 #[cfg(unix)]
 use std::io::ErrorKind;
 use std::path::Path;
@@ -205,27 +203,7 @@ impl IpcServerHandle {
 /// On Unix this is `~/.config/zqlz/ipc.sock`.
 /// On Windows this is a per-user named pipe path derived from the config dir.
 pub fn default_socket_path() -> Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        let config_dir = dirs::config_dir().context("could not determine config directory")?;
-        return Ok(config_dir.join("zqlz").join("ipc.sock"));
-    }
-
-    #[cfg(windows)]
-    {
-        let config_dir = dirs::config_dir().context("could not determine config directory")?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        config_dir
-            .to_string_lossy()
-            .to_lowercase()
-            .hash(&mut hasher);
-        let endpoint = format!(r"\\.\pipe\zqlz-ipc-{:016x}", hasher.finish());
-        return Ok(PathBuf::from(endpoint));
-    }
-
-    #[allow(unreachable_code)]
-    let config_dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(config_dir.join("zqlz").join("ipc.sock"))
+    zqlz_core::paths::ipc_endpoint().context("could not determine canonical IPC endpoint path")
 }
 
 /// Start the IPC server, listening on `socket_path`.

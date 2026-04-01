@@ -10,8 +10,6 @@ mod standalone;
 
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-#[cfg(windows)]
-use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
@@ -451,27 +449,7 @@ async fn main() -> Result<()> {
 }
 
 fn default_socket_path() -> Result<PathBuf> {
-    #[cfg(unix)]
-    {
-        let config_dir = dirs::config_dir().context("could not determine config directory")?;
-        return Ok(config_dir.join("zqlz").join("ipc.sock"));
-    }
-
-    #[cfg(windows)]
-    {
-        let config_dir = dirs::config_dir().context("could not determine config directory")?;
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        config_dir
-            .to_string_lossy()
-            .to_lowercase()
-            .hash(&mut hasher);
-        let endpoint = format!(r"\\.\pipe\zqlz-ipc-{:016x}", hasher.finish());
-        return Ok(PathBuf::from(endpoint));
-    }
-
-    #[allow(unreachable_code)]
-    let config_dir = dirs::config_dir().context("could not determine config directory")?;
-    Ok(config_dir.join("zqlz").join("ipc.sock"))
+    zqlz_core::paths::ipc_endpoint().context("could not determine canonical IPC endpoint path")
 }
 
 // ---------------------------------------------------------------------------

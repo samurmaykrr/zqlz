@@ -9,5 +9,5 @@ path = "src/internal_storage.rs"
 
 [dependencies]
 anyhow.workspace = true
-dirs.workspace = true
+zqlz-core.workspace = true
 rusqlite.workspace = true

@@ -4008,7 +4008,7 @@ impl Panel for QueryEditor {
 
 /// Returns the path where the schema cache for a given connection is persisted on disk.
 ///
-/// Layout: `{data_local_dir}/zqlz/schema_cache/{connection_id}.json`
+/// Layout: `~/.config/zqlz/schema_cache/{connection_id}.json`
 /// This is intentionally per-connection so different databases never share cached schemas.
 fn schema_cache_path(connection_id: Uuid, scope: Option<&str>) -> Option<std::path::PathBuf> {
     let scope = scope
@@ -4024,11 +4024,9 @@ fn schema_cache_path(connection_id: Uuid, scope: Option<&str>) -> Option<std::pa
         hasher.finish()
     };
 
-    dirs::data_local_dir().map(|base| {
-        base.join("zqlz")
-            .join("schema_cache")
-            .join(format!("{connection_id}_{scope_hash:016x}.json"))
-    })
+    zqlz_core::paths::schema_cache_dir()
+        .ok()
+        .map(|base| base.join(format!("{connection_id}_{scope_hash:016x}.json")))
 }
 
 /// Attempts to read and deserialize a previously saved schema cache from disk.

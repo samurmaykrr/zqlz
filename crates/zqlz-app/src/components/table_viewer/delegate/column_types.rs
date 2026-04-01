@@ -89,6 +89,13 @@ impl TableViewerDelegate {
             .unwrap_or(false)
     }
 
+    pub fn can_generate_uuid_for_column(&self, data_col_ix: usize) -> bool {
+        self.column_meta
+            .get(data_col_ix)
+            .map(|col| is_uuid_generation_compatible_data_type(&col.data_type))
+            .unwrap_or(false)
+    }
+
     /// Validate a cell value against the column's data type.
     /// Accepts a user-entered string (from inline edit or paste).
     /// Returns `Ok(())` if valid, or `Err(message)` describing the problem.
@@ -361,5 +368,54 @@ fn base_type(type_string: &str) -> &str {
     match type_string.find('(') {
         Some(idx) => &type_string[..idx],
         None => type_string,
+    }
+}
+
+fn is_uuid_generation_compatible_data_type(data_type: &str) -> bool {
+    let normalized = data_type.to_lowercase();
+    let base = base_type(&normalized);
+
+    matches!(
+        base,
+        "uuid"
+            | "uniqueidentifier"
+            | "guid"
+            | "text"
+            | "varchar"
+            | "char"
+            | "bpchar"
+            | "name"
+            | "citext"
+            | "character varying"
+            | "character"
+            | "nvarchar"
+            | "nchar"
+            | "longtext"
+            | "mediumtext"
+            | "tinytext"
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_uuid_generation_compatible_data_type;
+
+    #[test]
+    fn allows_uuid_and_string_like_types() {
+        assert!(is_uuid_generation_compatible_data_type("uuid"));
+        assert!(is_uuid_generation_compatible_data_type("UNIQUEIDENTIFIER"));
+        assert!(is_uuid_generation_compatible_data_type("varchar(255)"));
+        assert!(is_uuid_generation_compatible_data_type("TEXT"));
+        assert!(is_uuid_generation_compatible_data_type(
+            "character varying(64)"
+        ));
+    }
+
+    #[test]
+    fn rejects_non_uuid_non_string_like_types() {
+        assert!(!is_uuid_generation_compatible_data_type("int"));
+        assert!(!is_uuid_generation_compatible_data_type("boolean"));
+        assert!(!is_uuid_generation_compatible_data_type("jsonb"));
+        assert!(!is_uuid_generation_compatible_data_type("date"));
     }
 }

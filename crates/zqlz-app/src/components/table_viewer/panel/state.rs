@@ -71,21 +71,26 @@ impl TableViewerPanel {
 
         table_state.update(cx, |table, cx| {
             let delegate = table.delegate_mut();
-            if let Some(row_data) = delegate.rows.get_mut(row) {
-                if let Some(cell) = row_data.get_mut(col) {
-                    let old_value = cell.display_for_table();
-                    *cell = new_value.clone();
-                    tracing::info!(
-                        "Cell updated: '{}' -> '{}'",
-                        old_value,
-                        cell.display_for_table()
-                    );
-                    cx.notify();
-                } else {
-                    tracing::warn!("Column {} not found in row {}", col, row);
-                }
-            } else {
+            let previous_value = delegate
+                .rows
+                .get(row)
+                .and_then(|row_data| row_data.get(col))
+                .map(|cell| cell.display_for_table());
+
+            if let Some(old_value) = previous_value {
+                delegate.apply_value_locally(row, col, new_value.clone());
+                let new_value_display = delegate
+                    .rows
+                    .get(row)
+                    .and_then(|updated_row| updated_row.get(col))
+                    .map(|cell| cell.display_for_table())
+                    .unwrap_or_else(|| new_value.display_for_table());
+                tracing::info!("Cell updated: '{}' -> '{}'", old_value, new_value_display);
+                cx.notify();
+            } else if delegate.rows.get(row).is_none() {
                 tracing::warn!("Row {} not found in table", row);
+            } else {
+                tracing::warn!("Column {} not found in row {}", col, row);
             }
         });
 
@@ -193,7 +198,7 @@ impl TableViewerPanel {
 
     pub fn set_fk_values(
         &mut self,
-        table_name: String,
+        cache_key: String,
         values: Vec<crate::components::table_viewer::delegate::FkSelectItem>,
         query: Option<String>,
         request_id: u64,
@@ -204,7 +209,7 @@ impl TableViewerPanel {
             table_state.update(cx, |table, cx| {
                 table
                     .delegate_mut()
-                    .set_fk_values(table_name, values, query, request_id, window, cx);
+                    .set_fk_values(cache_key, values, query, request_id, window, cx);
             });
         }
     }

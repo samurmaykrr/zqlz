@@ -19,9 +19,9 @@ impl InternalStorage {
     }
 
     pub fn for_config_file(file_name: &str) -> Result<Self> {
-        let config_dir = dirs::config_dir().context("Failed to get config directory")?;
-        let app_dir = config_dir.join("zqlz");
-        Self::open(app_dir.join(file_name))
+        let config_dir = zqlz_core::paths::config_dir()
+            .context("Failed to get canonical ZQLZ config directory")?;
+        Self::open(config_dir.join(file_name))
     }
 
     pub fn path(&self) -> &Path {

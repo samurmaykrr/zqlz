@@ -586,7 +586,7 @@ impl SchemaIntrospection for PostgresConnection {
             .query(
                 "SELECT 
                     tc.constraint_name,
-                    array_agg(kcu.column_name ORDER BY kcu.ordinal_position) as columns
+                    array_agg(kcu.column_name::text ORDER BY kcu.ordinal_position) as columns
                  FROM information_schema.table_constraints tc
                  JOIN information_schema.key_column_usage kcu
                    ON tc.constraint_name = kcu.constraint_name

@@ -1,6 +1,44 @@
 use super::*;
 
 impl TableViewerPanel {
+    fn metadata_for_existing_column(&self, column_name: &str) -> Option<&ColumnMeta> {
+        self.original_column_meta
+            .iter()
+            .find(|column| column.name == column_name)
+            .or_else(|| {
+                self.column_meta
+                    .iter()
+                    .find(|column| column.name == column_name)
+            })
+    }
+
+    fn preserve_reload_column_metadata(&self, result: &mut QueryResult) {
+        for column in &mut result.columns {
+            let Some(existing_column) = self.metadata_for_existing_column(&column.name) else {
+                continue;
+            };
+
+            let incoming_enum_values_empty = column
+                .enum_values
+                .as_ref()
+                .map(|enum_values| enum_values.is_empty())
+                .unwrap_or(true);
+            let existing_has_enum_values = existing_column
+                .enum_values
+                .as_ref()
+                .map(|enum_values| !enum_values.is_empty())
+                .unwrap_or(false);
+
+            if incoming_enum_values_empty && existing_has_enum_values {
+                column.enum_values = existing_column.enum_values.clone();
+            }
+
+            if column.data_type.starts_with("Other(") && existing_has_enum_values {
+                column.data_type = existing_column.data_type.clone();
+            }
+        }
+    }
+
     fn is_heavy_column_type(data_type: &str) -> bool {
         let data_type = data_type.to_ascii_lowercase();
         ["json", "text", "blob", "bytea", "clob", "xml"]
@@ -263,6 +301,10 @@ impl TableViewerPanel {
             self.apply_column_visibility_to_result(&mut result, cx);
         }
 
+        if is_same_table {
+            self.preserve_reload_column_metadata(&mut result);
+        }
+
         let preserved_widths = if is_same_table {
             self.capture_current_column_widths(cx)
         } else {
@@ -306,10 +348,9 @@ impl TableViewerPanel {
         });
 
         // Subscribe to table events...
-        let viewer_panel = cx.entity().clone();
         let table_state_weak = table_state.downgrade();
         cx.subscribe_in(&table_state, window, {
-            move |_this, _table, event: &zqlz_ui::widgets::table::TableEvent, window, cx| {
+            move |this, _table, event: &zqlz_ui::widgets::table::TableEvent, window, cx| {
                 use zqlz_ui::widgets::table::TableEvent;
 
                 tracing::debug!("Table event received: {:?}", std::mem::discriminant(event));
@@ -319,12 +360,12 @@ impl TableViewerPanel {
                         let row = *row;
                         let table_state_weak = table_state_weak.clone();
 
-                        cx.spawn_in(window, async move |_this, cx| {
-                            if let Err(e) = table_state_weak.update(cx, |table, cx| {
+                        cx.spawn_in(window, async move |viewer_panel, cx| {
+                            let row_selected_event = table_state_weak.read_with(cx, |table, _cx| {
                                 let delegate = table.delegate();
                                 let actual_row = delegate.get_actual_row_index(row);
-                                if let Some(row_values) = delegate.rows.get(actual_row) {
-                                    let event = TableViewerEvent::RowSelected {
+                                delegate.rows.get(actual_row).map(|row_values| {
+                                    TableViewerEvent::RowSelected {
                                         connection_id: delegate.connection_id,
                                         table_name: delegate.table_name.clone(),
                                         row_index: actual_row,
@@ -335,15 +376,25 @@ impl TableViewerPanel {
                                             .iter()
                                             .map(|c| c.name.clone())
                                             .collect(),
-                                    };
-                                    if let Some(viewer) = delegate.viewer_panel.upgrade() {
-                                        viewer.update(cx, |_panel, cx| {
-                                            cx.emit(event);
-                                        });
+                                    }
+                                })
+                            });
+
+                            match row_selected_event {
+                                Ok(Some(event)) => {
+                                    if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
+                                        cx.emit(event);
+                                    }) {
+                                        tracing::debug!(
+                                            error = %error,
+                                            "Failed to emit RowSelected event because viewer panel is unavailable"
+                                        );
                                     }
                                 }
-                            }) {
-                                tracing::error!("Failed to emit RowSelected event: {:?}", e);
+                                Ok(None) => {}
+                                Err(error) => {
+                                    tracing::error!("Failed to read row selection state: {:?}", error);
+                                }
                             }
 
                             anyhow::Ok(())
@@ -354,7 +405,6 @@ impl TableViewerPanel {
                         let row = *row;
                         let col = *col;
                         let table_state_weak = table_state_weak.clone();
-                        let _viewer_panel = viewer_panel.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
                             if let Err(e) = table_state_weak.update_in(cx, |table, window, cx| {
@@ -370,7 +420,6 @@ impl TableViewerPanel {
                     TableEvent::DoubleClickedCell { row, col } => {
                         let row = *row;
                         let col = *col;
-                        let _viewer_panel = viewer_panel.clone();
                         let table_state_weak = table_state_weak.clone();
 
                         cx.spawn_in(window, async move |_this, cx| {
@@ -459,9 +508,7 @@ impl TableViewerPanel {
                         .detach();
                     }
                     TableEvent::CellSelectionChanged(selection) => {
-                        viewer_panel.update(cx, |panel, cx| {
-                            panel.update_selection_stats_from_table(cx);
-                        });
+                        this.update_selection_stats_from_table(cx);
                         cx.notify();
                         let cell_count = selection.cell_count();
                         if cell_count > 1 {

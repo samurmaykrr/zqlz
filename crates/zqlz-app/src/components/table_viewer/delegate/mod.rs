@@ -31,6 +31,7 @@ mod clipboard;
 mod column_types;
 mod columns;
 mod context_menu;
+mod context_menu_utils;
 mod filtering;
 mod fk;
 mod init;
@@ -48,6 +49,8 @@ pub use types::*; // ensure public re-export
 pub(super) struct FkSelectDelegate {
     pub(super) items: Vec<FkSelectItem>,
     pub(super) table_name: String,
+    pub(super) schema_name: Option<String>,
+    pub(super) cache_key: String,
     pub(super) referenced_columns: Vec<String>,
     pub(super) connection_id: Uuid,
     pub(super) viewer_panel: WeakEntity<TableViewerPanel>,
@@ -86,6 +89,8 @@ impl SelectDelegate for FkSelectDelegate {
         let viewer_panel = self.viewer_panel.clone();
         let connection_id = self.connection_id;
         let referenced_table = self.table_name.clone();
+        let referenced_schema = self.schema_name.clone();
+        let cache_key = self.cache_key.clone();
         let referenced_columns = self.referenced_columns.clone();
         let request_id = self.request_id;
 
@@ -95,6 +100,8 @@ impl SelectDelegate for FkSelectDelegate {
                 cx.emit(TableViewerEvent::LoadFkValues {
                     connection_id,
                     referenced_table,
+                    referenced_schema,
+                    cache_key,
                     referenced_columns,
                     query: if query.is_empty() { None } else { Some(query) },
                     limit: 10,
@@ -120,6 +127,14 @@ pub struct TableViewerDelegate {
 
     /// Table data as typed Values (preserving original database types)
     pub(crate) rows: Vec<Vec<Value>>,
+
+    /// Stable load-order token for each row in `rows`.
+    ///
+    /// Used to restore deterministic original order when client-side sort is cleared.
+    pub(crate) row_original_order: Vec<u64>,
+
+    /// Next token to assign to newly loaded/appended rows.
+    pub(crate) next_row_order_token: u64,
 
     /// UI size (small/medium/large - affects padding/fonts)
     pub(super) size: Size,

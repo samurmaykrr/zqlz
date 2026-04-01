@@ -5,7 +5,6 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
-use zqlz_text_editor::TextEditor;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, IndexPath, Sizable,
     button::{Button, ButtonVariants},
@@ -23,6 +22,8 @@ use super::filter_types::{
     ColumnSelectItem, FilterCondition, FilterOperator, SortCriterion, SortDirection,
 };
 
+const CUSTOM_FILTER_TOOLTIP: &str = "Custom mode expects a SQL predicate fragment (omit WHERE). Examples: \"book_chapter_id = 'category-1'\", \"chapter_title LIKE '%startup%'\", \"deleted_at IS NULL\".";
+
 /// Events emitted by the filter panel
 #[derive(Clone, Debug)]
 pub enum FilterPanelEvent {
@@ -38,8 +39,8 @@ pub struct FilterRowState {
     pub column_select: Entity<SelectState<SearchableVec<ColumnSelectItem>>>,
     pub value_input: Entity<InputState>,
     pub value2_input: Option<Entity<InputState>>,
-    /// Dedicated input for custom SQL expressions (has helpful placeholder)
-    pub custom_sql_input: Entity<TextEditor>,
+    /// Dedicated input for custom SQL expressions.
+    pub custom_sql_input: Entity<InputState>,
 }
 
 impl FilterRowState {
@@ -54,7 +55,10 @@ impl FilterRowState {
         });
 
         let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value"));
-        let custom_sql_input = cx.new(|cx| TextEditor::new(window, cx));
+        let custom_sql_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("e.g. book_chapter_id = 'category-1' (omit WHERE)")
+        });
 
         Self {
             condition: FilterCondition::new(id),
@@ -174,12 +178,17 @@ impl FilterPanelState {
         )
         .detach();
 
-        // Observe the custom SQL editor for text changes.
-        // cx.observe fires on every cx.notify(), which TextEditor calls after every edit.
-        cx.observe(&row_state.custom_sql_input, move |this, input, cx| {
-            let value: SharedString = input.read(cx).get_text(cx).to_string().into();
-            this.on_value_changed(filter_id, value, cx);
-        })
+        // Subscribe to custom SQL input changes
+        cx.subscribe_in(
+            &row_state.custom_sql_input,
+            window,
+            move |this, input, event: &InputEvent, _window, cx| {
+                if let InputEvent::Change = event {
+                    let value: SharedString = input.read(cx).text().to_string().into();
+                    this.on_value_changed(filter_id, value, cx);
+                }
+            },
+        )
         .detach();
 
         self.filters.push(row_state);
@@ -257,11 +266,17 @@ impl FilterPanelState {
         )
         .detach();
 
-        // Observe the custom SQL editor for text changes.
-        cx.observe(&row_state.custom_sql_input, move |this, input, cx| {
-            let value: SharedString = input.read(cx).get_text(cx).to_string().into();
-            this.on_value_changed(filter_id, value, cx);
-        })
+        // Subscribe to custom SQL input changes
+        cx.subscribe_in(
+            &row_state.custom_sql_input,
+            window,
+            move |this, input, event: &InputEvent, _window, cx| {
+                if let InputEvent::Change = event {
+                    let value: SharedString = input.read(cx).text().to_string().into();
+                    this.on_value_changed(filter_id, value, cx);
+                }
+            },
+        )
         .detach();
 
         // Create the row state with the pre-populated condition
@@ -389,7 +404,7 @@ impl FilterPanelState {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let mut custom_sql_editor_to_focus: Option<Entity<TextEditor>> = None;
+        let mut custom_sql_input_to_focus: Option<Entity<InputState>> = None;
 
         if let Some(filter_row) = self
             .filters
@@ -399,18 +414,23 @@ impl FilterPanelState {
             if value.as_ref() == "[Custom]" {
                 filter_row.condition.column = None;
                 filter_row.condition.operator = FilterOperator::Custom;
-                custom_sql_editor_to_focus = Some(filter_row.custom_sql_input.clone());
+                custom_sql_input_to_focus = Some(filter_row.custom_sql_input.clone());
             } else {
                 filter_row.condition.column = Some(value.to_string());
+                if filter_row.condition.operator.is_custom() {
+                    filter_row.condition.operator = FilterOperator::Equal;
+                    filter_row.condition.custom_sql = None;
+                }
             }
             self.is_dirty = true;
             cx.emit(FilterPanelEvent::Changed);
             cx.notify();
         }
 
-        if let Some(custom_sql_editor) = custom_sql_editor_to_focus {
-            let focus_handle = custom_sql_editor.read(cx).focus_handle(cx);
-            focus_handle.focus(window, cx);
+        if let Some(custom_sql_input) = custom_sql_input_to_focus {
+            custom_sql_input.update(cx, |state, cx| {
+                state.focus(window, cx);
+            });
         }
     }
 
@@ -421,7 +441,21 @@ impl FilterPanelState {
             .iter_mut()
             .find(|f| f.condition.id == filter_id)
         {
-            filter_row.condition.value = value.to_string();
+            let value = value.to_string();
+            let is_custom_filter =
+                filter_row.condition.operator.is_custom() || filter_row.condition.column.is_none();
+
+            if is_custom_filter {
+                filter_row.condition.custom_sql = if value.trim().is_empty() {
+                    None
+                } else {
+                    Some(value.clone())
+                };
+            } else {
+                filter_row.condition.custom_sql = None;
+            }
+
+            filter_row.condition.value = value;
             self.is_dirty = true;
             cx.emit(FilterPanelEvent::Changed);
             cx.notify();
@@ -605,6 +639,10 @@ impl RenderOnce for FilterPanel {
 
         let has_filters = !state.filters.is_empty();
         let has_sorts = !state.sorts.is_empty();
+        let has_filter_sql = state
+            .filters
+            .iter()
+            .any(|filter| filter.condition.enabled && filter.condition.to_sql().is_some());
         let is_dirty = state.is_dirty;
 
         // Pre-render filter rows to avoid closure lifetime issues
@@ -748,6 +786,7 @@ impl RenderOnce for FilterPanel {
             // Apply button row
             .child({
                 let has_criteria = has_filters || has_sorts;
+                let has_applicable_criteria = has_filter_sql || has_sorts;
                 h_flex()
                     .items_center()
                     .gap_2()
@@ -756,7 +795,7 @@ impl RenderOnce for FilterPanel {
                         Button::new("apply-filter-sort")
                             .label("Apply Filter & Sort")
                             .primary()
-                            .disabled(!has_criteria)
+                            .disabled(!has_applicable_criteria)
                             .small()
                             .on_click({
                                 let state = panel_state.clone();
@@ -767,7 +806,7 @@ impl RenderOnce for FilterPanel {
                                 }
                             }),
                     )
-                    .when(has_filters, |this| {
+                    .when(has_filter_sql, |this| {
                         this.child(
                             Button::new("copy-filter-sql")
                                 .label("Copy Filter SQL")
@@ -831,7 +870,6 @@ fn render_filter_row(
         .items_center()
         .gap_1()
         .py_1()
-        // Enabled checkbox
         .child(
             Checkbox::new(format!("filter-enabled-{}", filter_id))
                 .checked(enabled)
@@ -842,128 +880,169 @@ fn render_filter_row(
                     }
                 }),
         )
-        // Column selector
         .child(
-            div().w(px(180.0)).child(
-                Select::new(&filter_row.column_select)
-                    .small()
-                    .placeholder("Column..."),
-            ),
-        )
-        // Operator dropdown (hidden for custom SQL)
-        .when(!is_custom, |this| {
-            this.child(render_operator_dropdown(
-                panel_state,
-                filter_id,
-                operator,
-                cx,
-            ))
-        })
-        // Custom SQL input (wide input for raw SQL expression)
-        .when(is_custom, |this| {
-            this.child(
-                div()
-                    .w(px(280.0))
-                    .h(px(32.0))
-                    .child(filter_row.custom_sql_input.clone()),
-            )
-        })
-        // Regular value input (for non-custom filters)
-        .when(requires_value, |this| {
-            this.child(
-                div()
-                    .w(px(120.0))
-                    .child(Input::new(&filter_row.value_input).small().cleanable(true)),
-            )
-        })
-        // Second value input (for BETWEEN)
-        .when(requires_two_values, |this| {
-            if let Some(ref value2_input) = filter_row.value2_input {
-                this.child(
-                    h_flex()
-                        .items_center()
-                        .gap_1()
-                        .child(div().text_sm().child("and"))
-                        .child(div().w(px(100.0)).child(Input::new(value2_input).small())),
+            h_flex()
+                .flex_1()
+                .min_w_0()
+                .items_center()
+                .gap_1()
+                .child(
+                    div().w(px(180.0)).child(
+                        Select::new(&filter_row.column_select)
+                            .small()
+                            .w_full()
+                            .placeholder("Column..."),
+                    ),
                 )
-            } else {
-                this
-            }
-        })
-        // Add filter button
-        .child(
-            Button::new(format!("add-filter-{}", filter_id))
-                .icon(ZqlzIcon::Plus)
-                .ghost()
-                .xsmall()
-                .tooltip("Add Filter")
-                .on_click({
-                    let state = panel_state.clone();
-                    move |_, window, cx| {
-                        state.update(cx, |s, cx| s.add_filter(window, cx));
-                    }
-                }),
-        )
-        // Remove/Options button
-        .child(
-            Button::new(format!("filter-options-{}", filter_id))
-                .icon(ZqlzIcon::Ellipsis)
-                .ghost()
-                .xsmall()
-                .tooltip("Filter Options")
-                .dropdown_menu({
-                    let state = panel_state.clone();
-                    let can_move_up = index > 0;
-                    let can_move_down = index < total - 1;
-                    move |menu, _window, _cx| {
-                        menu.when(can_move_up, |menu| {
-                            menu.item(PopupMenuItem::new("Move Up").on_click({
-                                let state = state.clone();
-                                move |_, _window, cx| {
-                                    state.update(cx, |s, cx| s.move_filter_up(filter_id, cx));
-                                }
-                            }))
-                        })
-                        .when(can_move_down, |menu| {
-                            menu.item(PopupMenuItem::new("Move Down").on_click({
-                                let state = state.clone();
-                                move |_, _window, cx| {
-                                    state.update(cx, |s, cx| s.move_filter_down(filter_id, cx));
-                                }
-                            }))
-                        })
-                        .when(can_move_up || can_move_down, |menu| menu.separator())
-                        .item(
-                            PopupMenuItem::new("Remove Filter").on_click({
-                                let state = state.clone();
-                                move |_, _window, cx| {
-                                    state.update(cx, |s, cx| s.remove_filter(filter_id, cx));
+                .when(!is_custom, |this| {
+                    this.child(render_operator_dropdown(
+                        panel_state,
+                        filter_id,
+                        operator,
+                        cx,
+                    ))
+                })
+                .when(is_custom, |this| {
+                    this.child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div().flex_1().w_full().min_w_0().h(px(32.0)).child(
+                                    Input::new(&filter_row.custom_sql_input)
+                                        .small()
+                                        .w_full()
+                                        .cleanable(true),
+                                ),
+                            )
+                            .child(
+                                Button::new(format!("custom-filter-help-{}", filter_id))
+                                    .icon(ZqlzIcon::Info)
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip(CUSTOM_FILTER_TOOLTIP),
+                            ),
+                    )
+                })
+                .when(!is_custom && requires_value, |this| {
+                    this.child(
+                        h_flex()
+                            .flex_1()
+                            .min_w_0()
+                            .items_center()
+                            .gap_1()
+                            .child(
+                                div().flex_1().min_w(px(140.0)).child(
+                                    Input::new(&filter_row.value_input)
+                                        .small()
+                                        .w_full()
+                                        .cleanable(true),
+                                ),
+                            )
+                            .when(requires_two_values, |this| {
+                                if let Some(ref value2_input) = filter_row.value2_input {
+                                    this.child(div().text_sm().child("and")).child(
+                                        div()
+                                            .flex_1()
+                                            .min_w(px(140.0))
+                                            .child(Input::new(value2_input).small().w_full()),
+                                    )
+                                } else {
+                                    this
                                 }
                             }),
+                    )
+                })
+                .when(!is_custom && !requires_value, |this| {
+                    this.child(div().flex_1())
+                }),
+        )
+        .child(
+            h_flex()
+                .items_center()
+                .gap_1()
+                .flex_shrink_0()
+                .child(
+                    Button::new(format!("add-filter-{}", filter_id))
+                        .icon(ZqlzIcon::Plus)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Add Filter")
+                        .on_click({
+                            let state = panel_state.clone();
+                            move |_, window, cx| {
+                                state.update(cx, |s, cx| s.add_filter(window, cx));
+                            }
+                        }),
+                )
+                .child(
+                    Button::new(format!("filter-options-{}", filter_id))
+                        .icon(ZqlzIcon::Ellipsis)
+                        .ghost()
+                        .xsmall()
+                        .tooltip("Filter Options")
+                        .dropdown_menu({
+                            let state = panel_state.clone();
+                            let can_move_up = index > 0;
+                            let can_move_down = index < total - 1;
+                            move |menu, _window, _cx| {
+                                menu.when(can_move_up, |menu| {
+                                    menu.item(PopupMenuItem::new("Move Up").on_click({
+                                        let state = state.clone();
+                                        move |_, _window, cx| {
+                                            state.update(cx, |s, cx| {
+                                                s.move_filter_up(filter_id, cx)
+                                            });
+                                        }
+                                    }))
+                                })
+                                .when(can_move_down, |menu| {
+                                    menu.item(PopupMenuItem::new("Move Down").on_click({
+                                        let state = state.clone();
+                                        move |_, _window, cx| {
+                                            state.update(cx, |s, cx| {
+                                                s.move_filter_down(filter_id, cx)
+                                            });
+                                        }
+                                    }))
+                                })
+                                .when(can_move_up || can_move_down, |menu| menu.separator())
+                                .item(
+                                    PopupMenuItem::new("Remove Filter").on_click({
+                                        let state = state.clone();
+                                        move |_, _window, cx| {
+                                            state
+                                                .update(cx, |s, cx| s.remove_filter(filter_id, cx));
+                                        }
+                                    }),
+                                )
+                            }
+                        }),
+                )
+                .when(index < total - 1, {
+                    let state = panel_state.clone();
+                    move |this| {
+                        this.child(
+                            Button::new(format!("logical-op-{}", filter_id))
+                                .label(logical_operator.label())
+                                .ghost()
+                                .xsmall()
+                                .ml_1()
+                                .tooltip("Click to toggle AND/OR")
+                                .on_click({
+                                    let state = state.clone();
+                                    move |_, _window, cx| {
+                                        state.update(cx, |s, cx| {
+                                            s.toggle_logical_operator(filter_id, cx)
+                                        });
+                                    }
+                                }),
                         )
                     }
                 }),
         )
-        // Show clickable "and"/"or" between filters
-        .when(index < total - 1, {
-            let state = panel_state.clone();
-            move |this| {
-                this.child(
-                    Button::new(format!("logical-op-{}", filter_id))
-                        .label(logical_operator.label())
-                        .ghost()
-                        .xsmall()
-                        .ml_2()
-                        .tooltip("Click to toggle AND/OR")
-                        .on_click({
-                            let state = state.clone();
-                            move |_, _window, cx| {
-                                state.update(cx, |s, cx| s.toggle_logical_operator(filter_id, cx));
-                            }
-                        }),
-                )
-            }
-        })
 }
 
 /// Render operator dropdown button

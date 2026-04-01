@@ -148,6 +148,23 @@ pub(in crate::main_view) fn handle_save_cell_event(
     .detach();
 }
 
+fn pending_new_row_index_from_actual_row(
+    actual_row: usize,
+    total_rows: usize,
+    pending_new_row_count: usize,
+) -> Option<usize> {
+    if actual_row >= total_rows {
+        return None;
+    }
+
+    let original_row_count = total_rows.checked_sub(pending_new_row_count)?;
+    if actual_row >= original_row_count {
+        Some(actual_row - original_row_count)
+    } else {
+        None
+    }
+}
+
 pub(in crate::main_view) fn update_pending_new_row_cell(
     viewer: &WeakEntity<TableViewerPanel>,
     request: &SaveCellRequest,
@@ -161,15 +178,15 @@ pub(in crate::main_view) fn update_pending_new_row_cell(
         return false;
     };
 
-    let actual_row = table_state.read_with(cx, |table, _cx| {
-        table.delegate().get_actual_row_index(request.row)
-    });
+    let actual_row = request.row;
 
     let new_row_index = table_state.read_with(cx, |table, _cx| {
         let delegate = table.delegate();
-        delegate
-            .pending_changes
-            .get_new_row_index(actual_row, delegate.rows.len())
+        pending_new_row_index_from_actual_row(
+            actual_row,
+            delegate.rows.len(),
+            delegate.pending_changes.new_row_count(),
+        )
     });
 
     let Some(new_row_index) = new_row_index else {
@@ -347,4 +364,29 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
             Ok::<_, anyhow::Error>(())
         })
         .detach_and_log_err(cx);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pending_new_row_index_from_actual_row;
+
+    #[test]
+    fn pending_row_index_returns_none_for_existing_row() {
+        assert_eq!(pending_new_row_index_from_actual_row(1, 5, 2), None);
+    }
+
+    #[test]
+    fn pending_row_index_maps_first_pending_row() {
+        assert_eq!(pending_new_row_index_from_actual_row(3, 5, 2), Some(0));
+    }
+
+    #[test]
+    fn pending_row_index_maps_last_pending_row() {
+        assert_eq!(pending_new_row_index_from_actual_row(4, 5, 2), Some(1));
+    }
+
+    #[test]
+    fn pending_row_index_returns_none_when_row_out_of_bounds() {
+        assert_eq!(pending_new_row_index_from_actual_row(5, 5, 2), None);
+    }
 }

@@ -30,7 +30,7 @@ const GUTTER_SEPARATOR_WIDTH: Pixels = px(1.0);
 /// Dedicated horizontal zone reserved for fold chevrons, sitting between the
 /// right edge of the line-number text and the separator. This prevents the
 /// triangle from overlapping the digits regardless of how many digits are shown.
-const FOLD_CHEVRON_ZONE: Pixels = px(16.0);
+const FOLD_CHEVRON_ZONE: Pixels = px(14.0);
 
 /// Maximum number of completion items to show in the menu at once
 pub(crate) const MAX_COMPLETION_ITEMS: usize = 10;
@@ -1513,7 +1513,7 @@ impl Element for EditorElement {
         let fold_regions_snap = fold_snapshot.fold_regions().to_vec();
         let folded_lines_snap = fold_snapshot.folded_lines().clone();
 
-        let chevron_size = line_height * 0.55;
+        let chevron_size = line_height * 0.48;
         // Center the chevron within the dedicated FOLD_CHEVRON_ZONE that sits between
         // the line-number text and the separator — no overlap with digits possible.
         let chevron_zone_origin =
@@ -2158,7 +2158,10 @@ impl Element for EditorElement {
             .display_snapshot
             .sticky_header_excerpt(visible_range.start)
             .map(|header| {
-                let label = format!("{}: {}", header.kind_label, header.text);
+                // Keep sticky headers visually quiet: showing fold-kind prefixes (e.g. "block:")
+                // adds noise while scrolling and makes folded contexts harder to read quickly.
+                // The source line itself already carries enough context.
+                let label = header.text;
                 let shaped = self.shape_line_cached(
                     &label,
                     font_size * 0.92,
@@ -2568,8 +2571,8 @@ impl Element for EditorElement {
         // The chevron brightens to full foreground when the cursor is over it.
         if prepaint.show_folding {
             let mouse_pos = window.mouse_position();
-            let normal_color = cx.theme().colors.muted_foreground.opacity(0.55);
-            let hover_color = cx.theme().colors.foreground;
+            let normal_color = cx.theme().colors.muted_foreground.opacity(0.45);
+            let hover_color = cx.theme().colors.foreground.opacity(0.9);
 
             for chevron in &prepaint.fold_chevrons {
                 let rect = chevron.rect;

@@ -63,7 +63,6 @@
       "up": "table_viewer::SelectColumnVisibilityPrevious",
       "down": "table_viewer::SelectColumnVisibilityNext",
       "enter": "table_viewer::ToggleSelectedColumnVisibility",
-      "space": "table_viewer::ToggleSelectedColumnVisibility",
       "backspace": "table_viewer::DeleteSelectedRows",
       "delete": "table_viewer::DeleteSelectedRows"
     }

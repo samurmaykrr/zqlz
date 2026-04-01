@@ -16,6 +16,7 @@ pub mod dialect_config;
 pub mod dialects;
 mod driver;
 mod error;
+pub mod paths;
 mod schema;
 pub mod security;
 pub mod transaction;

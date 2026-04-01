@@ -79,6 +79,7 @@ impl TableViewerDelegate {
         };
 
         self.rows.truncate(original_row_count);
+        self.row_original_order.truncate(original_row_count);
 
         self.pending_changes.clear();
         self.undo_stack.clear();
@@ -141,6 +142,8 @@ impl TableViewerDelegate {
 
         self.pending_changes.new_rows.push(new_row.clone());
         self.rows.push(new_row);
+        self.row_original_order.push(self.next_row_order_token);
+        self.next_row_order_token = self.next_row_order_token.saturating_add(1);
         self.clear_cell_preview_cache();
 
         if self.is_filtering {
@@ -250,6 +253,7 @@ impl TableViewerDelegate {
         self.apply_value_locally(row, data_col, new_value);
 
         let viewer_panel = self.viewer_panel.clone();
+        let table_state_weak = cx.entity().downgrade();
         cx.defer(move |cx| {
             if let Err(error) = viewer_panel.update(cx, |_panel, cx| {
                 cx.emit(TableViewerEvent::SaveCell {
@@ -267,18 +271,14 @@ impl TableViewerDelegate {
             }) {
                 tracing::error!("Failed to emit SaveCell: {:?}", error);
                 let request = request.clone();
-                if let Err(restore_error) = viewer_panel.update(cx, |panel, cx| {
-                    if let Some(table_state) = &panel.table_state {
-                        table_state.update(cx, |table, _cx| {
-                            table.delegate_mut().pending_changes.modified_cells.insert(
-                                (request.row, request.data_col),
-                                PendingCellChange {
-                                    original_value: request.original_value.clone(),
-                                    new_value: request.new_value.clone(),
-                                },
-                            );
-                        });
-                    }
+                if let Err(restore_error) = table_state_weak.update(cx, |table, _cx| {
+                    table.delegate_mut().pending_changes.modified_cells.insert(
+                        (request.row, request.data_col),
+                        PendingCellChange {
+                            original_value: request.original_value.clone(),
+                            new_value: request.new_value.clone(),
+                        },
+                    );
                 }) {
                     tracing::error!(
                         "Failed to queue pending change after SaveCell emit failure: {:?}",
@@ -354,6 +354,8 @@ impl TableViewerDelegate {
         for failed_new_row in failed_new_rows {
             self.pending_changes.new_rows.push(failed_new_row.clone());
             self.rows.push(failed_new_row);
+            self.row_original_order.push(self.next_row_order_token);
+            self.next_row_order_token = self.next_row_order_token.saturating_add(1);
 
             if self.is_filtering {
                 self.filtered_row_indices.push(self.rows.len() - 1);

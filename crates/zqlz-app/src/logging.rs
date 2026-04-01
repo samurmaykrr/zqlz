@@ -40,10 +40,7 @@ pub struct LoggingConfig {
 
 impl Default for LoggingConfig {
     fn default() -> Self {
-        let log_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("zqlz")
-            .join("logs");
+        let log_dir = default_log_directory();
 
         Self {
             log_dir,
@@ -59,10 +56,7 @@ impl Default for LoggingConfig {
 impl LoggingConfig {
     /// Create a production configuration (minimal console output, JSON logs for bug reports)
     pub fn production() -> Self {
-        let log_dir = dirs::data_local_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("zqlz")
-            .join("logs");
+        let log_dir = default_log_directory();
 
         Self {
             log_dir,
@@ -188,10 +182,14 @@ pub fn init_default() -> anyhow::Result<()> {
 
 /// Get the log directory path
 pub fn log_directory() -> PathBuf {
-    dirs::data_local_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join("zqlz")
-        .join("logs")
+    default_log_directory()
+}
+
+fn default_log_directory() -> PathBuf {
+    match zqlz_core::paths::logs_dir() {
+        Ok(path) => path,
+        Err(_) => PathBuf::from("."),
+    }
 }
 
 /// Helper macro for logging errors with context
