@@ -38,9 +38,9 @@ members = [
 default-members = ["crates/zqlz-app"]
 
 [workspace.package]
-version = "0.0.7"
+version = "0.0.8"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "GPL-3.0-only"
 repository = "https://github.com/yourorg/zqlz"
 publish = false
 
