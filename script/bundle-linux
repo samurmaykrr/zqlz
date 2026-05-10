@@ -57,14 +57,15 @@ else
     profile="release"
 fi
 
-# Build the application
+# Build the application and CLI launcher.
 echo "==> Building application..."
-cargo build $build_flag --package zqlz-app --target "$target_triple"
+cargo build $build_flag --package zqlz-app --package zqlz-cli --target "$target_triple"
 
 # Create bundle structure
 bundle_name="zqlz${APP_SUFFIX}"
 bundle_dir="target/$target_triple/$profile/${bundle_name}.app"
 bin_dir="$bundle_dir/bin"
+libexec_dir="$bundle_dir/libexec"
 share_dir="$bundle_dir/share"
 icons_512="$share_dir/icons/hicolor/512x512/apps"
 icons_1024="$share_dir/icons/hicolor/1024x1024/apps"
@@ -72,20 +73,21 @@ applications_dir="$share_dir/applications"
 
 echo "==> Creating bundle at $bundle_dir"
 rm -rf "$bundle_dir"
-mkdir -p "$bin_dir" "$icons_512" "$icons_1024" "$applications_dir"
+mkdir -p "$bin_dir" "$libexec_dir" "$icons_512" "$icons_1024" "$applications_dir"
 
-# Copy binary
+# Copy the CLI launcher and GUI executable using the layout expected by zqlz-cli.
 cp "target/$target_triple/$profile/zqlz" "$bin_dir/zqlz"
+cp "target/$target_triple/$profile/zqlz-editor" "$libexec_dir/zqlz-editor"
 
 # Strip debug symbols for release builds
 if [[ "$profile" == "release" ]]; then
     echo "==> Stripping debug symbols..."
     # Save debug symbols separately
     if command -v objcopy &> /dev/null; then
-        objcopy --only-keep-debug "$bin_dir/zqlz" "$bundle_dir/zqlz.debug" 2>/dev/null || true
-        objcopy --strip-debug "$bin_dir/zqlz" 2>/dev/null || true
+        objcopy --only-keep-debug "$libexec_dir/zqlz-editor" "$bundle_dir/zqlz-editor.debug" 2>/dev/null || true
+        objcopy --strip-debug "$libexec_dir/zqlz-editor" 2>/dev/null || true
     elif command -v strip &> /dev/null; then
-        strip "$bin_dir/zqlz" 2>/dev/null || true
+        strip "$libexec_dir/zqlz-editor" 2>/dev/null || true
     fi
 fi
 
@@ -164,6 +166,7 @@ echo "Installing ZQLZ to $PREFIX..."
 
 # Install binary
 sudo install -Dm755 "$SCRIPT_DIR/bin/zqlz" "$PREFIX/bin/zqlz"
+sudo install -Dm755 "$SCRIPT_DIR/libexec/zqlz-editor" "$PREFIX/libexec/zqlz-editor"
 
 # Install icons
 for size_dir in "$SCRIPT_DIR/share/icons/hicolor"/*; do

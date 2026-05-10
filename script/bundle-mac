@@ -64,9 +64,9 @@ else
     profile="release"
 fi
 
-# Build the application
+# Build the application and CLI launcher.
 echo "==> Building application..."
-cargo build $build_flag --package zqlz-app --target "$target_triple"
+cargo build $build_flag --package zqlz-app --package zqlz-cli --target "$target_triple"
 
 # Create app bundle structure
 app_name="${APP_DISPLAY_NAME}.app"
@@ -79,8 +79,9 @@ echo "==> Creating app bundle at $app_path"
 rm -rf "$app_path"
 mkdir -p "$macos_path" "$resources_path"
 
-# Copy binary
+# Copy the CLI launcher and GUI executable using the layout expected by zqlz-cli.
 cp "target/$target_triple/$profile/zqlz" "$macos_path/zqlz"
+cp "target/$target_triple/$profile/zqlz-editor" "$macos_path/zqlz-editor"
 
 # Create Info.plist
 cat > "$contents_path/Info.plist" << EOF
@@ -93,7 +94,7 @@ cat > "$contents_path/Info.plist" << EOF
     <key>CFBundleDisplayName</key>
     <string>${APP_DISPLAY_NAME}</string>
     <key>CFBundleExecutable</key>
-    <string>zqlz</string>
+    <string>zqlz-editor</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>CFBundleIdentifier</key>

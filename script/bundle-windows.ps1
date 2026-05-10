@@ -149,9 +149,9 @@ if ($Channel -eq "dev") {
     $Profile = "release"
 }
 
-# Build the application
+# Build the application and CLI launcher.
 Write-Host "==> Building application..." -ForegroundColor Cyan
-$BuildArgs = @("build") + $BuildFlags + @("--package", "zqlz-app", "--target", $TargetTriple)
+$BuildArgs = @("build") + $BuildFlags + @("--package", "zqlz-app", "--package", "zqlz-cli", "--target", $TargetTriple)
 & cargo @BuildArgs
 if ($LASTEXITCODE -ne 0) {
     Write-Error "Build failed"
@@ -169,13 +169,14 @@ if (Test-Path $StagingDir) {
 New-Item -ItemType Directory -Force -Path $StagingDir | Out-Null
 New-Item -ItemType Directory -Force -Path $BinDir | Out-Null
 
-# Copy binary
-$SourceBinary = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, "zqlz.exe")
+# Copy the GUI executable and CLI launcher using the layout expected by zqlz-cli.
+$GuiSourceBinary = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, "zqlz-editor.exe")
+$CliSourceBinary = [System.IO.Path]::Combine("target", $TargetTriple, $Profile, "zqlz.exe")
 $DestBinary = Join-Path $StagingDir "ZQLZ.exe"
-Copy-Item $SourceBinary $DestBinary
+Copy-Item $GuiSourceBinary $DestBinary
 
 # Copy to bin directory for CLI access
-Copy-Item $SourceBinary (Join-Path $BinDir "zqlz.exe")
+Copy-Item $CliSourceBinary (Join-Path $BinDir "zqlz.exe")
 
 # Determine icon name
 $IconName = "app-icon$IconSuffix"
