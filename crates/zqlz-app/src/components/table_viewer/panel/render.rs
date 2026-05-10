@@ -227,7 +227,7 @@ impl Render for TableViewerPanel {
                             .flex_1()
                             .w_full()
                             .overflow_hidden()
-                            .child(Table::new(table_state).stripe(true)),
+                            .child(Table::new(table_state).stripe(true).header_height(px(44.))),
                     );
 
                     if let Some(stats) = self.render_selection_stats(cx) {

@@ -24,6 +24,8 @@ impl DriverRegistry {
         // SQL Databases
         #[cfg(feature = "sqlite")]
         registry.register(Arc::new(crate::sqlite::SqliteDriver::new()));
+        #[cfg(feature = "turso")]
+        registry.register(Arc::new(crate::turso::TursoDriver::new()));
         #[cfg(feature = "postgres")]
         registry.register(Arc::new(crate::postgres::PostgresDriver::new()));
         #[cfg(feature = "mysql")]
@@ -97,6 +99,8 @@ pub fn get_dialect_info(driver_name: &str) -> DialectInfo {
     match driver_name.to_lowercase().as_str() {
         #[cfg(feature = "sqlite")]
         "sqlite" => crate::sqlite::sqlite_dialect(),
+        #[cfg(feature = "turso")]
+        "turso" => crate::sqlite::sqlite_dialect(),
         #[cfg(feature = "postgres")]
         "postgres" | "postgresql" => crate::postgres::postgres_dialect(),
         #[cfg(feature = "mysql")]

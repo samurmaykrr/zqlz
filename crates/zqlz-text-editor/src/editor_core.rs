@@ -1,10 +1,17 @@
 use crate::{
-    Cursor, Position, SearchEngine, Selection, SelectionsCollection, StructuralRange, TextBuffer,
-    TextFindOptions,
+    Cursor, Position, SearchEngine, Selection, SelectionsCollection, TextBuffer, TextFindOptions,
     selection::{SelectionEntry, SelectionMode},
 };
 
 pub type ExtraCursor = (Cursor, Selection);
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StructuralRange {
+    pub start: usize,
+    pub end: usize,
+    pub open: char,
+    pub close: char,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SelectionHistoryEntry {
@@ -665,6 +672,14 @@ impl<'a> EditorCoreSnapshot<'a> {
         self.with_core(|core| core.delete_at_cursor_edit_batch())
     }
 
+    pub fn delete_to_beginning_of_line_edit_batch(self) -> Option<PlannedEditBatch> {
+        self.with_core(|core| core.delete_to_beginning_of_line_edit_batch())
+    }
+
+    pub fn delete_to_end_of_line_edit_batch(self) -> Option<PlannedEditBatch> {
+        self.with_core(|core| core.delete_to_end_of_line_edit_batch())
+    }
+
     pub fn delete_subword_left_edit_batch(self) -> Option<PlannedEditBatch> {
         self.with_core(|core| core.delete_subword_left_edit_batch())
     }
@@ -941,11 +956,6 @@ impl<'a> EditorCore<'a> {
     }
 
     fn set_primary_cursor_only(&mut self, cursor_position: Position) {
-        self.cursor.set_position(cursor_position);
-        self.sync_selection_collection_from_fields();
-    }
-
-    fn set_primary_cursor_with_collection_sync(&mut self, cursor_position: Position) {
         self.cursor.set_position(cursor_position);
         self.sync_selection_collection_from_fields();
     }
@@ -1765,7 +1775,11 @@ impl<'a> EditorCore<'a> {
             return false;
         }
 
-        if !self.selection.has_selection() {
+        if !self
+            .selection_entries()
+            .iter()
+            .any(|entry| entry.selection.has_selection())
+        {
             let Some(word_range) = word_range else {
                 return false;
             };
@@ -1800,14 +1814,73 @@ impl<'a> EditorCore<'a> {
         let new_selection = Selection::from_anchor_head(start, end);
         self.add_extra_cursor(end, Some(new_selection));
         self.normalize_extra_cursors();
+        true
+    }
 
-        let previous_primary = claimed
-            .first()
-            .and_then(|range| self.buffer.offset_to_position(range.end).ok());
-        self.set_primary_cursor_with_collection_sync(end);
-        if let Some(previous_primary) = previous_primary {
-            self.set_primary_cursor_with_collection_sync(previous_primary);
+    pub fn select_previous_occurrence(
+        &mut self,
+        word_range: Option<std::ops::Range<usize>>,
+        all_occurrences: &[std::ops::Range<usize>],
+    ) -> bool {
+        if all_occurrences.is_empty() {
+            return false;
         }
+
+        if !self
+            .selection_entries()
+            .iter()
+            .any(|entry| entry.selection.has_selection())
+        {
+            let Some(word_range) = word_range else {
+                return false;
+            };
+            return self.select_offset_range(word_range);
+        }
+
+        let claimed = self.claimed_selection_ranges();
+        let search_before = word_range
+            .as_ref()
+            .map(|range| range.start)
+            .or_else(|| {
+                self.selection_byte_range(&self.selection)
+                    .map(|range| range.start)
+            })
+            .or_else(|| {
+                self.selection_entries()
+                    .iter()
+                    .find(|entry| entry.selection.has_selection())
+                    .and_then(|entry| self.selection_byte_range(&entry.selection))
+                    .map(|range| range.start)
+            })
+            .unwrap_or(self.buffer.len());
+        let previous = all_occurrences
+            .iter()
+            .rev()
+            .find(|range| {
+                range.end <= search_before
+                    && !claimed.iter().any(|claimed| claimed.start == range.start)
+            })
+            .or_else(|| {
+                all_occurrences
+                    .iter()
+                    .rev()
+                    .find(|range| !claimed.iter().any(|claimed| claimed.start == range.start))
+            });
+
+        let Some(byte_range) = previous else {
+            return false;
+        };
+
+        let Ok(start) = self.buffer.offset_to_position(byte_range.start) else {
+            return false;
+        };
+        let Ok(end) = self.buffer.offset_to_position(byte_range.end) else {
+            return false;
+        };
+
+        let new_selection = Selection::from_anchor_head(start, end);
+        self.add_extra_cursor(end, Some(new_selection));
+        self.normalize_extra_cursors();
         true
     }
 
@@ -3299,6 +3372,69 @@ impl<'a> EditorCore<'a> {
         })
     }
 
+    pub fn delete_to_beginning_of_line_edit_batch(&self) -> Option<PlannedEditBatch> {
+        let position = self.cursor.position();
+        if position.column == 0 {
+            return None;
+        }
+
+        let cursor_offset = self.buffer.position_to_offset(position).ok()?;
+        let line_start_offset = self
+            .buffer
+            .position_to_offset(Position::new(position.line, 0))
+            .ok()?;
+        if line_start_offset >= cursor_offset {
+            return None;
+        }
+
+        Some(PlannedEditBatch {
+            edits: vec![TextReplacementEdit {
+                range: line_start_offset..cursor_offset,
+                replacement: String::new(),
+            }],
+            post_apply_selection: PostApplySelection::MovePrimaryCursorToOffset(line_start_offset),
+        })
+    }
+
+    pub fn delete_to_end_of_line_edit_batch(&self) -> Option<PlannedEditBatch> {
+        let position = self.cursor.position();
+        let line_text = self.buffer.line(position.line)?;
+        let line_end_column = line_text
+            .strip_suffix("\r\n")
+            .map(str::len)
+            .or_else(|| line_text.strip_suffix('\n').map(str::len))
+            .unwrap_or(line_text.len());
+        let cursor_offset = self.buffer.position_to_offset(position).ok()?;
+
+        let delete_range = if position.column < line_end_column {
+            let line_end_offset = self
+                .buffer
+                .position_to_offset(Position::new(position.line, line_end_column))
+                .ok()?;
+            cursor_offset..line_end_offset
+        } else if position.line + 1 < self.buffer.line_count() {
+            let next_line_offset = self
+                .buffer
+                .position_to_offset(Position::new(position.line + 1, 0))
+                .ok()?;
+            cursor_offset..next_line_offset
+        } else {
+            return None;
+        };
+
+        if delete_range.is_empty() {
+            return None;
+        }
+
+        Some(PlannedEditBatch {
+            edits: vec![TextReplacementEdit {
+                range: delete_range,
+                replacement: String::new(),
+            }],
+            post_apply_selection: PostApplySelection::Keep,
+        })
+    }
+
     pub fn delete_subword_left_plan(&self) -> Option<DeleteSubwordPlan> {
         let offset = self
             .buffer
@@ -4544,6 +4680,55 @@ mod tests {
         let state = core.selection_state();
         assert_eq!(state.extra_cursors().len(), 1);
         assert_eq!(state.extra_cursors()[0].0.position(), Position::new(0, 14));
+    }
+
+    #[test]
+    fn select_previous_occurrence_adds_a_secondary_selection() {
+        let (
+            buffer,
+            mut cursor,
+            mut selection,
+            mut extra_cursors,
+            mut collection,
+            mut last_select_line_was_extend,
+            mut selection_history,
+        ) = test_core("word test word test");
+        cursor.set_position(Position::new(0, 12));
+
+        let mut core = EditorCore::new(
+            &buffer,
+            &mut cursor,
+            &mut selection,
+            &mut extra_cursors,
+            &mut collection,
+            &mut last_select_line_was_extend,
+            &mut selection_history,
+        );
+
+        assert!(core.select_previous_occurrence(Some(10..14), &[0..4, 10..14]));
+        assert_eq!(
+            core.selection_state().expect_selection().range().start,
+            Position::new(0, 10)
+        );
+        assert_eq!(
+            core.selection_state().expect_selection().range().end,
+            Position::new(0, 14)
+        );
+
+        assert!(core.select_previous_occurrence(Some(10..14), &[0..4, 10..14]));
+        let state = core.selection_state();
+        let mut ranges = state
+            .collection
+            .all()
+            .iter()
+            .map(|entry| entry.selection.range())
+            .collect::<Vec<_>>();
+        ranges.sort_by_key(|range| range.start);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].start, Position::new(0, 0));
+        assert_eq!(ranges[0].end, Position::new(0, 4));
+        assert_eq!(ranges[1].start, Position::new(0, 10));
+        assert_eq!(ranges[1].end, Position::new(0, 14));
     }
 
     #[test]
@@ -7006,6 +7191,43 @@ mod tests {
             Some(DeleteSubwordPlan {
                 range: 3..6,
                 target_offset: 3,
+            })
+        );
+    }
+
+    #[test]
+    fn delete_to_line_boundary_edit_batches_delete_without_clipboard_semantics() {
+        let buffer = TextBuffer::new("select one\nselect two");
+        let cursor = Cursor::at(Position::new(0, 6));
+        let selection = Selection::at(Position::new(0, 6));
+
+        assert_eq!(
+            test_core_snapshot(
+                &buffer,
+                cursor.clone(),
+                selection.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .delete_to_beginning_of_line_edit_batch(),
+            Some(PlannedEditBatch {
+                edits: vec![TextReplacementEdit {
+                    range: 0..6,
+                    replacement: String::new(),
+                }],
+                post_apply_selection: PostApplySelection::MovePrimaryCursorToOffset(0),
+            })
+        );
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .delete_to_end_of_line_edit_batch(),
+            Some(PlannedEditBatch {
+                edits: vec![TextReplacementEdit {
+                    range: 6..10,
+                    replacement: String::new(),
+                }],
+                post_apply_selection: PostApplySelection::Keep,
             })
         );
     }

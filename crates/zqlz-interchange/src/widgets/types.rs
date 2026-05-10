@@ -548,6 +548,8 @@ pub struct ExportFormatOptions {
     pub append: bool,
     /// Continue on error
     pub continue_on_error: bool,
+    /// Zero pad date fields when formatting dates
+    pub zero_padding_date: bool,
     /// Include column headers
     pub include_headers: bool,
     /// Display blank instead of zero
@@ -562,6 +564,12 @@ pub struct ExportFormatOptions {
     pub binary_encoding: BinaryEncoding,
     /// Decimal symbol
     pub decimal_symbol: String,
+    /// Date order
+    pub date_order: DateOrder,
+    /// Date delimiter
+    pub date_delimiter: String,
+    /// Time delimiter
+    pub time_delimiter: String,
 }
 
 impl Default for ExportFormatOptions {
@@ -571,11 +579,15 @@ impl Default for ExportFormatOptions {
             continue_on_error: true,
             include_headers: true,
             blank_if_zero: false,
+            zero_padding_date: false,
             record_delimiter: RecordDelimiter::default(),
             field_delimiter: FieldDelimiter::default(),
             text_qualifier: TextQualifier::default(),
             binary_encoding: BinaryEncoding::default(),
             decimal_symbol: ".".to_string(),
+            date_order: DateOrder::default(),
+            date_delimiter: "/".to_string(),
+            time_delimiter: ":".to_string(),
         }
     }
 }
@@ -595,6 +607,10 @@ pub struct ExportWizardState {
     pub output_filename: String,
     /// Table configurations
     pub tables: Vec<TableExportConfig>,
+    /// Whether table metadata is still loading.
+    pub tables_loading: bool,
+    /// Table metadata loading failure shown inline in the wizard.
+    pub tables_load_error: Option<String>,
     /// Currently selected table index for field selection
     pub selected_table_index: usize,
     /// Add timestamp to filename
@@ -613,6 +629,8 @@ pub struct ExportWizardState {
     pub include_indexes: bool,
     /// Whether to include foreign keys in export (for UDIF)
     pub include_foreign_keys: bool,
+    /// Whether to include sequence current values in export (for UDIF)
+    pub include_sequences: bool,
     /// Whether export is running
     pub is_exporting: bool,
     /// Whether export is complete
@@ -627,6 +645,12 @@ pub struct ExportWizardState {
     pub output_file_path: Option<PathBuf>,
     /// Path to log file saved after export completes (for View Log button)
     pub log_file_path: Option<PathBuf>,
+    /// Last export error shown for copy/retry flows.
+    pub last_export_error: Option<String>,
+    /// Current export profile path for Save/Open behavior.
+    pub current_profile_path: Option<PathBuf>,
+    /// Current export profile display name.
+    pub current_profile_name: Option<String>,
     /// Inline validation error shown on step 1 when no tables are selected.
     pub table_selection_validation_error: Option<String>,
     /// Inline validation error shown on step 2 when no columns are selected.
@@ -642,6 +666,8 @@ impl Default for ExportWizardState {
             output_folder: dirs::document_dir().unwrap_or_else(|| PathBuf::from(".")),
             output_filename: "export".to_string(),
             tables: Vec::new(),
+            tables_loading: false,
+            tables_load_error: None,
             selected_table_index: 0,
             add_timestamp: false,
             timestamp_format: TimestampFormat::default(),
@@ -651,6 +677,7 @@ impl Default for ExportWizardState {
             include_data: true,
             include_indexes: true,
             include_foreign_keys: true,
+            include_sequences: true,
             is_exporting: false,
             is_complete: false,
             progress: 0.0,
@@ -658,6 +685,9 @@ impl Default for ExportWizardState {
             log_messages: Vec::new(),
             output_file_path: None,
             log_file_path: None,
+            last_export_error: None,
+            current_profile_path: None,
+            current_profile_name: None,
             table_selection_validation_error: None,
             field_selection_validation_error: None,
         }
@@ -770,6 +800,7 @@ impl ExportWizardState {
             include_data: self.include_data,
             include_indexes: self.include_indexes,
             include_foreign_keys: self.include_foreign_keys,
+            include_sequences: self.include_sequences,
             include_tables,
             ..Default::default()
         }

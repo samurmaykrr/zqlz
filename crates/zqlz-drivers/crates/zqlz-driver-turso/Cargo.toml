@@ -1,0 +1,25 @@
+[package]
+name = "zqlz-driver-turso"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "Turso remote driver for ZQLZ Database IDE"
+
+[lib]
+path = "src/zqlz_driver_turso.rs"
+
+[dependencies]
+zqlz-core.workspace = true
+zqlz-driver-sqlite.workspace = true
+async-trait.workspace = true
+tracing.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+libsql = { workspace = true, default-features = false, features = ["remote", "tls"] }
+chrono.workspace = true
+uuid.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["full", "test-util"] }

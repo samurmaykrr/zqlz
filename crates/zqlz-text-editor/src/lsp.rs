@@ -10,7 +10,8 @@ use anyhow::Result;
 use gpui::{App, Context, Task, Window};
 use lsp_types::{
     CodeActionOrCommand, CompletionContext, CompletionItem, CompletionItemKind, CompletionResponse,
-    Hover, InsertTextFormat, WorkspaceEdit,
+    Diagnostic, DiagnosticSeverity, DocumentSymbolResponse, FoldingRange, Hover, InsertTextFormat,
+    LinkedEditingRanges, SemanticToken, TextEdit, WorkspaceEdit,
 };
 use ropey::Rope;
 use std::rc::Rc;
@@ -97,12 +98,75 @@ impl LspUiState {
         Self::default()
     }
 
-    pub(crate) fn completion_menu_state(&self) -> Option<&CompletionMenuState> {
-        self.completion_menu.as_ref()
+    pub(crate) fn select_previous_completion(&mut self) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        if menu.selected_index == 0 {
+            return false;
+        }
+
+        menu.selected_index -= 1;
+        if menu.selected_index < menu.scroll_offset {
+            menu.scroll_offset = menu.selected_index;
+        }
+        true
     }
 
-    pub(crate) fn completion_menu_state_mut(&mut self) -> Option<&mut CompletionMenuState> {
-        self.completion_menu.as_mut()
+    pub(crate) fn select_next_completion(&mut self, visible_items: usize) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        if menu.selected_index >= menu.items.len().saturating_sub(1) {
+            return false;
+        }
+
+        menu.selected_index += 1;
+        let visible_items = visible_items.max(1);
+        let visible_end = menu.scroll_offset + visible_items;
+        if menu.selected_index >= visible_end {
+            menu.scroll_offset = menu.selected_index + 1 - visible_items;
+        }
+        true
+    }
+
+    pub(crate) fn select_completion_slot(&mut self, visible_slot: usize) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        let selected_index = menu.scroll_offset + visible_slot;
+        if selected_index >= menu.items.len() {
+            return false;
+        }
+        menu.selected_index = selected_index;
+        true
+    }
+
+    pub(crate) fn scroll_completion_menu(
+        &mut self,
+        scroll_lines: f32,
+        visible_items: usize,
+    ) -> bool {
+        let Some(menu) = self.completion_menu.as_mut() else {
+            return false;
+        };
+        let visible_items = visible_items.max(1);
+        menu.scroll_accumulator += scroll_lines;
+        let steps = menu.scroll_accumulator.trunc() as i32;
+        menu.scroll_accumulator -= steps as f32;
+        if steps == 0 {
+            return false;
+        }
+
+        let max_offset = menu.items.len().saturating_sub(visible_items);
+        let new_offset = (menu.scroll_offset as i32 + steps).clamp(0, max_offset as i32) as usize;
+        menu.scroll_offset = new_offset;
+        if menu.selected_index < new_offset {
+            menu.selected_index = new_offset;
+        } else if menu.selected_index >= new_offset + visible_items {
+            menu.selected_index = new_offset + visible_items - 1;
+        }
+        true
     }
 
     pub(crate) fn completion_cache(&self) -> Option<&CompletionCache> {
@@ -145,8 +209,19 @@ impl LspUiState {
         self.completion_cache = None;
     }
 
+    pub(crate) fn clear_document_bound_ui(&mut self) {
+        self.clear_completion();
+        self.clear_hover_state();
+    }
+
     pub fn has_completion_menu(&self) -> bool {
         self.completion_menu.is_some()
+    }
+
+    pub(crate) fn has_completion_items(&self) -> bool {
+        self.completion_menu
+            .as_ref()
+            .is_some_and(|menu| !menu.items.is_empty())
     }
 
     pub fn completion_menu(&self) -> Option<CompletionMenuData> {
@@ -159,12 +234,49 @@ impl LspUiState {
             })
     }
 
+    pub(crate) fn visible_completions(&self, prefix: &str) -> Vec<CompletionItem> {
+        if let Some(menu) = self.completion_menu() {
+            return menu.items;
+        }
+
+        let Some(cache) = self.completion_cache.as_ref() else {
+            return Vec::new();
+        };
+
+        let prefix = prefix.to_lowercase();
+        cache
+            .all_items
+            .iter()
+            .filter(|item| {
+                if prefix.is_empty() {
+                    return true;
+                }
+
+                let match_target = item
+                    .filter_text
+                    .as_ref()
+                    .unwrap_or(&item.label)
+                    .to_lowercase();
+                match_target.contains(&prefix)
+            })
+            .cloned()
+            .collect()
+    }
+
     pub fn hover_state(&self) -> Option<HoverState> {
         self.hover_state.clone()
     }
 
-    pub fn set_hover_state(&mut self, hover_state: HoverState) {
-        self.hover_state = Some(hover_state);
+    pub(crate) fn set_hover_state_if_word_changed(&mut self, hover_state: HoverState) -> bool {
+        let should_update = self
+            .hover_state
+            .as_ref()
+            .map(|current| current.word != hover_state.word)
+            .unwrap_or(true);
+        if should_update {
+            self.hover_state = Some(hover_state);
+        }
+        should_update
     }
 
     pub fn clear_hover_state(&mut self) {
@@ -181,6 +293,21 @@ pub struct RequestToken {
     pub revision: usize,
     pub cursor_offset: usize,
     pub generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProviderRequestKind {
+    Completion,
+    Hover,
+    CodeActions,
+    ApplyCodeAction,
+    Diagnostics,
+    SemanticTokens,
+    DocumentSymbols,
+    FoldingRanges,
+    InlayHints,
+    Formatting,
+    LinkedEditingRanges,
 }
 
 #[derive(Default)]
@@ -208,8 +335,18 @@ impl RequestTracker {
 pub struct LspRequestState {
     completion: RequestTracker,
     hover: RequestTracker,
+    code_actions: RequestTracker,
+    apply_code_action: RequestTracker,
+    diagnostics: RequestTracker,
+    semantic_tokens: RequestTracker,
+    document_symbols: RequestTracker,
+    folding_ranges: RequestTracker,
+    inlay_hints: RequestTracker,
+    formatting: RequestTracker,
+    linked_editing_ranges: RequestTracker,
     completion_debounce_task: Task<Result<()>>,
     completion_task: Task<Result<()>>,
+    hover_debounce_task: Task<Result<()>>,
     hover_task: Task<Result<()>>,
     completion_pending: bool,
     completion_pending_context: Option<CompletionContext>,
@@ -220,8 +357,18 @@ impl Default for LspRequestState {
         Self {
             completion: RequestTracker::default(),
             hover: RequestTracker::default(),
+            code_actions: RequestTracker::default(),
+            apply_code_action: RequestTracker::default(),
+            diagnostics: RequestTracker::default(),
+            semantic_tokens: RequestTracker::default(),
+            document_symbols: RequestTracker::default(),
+            folding_ranges: RequestTracker::default(),
+            inlay_hints: RequestTracker::default(),
+            formatting: RequestTracker::default(),
+            linked_editing_ranges: RequestTracker::default(),
             completion_debounce_task: Task::ready(Ok(())),
             completion_task: Task::ready(Ok(())),
+            hover_debounce_task: Task::ready(Ok(())),
             hover_task: Task::ready(Ok(())),
             completion_pending: false,
             completion_pending_context: None,
@@ -242,6 +389,69 @@ impl LspRequestState {
         self.hover.begin(revision, cursor_offset)
     }
 
+    pub fn begin_code_actions(&mut self, revision: usize, cursor_offset: usize) -> RequestToken {
+        self.code_actions.begin(revision, cursor_offset)
+    }
+
+    pub fn begin_apply_code_action(&mut self, revision: usize) -> RequestToken {
+        self.apply_code_action.begin(revision, 0)
+    }
+
+    pub fn begin_diagnostics(&mut self, revision: usize) -> RequestToken {
+        self.diagnostics.begin(revision, 0)
+    }
+
+    pub fn begin_semantic_tokens(&mut self, revision: usize) -> RequestToken {
+        self.semantic_tokens.begin(revision, 0)
+    }
+
+    pub fn begin_document_symbols(&mut self, revision: usize) -> RequestToken {
+        self.document_symbols.begin(revision, 0)
+    }
+
+    pub fn begin_folding_ranges(&mut self, revision: usize) -> RequestToken {
+        self.folding_ranges.begin(revision, 0)
+    }
+
+    pub fn begin_inlay_hints(&mut self, revision: usize) -> RequestToken {
+        self.inlay_hints.begin(revision, 0)
+    }
+
+    pub fn begin_formatting(&mut self, revision: usize) -> RequestToken {
+        self.formatting.begin(revision, 0)
+    }
+
+    pub fn begin_linked_editing_ranges(
+        &mut self,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> RequestToken {
+        self.linked_editing_ranges.begin(revision, cursor_offset)
+    }
+
+    pub fn begin_provider_request(
+        &mut self,
+        kind: ProviderRequestKind,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> RequestToken {
+        match kind {
+            ProviderRequestKind::Completion => self.begin_completion(revision, cursor_offset),
+            ProviderRequestKind::Hover => self.begin_hover(revision, cursor_offset),
+            ProviderRequestKind::CodeActions => self.begin_code_actions(revision, cursor_offset),
+            ProviderRequestKind::ApplyCodeAction => self.begin_apply_code_action(revision),
+            ProviderRequestKind::Diagnostics => self.begin_diagnostics(revision),
+            ProviderRequestKind::SemanticTokens => self.begin_semantic_tokens(revision),
+            ProviderRequestKind::DocumentSymbols => self.begin_document_symbols(revision),
+            ProviderRequestKind::FoldingRanges => self.begin_folding_ranges(revision),
+            ProviderRequestKind::InlayHints => self.begin_inlay_hints(revision),
+            ProviderRequestKind::Formatting => self.begin_formatting(revision),
+            ProviderRequestKind::LinkedEditingRanges => {
+                self.begin_linked_editing_ranges(revision, cursor_offset)
+            }
+        }
+    }
+
     pub fn matches_completion(
         &self,
         token: RequestToken,
@@ -260,6 +470,124 @@ impl LspRequestState {
         self.hover.matches(token, revision, cursor_offset)
     }
 
+    pub fn matches_code_actions(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.code_actions.matches(token, revision, cursor_offset)
+    }
+
+    pub fn matches_apply_code_action(&self, token: RequestToken, revision: usize) -> bool {
+        self.apply_code_action.matches(token, revision, 0)
+    }
+
+    pub fn matches_diagnostics(&self, token: RequestToken, revision: usize) -> bool {
+        self.diagnostics.matches(token, revision, 0)
+    }
+
+    pub fn matches_semantic_tokens(&self, token: RequestToken, revision: usize) -> bool {
+        self.semantic_tokens.matches(token, revision, 0)
+    }
+
+    pub fn matches_document_symbols(&self, token: RequestToken, revision: usize) -> bool {
+        self.document_symbols.matches(token, revision, 0)
+    }
+
+    pub fn matches_folding_ranges(&self, token: RequestToken, revision: usize) -> bool {
+        self.folding_ranges.matches(token, revision, 0)
+    }
+
+    pub fn matches_inlay_hints(&self, token: RequestToken, revision: usize) -> bool {
+        self.inlay_hints.matches(token, revision, 0)
+    }
+
+    pub fn matches_formatting(&self, token: RequestToken, revision: usize) -> bool {
+        self.formatting.matches(token, revision, 0)
+    }
+
+    pub fn matches_linked_editing_ranges(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.linked_editing_ranges
+            .matches(token, revision, cursor_offset)
+    }
+
+    pub fn matches_provider_request(
+        &self,
+        kind: ProviderRequestKind,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        match kind {
+            ProviderRequestKind::Completion => {
+                self.matches_completion(token, revision, cursor_offset)
+            }
+            ProviderRequestKind::Hover => self.matches_hover(token, revision, cursor_offset),
+            ProviderRequestKind::CodeActions => {
+                self.matches_code_actions(token, revision, cursor_offset)
+            }
+            ProviderRequestKind::ApplyCodeAction => self.matches_apply_code_action(token, revision),
+            ProviderRequestKind::Diagnostics => self.matches_diagnostics(token, revision),
+            ProviderRequestKind::SemanticTokens => self.matches_semantic_tokens(token, revision),
+            ProviderRequestKind::DocumentSymbols => self.matches_document_symbols(token, revision),
+            ProviderRequestKind::FoldingRanges => self.matches_folding_ranges(token, revision),
+            ProviderRequestKind::InlayHints => self.matches_inlay_hints(token, revision),
+            ProviderRequestKind::Formatting => self.matches_formatting(token, revision),
+            ProviderRequestKind::LinkedEditingRanges => {
+                self.matches_linked_editing_ranges(token, revision, cursor_offset)
+            }
+        }
+    }
+
+    pub fn apply_provider_result_if_current<T>(
+        &self,
+        kind: ProviderRequestKind,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+        result: T,
+    ) -> Option<T> {
+        self.matches_provider_request(kind, token, revision, cursor_offset)
+            .then_some(result)
+    }
+
+    pub fn apply_provider_task_result_if_current<T>(
+        &self,
+        kind: ProviderRequestKind,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+        result: Result<T>,
+    ) -> Result<Option<T>> {
+        if self.matches_provider_request(kind, token, revision, cursor_offset) {
+            return result.map(Some);
+        }
+
+        Ok(None)
+    }
+
+    pub fn apply_diagnostic_lifecycle_if_current(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        diagnostics: Vec<Diagnostic>,
+        active_index: Option<usize>,
+    ) -> Option<DiagnosticLifecycleSnapshot> {
+        self.apply_provider_result_if_current(
+            ProviderRequestKind::Diagnostics,
+            token,
+            revision,
+            0,
+            DiagnosticLifecycleSnapshot::new(revision, diagnostics, active_index, false),
+        )
+    }
+
     pub fn replace_completion_debounce_task(&mut self, task: Task<Result<()>>) {
         self.completion_debounce_task = task;
     }
@@ -270,6 +598,10 @@ impl LspRequestState {
 
     pub fn replace_hover_task(&mut self, task: Task<Result<()>>) {
         self.hover_task = task;
+    }
+
+    pub fn replace_hover_debounce_task(&mut self, task: Task<Result<()>>) {
+        self.hover_debounce_task = task;
     }
 
     pub fn queue_completion_refresh(&mut self, trigger: CompletionContext) {
@@ -294,6 +626,7 @@ impl LspRequestState {
     pub fn reset(&mut self) {
         self.completion_debounce_task = Task::ready(Ok(()));
         self.completion_task = Task::ready(Ok(()));
+        self.hover_debounce_task = Task::ready(Ok(()));
         self.hover_task = Task::ready(Ok(()));
         self.completion_pending = false;
         self.completion_pending_context = None;
@@ -306,24 +639,26 @@ impl LspRequestState {
         provider_available: bool,
         context: CompletionRequestContext,
     ) -> CompletionResolution {
-        if let Some(cache) = completion_cache
-            && cache.trigger_offset == context.trigger_offset
-            && context
-                .current_prefix
-                .to_lowercase()
-                .starts_with(&cache.trigger_prefix.to_lowercase())
-        {
-            let prefix_lower = context.current_prefix.to_lowercase();
-            let filtered = cache
-                .all_items
-                .iter()
-                .filter(|item| item.label.to_lowercase().contains(&prefix_lower))
-                .cloned()
-                .collect();
-            return CompletionResolution::CachedFilter {
-                items: filtered,
-                trigger_offset: context.trigger_offset,
-            };
+        if let Some(cache) = completion_cache {
+            let prefix_extends_cache = cache.trigger_offset == context.trigger_offset
+                && context
+                    .current_prefix
+                    .to_lowercase()
+                    .starts_with(&cache.trigger_prefix.to_lowercase());
+
+            if prefix_extends_cache {
+                let prefix_lower = context.current_prefix.to_lowercase();
+                let filtered = cache
+                    .all_items
+                    .iter()
+                    .filter(|item| item.label.to_lowercase().contains(&prefix_lower))
+                    .cloned()
+                    .collect();
+                return CompletionResolution::CachedFilter {
+                    items: filtered,
+                    trigger_offset: context.trigger_offset,
+                };
+            }
         }
 
         if !provider_available || !allow_provider_requests {
@@ -366,9 +701,10 @@ impl LspRequestState {
 mod tests {
     use super::{
         CompletionRequestContext, CompletionResolution, HoverRequestContext, HoverResolution,
-        HoverState, LspRequestState, LspUiState,
+        HoverState, LspRequestState, LspUiState, ProviderRequestKind,
     };
-    use lsp_types::CompletionItem;
+    use anyhow::anyhow;
+    use lsp_types::{CompletionItem, Diagnostic, DiagnosticSeverity};
 
     #[test]
     fn request_state_rejects_stale_completion_tokens() {
@@ -388,6 +724,217 @@ mod tests {
 
         assert!(!state.matches_hover(stale, 3, 9));
         assert!(state.matches_hover(current, 3, 9));
+    }
+
+    #[test]
+    fn request_state_rejects_stale_extended_provider_tokens() {
+        let mut state = LspRequestState::new();
+
+        let stale_code_actions = state.begin_code_actions(1, 8);
+        let current_code_actions = state.begin_code_actions(1, 10);
+        assert!(!state.matches_code_actions(stale_code_actions, 1, 10));
+        assert!(state.matches_code_actions(current_code_actions, 1, 10));
+
+        let stale_apply_code_action = state.begin_apply_code_action(1);
+        let current_apply_code_action = state.begin_apply_code_action(2);
+        assert!(!state.matches_apply_code_action(stale_apply_code_action, 2));
+        assert!(state.matches_apply_code_action(current_apply_code_action, 2));
+
+        let stale_diagnostics = state.begin_diagnostics(1);
+        let current_diagnostics = state.begin_diagnostics(2);
+        assert!(!state.matches_diagnostics(stale_diagnostics, 2));
+        assert!(state.matches_diagnostics(current_diagnostics, 2));
+
+        let stale_semantic_tokens = state.begin_semantic_tokens(1);
+        let current_semantic_tokens = state.begin_semantic_tokens(2);
+        assert!(!state.matches_semantic_tokens(stale_semantic_tokens, 2));
+        assert!(state.matches_semantic_tokens(current_semantic_tokens, 2));
+
+        let stale_document_symbols = state.begin_document_symbols(3);
+        let current_document_symbols = state.begin_document_symbols(4);
+        assert!(!state.matches_document_symbols(stale_document_symbols, 4));
+        assert!(state.matches_document_symbols(current_document_symbols, 4));
+
+        let stale_folding_ranges = state.begin_folding_ranges(5);
+        let current_folding_ranges = state.begin_folding_ranges(6);
+        assert!(!state.matches_folding_ranges(stale_folding_ranges, 6));
+        assert!(state.matches_folding_ranges(current_folding_ranges, 6));
+
+        let stale_inlay_hints = state.begin_inlay_hints(5);
+        let current_inlay_hints = state.begin_inlay_hints(6);
+        assert!(!state.matches_inlay_hints(stale_inlay_hints, 6));
+        assert!(state.matches_inlay_hints(current_inlay_hints, 6));
+
+        let stale_formatting = state.begin_formatting(6);
+        let current_formatting = state.begin_formatting(7);
+        assert!(!state.matches_formatting(stale_formatting, 7));
+        assert!(state.matches_formatting(current_formatting, 7));
+
+        let stale_linked_editing_ranges = state.begin_linked_editing_ranges(7, 12);
+        let current_linked_editing_ranges = state.begin_linked_editing_ranges(7, 14);
+        assert!(!state.matches_linked_editing_ranges(stale_linked_editing_ranges, 7, 14));
+        assert!(state.matches_linked_editing_ranges(current_linked_editing_ranges, 7, 14));
+    }
+
+    #[test]
+    fn request_state_exposes_generic_provider_lifecycle_guard() {
+        let provider_requests = [
+            (ProviderRequestKind::Completion, 1, 3, 2, 3),
+            (ProviderRequestKind::Hover, 1, 3, 1, 4),
+            (ProviderRequestKind::CodeActions, 1, 3, 1, 4),
+            (ProviderRequestKind::ApplyCodeAction, 1, 0, 2, 0),
+            (ProviderRequestKind::Diagnostics, 1, 0, 2, 0),
+            (ProviderRequestKind::SemanticTokens, 1, 0, 2, 0),
+            (ProviderRequestKind::DocumentSymbols, 1, 0, 2, 0),
+            (ProviderRequestKind::FoldingRanges, 1, 0, 2, 0),
+            (ProviderRequestKind::InlayHints, 1, 0, 2, 0),
+            (ProviderRequestKind::Formatting, 1, 0, 2, 0),
+            (ProviderRequestKind::LinkedEditingRanges, 1, 3, 1, 4),
+        ];
+
+        for (kind, revision, cursor_offset, stale_revision, stale_cursor_offset) in
+            provider_requests
+        {
+            let mut state = LspRequestState::new();
+            let stale = state.begin_provider_request(kind, revision, cursor_offset);
+            let current = state.begin_provider_request(kind, stale_revision, stale_cursor_offset);
+
+            assert!(!state.matches_provider_request(
+                kind,
+                stale,
+                stale_revision,
+                stale_cursor_offset
+            ));
+            assert!(state.matches_provider_request(
+                kind,
+                current,
+                stale_revision,
+                stale_cursor_offset
+            ));
+        }
+    }
+
+    #[test]
+    fn request_state_applies_only_current_provider_results() {
+        let provider_requests = [
+            (ProviderRequestKind::Completion, 1, 3, 2, 3),
+            (ProviderRequestKind::Hover, 1, 3, 1, 4),
+            (ProviderRequestKind::CodeActions, 1, 3, 1, 4),
+            (ProviderRequestKind::ApplyCodeAction, 1, 0, 2, 0),
+            (ProviderRequestKind::Diagnostics, 1, 0, 2, 0),
+            (ProviderRequestKind::SemanticTokens, 1, 0, 2, 0),
+            (ProviderRequestKind::DocumentSymbols, 1, 0, 2, 0),
+            (ProviderRequestKind::FoldingRanges, 1, 0, 2, 0),
+            (ProviderRequestKind::InlayHints, 1, 0, 2, 0),
+            (ProviderRequestKind::Formatting, 1, 0, 2, 0),
+            (ProviderRequestKind::LinkedEditingRanges, 1, 3, 1, 4),
+        ];
+
+        for (kind, revision, cursor_offset, current_revision, current_cursor_offset) in
+            provider_requests
+        {
+            let mut state = LspRequestState::new();
+            let stale = state.begin_provider_request(kind, revision, cursor_offset);
+            let current =
+                state.begin_provider_request(kind, current_revision, current_cursor_offset);
+
+            assert_eq!(
+                state.apply_provider_result_if_current(
+                    kind,
+                    stale,
+                    current_revision,
+                    current_cursor_offset,
+                    "stale-result"
+                ),
+                None
+            );
+            assert_eq!(
+                state.apply_provider_result_if_current(
+                    kind,
+                    current,
+                    current_revision,
+                    current_cursor_offset,
+                    "current-result"
+                ),
+                Some("current-result")
+            );
+        }
+    }
+
+    #[test]
+    fn request_state_surfaces_current_provider_errors_and_drops_stale_ones() {
+        let mut state = LspRequestState::new();
+        let stale = state.begin_provider_request(ProviderRequestKind::SemanticTokens, 1, 0);
+        let current = state.begin_provider_request(ProviderRequestKind::SemanticTokens, 2, 0);
+
+        let stale_result = state
+            .apply_provider_task_result_if_current::<&'static str>(
+                ProviderRequestKind::SemanticTokens,
+                stale,
+                2,
+                0,
+                Err(anyhow!("stale provider failure")),
+            )
+            .expect("stale errors are ignored with stale provider results");
+
+        assert_eq!(stale_result, None);
+
+        let current_result = state.apply_provider_task_result_if_current(
+            ProviderRequestKind::SemanticTokens,
+            current,
+            2,
+            0,
+            Ok("current-result"),
+        );
+
+        assert_eq!(
+            current_result.expect("current provider result"),
+            Some("current-result")
+        );
+
+        let current_error = state
+            .apply_provider_task_result_if_current::<&'static str>(
+                ProviderRequestKind::SemanticTokens,
+                current,
+                2,
+                0,
+                Err(anyhow!("current provider failure")),
+            )
+            .expect_err("current provider errors must surface");
+
+        assert_eq!(current_error.to_string(), "current provider failure");
+    }
+
+    #[test]
+    fn request_state_applies_diagnostic_lifecycle_only_when_current() {
+        let mut state = LspRequestState::new();
+        let stale = state.begin_diagnostics(3);
+        let current = state.begin_diagnostics(4);
+        let diagnostics = vec![Diagnostic {
+            message: "missing relation".to_string(),
+            severity: Some(DiagnosticSeverity::ERROR),
+            ..Default::default()
+        }];
+
+        assert_eq!(
+            state.apply_diagnostic_lifecycle_if_current(stale, 4, diagnostics.clone(), Some(0)),
+            None
+        );
+
+        let snapshot = state
+            .apply_diagnostic_lifecycle_if_current(current, 4, diagnostics, Some(0))
+            .expect("current diagnostic lifecycle snapshot");
+
+        assert_eq!(snapshot.revision, 4);
+        assert!(!snapshot.stale);
+        assert_eq!(snapshot.max_severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            snapshot
+                .active_diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some("missing relation")
+        );
     }
 
     #[test]
@@ -422,19 +969,79 @@ mod tests {
 
         assert!(state.completion_cache().is_some());
         assert!(!state.has_completion_menu());
+        assert_eq!(state.visible_completions("sel").len(), 1);
+        assert!(state.visible_completions("missing").is_empty());
+    }
+
+    #[test]
+    fn ui_state_completion_helpers_select_and_scroll_visible_window() {
+        let mut state = LspUiState::new();
+        state.set_completion_items(
+            (0..12)
+                .map(|index| CompletionItem {
+                    label: format!("item-{index}"),
+                    ..Default::default()
+                })
+                .collect(),
+            0,
+        );
+
+        assert!(!state.select_previous_completion());
+        assert!(state.select_next_completion(3));
+        assert!(state.select_next_completion(3));
+        assert!(state.select_next_completion(3));
+        let menu = state.completion_menu.as_ref().expect("completion menu");
+        assert_eq!(menu.selected_index, 3);
+        assert_eq!(menu.scroll_offset, 1);
+
+        assert!(state.select_completion_slot(2));
+        assert_eq!(
+            state
+                .completion_menu
+                .as_ref()
+                .expect("completion menu")
+                .selected_index,
+            3
+        );
+
+        assert!(state.scroll_completion_menu(4.0, 3));
+        let menu = state.completion_menu.as_ref().expect("completion menu");
+        assert_eq!(menu.scroll_offset, 5);
+        assert_eq!(menu.selected_index, 5);
+
+        assert!(state.scroll_completion_menu(20.0, 3));
+        let menu = state.completion_menu.as_ref().expect("completion menu");
+        assert_eq!(menu.scroll_offset, 9);
+        assert_eq!(menu.selected_index, 9);
+
+        assert!(state.scroll_completion_menu(-20.0, 3));
+        let menu = state.completion_menu.as_ref().expect("completion menu");
+        assert_eq!(menu.scroll_offset, 0);
+        assert_eq!(menu.selected_index, 2);
     }
 
     #[test]
     fn ui_state_tracks_hover_state_separately_from_provider_availability() {
         let mut state = LspUiState::new();
-        state.set_hover_state(HoverState {
+        assert!(state.set_hover_state_if_word_changed(HoverState {
             word: "select".to_string(),
             documentation: "keyword".to_string(),
             range: 0..6,
-        });
+        }));
 
         assert!(state.has_hover());
         assert_eq!(state.hover_state().expect("hover state").word, "select");
+        assert!(!state.set_hover_state_if_word_changed(HoverState {
+            word: "select".to_string(),
+            documentation: "keyword docs".to_string(),
+            range: 0..6,
+        }));
+        assert!(state.set_hover_state_if_word_changed(HoverState {
+            word: "from".to_string(),
+            documentation: "keyword".to_string(),
+            range: 7..11,
+        }));
+        assert_eq!(state.hover_state().expect("hover state").word, "from");
 
         state.clear_hover_state();
 
@@ -1014,6 +1621,129 @@ pub trait CodeActionProvider: 'static {
     ) -> Vec<CodeActionOrCommand>;
 }
 
+/// Provider for document diagnostic refreshes.
+pub trait DiagnosticProvider: 'static {
+    /// Return diagnostics for the current document snapshot.
+    fn diagnostics(&self, text: &Rope, document: &DocumentContext)
+    -> Task<Result<Vec<Diagnostic>>>;
+}
+
+/// Provider for applying a selected code action through one editor contract.
+pub trait ApplyCodeActionProvider: 'static {
+    /// Apply the selected action and return the concrete workspace edit, if any.
+    fn apply_code_action(
+        &self,
+        action: &CodeActionOrCommand,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Task<Result<Option<WorkspaceEdit>>>;
+}
+
+/// Provider for semantic token refreshes.
+pub trait SemanticTokenProvider: 'static {
+    /// Return semantic tokens for the current document snapshot.
+    fn semantic_tokens(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Task<Result<Vec<SemanticToken>>>;
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiagnosticLifecycleSnapshot {
+    pub revision: usize,
+    pub stale: bool,
+    pub diagnostics: Vec<Diagnostic>,
+    pub max_severity: Option<DiagnosticSeverity>,
+    pub active_diagnostic: Option<Diagnostic>,
+    pub inline_diagnostics: Vec<Diagnostic>,
+    pub gutter_diagnostics: Vec<Diagnostic>,
+    pub block_diagnostics: Vec<Diagnostic>,
+}
+
+impl DiagnosticLifecycleSnapshot {
+    pub fn new(
+        revision: usize,
+        diagnostics: Vec<Diagnostic>,
+        active_index: Option<usize>,
+        stale: bool,
+    ) -> Self {
+        let max_severity = diagnostics
+            .iter()
+            .filter_map(|diagnostic| diagnostic.severity)
+            .min_by_key(|severity| diagnostic_severity_rank(*severity));
+        let active_diagnostic = active_index.and_then(|index| diagnostics.get(index).cloned());
+
+        Self {
+            revision,
+            stale,
+            inline_diagnostics: diagnostics.clone(),
+            gutter_diagnostics: diagnostics.clone(),
+            block_diagnostics: diagnostics.clone(),
+            diagnostics,
+            max_severity,
+            active_diagnostic,
+        }
+    }
+}
+
+fn diagnostic_severity_rank(severity: DiagnosticSeverity) -> u8 {
+    match severity {
+        DiagnosticSeverity::ERROR => 1,
+        DiagnosticSeverity::WARNING => 2,
+        DiagnosticSeverity::INFORMATION => 3,
+        DiagnosticSeverity::HINT => 4,
+        _ => 5,
+    }
+}
+
+/// Provider for document-outline symbols.
+pub trait DocumentSymbolProvider: 'static {
+    /// Return document symbols in LSP shape so callers can preserve hierarchy when available.
+    fn document_symbols(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Task<Result<Option<DocumentSymbolResponse>>>;
+}
+
+/// Provider for language-driven fold ranges.
+pub trait FoldingRangeProvider: 'static {
+    /// Return foldable source ranges for the current document snapshot.
+    fn folding_ranges(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Task<Result<Vec<FoldingRange>>>;
+}
+
+/// Provider for linked editing ranges such as paired SQL identifiers or tags.
+pub trait LinkedEditingRangeProvider: 'static {
+    /// Return linked ranges for the symbol at `offset`, if the language can provide them.
+    fn linked_editing_ranges(
+        &self,
+        text: &Rope,
+        offset: usize,
+        document: &DocumentContext,
+    ) -> Task<Result<Option<LinkedEditingRanges>>>;
+}
+
+/// Provider for language-driven inlay hint refreshes.
+pub trait InlayHintProvider: 'static {
+    /// Return normalized inlay hints for the current document snapshot.
+    fn inlay_hints(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Task<Result<Vec<EditorInlayHint>>>;
+}
+
+/// Provider for full-document formatting edits.
+pub trait FormattingProvider: 'static {
+    /// Return workspace-neutral text edits for the current document snapshot.
+    fn formatting(&self, text: &Rope, document: &DocumentContext) -> Task<Result<Vec<TextEdit>>>;
+}
+
 /// Preferred side of the anchor position to render an inlay hint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InlayHintSide {
@@ -1051,31 +1781,55 @@ pub struct EditorInlayHint {
 /// that are set will be used. This allows for flexible LSP configuration.
 pub struct Lsp {
     /// Optional completion provider for code completions
-    pub completion_provider: Option<Rc<dyn CompletionProvider>>,
+    completion_provider: Option<Rc<dyn CompletionProvider>>,
 
     /// Optional hover provider for hover tooltips
-    pub hover_provider: Option<Rc<dyn HoverProvider>>,
+    hover_provider: Option<Rc<dyn HoverProvider>>,
 
     /// Optional definition provider for go-to-definition
-    pub definition_provider: Option<Rc<dyn DefinitionProvider>>,
+    definition_provider: Option<Rc<dyn DefinitionProvider>>,
 
     /// Optional references provider for find-references
-    pub references_provider: Option<Rc<dyn ReferencesProvider>>,
+    references_provider: Option<Rc<dyn ReferencesProvider>>,
 
     /// Optional rename provider for symbol rename.
-    pub rename_provider: Option<Rc<dyn RenameProvider>>,
+    rename_provider: Option<Rc<dyn RenameProvider>>,
 
     /// Optional code action provider.
-    pub code_action_provider: Option<Rc<dyn CodeActionProvider>>,
+    code_action_provider: Option<Rc<dyn CodeActionProvider>>,
+
+    /// Optional code-action apply provider.
+    apply_code_action_provider: Option<Rc<dyn ApplyCodeActionProvider>>,
+
+    /// Optional diagnostic provider.
+    diagnostic_provider: Option<Rc<dyn DiagnosticProvider>>,
+
+    /// Optional semantic-token provider.
+    semantic_token_provider: Option<Rc<dyn SemanticTokenProvider>>,
+
+    /// Optional document-symbol provider.
+    document_symbol_provider: Option<Rc<dyn DocumentSymbolProvider>>,
+
+    /// Optional folding-range provider.
+    folding_range_provider: Option<Rc<dyn FoldingRangeProvider>>,
+
+    /// Optional linked-editing-range provider.
+    linked_editing_range_provider: Option<Rc<dyn LinkedEditingRangeProvider>>,
+
+    /// Optional inlay-hint provider.
+    inlay_hint_provider: Option<Rc<dyn InlayHintProvider>>,
+
+    /// Optional full-document formatting provider.
+    formatting_provider: Option<Rc<dyn FormattingProvider>>,
 
     /// Back-compat SQL LSP handle set through `TextEditor::set_sql_lsp`.
     ///
     /// The editor itself does not depend on a concrete `zqlz-lsp` type; this handle
     /// is retained so legacy integrations can still indicate "connected" status.
-    pub legacy_sql_lsp: Option<Arc<dyn std::any::Any + Send + Sync>>,
+    legacy_sql_lsp: Option<Arc<dyn std::any::Any + Send + Sync>>,
 
-    pub request_state: LspRequestState,
-    pub ui_state: LspUiState,
+    request_state: LspRequestState,
+    ui_state: LspUiState,
 }
 
 impl Default for Lsp {
@@ -1087,6 +1841,14 @@ impl Default for Lsp {
             references_provider: None,
             rename_provider: None,
             code_action_provider: None,
+            apply_code_action_provider: None,
+            diagnostic_provider: None,
+            semantic_token_provider: None,
+            document_symbol_provider: None,
+            folding_range_provider: None,
+            linked_editing_range_provider: None,
+            inlay_hint_provider: None,
+            formatting_provider: None,
             legacy_sql_lsp: None,
             request_state: LspRequestState::new(),
             ui_state: LspUiState::new(),
@@ -1105,8 +1867,328 @@ impl Lsp {
     /// This clears any ongoing tasks and resets internal state.
     pub fn reset(&mut self) {
         self.request_state.reset();
+        self.clear_document_bound_ui();
+    }
+
+    pub(crate) fn clear_document_bound_ui(&mut self) {
+        self.ui_state.clear_document_bound_ui();
+    }
+
+    pub(crate) fn clear_completion(&mut self) {
         self.ui_state.clear_completion();
+    }
+
+    pub(crate) fn clear_completion_menu(&mut self) {
+        self.ui_state.clear_completion_menu();
+    }
+
+    pub(crate) fn has_completion_menu(&self) -> bool {
+        self.ui_state.has_completion_menu()
+    }
+
+    pub(crate) fn has_completion_items(&self) -> bool {
+        self.ui_state.has_completion_items()
+    }
+
+    pub(crate) fn select_previous_completion(&mut self) -> bool {
+        self.ui_state.select_previous_completion()
+    }
+
+    pub(crate) fn select_next_completion(&mut self, visible_items: usize) -> bool {
+        self.ui_state.select_next_completion(visible_items)
+    }
+
+    pub(crate) fn select_completion_slot(&mut self, visible_slot: usize) -> bool {
+        self.ui_state.select_completion_slot(visible_slot)
+    }
+
+    pub(crate) fn scroll_completion_menu(
+        &mut self,
+        scroll_lines: f32,
+        visible_items: usize,
+    ) -> bool {
+        self.ui_state
+            .scroll_completion_menu(scroll_lines, visible_items)
+    }
+
+    pub(crate) fn visible_completions(&self, prefix: &str) -> Vec<CompletionItem> {
+        self.ui_state.visible_completions(prefix)
+    }
+
+    pub(crate) fn resolve_completion_request(
+        &mut self,
+        allow_async_provider_requests: bool,
+        context: CompletionRequestContext,
+    ) -> CompletionResolution {
+        self.request_state.resolve_completion_request(
+            self.ui_state.completion_cache(),
+            allow_async_provider_requests,
+            self.completion_provider.is_some(),
+            context,
+        )
+    }
+
+    pub(crate) fn matches_completion_request(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.request_state
+            .matches_completion(token, revision, cursor_offset)
+    }
+
+    pub(crate) fn replace_completion_task(&mut self, task: Task<Result<()>>) {
+        self.request_state.replace_completion_task(task);
+    }
+
+    pub(crate) fn replace_completion_debounce_task(&mut self, task: Task<Result<()>>) {
+        self.request_state.replace_completion_debounce_task(task);
+    }
+
+    pub(crate) fn clear_pending_completion(&mut self) {
+        self.request_state.clear_pending_completion();
+    }
+
+    pub(crate) fn queue_completion_refresh(&mut self, trigger: CompletionContext) {
+        self.request_state.queue_completion_refresh(trigger);
+    }
+
+    pub(crate) fn take_pending_completion_context(&mut self) -> Option<CompletionContext> {
+        self.request_state.take_pending_completion_context()
+    }
+
+    pub(crate) fn set_completion_cache(&mut self, cache: CompletionCache) {
+        self.ui_state.set_completion_cache(cache);
+    }
+
+    pub(crate) fn set_completion_items(
+        &mut self,
+        items: Vec<CompletionItem>,
+        trigger_offset: usize,
+    ) {
+        self.ui_state.set_completion_items(items, trigger_offset);
+    }
+
+    pub(crate) fn take_completion_menu_state(&mut self) -> Option<CompletionMenuState> {
+        self.ui_state.take_completion_menu_state()
+    }
+
+    pub(crate) fn clear_hover_state(&mut self) {
         self.ui_state.clear_hover_state();
+    }
+
+    pub(crate) fn set_hover_state_if_word_changed(&mut self, hover_state: HoverState) -> bool {
+        self.ui_state.set_hover_state_if_word_changed(hover_state)
+    }
+
+    pub(crate) fn has_hover_state(&self) -> bool {
+        self.ui_state.has_hover()
+    }
+
+    pub(crate) fn resolve_hover_request(
+        &mut self,
+        allow_async_provider_requests: bool,
+        fallback_hover: Option<HoverState>,
+        context: HoverRequestContext,
+    ) -> HoverResolution {
+        self.request_state.resolve_hover_request(
+            allow_async_provider_requests,
+            self.hover_provider.is_some(),
+            fallback_hover,
+            context,
+        )
+    }
+
+    pub(crate) fn matches_hover_request(
+        &self,
+        token: RequestToken,
+        revision: usize,
+        cursor_offset: usize,
+    ) -> bool {
+        self.request_state
+            .matches_hover(token, revision, cursor_offset)
+    }
+
+    pub(crate) fn replace_hover_task(&mut self, task: Task<Result<()>>) {
+        self.request_state.replace_hover_task(task);
+    }
+
+    pub(crate) fn replace_hover_debounce_task(&mut self, task: Task<Result<()>>) {
+        self.request_state.replace_hover_debounce_task(task);
+    }
+
+    pub(crate) fn set_completion_provider(&mut self, provider: Rc<dyn CompletionProvider>) {
+        self.completion_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_completion_provider(&mut self) {
+        self.completion_provider = None;
+    }
+
+    pub(crate) fn set_hover_provider(&mut self, provider: Rc<dyn HoverProvider>) {
+        self.hover_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_hover_provider(&mut self) {
+        self.hover_provider = None;
+    }
+
+    pub(crate) fn set_definition_provider(&mut self, provider: Rc<dyn DefinitionProvider>) {
+        self.definition_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_definition_provider(&mut self) {
+        self.definition_provider = None;
+    }
+
+    pub(crate) fn set_references_provider(&mut self, provider: Rc<dyn ReferencesProvider>) {
+        self.references_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_references_provider(&mut self) {
+        self.references_provider = None;
+    }
+
+    pub(crate) fn set_rename_provider(&mut self, provider: Rc<dyn RenameProvider>) {
+        self.rename_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_rename_provider(&mut self) {
+        self.rename_provider = None;
+    }
+
+    pub(crate) fn set_code_action_provider(&mut self, provider: Rc<dyn CodeActionProvider>) {
+        self.code_action_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_code_action_provider(&mut self) {
+        self.code_action_provider = None;
+    }
+
+    pub(crate) fn set_diagnostic_provider(&mut self, provider: Rc<dyn DiagnosticProvider>) {
+        self.diagnostic_provider = Some(provider);
+    }
+
+    pub(crate) fn clear_diagnostic_provider(&mut self) {
+        self.diagnostic_provider = None;
+    }
+
+    pub(crate) fn request_diagnostics(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+    ) -> Option<Task<Result<Vec<Diagnostic>>>> {
+        self.diagnostic_provider
+            .as_ref()
+            .map(|provider| provider.diagnostics(text, document))
+    }
+
+    pub(crate) fn set_legacy_sql_lsp(&mut self, lsp: Arc<dyn std::any::Any + Send + Sync>) {
+        self.legacy_sql_lsp = Some(lsp);
+    }
+
+    pub(crate) fn has_any_provider_or_bridge(&self) -> bool {
+        self.completion_provider.is_some()
+            || self.hover_provider.is_some()
+            || self.definition_provider.is_some()
+            || self.references_provider.is_some()
+            || self.rename_provider.is_some()
+            || self.code_action_provider.is_some()
+            || self.legacy_sql_lsp.is_some()
+    }
+
+    pub(crate) fn completion_trigger_context(
+        &self,
+        offset: usize,
+        new_text: &str,
+        cx: &mut Context<TextEditor>,
+    ) -> Option<CompletionContext> {
+        self.completion_provider
+            .as_ref()
+            .and_then(|provider| provider.completion_trigger_context(offset, new_text, cx))
+    }
+
+    pub(crate) fn request_completions(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        trigger: CompletionContext,
+        window: &mut Window,
+        cx: &mut Context<TextEditor>,
+    ) -> Option<Task<Result<CompletionResponse>>> {
+        self.completion_provider
+            .as_ref()
+            .map(|provider| provider.completions(rope, offset, trigger, window, cx))
+    }
+
+    pub(crate) fn request_hover(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<Task<Result<Option<Hover>>>> {
+        self.hover_provider
+            .as_ref()
+            .map(|provider| provider.hover(rope, offset, window, cx))
+    }
+
+    pub(crate) fn definition_at(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        context: &DocumentContext,
+    ) -> Option<usize> {
+        self.definition_provider
+            .as_ref()
+            .and_then(|provider| provider.definition(rope, offset, context))
+    }
+
+    pub(crate) fn reference_ranges(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        context: &DocumentContext,
+    ) -> Option<Vec<std::ops::Range<usize>>> {
+        self.references_provider
+            .as_ref()
+            .map(|provider| provider.references(rope, offset, context))
+    }
+
+    pub(crate) fn can_rename_at(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        probe_name: &str,
+        context: &DocumentContext,
+    ) -> bool {
+        self.rename_provider
+            .as_ref()
+            .is_some_and(|provider| provider.rename(rope, offset, probe_name, context).is_some())
+    }
+
+    pub(crate) fn rename_at(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        new_name: &str,
+        context: &DocumentContext,
+    ) -> Option<WorkspaceEdit> {
+        self.rename_provider
+            .as_ref()
+            .and_then(|provider| provider.rename(rope, offset, new_name, context))
+    }
+
+    pub(crate) fn code_actions_at(
+        &self,
+        rope: &Rope,
+        offset: usize,
+        context: &DocumentContext,
+    ) -> Option<Vec<CodeActionOrCommand>> {
+        self.code_action_provider
+            .as_ref()
+            .map(|provider| provider.code_actions(rope, offset, context))
     }
 
     /// Check if completions are available
@@ -1133,11 +2215,482 @@ impl Lsp {
     pub fn has_rename(&self) -> bool {
         self.rename_provider.is_some()
     }
+
+    /// Check if code actions are available.
+    pub fn has_code_actions(&self) -> bool {
+        self.code_action_provider.is_some()
+    }
+
+    /// Check if selected code actions can be applied through a provider.
+    pub fn has_apply_code_action(&self) -> bool {
+        self.apply_code_action_provider.is_some()
+    }
+
+    /// Check if document diagnostics are available.
+    pub fn has_diagnostics(&self) -> bool {
+        self.diagnostic_provider.is_some()
+    }
+
+    /// Check if semantic tokens are available.
+    pub fn has_semantic_tokens(&self) -> bool {
+        self.semantic_token_provider.is_some()
+    }
+
+    /// Check if document symbols are available.
+    pub fn has_document_symbols(&self) -> bool {
+        self.document_symbol_provider.is_some()
+    }
+
+    /// Check if language-driven folding ranges are available.
+    pub fn has_folding_ranges(&self) -> bool {
+        self.folding_range_provider.is_some()
+    }
+
+    /// Check if linked editing ranges are available.
+    pub fn has_linked_editing_ranges(&self) -> bool {
+        self.linked_editing_range_provider.is_some()
+    }
+
+    /// Check if language-driven inlay hints are available.
+    pub fn has_inlay_hints(&self) -> bool {
+        self.inlay_hint_provider.is_some()
+    }
+
+    /// Check if language-driven formatting is available.
+    pub fn has_formatting(&self) -> bool {
+        self.formatting_provider.is_some()
+    }
+
     pub fn hover_state(&self) -> Option<HoverState> {
         self.ui_state.hover_state()
     }
 
     pub fn completion_menu(&self) -> Option<CompletionMenuData> {
         self.ui_state.completion_menu()
+    }
+}
+
+#[cfg(test)]
+mod provider_contract_tests {
+    use super::{
+        ApplyCodeActionProvider, CodeActionProvider, CompletionProvider, DefinitionProvider,
+        DiagnosticLifecycleSnapshot, DiagnosticProvider, DocumentSymbolProvider,
+        FoldingRangeProvider, FormattingProvider, HoverProvider, InlayHintProvider,
+        LinkedEditingRangeProvider, Lsp, ReferencesProvider, RenameProvider, SemanticTokenProvider,
+    };
+    use crate::{DocumentContext, DocumentIdentity, TextDocument, TextEditor};
+    use anyhow::Result;
+    use gpui::{App, Context, Task, Window};
+    use lsp_types::{
+        CodeActionOrCommand, Command, CompletionContext, CompletionResponse, Diagnostic,
+        DiagnosticSeverity, DocumentSymbolResponse, FoldingRange, Hover, LinkedEditingRanges,
+        Position, Range, SemanticToken, TextEdit, WorkspaceEdit,
+    };
+    use ropey::Rope;
+    use std::rc::Rc;
+
+    struct FakeApplyCodeActionProvider;
+
+    struct FakeCompletionProvider;
+
+    impl CompletionProvider for FakeCompletionProvider {
+        fn completions(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _trigger: CompletionContext,
+            _window: &mut Window,
+            _cx: &mut Context<TextEditor>,
+        ) -> Task<Result<CompletionResponse>> {
+            Task::ready(Ok(CompletionResponse::Array(Vec::new())))
+        }
+
+        fn completion_trigger_context(
+            &self,
+            _offset: usize,
+            new_text: &str,
+            _cx: &mut Context<TextEditor>,
+        ) -> Option<CompletionContext> {
+            (!new_text.is_empty()).then_some(CompletionContext {
+                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            })
+        }
+    }
+
+    struct FakeHoverProvider;
+
+    impl HoverProvider for FakeHoverProvider {
+        fn hover(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _window: &mut Window,
+            _cx: &App,
+        ) -> Task<Result<Option<Hover>>> {
+            Task::ready(Ok(Some(Hover {
+                contents: lsp_types::HoverContents::Scalar(lsp_types::MarkedString::String(
+                    "fake hover".to_string(),
+                )),
+                range: None,
+            })))
+        }
+    }
+
+    struct FakeDefinitionProvider;
+
+    impl DefinitionProvider for FakeDefinitionProvider {
+        fn definition(
+            &self,
+            _text: &Rope,
+            offset: usize,
+            _document: &DocumentContext,
+        ) -> Option<usize> {
+            Some(offset.saturating_sub(1))
+        }
+    }
+
+    struct FakeReferencesProvider;
+
+    impl ReferencesProvider for FakeReferencesProvider {
+        fn references(
+            &self,
+            _text: &Rope,
+            offset: usize,
+            _document: &DocumentContext,
+        ) -> Vec<std::ops::Range<usize>> {
+            std::iter::once(offset..offset.saturating_add(6)).collect()
+        }
+    }
+
+    struct FakeRenameProvider;
+
+    impl RenameProvider for FakeRenameProvider {
+        fn rename(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            new_name: &str,
+            _document: &DocumentContext,
+        ) -> Option<WorkspaceEdit> {
+            (!new_name.is_empty()).then_some(WorkspaceEdit::default())
+        }
+    }
+
+    struct FakeCodeActionProvider;
+
+    impl CodeActionProvider for FakeCodeActionProvider {
+        fn code_actions(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _document: &DocumentContext,
+        ) -> Vec<CodeActionOrCommand> {
+            vec![CodeActionOrCommand::Command(Command {
+                title: "fake action".to_string(),
+                command: "fake.apply".to_string(),
+                arguments: None,
+            })]
+        }
+    }
+
+    impl ApplyCodeActionProvider for FakeApplyCodeActionProvider {
+        fn apply_code_action(
+            &self,
+            _action: &CodeActionOrCommand,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Option<WorkspaceEdit>>> {
+            Task::ready(Ok(Some(WorkspaceEdit::default())))
+        }
+    }
+
+    struct FakeSemanticTokenProvider;
+
+    struct FakeDiagnosticProvider;
+
+    impl DiagnosticProvider for FakeDiagnosticProvider {
+        fn diagnostics(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Vec<Diagnostic>>> {
+            Task::ready(Ok(vec![Diagnostic {
+                message: "fake diagnostic".to_string(),
+                severity: Some(DiagnosticSeverity::WARNING),
+                ..Default::default()
+            }]))
+        }
+    }
+
+    impl SemanticTokenProvider for FakeSemanticTokenProvider {
+        fn semantic_tokens(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Vec<SemanticToken>>> {
+            Task::ready(Ok(vec![SemanticToken {
+                delta_line: 0,
+                delta_start: 1,
+                length: 6,
+                token_type: 2,
+                token_modifiers_bitset: 0,
+            }]))
+        }
+    }
+
+    struct FakeDocumentSymbolProvider;
+
+    impl DocumentSymbolProvider for FakeDocumentSymbolProvider {
+        fn document_symbols(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Option<DocumentSymbolResponse>>> {
+            Task::ready(Ok(Some(DocumentSymbolResponse::Flat(Vec::new()))))
+        }
+    }
+
+    struct FakeFoldingRangeProvider;
+
+    impl FoldingRangeProvider for FakeFoldingRangeProvider {
+        fn folding_ranges(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Vec<FoldingRange>>> {
+            Task::ready(Ok(vec![FoldingRange {
+                start_line: 0,
+                start_character: None,
+                end_line: 2,
+                end_character: None,
+                kind: None,
+                collapsed_text: None,
+            }]))
+        }
+    }
+
+    struct FakeLinkedEditingRangeProvider;
+
+    impl LinkedEditingRangeProvider for FakeLinkedEditingRangeProvider {
+        fn linked_editing_ranges(
+            &self,
+            _text: &Rope,
+            _offset: usize,
+            _document: &DocumentContext,
+        ) -> Task<Result<Option<LinkedEditingRanges>>> {
+            Task::ready(Ok(Some(LinkedEditingRanges {
+                ranges: vec![Range::new(Position::new(0, 0), Position::new(0, 6))],
+                word_pattern: None,
+            })))
+        }
+    }
+
+    struct FakeInlayHintProvider;
+
+    impl InlayHintProvider for FakeInlayHintProvider {
+        fn inlay_hints(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Vec<super::EditorInlayHint>>> {
+            Task::ready(Ok(vec![super::EditorInlayHint {
+                byte_offset: 6,
+                label: ": integer".to_string(),
+                side: super::InlayHintSide::After,
+                kind: Some(super::InlayHintKind::Type),
+                padding_left: true,
+                padding_right: false,
+            }]))
+        }
+    }
+
+    struct FakeFormattingProvider;
+
+    impl FormattingProvider for FakeFormattingProvider {
+        fn formatting(
+            &self,
+            _text: &Rope,
+            _document: &DocumentContext,
+        ) -> Task<Result<Vec<TextEdit>>> {
+            Task::ready(Ok(vec![TextEdit {
+                range: Range::new(Position::new(0, 0), Position::new(0, 6)),
+                new_text: "SELECT".to_string(),
+            }]))
+        }
+    }
+
+    fn fake_document_context() -> DocumentContext {
+        TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document identity"),
+            "select one",
+        )
+        .context()
+    }
+
+    #[test]
+    fn lsp_exposes_extended_provider_contract_availability() {
+        let mut lsp = Lsp::new();
+
+        assert!(!lsp.has_apply_code_action());
+        assert!(!lsp.has_diagnostics());
+        assert!(!lsp.has_semantic_tokens());
+        assert!(!lsp.has_document_symbols());
+        assert!(!lsp.has_folding_ranges());
+        assert!(!lsp.has_linked_editing_ranges());
+        assert!(!lsp.has_inlay_hints());
+        assert!(!lsp.has_formatting());
+
+        lsp.apply_code_action_provider = Some(Rc::new(FakeApplyCodeActionProvider));
+        lsp.diagnostic_provider = Some(Rc::new(FakeDiagnosticProvider));
+        lsp.semantic_token_provider = Some(Rc::new(FakeSemanticTokenProvider));
+        lsp.document_symbol_provider = Some(Rc::new(FakeDocumentSymbolProvider));
+        lsp.folding_range_provider = Some(Rc::new(FakeFoldingRangeProvider));
+        lsp.linked_editing_range_provider = Some(Rc::new(FakeLinkedEditingRangeProvider));
+        lsp.inlay_hint_provider = Some(Rc::new(FakeInlayHintProvider));
+        lsp.formatting_provider = Some(Rc::new(FakeFormattingProvider));
+
+        assert!(lsp.has_apply_code_action());
+        assert!(lsp.has_diagnostics());
+        assert!(lsp.has_semantic_tokens());
+        assert!(lsp.has_document_symbols());
+        assert!(lsp.has_folding_ranges());
+        assert!(lsp.has_linked_editing_ranges());
+        assert!(lsp.has_inlay_hints());
+        assert!(lsp.has_formatting());
+    }
+
+    #[test]
+    fn fake_core_providers_return_contract_outputs() {
+        let document = fake_document_context();
+        let text = Rope::from_str("select one");
+
+        let definition = FakeDefinitionProvider.definition(&text, 6, &document);
+        assert_eq!(definition, Some(5));
+
+        let references = FakeReferencesProvider.references(&text, 0, &document);
+        assert_eq!(references, vec![0..6]);
+
+        let rename = FakeRenameProvider.rename(&text, 0, "renamed", &document);
+        assert!(rename.is_some());
+
+        let actions = FakeCodeActionProvider.code_actions(&text, 0, &document);
+        assert_eq!(actions.len(), 1);
+    }
+
+    #[test]
+    fn lsp_exposes_core_provider_contract_availability() {
+        let mut lsp = Lsp::new();
+
+        assert!(!lsp.has_completions());
+        assert!(!lsp.has_hover());
+        assert!(!lsp.has_definition());
+        assert!(!lsp.has_references());
+        assert!(!lsp.has_rename());
+        assert!(!lsp.has_code_actions());
+
+        lsp.set_completion_provider(Rc::new(FakeCompletionProvider));
+        lsp.set_hover_provider(Rc::new(FakeHoverProvider));
+        lsp.set_definition_provider(Rc::new(FakeDefinitionProvider));
+        lsp.set_references_provider(Rc::new(FakeReferencesProvider));
+        lsp.set_rename_provider(Rc::new(FakeRenameProvider));
+        lsp.set_code_action_provider(Rc::new(FakeCodeActionProvider));
+
+        assert!(lsp.has_completions());
+        assert!(lsp.has_hover());
+        assert!(lsp.has_definition());
+        assert!(lsp.has_references());
+        assert!(lsp.has_rename());
+        assert!(lsp.has_code_actions());
+    }
+
+    #[test]
+    fn diagnostic_lifecycle_snapshot_exposes_render_outputs() {
+        let diagnostics = vec![
+            Diagnostic {
+                severity: Some(DiagnosticSeverity::WARNING),
+                message: "warn".to_string(),
+                ..Default::default()
+            },
+            Diagnostic {
+                severity: Some(DiagnosticSeverity::ERROR),
+                message: "error".to_string(),
+                ..Default::default()
+            },
+        ];
+
+        let snapshot = DiagnosticLifecycleSnapshot::new(4, diagnostics, Some(1), true);
+
+        assert_eq!(snapshot.revision, 4);
+        assert!(snapshot.stale);
+        assert_eq!(snapshot.max_severity, Some(DiagnosticSeverity::ERROR));
+        assert_eq!(
+            snapshot
+                .active_diagnostic
+                .as_ref()
+                .map(|diagnostic| diagnostic.message.as_str()),
+            Some("error")
+        );
+        assert_eq!(snapshot.inline_diagnostics.len(), 2);
+        assert_eq!(snapshot.gutter_diagnostics.len(), 2);
+        assert_eq!(snapshot.block_diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn fake_extended_providers_return_lifecycle_outputs() {
+        let document = fake_document_context();
+        let text = Rope::from_str("select one");
+        let action = CodeActionOrCommand::Command(Command {
+            title: "fake action".to_string(),
+            command: "fake.apply".to_string(),
+            arguments: None,
+        });
+
+        let applied_edit = futures::executor::block_on(
+            FakeApplyCodeActionProvider.apply_code_action(&action, &text, &document),
+        )
+        .expect("apply-code-action result");
+        assert!(applied_edit.is_some());
+
+        let diagnostics =
+            futures::executor::block_on(FakeDiagnosticProvider.diagnostics(&text, &document))
+                .expect("diagnostics result");
+        assert_eq!(diagnostics.len(), 1);
+
+        let semantic_tokens = futures::executor::block_on(
+            FakeSemanticTokenProvider.semantic_tokens(&text, &document),
+        )
+        .expect("semantic-token result");
+        assert_eq!(semantic_tokens[0].length, 6);
+
+        let document_symbols = futures::executor::block_on(
+            FakeDocumentSymbolProvider.document_symbols(&text, &document),
+        )
+        .expect("document-symbol result");
+        assert!(matches!(
+            document_symbols,
+            Some(DocumentSymbolResponse::Flat(_))
+        ));
+
+        let folding_ranges =
+            futures::executor::block_on(FakeFoldingRangeProvider.folding_ranges(&text, &document))
+                .expect("folding-range result");
+        assert_eq!(folding_ranges[0].end_line, 2);
+
+        let linked_editing_ranges = futures::executor::block_on(
+            FakeLinkedEditingRangeProvider.linked_editing_ranges(&text, 0, &document),
+        )
+        .expect("linked-editing result");
+        assert_eq!(linked_editing_ranges.expect("ranges").ranges.len(), 1);
+
+        let inlay_hints =
+            futures::executor::block_on(FakeInlayHintProvider.inlay_hints(&text, &document))
+                .expect("inlay-hint result");
+        assert_eq!(inlay_hints[0].label, ": integer");
+
+        let formatting_edits =
+            futures::executor::block_on(FakeFormattingProvider.formatting(&text, &document))
+                .expect("formatting result");
+        assert_eq!(formatting_edits[0].new_text, "SELECT");
     }
 }

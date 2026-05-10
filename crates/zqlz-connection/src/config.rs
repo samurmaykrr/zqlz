@@ -139,6 +139,8 @@ impl SavedConnection {
             "postgres" | "postgresql" => Ok(Some(Self::from_postgres_uri(&url))),
             "mysql" => Ok(Some(Self::from_mysql_uri(&url))),
             "sqlite" => Ok(Some(Self::from_sqlite_uri(&url)?)),
+            "libsql" => Ok(Some(Self::from_turso_uri(&url))),
+            "https" if is_turso_host(url.host_str()) => Ok(Some(Self::from_turso_uri(&url))),
             "file" => {
                 let path = url
                     .to_file_path()
@@ -147,6 +149,12 @@ impl SavedConnection {
             }
             _ => Ok(None),
         }
+    }
+
+    fn from_turso_uri(url: &Url) -> Self {
+        let database = database_name_from_url(url);
+        let name = auto_connection_name("Turso", url.host_str(), database.as_deref());
+        SavedConnection::new(name, "turso".to_string()).with_param("url", url.as_str())
     }
 
     fn from_database_path(path: &Path) -> Option<Self> {
@@ -287,6 +295,13 @@ fn has_uri_scheme(target: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
+fn is_turso_host(host: Option<&str>) -> bool {
+    host.is_some_and(|host| {
+        let host = host.to_ascii_lowercase();
+        host == "turso.io" || host.ends_with(".turso.io")
+    })
+}
+
 fn is_duckdb_path(path: &Path) -> bool {
     path.extension()
         .and_then(|value| value.to_str())
@@ -375,6 +390,33 @@ mod tests {
         assert_eq!(
             connection.params.get("database").map(String::as_str),
             Some("shop")
+        );
+    }
+
+    #[test]
+    fn imports_turso_libsql_uri() {
+        let connection = SavedConnection::from_external_target("libsql://sample-org.turso.io")
+            .unwrap()
+            .expect("turso uri should import");
+
+        assert_eq!(connection.driver, "turso");
+        assert_eq!(connection.name, "Turso @ sample-org.turso.io");
+        assert_eq!(
+            connection.params.get("url").map(String::as_str),
+            Some("libsql://sample-org.turso.io")
+        );
+    }
+
+    #[test]
+    fn imports_turso_https_uri() {
+        let connection = SavedConnection::from_external_target("https://sample-org.turso.io")
+            .unwrap()
+            .expect("turso https uri should import");
+
+        assert_eq!(connection.driver, "turso");
+        assert_eq!(
+            connection.params.get("url").map(String::as_str),
+            Some("https://sample-org.turso.io/")
         );
     }
 

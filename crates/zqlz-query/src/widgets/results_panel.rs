@@ -1,29 +1,31 @@
 //! Results panel with multi-tab view
 //!
-//! Displays query results in tabs: Message, Summary, Result, Explain, Problems, Info
+//! Displays query results in tabs: Message, Summary, Result, Explain, Info
 
 use std::ops::Range;
 
+use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_analyzer::QueryAnalysis;
 use zqlz_core::QueryResult;
+use zqlz_explain_visual::{ExplainGraphInput, ExplainGraphState, ExplainGraphView};
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, Selectable, Sizable,
+    ActiveTheme, Selectable, Sizable,
     button::{Button, ButtonRounded, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
-    scroll::{Scrollbar, ScrollbarShow},
+    scroll::{ScrollableElement, Scrollbar, ScrollbarShow},
     table::{Column, ColumnSort, Table, TableDelegate, TableState},
     v_flex,
 };
 
-use super::{DiagnosticInfo, DiagnosticInfoSeverity};
+use super::DiagnosticInfo;
+use super::explain_analysis_view::ExplainAnalysisView;
 
 const RESULTS_MAX_MATERIALIZED_ROWS: usize = 20_000;
 const RESULTS_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
 const RESULTS_MESSAGE_ROW_HEIGHT: f32 = 34.0;
-const RESULTS_PROBLEM_ROW_HEIGHT: f32 = 52.0;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResultTab {
@@ -31,7 +33,6 @@ enum ResultTab {
     Summary,
     Result(usize),  // Index of the result to show
     Explain(usize), // Index of the explain result to show
-    Problems,       // SQL diagnostics tab
     Info,
 }
 
@@ -43,6 +44,7 @@ pub enum ExplainSubTab {
     Plan,
     Op,
     Statistics,
+    Suggestions,
     Info,
 }
 
@@ -69,6 +71,8 @@ pub struct ExplainResult {
     pub query_plan: Option<QueryResult>,
     /// Parsed and analyzed query plan with suggestions
     pub analyzed_plan: Option<QueryAnalysis>,
+    /// Dialect/provider id used to choose EXPLAIN syntax and parser behavior
+    pub provider_id: Option<String>,
     /// Error message if EXPLAIN failed
     pub error: Option<String>,
     /// Connection name for display
@@ -123,8 +127,22 @@ struct ResultsTableDelegate {
 
 impl ResultsTableDelegate {
     fn new(result: &QueryResult) -> Self {
+        Self::new_with_content_widths(result, false)
+    }
+
+    fn new_plan(result: &QueryResult) -> Self {
+        Self::new_with_content_widths(result, true)
+    }
+
+    fn new_with_content_widths(result: &QueryResult, fit_content: bool) -> Self {
         let source_row_count = result.rows.len();
         let truncated = source_row_count > RESULTS_MAX_MATERIALIZED_ROWS;
+        let rows: Vec<Vec<String>> = result
+            .rows
+            .iter()
+            .take(RESULTS_MAX_MATERIALIZED_ROWS)
+            .map(|row| row.values.iter().map(|val| val.to_string()).collect())
+            .collect();
 
         // Create row number column as first column (fixed left)
         // Width scales with digit count so large row numbers aren't truncated
@@ -138,18 +156,20 @@ impl ResultsTableDelegate {
 
         // Add data columns
         columns.extend(result.columns.iter().enumerate().map(|(idx, col_meta)| {
+            let width = if fit_content {
+                Self::content_column_width(
+                    &col_meta.name,
+                    rows.iter().filter_map(|row| row.get(idx)),
+                )
+            } else {
+                150.0
+            };
+
             Column::new(format!("col-{}", idx), col_meta.name.clone())
-                .width(150.0)
+                .width(width)
                 .resizable(true)
                 .sortable()
         }));
-
-        let rows: Vec<Vec<String>> = result
-            .rows
-            .iter()
-            .take(RESULTS_MAX_MATERIALIZED_ROWS)
-            .map(|row| row.values.iter().map(|val| val.to_string()).collect())
-            .collect();
 
         Self {
             columns,
@@ -165,6 +185,15 @@ impl ResultsTableDelegate {
 
     fn source_row_count(&self) -> usize {
         self.source_row_count
+    }
+
+    fn content_column_width<'a>(header: &str, values: impl Iterator<Item = &'a String>) -> f32 {
+        let max_chars = values
+            .map(|value| value.chars().count())
+            .chain(std::iter::once(header.chars().count()))
+            .max()
+            .unwrap_or(12);
+        ((max_chars as f32 * 13.0) + 72.0).clamp(220.0, 3200.0)
     }
 
     /// Calculate the width needed for the row number column based on the maximum
@@ -245,6 +274,18 @@ impl TableDelegate for ResultsTableDelegate {
             .into_any_element()
     }
 
+    fn cell_text(&self, row_ix: usize, col_ix: usize, _cx: &App) -> String {
+        if col_ix == 0 {
+            return (row_ix + 1).to_string();
+        }
+
+        self.rows
+            .get(row_ix)
+            .and_then(|row| row.get(col_ix.saturating_sub(1)))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn perform_sort(
         &mut self,
         col_ix: usize,
@@ -304,8 +345,8 @@ pub struct ResultsPanel {
     /// Scroll handle for the Message tab statement list.
     message_scroll_handle: UniformListScrollHandle,
 
-    /// Scroll handle for the Problems tab diagnostics list.
-    problems_scroll_handle: UniformListScrollHandle,
+    /// Scroll handle for top result/explain tab overflow.
+    tab_bar_scroll_handle: ScrollHandle,
 
     /// Current query execution data
     execution: Option<QueryExecution>,
@@ -322,6 +363,9 @@ pub struct ResultsPanel {
     /// Table states for explain Plan view (EXPLAIN QUERY PLAN output, lazily created)
     explain_plan_table_states: Vec<Option<Entity<TableState<ResultsTableDelegate>>>>,
 
+    /// Visual graph states for parsed EXPLAIN output.
+    explain_graph_states: Vec<Option<Entity<ExplainGraphState>>>,
+
     /// Active sub-tab for Explain view
     explain_sub_tab: ExplainSubTab,
 
@@ -331,9 +375,6 @@ pub struct ResultsPanel {
     /// Whether results are loading
     is_loading: bool,
 
-    /// SQL diagnostics from the active query editor
-    problems: Vec<DiagnosticInfo>,
-
     /// The currently active editor index (for scoping diagnostics)
     active_editor_id: Option<usize>,
 
@@ -342,12 +383,6 @@ pub struct ResultsPanel {
 
     /// Set of closed result tab indices (statement indices that have been closed by user)
     closed_result_tabs: std::collections::HashSet<usize>,
-
-    /// Problems panel severity filters (which severity levels to show)
-    problems_show_errors: bool,
-    problems_show_warnings: bool,
-    problems_show_info: bool,
-    problems_show_hints: bool,
 }
 
 impl ResultsPanel {
@@ -355,23 +390,19 @@ impl ResultsPanel {
         Self {
             focus_handle: cx.focus_handle(),
             message_scroll_handle: UniformListScrollHandle::new(),
-            problems_scroll_handle: UniformListScrollHandle::new(),
+            tab_bar_scroll_handle: ScrollHandle::new(),
             execution: None,
             table_states: Vec::new(),
             explain_results: Vec::new(),
             explain_op_table_states: Vec::new(),
             explain_plan_table_states: Vec::new(),
+            explain_graph_states: Vec::new(),
             explain_sub_tab: ExplainSubTab::Plan,
             active_tab: ResultTab::Message,
             is_loading: false,
-            problems: Vec::new(),
             active_editor_id: None,
             diagnostics_loading: false,
             closed_result_tabs: std::collections::HashSet::new(),
-            problems_show_errors: true,
-            problems_show_warnings: true,
-            problems_show_info: true,
-            problems_show_hints: true,
         }
     }
 
@@ -389,11 +420,8 @@ impl ResultsPanel {
         self.active_editor_id
     }
 
-    /// Set problems/diagnostics from the query editor
-    /// Only diagnostics matching the active_editor_id will be displayed
-    pub fn set_problems(&mut self, problems: Vec<DiagnosticInfo>, cx: &mut Context<Self>) {
-        self.problems = problems;
-        self.problems_scroll_handle = UniformListScrollHandle::new();
+    /// Accept diagnostics updates for compatibility; the Problems panel owns display.
+    pub fn set_problems(&mut self, _problems: Vec<DiagnosticInfo>, cx: &mut Context<Self>) {
         self.diagnostics_loading = false;
         cx.notify();
     }
@@ -409,56 +437,6 @@ impl ResultsPanel {
     /// Get current diagnostics loading state
     pub fn is_diagnostics_loading(&self) -> bool {
         self.diagnostics_loading
-    }
-
-    /// Get the current problem count
-    pub fn problem_count(&self) -> usize {
-        self.problems.len()
-    }
-
-    /// Get error count from problems
-    pub fn error_count(&self) -> usize {
-        self.problems
-            .iter()
-            .filter(|p| matches!(p.severity, DiagnosticInfoSeverity::Error))
-            .count()
-    }
-
-    /// Get warning count from problems
-    pub fn warning_count(&self) -> usize {
-        self.problems
-            .iter()
-            .filter(|p| matches!(p.severity, DiagnosticInfoSeverity::Warning))
-            .count()
-    }
-
-    /// Get info count from problems
-    pub fn info_count(&self) -> usize {
-        self.problems
-            .iter()
-            .filter(|p| matches!(p.severity, DiagnosticInfoSeverity::Info))
-            .count()
-    }
-
-    /// Get hint count from problems
-    pub fn hint_count(&self) -> usize {
-        self.problems
-            .iter()
-            .filter(|p| matches!(p.severity, DiagnosticInfoSeverity::Hint))
-            .count()
-    }
-
-    /// Get filtered problems based on current severity filters
-    fn get_filtered_problems(&self) -> Vec<&DiagnosticInfo> {
-        self.problems
-            .iter()
-            .filter(|p| match p.severity {
-                DiagnosticInfoSeverity::Error => self.problems_show_errors,
-                DiagnosticInfoSeverity::Warning => self.problems_show_warnings,
-                DiagnosticInfoSeverity::Info => self.problems_show_info,
-                DiagnosticInfoSeverity::Hint => self.problems_show_hints,
-            })
-            .collect()
     }
 
     /// Set the query execution result
@@ -498,6 +476,7 @@ impl ResultsPanel {
         // Reserve lazy slots for explain tables (keep indices aligned with explain_results)
         self.explain_op_table_states.push(None);
         self.explain_plan_table_states.push(None);
+        self.explain_graph_states.push(None);
 
         let explain_idx = self.explain_results.len();
         self.explain_results.push(result);
@@ -505,6 +484,7 @@ impl ResultsPanel {
         self.active_tab = ResultTab::Explain(explain_idx);
         self.explain_sub_tab = ExplainSubTab::Plan;
         self.ensure_explain_plan_table_state(explain_idx, window, cx);
+        self.ensure_explain_graph_state(explain_idx, cx);
         cx.notify();
     }
 
@@ -518,11 +498,11 @@ impl ResultsPanel {
     pub fn clear(&mut self, cx: &mut Context<Self>) {
         self.execution = None;
         self.message_scroll_handle = UniformListScrollHandle::new();
-        self.problems_scroll_handle = UniformListScrollHandle::new();
         self.table_states.clear();
         self.explain_results.clear();
         self.explain_op_table_states.clear();
         self.explain_plan_table_states.clear();
+        self.explain_graph_states.clear();
         self.closed_result_tabs.clear();
         self.is_loading = false;
         cx.notify();
@@ -549,6 +529,41 @@ impl ResultsPanel {
                 self.active_tab = next_tab.unwrap_or(ResultTab::Summary);
             }
         }
+
+        cx.notify();
+    }
+
+    fn close_explain_tab(&mut self, idx: usize, cx: &mut Context<Self>) {
+        if idx >= self.explain_results.len() {
+            return;
+        }
+
+        self.explain_results.remove(idx);
+        if idx < self.explain_op_table_states.len() {
+            self.explain_op_table_states.remove(idx);
+        }
+        if idx < self.explain_plan_table_states.len() {
+            self.explain_plan_table_states.remove(idx);
+        }
+        if idx < self.explain_graph_states.len() {
+            self.explain_graph_states.remove(idx);
+        }
+
+        self.active_tab = match self.active_tab.clone() {
+            ResultTab::Explain(active_idx) if active_idx == idx => {
+                if self.explain_results.is_empty() {
+                    ResultTab::Summary
+                } else if idx >= self.explain_results.len() {
+                    ResultTab::Explain(self.explain_results.len() - 1)
+                } else {
+                    ResultTab::Explain(idx)
+                }
+            }
+            ResultTab::Explain(active_idx) if active_idx > idx => {
+                ResultTab::Explain(active_idx - 1)
+            }
+            other => other,
+        };
 
         cx.notify();
     }
@@ -623,7 +638,7 @@ impl ResultsPanel {
             return;
         };
 
-        let delegate = ResultsTableDelegate::new(query_plan);
+        let delegate = ResultsTableDelegate::new_plan(query_plan);
         let table_state = cx.new(|cx| {
             TableState::new(delegate, window, cx)
                 .col_resizable(true)
@@ -661,6 +676,29 @@ impl ResultsPanel {
                 .row_selectable(true)
         });
         self.explain_op_table_states[explain_idx] = Some(table_state);
+    }
+
+    fn ensure_explain_graph_state(&mut self, explain_idx: usize, cx: &mut Context<Self>) {
+        if explain_idx >= self.explain_graph_states.len()
+            || self.explain_graph_states[explain_idx].is_some()
+        {
+            return;
+        }
+
+        let Some(result) = self.explain_results.get(explain_idx) else {
+            return;
+        };
+        let Some(analysis) = result.analyzed_plan.clone() else {
+            return;
+        };
+
+        let input = ExplainGraphInput {
+            provider_id: result.provider_id.clone(),
+            connection_name: result.connection_name.clone(),
+            duration_ms: result.duration_ms,
+        };
+        let state = cx.new(|_| ExplainGraphState::new(analysis, input));
+        self.explain_graph_states[explain_idx] = Some(state);
     }
 
     /// Get the current result being displayed (if any)
@@ -856,7 +894,7 @@ impl ResultsPanel {
         let theme = cx.theme();
 
         let mut tab_bar = h_flex()
-            .w_full()
+            .flex_none()
             .h(px(32.0))
             .gap_1()
             .px_2()
@@ -943,50 +981,34 @@ impl ResultsPanel {
         for (idx, _explain) in self.explain_results.iter().enumerate() {
             let explain_idx = idx;
             tab_bar = tab_bar.child(
-                Button::new(format!("tab-explain-{}", idx))
-                    .ghost()
-                    .xsmall()
-                    .rounded(ButtonRounded::None)
-                    .label(format!("Explain {}", idx + 1))
-                    .selected(self.active_tab == ResultTab::Explain(explain_idx))
-                    .on_click(cx.listener(move |this, _, window, cx| {
-                        this.ensure_explain_plan_table_state(explain_idx, window, cx);
-                        this.active_tab = ResultTab::Explain(explain_idx);
-                        cx.notify();
-                    })),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new(format!("tab-explain-{}", idx))
+                            .ghost()
+                            .xsmall()
+                            .rounded(ButtonRounded::None)
+                            .label(format!("Explain {}", idx + 1))
+                            .selected(self.active_tab == ResultTab::Explain(explain_idx))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.ensure_explain_plan_table_state(explain_idx, window, cx);
+                                this.active_tab = ResultTab::Explain(explain_idx);
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        Button::new(format!("close-explain-{}", idx))
+                            .ghost()
+                            .xsmall()
+                            .rounded(ButtonRounded::None)
+                            .label("×")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                this.close_explain_tab(explain_idx, cx);
+                            })),
+                    ),
             );
         }
-
-        // Add Problems tab
-        let problem_count = self.problems.len();
-        let error_count = self.error_count();
-        let warning_count = self.warning_count();
-        tab_bar = tab_bar.child(
-            Button::new("tab-problems")
-                .map(|btn| {
-                    if error_count > 0 {
-                        btn.danger()
-                    } else if warning_count > 0 {
-                        btn.warning()
-                    } else {
-                        btn.ghost()
-                    }
-                })
-                .xsmall()
-                .rounded(ButtonRounded::None)
-                .map(|btn| {
-                    if problem_count > 0 {
-                        btn.label(format!("Problems ({})", problem_count))
-                    } else {
-                        btn.label("Problems")
-                    }
-                })
-                .selected(self.active_tab == ResultTab::Problems)
-                .on_click(cx.listener(|this, _, _, cx| {
-                    this.active_tab = ResultTab::Problems;
-                    cx.notify();
-                })),
-        );
 
         // Add Info tab
         tab_bar = tab_bar.child(
@@ -1004,25 +1026,6 @@ impl ResultsPanel {
 
         // Add spacer
         tab_bar = tab_bar.child(div().flex_1());
-
-        // Add reload button when Problems tab is active
-        if self.active_tab == ResultTab::Problems {
-            tab_bar = tab_bar.child(
-                Button::new("reload-diagnostics")
-                    .ghost()
-                    .xsmall()
-                    .rounded(ButtonRounded::None)
-                    .label(if self.diagnostics_loading {
-                        "Reloading..."
-                    } else {
-                        "Reload"
-                    })
-                    .disabled(self.diagnostics_loading)
-                    .on_click(cx.listener(|_this, _, _, cx| {
-                        cx.emit(ResultsPanelEvent::ReloadDiagnostics);
-                    })),
-            );
-        }
 
         // Add export buttons when a Result tab is active
         let is_result_tab = matches!(self.active_tab, ResultTab::Result(_));
@@ -1050,7 +1053,13 @@ impl ResultsPanel {
                 );
         }
 
-        tab_bar
+        div()
+            .id("results-tab-bar-scroll")
+            .w_full()
+            .h(px(32.0))
+            .track_scroll(&self.tab_bar_scroll_handle)
+            .overflow_x_scrollbar()
+            .child(tab_bar)
     }
 
     /// Render Message tab
@@ -1730,359 +1739,53 @@ impl ResultsPanel {
 
     /// Render the Explain tab (sub-tab bar + content)
     fn render_explain_tab(&self, explain_idx: usize, cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(self.render_explain_sub_tab_bar(cx))
-            .child(div().flex_1().w_full().overflow_hidden().map(
-                |this| match self.explain_sub_tab {
-                    ExplainSubTab::Visual => {
-                        this.child(self.render_explain_visual_view(explain_idx, cx))
-                    }
-                    ExplainSubTab::Plan => {
-                        this.child(self.render_explain_plan_view(explain_idx, cx))
-                    }
-                    ExplainSubTab::Op => this.child(self.render_explain_op_view(explain_idx, cx)),
-                    ExplainSubTab::Statistics => {
-                        this.child(self.render_explain_statistics_view(explain_idx, cx))
-                    }
-                    ExplainSubTab::Info => {
-                        this.child(self.render_explain_info_view(explain_idx, cx))
-                    }
-                },
-            ))
-    }
-
-    /// Render the Problems tab showing SQL diagnostics
-    fn render_problems_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let filtered_problems = self.get_filtered_problems();
-        let filtered_count = filtered_problems.len();
+        let active_sub_tab = if self.explain_sub_tab == ExplainSubTab::Op
+            && !self.explain_supports_op(explain_idx)
+        {
+            ExplainSubTab::Plan
+        } else {
+            self.explain_sub_tab
+        };
 
         v_flex()
             .size_full()
-            // Filter bar with severity counts
+            .child(self.render_explain_sub_tab_bar(explain_idx, cx))
             .child(
-                h_flex()
+                div()
+                    .flex_1()
                     .w_full()
-                    .h(px(32.0))
-                    .px_2()
-                    .gap_1()
-                    .items_center()
-                    .bg(theme.muted.opacity(0.3))
-                    .border_b_1()
-                    .border_color(theme.border)
-                    // Error filter button
-                    .child({
-                        let error_count = self.error_count();
-                        Button::new("filter-errors")
-                            .ghost()
-                            .xsmall()
-                            .rounded(ButtonRounded::None)
-                            .when(self.problems_show_errors, |b| b.selected(true))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().size(px(8.0)).rounded_full().bg(theme.danger))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.problems_show_errors {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(format!(
-                                                "{} Error{}",
-                                                error_count,
-                                                if error_count == 1 { "" } else { "s" }
-                                            )),
-                                    ),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.problems_show_errors = !this.problems_show_errors;
-                                this.problems_scroll_handle = UniformListScrollHandle::new();
-                                cx.notify();
-                            }))
-                    })
-                    // Warning filter button
-                    .child({
-                        let warning_count = self.warning_count();
-                        Button::new("filter-warnings")
-                            .ghost()
-                            .xsmall()
-                            .rounded(ButtonRounded::None)
-                            .when(self.problems_show_warnings, |b| b.selected(true))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().size(px(8.0)).rounded_full().bg(theme.warning))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.problems_show_warnings {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(format!(
-                                                "{} Warning{}",
-                                                warning_count,
-                                                if warning_count == 1 { "" } else { "s" }
-                                            )),
-                                    ),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.problems_show_warnings = !this.problems_show_warnings;
-                                this.problems_scroll_handle = UniformListScrollHandle::new();
-                                cx.notify();
-                            }))
-                    })
-                    // Info filter button
-                    .child({
-                        let info_count = self.info_count();
-                        Button::new("filter-info")
-                            .ghost()
-                            .xsmall()
-                            .rounded(ButtonRounded::None)
-                            .when(self.problems_show_info, |b| b.selected(true))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().size(px(8.0)).rounded_full().bg(theme.info))
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.problems_show_info {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(format!("{} Info", info_count)),
-                                    ),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.problems_show_info = !this.problems_show_info;
-                                this.problems_scroll_handle = UniformListScrollHandle::new();
-                                cx.notify();
-                            }))
-                    })
-                    // Hint filter button
-                    .child({
-                        let hint_count = self.hint_count();
-                        Button::new("filter-hints")
-                            .ghost()
-                            .xsmall()
-                            .rounded(ButtonRounded::None)
-                            .when(self.problems_show_hints, |b| b.selected(true))
-                            .child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(
-                                        div()
-                                            .size(px(8.0))
-                                            .rounded_full()
-                                            .bg(theme.muted_foreground),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_xs()
-                                            .text_color(if self.problems_show_hints {
-                                                theme.foreground
-                                            } else {
-                                                theme.muted_foreground
-                                            })
-                                            .child(format!(
-                                                "{} Hint{}",
-                                                hint_count,
-                                                if hint_count == 1 { "" } else { "s" }
-                                            )),
-                                    ),
-                            )
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.problems_show_hints = !this.problems_show_hints;
-                                this.problems_scroll_handle = UniformListScrollHandle::new();
-                                cx.notify();
-                            }))
+                    .overflow_hidden()
+                    .map(|this| match active_sub_tab {
+                        ExplainSubTab::Visual => {
+                            this.child(self.render_explain_visual_view(explain_idx, cx))
+                        }
+                        ExplainSubTab::Plan => {
+                            this.child(self.render_explain_plan_view(explain_idx, cx))
+                        }
+                        ExplainSubTab::Op => {
+                            this.child(self.render_explain_op_view(explain_idx, cx))
+                        }
+                        ExplainSubTab::Statistics => {
+                            this.child(self.render_explain_statistics_view(explain_idx, cx))
+                        }
+                        ExplainSubTab::Suggestions => {
+                            this.child(self.render_explain_suggestions_view(explain_idx, cx))
+                        }
+                        ExplainSubTab::Info => {
+                            this.child(self.render_explain_info_view(explain_idx, cx))
+                        }
                     }),
             )
-            // Problems list (filtered)
-            .child(if filtered_problems.is_empty() {
-                v_flex()
-                    .flex_1()
-                    .items_center()
-                    .justify_center()
-                    .child(div().text_sm().text_color(theme.muted_foreground).child(
-                        if self.problems.is_empty() {
-                            "No problems detected"
-                        } else {
-                            "No problems match the current filter"
-                        },
-                    ))
-                    .into_any_element()
-            } else {
-                div()
-                    .id("problems-list")
-                    .flex_1()
-                    .w_full()
-                    .relative()
-                    .overflow_hidden()
-                    .child(
-                        uniform_list(
-                            "results-problems-list",
-                            filtered_count,
-                            cx.processor(
-                                move |state: &mut ResultsPanel,
-                                      visible_range: Range<usize>,
-                                      _window,
-                                      cx| {
-                                    let filtered = state.get_filtered_problems();
-                                    let total_rows = filtered.len();
-                                    let start = visible_range.start.min(total_rows);
-                                    let end = visible_range.end.min(total_rows);
-
-                                    if visible_range.end > total_rows {
-                                        tracing::debug!(
-                                            ?visible_range,
-                                            total_rows,
-                                            "Problems list visible range exceeded available rows"
-                                        );
-                                    }
-
-                                    let theme = cx.theme();
-
-                                    (start..end)
-                                        .filter_map(|index| {
-                                            let problem = filtered.get(index)?;
-                                            let line = problem.line + 1;
-                                            let column = problem.column + 1;
-                                            let severity = problem.severity;
-                                            let message = problem.message.clone();
-                                            let source = problem.source.clone();
-
-                                            Some(
-                                                h_flex()
-                                                    .id(ElementId::Name(
-                                                        format!("problem-{index}").into(),
-                                                    ))
-                                                    .w_full()
-                                                    .h(px(RESULTS_PROBLEM_ROW_HEIGHT))
-                                                    .px_3()
-                                                    .gap_3()
-                                                    .items_start()
-                                                    .justify_center()
-                                                    .cursor_pointer()
-                                                    .border_b_1()
-                                                    .border_color(theme.border)
-                                                    .when(index % 2 == 1, |this| {
-                                                        this.bg(theme.muted.opacity(0.18))
-                                                    })
-                                                    .hover(|styles| {
-                                                        styles.bg(theme.muted.opacity(0.32))
-                                                    })
-                                                    .on_click(cx.listener(
-                                                        move |_this, _, _, cx| {
-                                                            cx.emit(ResultsPanelEvent::GoToLine {
-                                                                line,
-                                                                column,
-                                                            });
-                                                        },
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .size(px(8.0))
-                                                            .mt(px(5.0))
-                                                            .rounded_full()
-                                                            .bg(match severity {
-                                                                DiagnosticInfoSeverity::Error => {
-                                                                    theme.danger
-                                                                }
-                                                                DiagnosticInfoSeverity::Warning => {
-                                                                    theme.warning
-                                                                }
-                                                                DiagnosticInfoSeverity::Info => {
-                                                                    theme.info
-                                                                }
-                                                                DiagnosticInfoSeverity::Hint => {
-                                                                    theme.muted_foreground
-                                                                }
-                                                            }),
-                                                    )
-                                                    .child(
-                                                        v_flex()
-                                                            .flex_1()
-                                                            .gap_1()
-                                                            .child(
-                                                                div()
-                                                                    .text_sm()
-                                                                    .text_color(theme.foreground)
-                                                                    .overflow_hidden()
-                                                                    .text_ellipsis()
-                                                                    .whitespace_nowrap()
-                                                                    .child(message),
-                                                            )
-                                                            .child(
-                                                                h_flex()
-                                                                    .gap_2()
-                                                                    .text_xs()
-                                                                    .text_color(
-                                                                        theme.muted_foreground,
-                                                                    )
-                                                                    .child(format!(
-                                                                        "Ln {}, Col {}",
-                                                                        line, column
-                                                                    ))
-                                                                    .when_some(
-                                                                        source,
-                                                                        |this, src| {
-                                                                            this.child(div().child(
-                                                                                format!(
-                                                                                    "[{}]",
-                                                                                    src
-                                                                                ),
-                                                                            ))
-                                                                        },
-                                                                    ),
-                                                            ),
-                                                    )
-                                                    .into_any_element(),
-                                            )
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            ),
-                        )
-                        .flex_grow()
-                        .size_full()
-                        .pr(px(RESULTS_LIST_SCROLLBAR_WIDTH))
-                        .track_scroll(&self.problems_scroll_handle)
-                        .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .into_any_element(),
-                    )
-                    .child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .right_0()
-                            .bottom_0()
-                            .w(px(RESULTS_LIST_SCROLLBAR_WIDTH))
-                            .child(
-                                Scrollbar::vertical(&self.problems_scroll_handle)
-                                    .scrollbar_show(ScrollbarShow::Always),
-                            ),
-                    )
-                    .into_any_element()
-            })
-            .into_any_element()
     }
 
     /// Render the sub-tab bar for Explain view
-    fn render_explain_sub_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_explain_sub_tab_bar(
+        &self,
+        explain_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let theme = cx.theme();
+        let supports_op = self.explain_supports_op(explain_idx);
 
         h_flex()
             .w_full()
@@ -2100,6 +1803,9 @@ impl ResultsPanel {
                     .label("Visual")
                     .selected(self.explain_sub_tab == ExplainSubTab::Visual)
                     .on_click(cx.listener(|this, _, _, cx| {
+                        if let ResultTab::Explain(explain_idx) = this.active_tab {
+                            this.ensure_explain_graph_state(explain_idx, cx);
+                        }
                         this.explain_sub_tab = ExplainSubTab::Visual;
                         cx.notify();
                     })),
@@ -2119,21 +1825,23 @@ impl ResultsPanel {
                         cx.notify();
                     })),
             )
-            .child(
-                Button::new("explain-sub-op")
-                    .ghost()
-                    .xsmall()
-                    .rounded(ButtonRounded::None)
-                    .label("Op")
-                    .selected(self.explain_sub_tab == ExplainSubTab::Op)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if let ResultTab::Explain(explain_idx) = this.active_tab {
-                            this.ensure_explain_op_table_state(explain_idx, window, cx);
-                        }
-                        this.explain_sub_tab = ExplainSubTab::Op;
-                        cx.notify();
-                    })),
-            )
+            .when(supports_op, |this| {
+                this.child(
+                    Button::new("explain-sub-op")
+                        .ghost()
+                        .xsmall()
+                        .rounded(ButtonRounded::None)
+                        .label("Op")
+                        .selected(self.explain_sub_tab == ExplainSubTab::Op)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if let ResultTab::Explain(explain_idx) = this.active_tab {
+                                this.ensure_explain_op_table_state(explain_idx, window, cx);
+                            }
+                            this.explain_sub_tab = ExplainSubTab::Op;
+                            cx.notify();
+                        })),
+                )
+            })
             .child(
                 Button::new("explain-sub-statistics")
                     .ghost()
@@ -2143,6 +1851,18 @@ impl ResultsPanel {
                     .selected(self.explain_sub_tab == ExplainSubTab::Statistics)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.explain_sub_tab = ExplainSubTab::Statistics;
+                        cx.notify();
+                    })),
+            )
+            .child(
+                Button::new("explain-sub-suggestions")
+                    .ghost()
+                    .xsmall()
+                    .rounded(ButtonRounded::None)
+                    .label("Suggestions")
+                    .selected(self.explain_sub_tab == ExplainSubTab::Suggestions)
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.explain_sub_tab = ExplainSubTab::Suggestions;
                         cx.notify();
                     })),
             )
@@ -2160,6 +1880,17 @@ impl ResultsPanel {
             )
     }
 
+    fn explain_supports_op(&self, explain_idx: usize) -> bool {
+        self.explain_results.get(explain_idx).is_some_and(|result| {
+            result.raw_output.is_some()
+                && result
+                    .provider_id
+                    .as_deref()
+                    .map(|provider| provider.eq_ignore_ascii_case("sqlite"))
+                    .unwrap_or(false)
+        })
+    }
+
     /// Render Visual sub-tab with Summary, Plan Tree, and Suggestions
     fn render_explain_visual_view(
         &self,
@@ -2171,42 +1902,11 @@ impl ResultsPanel {
 
         if let Some(result) = explain_result {
             if let Some(analysis) = &result.analyzed_plan {
-                return v_flex()
-                    .size_full()
-                    .child(
-                        div()
-                            .id("explain-visual-content")
-                            .flex_1()
-                            .w_full()
-                            .overflow_y_scroll()
-                            .child(
-                                v_flex()
-                                    .w_full()
-                                    // Summary section
-                                    .child(self.render_explain_summary(analysis, result, cx))
-                                    // Main content: Plan Tree (left) and Suggestions (right)
-                                    .child(
-                                        h_flex()
-                                            .w_full()
-                                            .min_h(px(300.0))
-                                            .gap_2()
-                                            .px_4()
-                                            .pb_4()
-                                            .child(
-                                                v_flex()
-                                                    .flex_1()
-                                                    .min_w(px(400.0))
-                                                    .child(self.render_plan_tree(analysis, cx)),
-                                            )
-                                            .child(
-                                                v_flex()
-                                                    .w(px(350.0))
-                                                    .child(self.render_suggestions(analysis, cx)),
-                                            ),
-                                    ),
-                            ),
-                    )
-                    .into_any_element();
+                if let Some(Some(state)) = self.explain_graph_states.get(explain_idx) {
+                    return ExplainGraphView::new(state.clone()).render(cx);
+                }
+
+                return ExplainAnalysisView::new(result, analysis).render_visual(cx);
             } else {
                 return v_flex()
                     .size_full()
@@ -2233,418 +1933,6 @@ impl ResultsPanel {
                     .child("No explain result available"),
             )
             .into_any_element()
-    }
-
-    /// Render the summary section at the top
-    fn render_explain_summary(
-        &self,
-        analysis: &QueryAnalysis,
-        result: &ExplainResult,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-
-        let total_cost = analysis.plan.total_cost.unwrap_or(0.0);
-        let total_rows = analysis.plan.total_rows.unwrap_or(0);
-        let execution_time = analysis
-            .plan
-            .execution_time_ms
-            .unwrap_or(result.duration_ms as f64);
-
-        // Determine score color
-        let score_color = if analysis.performance_score >= 80 {
-            theme.success
-        } else if analysis.performance_score >= 50 {
-            theme.warning
-        } else {
-            theme.danger
-        };
-
-        v_flex()
-            .w_full()
-            .gap_3()
-            .p_4()
-            .bg(theme.muted.opacity(0.3))
-            .border_b_1()
-            .border_color(theme.border)
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_lg()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Query Plan Analysis"),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py(px(2.0))
-                            .bg(score_color.opacity(0.2))
-                            .border_1()
-                            .border_color(score_color)
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(score_color)
-                                    .child(format!("Score: {}/100", analysis.performance_score)),
-                            ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_6()
-                    .text_sm()
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_color(theme.muted_foreground).child("Total Cost"))
-                            .child(
-                                div()
-                                    .text_color(theme.foreground)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{:.2}", total_cost)),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Estimated Rows"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.foreground)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{}", total_rows)),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(
-                                div()
-                                    .text_color(theme.muted_foreground)
-                                    .child("Execution Time"),
-                            )
-                            .child(
-                                div()
-                                    .text_color(theme.foreground)
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(format!("{:.3}s", execution_time / 1000.0)),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.foreground)
-                    .child(analysis.summary.clone()),
-            )
-    }
-
-    /// Render the plan tree visualization
-    fn render_plan_tree(
-        &self,
-        analysis: &QueryAnalysis,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-
-        v_flex()
-            .size_full()
-            .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child("Execution Plan"),
-            )
-            .child(
-                div()
-                    .id("plan-tree-content")
-                    .flex_1()
-                    .p_3()
-                    .bg(theme.muted.opacity(0.2))
-                    .border_1()
-                    .border_color(theme.border)
-                    .overflow_y_scroll()
-                    .child(v_flex().w_full().child(self.render_plan_node(
-                        &analysis.plan.root,
-                        0,
-                        cx,
-                    ))),
-            )
-    }
-
-    /// Render a single plan node recursively
-    fn render_plan_node(
-        &self,
-        node: &zqlz_analyzer::explain::PlanNode,
-        depth: usize,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let theme = cx.theme();
-        let indent = depth * 20;
-
-        // Node type badge color
-        let node_color = if node.is_scan() {
-            if node.node_type == zqlz_analyzer::explain::NodeType::SeqScan {
-                theme.warning
-            } else {
-                theme.success
-            }
-        } else if node.is_join() {
-            theme.info
-        } else {
-            theme.muted_foreground
-        };
-
-        // Calculate cost as a heatmap gradient (0-1 scale)
-        let cost_intensity = node
-            .cost
-            .map(|c| (c.total / 1000.0).min(1.0))
-            .unwrap_or(0.0);
-
-        v_flex()
-            .gap_1()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .pl(px(indent as f32))
-                    .py(px(4.0))
-                    .items_center()
-                    // Node type badge
-                    .child(
-                        div()
-                            .px_2()
-                            .py(px(2.0))
-                            .bg(node_color.opacity(0.2))
-                            .border_1()
-                            .border_color(node_color)
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .font_family(theme.mono_font_family.clone())
-                                    .text_color(node_color)
-                                    .child(format!("{:?}", node.node_type)),
-                            ),
-                    )
-                    // Relation name
-                    .when_some(node.relation.as_ref(), |this, relation| {
-                        this.child(
-                            div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .text_color(theme.foreground)
-                                .child(relation.clone()),
-                        )
-                    })
-                    // Cost indicator
-                    .when_some(node.cost.as_ref(), |this, cost| {
-                        this.child(
-                            div()
-                                .px_2()
-                                .py(px(2.0))
-                                .bg(theme.danger.opacity(cost_intensity as f32 * 0.3))
-                                .border_1()
-                                .border_color(theme.border.opacity(0.6))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .font_family(theme.mono_font_family.clone())
-                                        .text_color(theme.muted_foreground)
-                                        .child(format!(
-                                            "cost: {:.2}..{:.2}",
-                                            cost.startup, cost.total
-                                        )),
-                                ),
-                        )
-                    })
-                    // Row estimate
-                    .when_some(node.rows, |this, rows| {
-                        this.child(
-                            div()
-                                .text_xs()
-                                .font_family(theme.mono_font_family.clone())
-                                .text_color(theme.muted_foreground)
-                                .child(format!("rows: {}", rows)),
-                        )
-                    }),
-            )
-            // Filter information
-            .when_some(node.filter.as_ref(), |this, filter| {
-                this.child(
-                    div()
-                        .pl(px((indent + 20) as f32))
-                        .text_xs()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_color(theme.muted_foreground)
-                        .child(format!("Filter: {}", filter)),
-                )
-            })
-            // Child nodes
-            .children(
-                node.children
-                    .iter()
-                    .map(|child| self.render_plan_node(child, depth + 1, cx)),
-            )
-            .into_any_element()
-    }
-
-    /// Render the suggestions panel
-    fn render_suggestions(
-        &self,
-        analysis: &QueryAnalysis,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let theme = cx.theme();
-
-        v_flex()
-            .size_full()
-            .gap_2()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(theme.foreground)
-                            .child("Optimization Suggestions"),
-                    )
-                    .child(
-                        div()
-                            .px_2()
-                            .py(px(2.0))
-                            .bg(theme.muted.opacity(0.5))
-                            .border_1()
-                            .border_color(theme.border.opacity(0.6))
-                            .child(
-                                div()
-                                    .text_xs()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .text_color(theme.muted_foreground)
-                                    .child(format!("{}", analysis.suggestions.len())),
-                            ),
-                    ),
-            )
-            .child(
-                div()
-                    .id("suggestions-content")
-                    .flex_1()
-                    .overflow_y_scroll()
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .when(analysis.suggestions.is_empty(), |this| {
-                                this.child(
-                                    v_flex()
-                                        .flex_1()
-                                        .items_center()
-                                        .justify_center()
-                                        .p_4()
-                                        .bg(theme.success.opacity(0.1))
-                                        .border_1()
-                                        .border_color(theme.success)
-                                        .child(div().text_sm().text_color(theme.success).child(
-                                            "✓ No issues detected - query plan looks optimal!",
-                                        )),
-                                )
-                            })
-                            .children(analysis.sorted_suggestions().iter().map(|suggestion| {
-                                let severity_color = match suggestion.severity {
-                                    zqlz_analyzer::SeverityLevel::Critical => theme.danger,
-                                    zqlz_analyzer::SeverityLevel::Warning => theme.warning,
-                                    zqlz_analyzer::SeverityLevel::Info => theme.info,
-                                };
-
-                                v_flex()
-                                    .gap_2()
-                                    .p_3()
-                                    .bg(severity_color.opacity(0.05))
-                                    .border_1()
-                                    .border_color(severity_color.opacity(0.3))
-                                    .child(
-                                        h_flex()
-                                            .gap_2()
-                                            .items_center()
-                                            .child(
-                                                div()
-                                                    .px_2()
-                                                    .py(px(2.0))
-                                                    .bg(severity_color.opacity(0.2))
-                                                    .border_1()
-                                                    .border_color(severity_color.opacity(0.45))
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .font_weight(FontWeight::BOLD)
-                                                            .text_color(severity_color)
-                                                            .child(
-                                                                suggestion
-                                                                    .severity
-                                                                    .as_str()
-                                                                    .to_uppercase(),
-                                                            ),
-                                                    ),
-                                            )
-                                            .when_some(suggestion.table.as_ref(), |this, table| {
-                                                this.child(
-                                                    div()
-                                                        .text_xs()
-                                                        .font_family(theme.mono_font_family.clone())
-                                                        .text_color(theme.muted_foreground)
-                                                        .child(table.clone()),
-                                                )
-                                            }),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .font_weight(FontWeight::MEDIUM)
-                                            .text_color(theme.foreground)
-                                            .child(suggestion.message.clone()),
-                                    )
-                                    .child(
-                                        div()
-                                            .text_sm()
-                                            .text_color(theme.muted_foreground)
-                                            .child(suggestion.recommendation.clone()),
-                                    )
-                                    .when(!suggestion.columns.is_empty(), |this| {
-                                        this.child(h_flex().gap_1().flex_wrap().children(
-                                            suggestion.columns.iter().map(|col| {
-                                                div()
-                                                    .px_2()
-                                                    .py(px(2.0))
-                                                    .bg(theme.muted.opacity(0.3))
-                                                    .border_1()
-                                                    .border_color(theme.border.opacity(0.6))
-                                                    .child(
-                                                        div()
-                                                            .text_xs()
-                                                            .font_family(
-                                                                theme.mono_font_family.clone(),
-                                                            )
-                                                            .text_color(theme.foreground)
-                                                            .child(col.clone()),
-                                                    )
-                                            }),
-                                        ))
-                                    })
-                            })),
-                    ),
-            )
     }
 
     /// Render Plan sub-tab (EXPLAIN QUERY PLAN output table)
@@ -2775,75 +2063,53 @@ impl ResultsPanel {
         }
     }
 
-    /// Render Statistics sub-tab (placeholder)
+    /// Render Statistics sub-tab
     fn render_explain_statistics_view(
         &self,
         explain_idx: usize,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let theme = cx.theme();
-        let explain_result = self.explain_results.get(explain_idx);
+        if let Some(result) = self.explain_results.get(explain_idx)
+            && let Some(analysis) = &result.analyzed_plan
+        {
+            return ExplainAnalysisView::new(result, analysis).render_statistics(cx);
+        }
 
+        let theme = cx.theme();
         v_flex()
             .size_full()
             .p_4()
-            .gap_3()
             .text_sm()
-            .when_some(explain_result, |this, result| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Execution Time:"),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.foreground)
-                                .child(format!("{:.3}s", result.duration_ms as f64 / 1000.0)),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().text_color(theme.muted_foreground).child("Opcodes:"))
-                        .child(
-                            div().text_color(theme.foreground).child(
-                                result
-                                    .raw_output
-                                    .as_ref()
-                                    .map(|r| r.rows.len().to_string())
-                                    .unwrap_or_else(|| "N/A".to_string()),
-                            ),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Plan Steps:"),
-                        )
-                        .child(
-                            div().text_color(theme.foreground).child(
-                                result
-                                    .query_plan
-                                    .as_ref()
-                                    .map(|r| r.rows.len().to_string())
-                                    .unwrap_or_else(|| "N/A".to_string()),
-                            ),
-                        ),
-                )
-            })
-            .when(explain_result.is_none(), |this| {
-                this.child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("No statistics available"),
-                )
-            })
+            .child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child("No parsed statistics available"),
+            )
+            .into_any_element()
+    }
+
+    fn render_explain_suggestions_view(
+        &self,
+        explain_idx: usize,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        if let Some(result) = self.explain_results.get(explain_idx)
+            && let Some(analysis) = &result.analyzed_plan
+        {
+            return ExplainAnalysisView::new(result, analysis).render_suggestions(cx);
+        }
+
+        let theme = cx.theme();
+        v_flex()
+            .size_full()
+            .p_4()
+            .text_sm()
+            .child(
+                div()
+                    .text_color(theme.muted_foreground)
+                    .child("No parsed suggestions available"),
+            )
+            .into_any_element()
     }
 
     /// Render Info sub-tab (metadata about the explain)
@@ -2855,108 +2121,111 @@ impl ResultsPanel {
         let theme = cx.theme();
         let explain_result = self.explain_results.get(explain_idx);
 
-        v_flex()
-            .size_full()
-            .p_4()
-            .gap_3()
-            .text_sm()
-            .when_some(explain_result, |this, result| {
-                this.child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().text_color(theme.muted_foreground).child("Timestamp:"))
-                        .child(
-                            div()
-                                .text_color(theme.foreground)
-                                .child(result.timestamp.format("%Y-%m-%d %H:%M:%S").to_string()),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Connection:"),
-                        )
-                        .child(
-                            div().text_color(theme.foreground).child(
-                                result
-                                    .connection_name
-                                    .clone()
-                                    .unwrap_or_else(|| "Unknown".to_string()),
-                            ),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(div().text_color(theme.muted_foreground).child("Database:"))
-                        .child(
-                            div().text_color(theme.foreground).child(
-                                result
-                                    .database_name
-                                    .clone()
-                                    .unwrap_or_else(|| "N/A".to_string()),
-                            ),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            div()
-                                .text_color(theme.muted_foreground)
-                                .child("Execution Time:"),
-                        )
-                        .child(
-                            div()
-                                .text_color(theme.foreground)
-                                .child(format!("{:.3}s", result.duration_ms as f64 / 1000.0)),
-                        ),
-                )
-                .child(div().h(px(1.0)).w_full().bg(theme.border))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(div().text_color(theme.muted_foreground).child("Query:"))
-                        .child(
-                            div()
-                                .text_color(theme.foreground)
-                                .font_family(theme.mono_font_family.clone())
-                                .p_2()
-                                .bg(theme.muted)
-                                .border_1()
-                                .border_color(theme.border.opacity(0.6))
-                                .child(result.sql.clone()),
-                        ),
-                )
-                .when_some(result.error.as_ref(), |this, error| {
-                    this.child(div().h(px(1.0)).w_full().bg(theme.border))
-                        .child(
-                            v_flex()
-                                .gap_2()
-                                .child(div().text_color(theme.danger).child("Error:"))
-                                .child(
-                                    div()
-                                        .text_color(theme.danger)
-                                        .font_family(theme.mono_font_family.clone())
-                                        .p_2()
-                                        .bg(theme.muted)
-                                        .border_1()
-                                        .border_color(theme.border.opacity(0.6))
-                                        .child(error.clone()),
+        div().size_full().overflow_hidden().child(
+            v_flex()
+                .size_full()
+                .p_4()
+                .gap_3()
+                .text_sm()
+                .overflow_y_scrollbar()
+                .when_some(explain_result, |this, result| {
+                    this.child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().text_color(theme.muted_foreground).child("Timestamp:"))
+                            .child(
+                                div().text_color(theme.foreground).child(
+                                    result.timestamp.format("%Y-%m-%d %H:%M:%S").to_string(),
                                 ),
-                        )
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Connection:"),
+                            )
+                            .child(
+                                div().text_color(theme.foreground).child(
+                                    result
+                                        .connection_name
+                                        .clone()
+                                        .unwrap_or_else(|| "Unknown".to_string()),
+                                ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(div().text_color(theme.muted_foreground).child("Database:"))
+                            .child(
+                                div().text_color(theme.foreground).child(
+                                    result
+                                        .database_name
+                                        .clone()
+                                        .unwrap_or_else(|| "N/A".to_string()),
+                                ),
+                            ),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .text_color(theme.muted_foreground)
+                                    .child("Execution Time:"),
+                            )
+                            .child(
+                                div()
+                                    .text_color(theme.foreground)
+                                    .child(format!("{:.3}s", result.duration_ms as f64 / 1000.0)),
+                            ),
+                    )
+                    .child(div().h(px(1.0)).w_full().bg(theme.border))
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(div().text_color(theme.muted_foreground).child("Query:"))
+                            .child(
+                                div()
+                                    .text_color(theme.foreground)
+                                    .font_family(theme.mono_font_family.clone())
+                                    .p_2()
+                                    .bg(theme.muted)
+                                    .border_1()
+                                    .border_color(theme.border.opacity(0.6))
+                                    .child(result.sql.clone()),
+                            ),
+                    )
+                    .when_some(result.error.as_ref(), |this, error| {
+                        this.child(div().h(px(1.0)).w_full().bg(theme.border))
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .child(div().text_color(theme.danger).child("Error:"))
+                                    .child(
+                                        div()
+                                            .text_color(theme.danger)
+                                            .font_family(theme.mono_font_family.clone())
+                                            .p_2()
+                                            .bg(theme.muted)
+                                            .border_1()
+                                            .border_color(theme.border.opacity(0.6))
+                                            .child(error.clone()),
+                                    ),
+                            )
+                    })
                 })
-            })
-            .when(explain_result.is_none(), |this| {
-                this.child(
-                    div()
-                        .text_color(theme.muted_foreground)
-                        .child("No explain result available"),
-                )
-            })
+                .when(explain_result.is_none(), |this| {
+                    this.child(
+                        div()
+                            .text_color(theme.muted_foreground)
+                            .child("No explain result available"),
+                    )
+                }),
+        )
     }
 
     /// Render a simple "no data" message for explain views
@@ -2993,11 +2262,6 @@ impl Render for ResultsPanel {
                     return this.child(self.render_explain_tab(idx, cx));
                 }
 
-                // Handle Problems tab (doesn't require execution)
-                if self.active_tab == ResultTab::Problems {
-                    return this.child(self.render_problems_tab(cx));
-                }
-
                 // Handle execution-related tabs
                 if let Some(exec) = &self.execution {
                     match self.active_tab {
@@ -3005,7 +2269,7 @@ impl Render for ResultsPanel {
                         ResultTab::Summary => this.child(self.render_summary_tab(exec, cx)),
                         ResultTab::Result(idx) => this.child(self.render_result_tab(idx, cx)),
                         ResultTab::Info => this.child(self.render_info_tab(exec, cx)),
-                        ResultTab::Explain(_) | ResultTab::Problems => unreachable!(), // Already handled above
+                        ResultTab::Explain(_) => unreachable!(), // Already handled above
                     }
                 } else {
                     this.child(self.render_empty_state(cx))

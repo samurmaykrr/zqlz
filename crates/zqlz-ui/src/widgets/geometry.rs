@@ -60,141 +60,7 @@ pub enum Side {
     Right,
 }
 
-/// The anchor position of an element.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum Anchor {
-    #[default]
-    #[serde(rename = "top-left")]
-    TopLeft,
-    #[serde(rename = "top-center")]
-    TopCenter,
-    #[serde(rename = "top-right")]
-    TopRight,
-    #[serde(rename = "bottom-left")]
-    BottomLeft,
-    #[serde(rename = "bottom-center")]
-    BottomCenter,
-    #[serde(rename = "bottom-right")]
-    BottomRight,
-}
-
-impl Display for Anchor {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        match self {
-            Anchor::TopLeft => write!(f, "TopLeft"),
-            Anchor::TopCenter => write!(f, "TopCenter"),
-            Anchor::TopRight => write!(f, "TopRight"),
-            Anchor::BottomLeft => write!(f, "BottomLeft"),
-            Anchor::BottomCenter => write!(f, "BottomCenter"),
-            Anchor::BottomRight => write!(f, "BottomRight"),
-        }
-    }
-}
-
-impl Anchor {
-    /// Returns true if the anchor is at the top.
-    #[inline]
-    pub fn is_top(&self) -> bool {
-        matches!(self, Self::TopLeft | Self::TopCenter | Self::TopRight)
-    }
-
-    /// Returns true if the anchor is at the bottom.
-    #[inline]
-    pub fn is_bottom(&self) -> bool {
-        matches!(
-            self,
-            Self::BottomLeft | Self::BottomCenter | Self::BottomRight
-        )
-    }
-
-    /// Returns true if the anchor is at the left.
-    #[inline]
-    pub fn is_left(&self) -> bool {
-        matches!(self, Self::TopLeft | Self::BottomLeft)
-    }
-
-    /// Returns true if the anchor is at the right.
-    #[inline]
-    pub fn is_right(&self) -> bool {
-        matches!(self, Self::TopRight | Self::BottomRight)
-    }
-
-    /// Returns true if the anchor is at the center.
-    #[inline]
-    pub fn is_center(&self) -> bool {
-        matches!(self, Self::TopCenter | Self::BottomCenter)
-    }
-
-    /// Swaps the vertical position of the anchor.
-    pub fn swap_vertical(&self) -> Self {
-        match self {
-            Anchor::TopLeft => Anchor::BottomLeft,
-            Anchor::TopCenter => Anchor::BottomCenter,
-            Anchor::TopRight => Anchor::BottomRight,
-            Anchor::BottomLeft => Anchor::TopLeft,
-            Anchor::BottomCenter => Anchor::TopCenter,
-            Anchor::BottomRight => Anchor::TopRight,
-        }
-    }
-
-    /// Swaps the horizontal position of the anchor.
-    pub fn swap_horizontal(&self) -> Self {
-        match self {
-            Anchor::TopLeft => Anchor::TopRight,
-            Anchor::TopCenter => Anchor::TopCenter,
-            Anchor::TopRight => Anchor::TopLeft,
-            Anchor::BottomLeft => Anchor::BottomRight,
-            Anchor::BottomCenter => Anchor::BottomCenter,
-            Anchor::BottomRight => Anchor::BottomLeft,
-        }
-    }
-
-    /// Returns the anchor on the other side along the given axis.
-    pub(crate) fn other_side_corner_along(&self, axis: Axis) -> Anchor {
-        match axis {
-            Axis::Vertical => match self {
-                Self::TopLeft => Self::BottomLeft,
-                Self::TopCenter => Self::BottomCenter,
-                Self::TopRight => Self::BottomRight,
-                Self::BottomLeft => Self::TopLeft,
-                Self::BottomCenter => Self::TopCenter,
-                Self::BottomRight => Self::TopRight,
-            },
-            Axis::Horizontal => match self {
-                Self::TopLeft => Self::TopRight,
-                Self::TopCenter => Self::TopCenter,
-                Self::TopRight => Self::TopLeft,
-                Self::BottomLeft => Self::BottomRight,
-                Self::BottomCenter => Self::BottomCenter,
-                Self::BottomRight => Self::BottomLeft,
-            },
-        }
-    }
-}
-
-impl From<gpui::Corner> for Anchor {
-    fn from(corner: gpui::Corner) -> Self {
-        match corner {
-            gpui::Corner::TopLeft => Anchor::TopLeft,
-            gpui::Corner::TopRight => Anchor::TopRight,
-            gpui::Corner::BottomLeft => Anchor::BottomLeft,
-            gpui::Corner::BottomRight => Anchor::BottomRight,
-        }
-    }
-}
-
-impl From<Anchor> for gpui::Corner {
-    fn from(anchor: Anchor) -> Self {
-        match anchor {
-            Anchor::TopLeft => gpui::Corner::TopLeft,
-            Anchor::TopRight => gpui::Corner::TopRight,
-            Anchor::BottomLeft => gpui::Corner::BottomLeft,
-            Anchor::BottomRight => gpui::Corner::BottomRight,
-            Anchor::TopCenter => gpui::Corner::TopLeft,
-            Anchor::BottomCenter => gpui::Corner::BottomLeft,
-        }
-    }
-}
+pub use gpui::Anchor;
 
 impl Side {
     /// Returns true if the side is left.
@@ -263,6 +129,8 @@ impl LengthExt for Length {
 #[cfg(test)]
 mod tests {
     use super::{Anchor, Placement};
+    use gpui::Axis;
+
     #[test]
     fn test_placement() {
         assert!(Placement::Left.is_horizontal());
@@ -344,95 +212,10 @@ mod tests {
 
     #[test]
     fn test_anchor() {
-        assert_eq!(Anchor::default(), Anchor::TopLeft);
-
-        assert_eq!(Anchor::TopLeft.to_string(), "TopLeft");
-        assert_eq!(Anchor::TopCenter.to_string(), "TopCenter");
-        assert_eq!(Anchor::TopRight.to_string(), "TopRight");
-        assert_eq!(Anchor::BottomLeft.to_string(), "BottomLeft");
-        assert_eq!(Anchor::BottomCenter.to_string(), "BottomCenter");
-        assert_eq!(Anchor::BottomRight.to_string(), "BottomRight");
-
-        assert_eq!(
-            serde_json::to_string(&Anchor::TopLeft).unwrap(),
-            r#""top-left""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Anchor::TopCenter).unwrap(),
-            r#""top-center""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Anchor::TopRight).unwrap(),
-            r#""top-right""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Anchor::BottomLeft).unwrap(),
-            r#""bottom-left""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Anchor::BottomCenter).unwrap(),
-            r#""bottom-center""#
-        );
-        assert_eq!(
-            serde_json::to_string(&Anchor::BottomRight).unwrap(),
-            r#""bottom-right""#
-        );
-
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""top-left""#).unwrap(),
-            Anchor::TopLeft
-        );
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""top-center""#).unwrap(),
-            Anchor::TopCenter
-        );
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""top-right""#).unwrap(),
-            Anchor::TopRight
-        );
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""bottom-left""#).unwrap(),
-            Anchor::BottomLeft
-        );
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""bottom-center""#).unwrap(),
-            Anchor::BottomCenter
-        );
-        assert_eq!(
-            serde_json::from_str::<Anchor>(r#""bottom-right""#).unwrap(),
-            Anchor::BottomRight
-        );
-
-        assert!(Anchor::TopLeft.is_top());
-        assert!(Anchor::TopCenter.is_top());
-        assert!(Anchor::TopRight.is_top());
-        assert!(!Anchor::BottomLeft.is_top());
-        assert!(!Anchor::BottomCenter.is_top());
-        assert!(!Anchor::BottomRight.is_top());
-
-        assert!(Anchor::BottomLeft.is_bottom());
-        assert!(Anchor::BottomCenter.is_bottom());
-        assert!(Anchor::BottomRight.is_bottom());
-        assert!(!Anchor::TopLeft.is_bottom());
-        assert!(!Anchor::TopCenter.is_bottom());
-        assert!(!Anchor::TopRight.is_bottom());
-
-        assert!(Anchor::TopLeft.is_left());
-        assert!(Anchor::BottomLeft.is_left());
-        assert!(!Anchor::TopCenter.is_left());
-        assert!(!Anchor::BottomCenter.is_left());
-        assert!(!Anchor::TopRight.is_left());
-        assert!(!Anchor::BottomRight.is_left());
-
-        assert!(Anchor::TopRight.is_right());
-        assert!(Anchor::BottomRight.is_right());
-        assert!(!Anchor::TopLeft.is_right());
-        assert!(!Anchor::BottomLeft.is_right());
-        assert!(!Anchor::TopCenter.is_right());
-        assert!(!Anchor::BottomCenter.is_right());
-
         assert!(Anchor::TopCenter.is_center());
         assert!(Anchor::BottomCenter.is_center());
+        assert!(Anchor::LeftCenter.is_center());
+        assert!(Anchor::RightCenter.is_center());
         assert!(!Anchor::TopLeft.is_center());
         assert!(!Anchor::TopRight.is_center());
         assert!(!Anchor::BottomLeft.is_center());
@@ -440,84 +223,72 @@ mod tests {
     }
 
     #[test]
-    fn test_anchor_swap_vertical() {
-        assert_eq!(Anchor::TopLeft.swap_vertical(), Anchor::BottomLeft);
-        assert_eq!(Anchor::TopCenter.swap_vertical(), Anchor::BottomCenter);
-        assert_eq!(Anchor::TopRight.swap_vertical(), Anchor::BottomRight);
-        assert_eq!(Anchor::BottomLeft.swap_vertical(), Anchor::TopLeft);
-        assert_eq!(Anchor::BottomCenter.swap_vertical(), Anchor::TopCenter);
-        assert_eq!(Anchor::BottomRight.swap_vertical(), Anchor::TopRight);
-
+    fn test_anchor_other_side_vertical() {
         assert_eq!(
-            Anchor::TopLeft.swap_vertical().swap_vertical(),
+            Anchor::TopLeft.other_side_along(Axis::Vertical),
+            Anchor::BottomLeft
+        );
+        assert_eq!(
+            Anchor::TopCenter.other_side_along(Axis::Vertical),
+            Anchor::BottomCenter
+        );
+        assert_eq!(
+            Anchor::TopRight.other_side_along(Axis::Vertical),
+            Anchor::BottomRight
+        );
+        assert_eq!(
+            Anchor::BottomLeft.other_side_along(Axis::Vertical),
             Anchor::TopLeft
         );
         assert_eq!(
-            Anchor::TopCenter.swap_vertical().swap_vertical(),
+            Anchor::BottomCenter.other_side_along(Axis::Vertical),
             Anchor::TopCenter
         );
         assert_eq!(
-            Anchor::BottomRight.swap_vertical().swap_vertical(),
-            Anchor::BottomRight
+            Anchor::BottomRight.other_side_along(Axis::Vertical),
+            Anchor::TopRight
+        );
+
+        assert_eq!(
+            Anchor::TopLeft
+                .other_side_along(Axis::Vertical)
+                .other_side_along(Axis::Vertical),
+            Anchor::TopLeft
         );
     }
 
     #[test]
-    fn test_anchor_swap_horizontal() {
-        assert_eq!(Anchor::TopLeft.swap_horizontal(), Anchor::TopRight);
-        assert_eq!(Anchor::TopCenter.swap_horizontal(), Anchor::TopCenter);
-        assert_eq!(Anchor::TopRight.swap_horizontal(), Anchor::TopLeft);
-        assert_eq!(Anchor::BottomLeft.swap_horizontal(), Anchor::BottomRight);
-        assert_eq!(Anchor::BottomCenter.swap_horizontal(), Anchor::BottomCenter);
-        assert_eq!(Anchor::BottomRight.swap_horizontal(), Anchor::BottomLeft);
-
+    fn test_anchor_other_side_horizontal() {
         assert_eq!(
-            Anchor::TopLeft.swap_horizontal().swap_horizontal(),
+            Anchor::TopLeft.other_side_along(Axis::Horizontal),
+            Anchor::TopRight
+        );
+        assert_eq!(
+            Anchor::TopCenter.other_side_along(Axis::Horizontal),
+            Anchor::TopCenter
+        );
+        assert_eq!(
+            Anchor::TopRight.other_side_along(Axis::Horizontal),
             Anchor::TopLeft
         );
         assert_eq!(
-            Anchor::BottomRight.swap_horizontal().swap_horizontal(),
+            Anchor::BottomLeft.other_side_along(Axis::Horizontal),
             Anchor::BottomRight
         );
-        assert_eq!(Anchor::TopCenter.swap_horizontal(), Anchor::TopCenter);
-        assert_eq!(Anchor::BottomCenter.swap_horizontal(), Anchor::BottomCenter);
-    }
+        assert_eq!(
+            Anchor::BottomCenter.other_side_along(Axis::Horizontal),
+            Anchor::BottomCenter
+        );
+        assert_eq!(
+            Anchor::BottomRight.other_side_along(Axis::Horizontal),
+            Anchor::BottomLeft
+        );
 
-    #[test]
-    fn test_anchor_from_corner() {
-        use gpui::Corner;
-
-        assert_eq!(Anchor::from(Corner::TopLeft), Anchor::TopLeft);
-        assert_eq!(Anchor::from(Corner::TopRight), Anchor::TopRight);
-        assert_eq!(Anchor::from(Corner::BottomLeft), Anchor::BottomLeft);
-        assert_eq!(Anchor::from(Corner::BottomRight), Anchor::BottomRight);
-
-        let anchor: Anchor = Corner::TopLeft.into();
-        assert_eq!(anchor, Anchor::TopLeft);
-
-        let anchor: Anchor = Corner::BottomRight.into();
-        assert_eq!(anchor, Anchor::BottomRight);
-    }
-
-    #[test]
-    fn test_anchor_to_corner() {
-        use gpui::Corner;
-
-        assert_eq!(Corner::from(Anchor::TopLeft), Corner::TopLeft);
-        assert_eq!(Corner::from(Anchor::TopRight), Corner::TopRight);
-        assert_eq!(Corner::from(Anchor::BottomLeft), Corner::BottomLeft);
-        assert_eq!(Corner::from(Anchor::BottomRight), Corner::BottomRight);
-
-        assert_eq!(Corner::from(Anchor::TopCenter), Corner::TopLeft);
-        assert_eq!(Corner::from(Anchor::BottomCenter), Corner::BottomLeft);
-
-        let corner: Corner = Anchor::TopLeft.into();
-        assert_eq!(corner, Corner::TopLeft);
-
-        let corner: Corner = Anchor::TopCenter.into();
-        assert_eq!(corner, Corner::TopLeft);
-
-        let corner: Corner = Anchor::BottomRight.into();
-        assert_eq!(corner, Corner::BottomRight);
+        assert_eq!(
+            Anchor::TopLeft
+                .other_side_along(Axis::Horizontal)
+                .other_side_along(Axis::Horizontal),
+            Anchor::TopLeft
+        );
     }
 }

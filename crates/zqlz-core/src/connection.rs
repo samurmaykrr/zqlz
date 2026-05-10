@@ -1,7 +1,11 @@
 //! Connection trait and transaction handling
 
-use crate::{ExplainConfig, QueryResult, Result, SchemaIntrospection, StatementResult, Value};
+use crate::{
+    DriverCategory, ExplainConfig, QueryResult, Result, SchemaIntrospection, StatementResult,
+    TableType, Value, driver_category_from_driver_name,
+};
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 /// Policy for formatting SQL bind placeholders.
@@ -26,6 +30,272 @@ impl BindPlaceholderPolicy {
             Self::ColonNumbered => format!(":{}", one_based_index),
         }
     }
+}
+
+/// Logical scope requested before selecting a physical/session connection.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConnectionScope {
+    Default,
+    Database(String),
+    Namespace(String),
+    KeyValueDatabase(u16),
+}
+
+/// Driver-normalized connection scope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedConnectionScope {
+    pub requested_scope: ConnectionScope,
+    pub normalized_scope: ConnectionScope,
+    pub physical_database_key: Option<String>,
+    pub effective_database: Option<String>,
+    pub effective_namespace: Option<String>,
+    pub introspection_scope: Option<String>,
+    pub requires_dedicated_connection: bool,
+}
+
+impl ResolvedConnectionScope {
+    pub fn default_scope() -> Self {
+        Self {
+            requested_scope: ConnectionScope::Default,
+            normalized_scope: ConnectionScope::Default,
+            physical_database_key: None,
+            effective_database: None,
+            effective_namespace: None,
+            introspection_scope: None,
+            requires_dedicated_connection: false,
+        }
+    }
+}
+
+/// Generic key-value value family exposed by drivers such as Redis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum KeyValueKind {
+    #[default]
+    String,
+    List,
+    Set,
+    ZSet,
+    Hash,
+    Stream,
+    Json,
+    None,
+}
+
+impl KeyValueKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::String => "string",
+            Self::List => "list",
+            Self::Set => "set",
+            Self::ZSet => "zset",
+            Self::Hash => "hash",
+            Self::Stream => "stream",
+            Self::Json => "json",
+            Self::None => "none",
+        }
+    }
+}
+
+/// One logical key-value database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValueDatabaseInfo {
+    pub index: u16,
+    pub size_bytes: Option<i64>,
+}
+
+/// Incremental key scan request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValueScanRequest {
+    pub database_index: u16,
+    pub limit: usize,
+    pub scan_batch_size: usize,
+}
+
+/// Key names returned from one or more scan iterations.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeyValueScanResult {
+    pub keys: Vec<String>,
+}
+
+/// Summary row for a key-value database browser.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyValueKeySummary {
+    pub key: String,
+    pub kind: KeyValueKind,
+    pub ttl_seconds: Option<i64>,
+    pub size_bytes: Option<i64>,
+    pub preview: Option<String>,
+}
+
+/// Full key data in generic rows.
+#[derive(Debug, Clone)]
+pub struct KeyValueEntry {
+    pub key: String,
+    pub kind: KeyValueKind,
+    pub ttl_seconds: Option<i64>,
+    pub data: QueryResult,
+}
+
+/// Save or rename one key.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValueSaveRequest {
+    pub original_key: String,
+    pub new_key: String,
+    pub kind: KeyValueKind,
+    pub serialized_value: String,
+    pub ttl_seconds: Option<u64>,
+    pub temporary_key: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeyValueSaveOutcome {
+    pub was_renamed: bool,
+}
+
+/// Delete keys from active key-value database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyValueDeleteRequest {
+    pub key_names: Vec<String>,
+    pub continue_on_error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct KeyValueDeleteOutcome {
+    pub deleted_key_names: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+/// Update one grid cell for a key entry.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct KeyValueCellUpdateRequest {
+    pub key: String,
+    pub kind: KeyValueKind,
+    pub column_name: String,
+    pub new_value: Option<Value>,
+    pub row_values: Vec<Value>,
+}
+
+/// Capability trait for key-value stores.
+#[async_trait]
+pub trait KeyValueStore: Send + Sync {
+    async fn list_key_value_databases(&self) -> Result<Vec<KeyValueDatabaseInfo>>;
+    async fn scan_keys(&self, request: KeyValueScanRequest) -> Result<KeyValueScanResult>;
+    async fn load_key_summaries(&self, database_index: u16) -> Result<Vec<KeyValueKeySummary>>;
+    async fn read_key(&self, key: &str, limit: usize) -> Result<KeyValueEntry>;
+    async fn save_key(&self, request: KeyValueSaveRequest) -> Result<KeyValueSaveOutcome>;
+    async fn update_key_cell(&self, request: KeyValueCellUpdateRequest) -> Result<()>;
+    async fn delete_keys(&self, request: KeyValueDeleteRequest) -> Result<KeyValueDeleteOutcome>;
+}
+
+/// One document database.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentDatabaseInfo {
+    pub name: String,
+    pub size_bytes: Option<u64>,
+    pub empty: bool,
+}
+
+/// One collection/document set.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentCollectionInfo {
+    pub database: String,
+    pub name: String,
+    pub collection_type: String,
+    pub document_count: Option<u64>,
+    pub size_bytes: Option<u64>,
+    pub index_count: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentQueryRequest {
+    pub database: String,
+    pub collection: String,
+    pub filter_json: Option<String>,
+    pub projection_json: Option<String>,
+    pub sort_json: Option<String>,
+    pub skip: u64,
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentAggregateRequest {
+    pub database: String,
+    pub collection: String,
+    pub pipeline_json: String,
+    pub limit: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSaveRequest {
+    pub database: String,
+    pub collection: String,
+    pub document_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentReplaceRequest {
+    pub database: String,
+    pub collection: String,
+    pub id_json: String,
+    pub document_json: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DocumentCellUpdateRequest {
+    pub database: String,
+    pub collection: String,
+    pub id_json: String,
+    pub field_path: String,
+    pub new_value: Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentDeleteRequest {
+    pub database: String,
+    pub collection: String,
+    pub ids_json: Vec<String>,
+    pub continue_on_error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DocumentDeleteOutcome {
+    pub deleted_ids: Vec<String>,
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentSchemaSampleRequest {
+    pub database: String,
+    pub collection: String,
+    pub sample_size: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentInferredField {
+    pub name: String,
+    pub types: Vec<String>,
+    pub occurrence_count: u64,
+    pub is_required: bool,
+}
+
+/// Capability trait for document stores.
+#[async_trait]
+pub trait DocumentStore: Send + Sync {
+    async fn list_document_databases(&self) -> Result<Vec<DocumentDatabaseInfo>>;
+    async fn list_collections(&self, database: &str) -> Result<Vec<DocumentCollectionInfo>>;
+    async fn query_documents(&self, request: DocumentQueryRequest) -> Result<QueryResult>;
+    async fn aggregate_documents(&self, request: DocumentAggregateRequest) -> Result<QueryResult>;
+    async fn insert_document(&self, request: DocumentSaveRequest) -> Result<Value>;
+    async fn replace_document(&self, request: DocumentReplaceRequest) -> Result<()>;
+    async fn update_document_cell(&self, request: DocumentCellUpdateRequest) -> Result<()>;
+    async fn delete_documents(
+        &self,
+        request: DocumentDeleteRequest,
+    ) -> Result<DocumentDeleteOutcome>;
+    async fn sample_schema(
+        &self,
+        request: DocumentSchemaSampleRequest,
+    ) -> Result<Vec<DocumentInferredField>>;
 }
 
 /// SQL object name with an optional namespace qualifier.
@@ -202,6 +472,10 @@ pub struct CellUpdateRequest {
     pub table_name: String,
     /// Column name to update
     pub column_name: String,
+    /// Database column type, when known
+    pub column_type: Option<String>,
+    /// Database column types for row identifier columns, when known
+    pub row_column_types: Vec<(String, String)>,
     /// New value (None for NULL)
     pub new_value: Option<Value>,
     /// Row identifier - can be row index, primary key value, or full row data
@@ -239,6 +513,12 @@ pub trait Connection: Send + Sync {
         None
     }
 
+    /// Broad category used by services/UI to route behavior without concrete
+    /// driver-name branching.
+    fn driver_category(&self) -> DriverCategory {
+        driver_category_from_driver_name(self.driver_name())
+    }
+
     /// Return a lightweight ping SQL statement for this connection.
     fn ping_query_sql(&self) -> &'static str {
         "SELECT 1"
@@ -258,6 +538,61 @@ pub trait Connection: Send + Sync {
     /// Drivers may override this when UI labels differ from driver-native names.
     fn normalize_database_scope_name(&self, database_name: &str) -> String {
         database_name.to_string()
+    }
+
+    /// Resolve a logical scope into driver-owned connection and introspection
+    /// semantics.
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+        resolved.normalized_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {}
+            ConnectionScope::Database(database_name) => {
+                let normalized_database_name =
+                    self.normalize_database_scope_name(database_name.trim());
+                resolved.normalized_scope =
+                    ConnectionScope::Database(normalized_database_name.clone());
+                resolved.effective_database = Some(normalized_database_name.clone());
+                if self.requires_database_scoped_connection() {
+                    resolved.physical_database_key = Some(normalized_database_name);
+                    resolved.requires_dedicated_connection = true;
+                } else {
+                    resolved.effective_namespace = Some(normalized_database_name.clone());
+                    resolved.introspection_scope = Some(normalized_database_name);
+                }
+            }
+            ConnectionScope::Namespace(namespace) => {
+                let namespace = namespace.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                resolved.effective_namespace = Some(namespace.clone());
+                resolved.introspection_scope = Some(namespace);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                let database_name = index.to_string();
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+                resolved.effective_database = Some(database_name.clone());
+                if self.requires_database_scoped_connection() {
+                    resolved.physical_database_key = Some(database_name);
+                    resolved.requires_dedicated_connection = true;
+                }
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    /// Resolve the current session database/catalog name when the driver has
+    /// one. Drivers own any SQL needed for this.
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        Ok(None)
+    }
+
+    /// Resolve the current session namespace/schema name when the driver has
+    /// one. Drivers own any SQL needed for this.
+    async fn current_namespace_name(&self) -> Result<Option<String>> {
+        self.resolve_session_namespace().await
     }
 
     /// Return the EXPLAIN configuration for this connection.
@@ -312,6 +647,11 @@ pub trait Connection: Send + Sync {
     /// `base_sql` should be a complete query without trailing limit/offset clauses.
     fn paginated_select_sql(&self, base_sql: &str, limit: u64, offset: u64) -> String {
         format!("{} LIMIT {} OFFSET {}", base_sql, limit, offset)
+    }
+
+    /// Wrap a base `SELECT` statement with limit-only pagination syntax.
+    fn limited_select_sql(&self, base_sql: &str, limit: u64) -> String {
+        self.paginated_select_sql(base_sql, limit, 0)
     }
 
     /// Generate a SQL expression suitable for text-search comparisons.
@@ -502,6 +842,20 @@ pub trait Connection: Send + Sync {
         false
     }
 
+    /// Whether a failed table browse should degrade to schema-only metadata.
+    fn should_use_schema_only_table_browse_fallback(
+        &self,
+        _table_type: TableType,
+        _error_message: &str,
+    ) -> bool {
+        false
+    }
+
+    /// Whether failed column introspection should fall back to parsing DDL.
+    fn should_use_ddl_column_fallback(&self, _table_type: TableType, _error_message: &str) -> bool {
+        false
+    }
+
     /// Return an estimated row count for an object when available.
     async fn estimated_row_count(&self, _table_name: &SqlObjectName) -> Result<Option<u64>> {
         Ok(None)
@@ -595,6 +949,16 @@ pub trait Connection: Send + Sync {
 
     /// Get schema introspection interface if supported
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
+        None
+    }
+
+    /// Get key-value store interface if supported.
+    fn as_key_value_store(&self) -> Option<&dyn KeyValueStore> {
+        None
+    }
+
+    /// Get document store interface if supported.
+    fn as_document_store(&self) -> Option<&dyn DocumentStore> {
         None
     }
 

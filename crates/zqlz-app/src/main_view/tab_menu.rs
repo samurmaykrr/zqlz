@@ -27,6 +27,42 @@ impl TabContextMenuState {
             }
         })
     }
+
+    pub fn show(
+        &mut self,
+        menu: Entity<zqlz_ui::widgets::menu::PopupMenu>,
+        tab_index: usize,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.menu_subscription.take();
+        self.position = position;
+        self.tab_index = tab_index;
+        self.menu = menu.clone();
+
+        let menu_state = cx.entity().clone();
+        self.menu_subscription = Some(cx.subscribe(
+            &menu,
+            move |_state, _, _event: &DismissEvent, cx| {
+                let menu_state = menu_state.clone();
+                cx.defer(move |cx| {
+                    menu_state.update(cx, |state, cx| {
+                        state.open = false;
+                        cx.notify();
+                    });
+                });
+            },
+        ));
+
+        self.open = true;
+
+        if !menu.focus_handle(cx).contains_focused(window, cx) {
+            menu.focus_handle(cx).focus(window, cx);
+        }
+
+        cx.notify();
+    }
 }
 
 impl Render for TabContextMenuState {
@@ -41,7 +77,7 @@ impl Render for TabContextMenuState {
         deferred(
             anchored()
                 .snap_to_window_with_margin(px(8.))
-                .anchor(Corner::TopLeft)
+                .anchor(Anchor::TopLeft)
                 .position(self.position)
                 .child(
                     div()

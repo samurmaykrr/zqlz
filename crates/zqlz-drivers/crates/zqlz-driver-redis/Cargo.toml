@@ -20,7 +20,10 @@ uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 toml.workspace = true
-redis = { version = "0.27", features = ["tokio-comp", "cluster-async"] }
+redis = { version = "0.27", features = ["tokio-comp", "tokio-native-tls-comp", "cluster-async"] }
+anyhow.workspace = true
+ssh2.workspace = true
+url.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

@@ -6,20 +6,6 @@
 use crate::components::{ColumnInfo, ForeignKeyInfo, IndexInfo, SchemaDetails};
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::DriverCategory;
-
-/// Converts a driver name to its category for UI display.
-pub(in crate::main_view) fn driver_name_to_category(driver_name: &str) -> DriverCategory {
-    match driver_name {
-        "mysql" | "postgres" | "postgresql" | "mariadb" | "sqlite" | "sqlserver" | "mssql"
-        | "cockroachdb" | "clickhouse" => DriverCategory::Relational,
-        "mongodb" | "couchdb" | "dynamodb" | "cassandra" | "scylladb" => DriverCategory::Document,
-        "redis" | "memcached" | "etcd" => DriverCategory::KeyValue,
-        "neo4j" | "arangodb" | "janusgraph" => DriverCategory::Graph,
-        "elasticsearch" | "opensearch" | "meilisearch" => DriverCategory::Search,
-        _ => DriverCategory::Relational,
-    }
-}
 
 /// Converts service-level TableDetails to component-level SchemaDetails.
 pub(in crate::main_view) fn convert_to_schema_details(
@@ -57,7 +43,12 @@ pub(in crate::main_view) fn convert_to_schema_details(
             name: fk.name,
             columns: fk.columns,
             referenced_table: fk.referenced_table,
+            referenced_schema: fk.referenced_schema,
             referenced_columns: fk.referenced_columns,
+            on_update: fk.on_update,
+            on_delete: fk.on_delete,
+            is_deferrable: fk.is_deferrable,
+            initially_deferred: fk.initially_deferred,
         })
         .collect();
 
@@ -72,20 +63,14 @@ pub(in crate::main_view) fn convert_to_schema_details(
     }
 }
 
-/// Resolves the correct schema qualifier for SQL queries based on driver type.
-///
-/// For MySQL/MariaDB, database_name and schema are the same concept, so
-/// database_name is used directly. For PostgreSQL, the connection is already
-/// scoped to the target database and schema can be included directly in table
-/// names (e.g. `marketing.orders`), so no separate schema qualifier should be
-/// injected. For SQLite, schemas don't apply.
+/// App-level adapter that preserves existing table-handler call signatures
+/// while delegating qualifier policy to `zqlz-core`.
 pub(in crate::main_view) fn resolve_schema_qualifier(
     connection: &Arc<dyn zqlz_core::Connection>,
     database_name: &Option<String>,
 ) -> Option<String> {
-    match connection.dialect_id() {
-        Some("mysql") | Some("mariadb") | Some("clickhouse") | Some("mssql")
-        | Some("sqlserver") => database_name.clone(),
-        _ => None,
-    }
+    zqlz_core::resolve_schema_qualifier_for_connection(
+        connection.as_ref(),
+        database_name.as_deref(),
+    )
 }

@@ -55,6 +55,7 @@ pub enum CommandCategory {
     Layout,
     Tab,
     Focus,
+    DocumentSymbol,
     /// Table commands from a specific connection. The string is the
     /// connection display name (e.g. "production-db").
     Table(String),
@@ -73,6 +74,7 @@ impl CommandCategory {
             Self::Layout => "Layout".to_string(),
             Self::Tab => "Tab".to_string(),
             Self::Focus => "Focus".to_string(),
+            Self::DocumentSymbol => "Symbols".to_string(),
             Self::Table(name) => format!("Table: {name}"),
             Self::View(name) => format!("View: {name}"),
         }
@@ -88,6 +90,7 @@ impl CommandCategory {
             Self::Layout => "Layout",
             Self::Tab => "Tab",
             Self::Focus => "Focus",
+            Self::DocumentSymbol => "Symbols",
             Self::Table(_) => "Tables",
             Self::View(_) => "Views",
         }
@@ -155,6 +158,9 @@ fn icon_for_command(command_id: &str, category: &CommandCategory) -> Option<AnyE
             CommandCategory::Connection => {
                 Some(Icon::new(ZqlzIcon::Plug).small().into_any_element())
             }
+            CommandCategory::DocumentSymbol => {
+                Some(Icon::new(ZqlzIcon::FileSql).small().into_any_element())
+            }
             _ => None,
         },
     }
@@ -175,6 +181,11 @@ pub enum CommandType {
     },
     Connection {
         connection_id: Uuid,
+    },
+    DocumentSymbol {
+        line: usize,
+        column: usize,
+        label: String,
     },
 }
 
@@ -303,6 +314,26 @@ impl Command {
         }
         .with_search_fields()
     }
+
+    pub fn new_document_symbol(label: String, line: usize, column: usize) -> Self {
+        Self {
+            id: format!("document-symbol-{line}-{column}-{label}"),
+            label: format!("{label}  L{}", line + 1),
+            category: CommandCategory::DocumentSymbol,
+            command_type: CommandType::DocumentSymbol {
+                line,
+                column,
+                label,
+            },
+            score: 0.0,
+            last_used: None,
+            action: None,
+            palette_event: Some(CommandPaletteEvent::GoToDocumentSymbol { line, column }),
+            label_lower: String::new(),
+            combined_search: String::new(),
+        }
+        .with_search_fields()
+    }
 }
 
 // ── Events ──────────────────────────────────────────────────────────────
@@ -319,6 +350,10 @@ pub enum CommandPaletteEvent {
     OpenView {
         connection_id: Uuid,
         view_name: String,
+    },
+    GoToDocumentSymbol {
+        line: usize,
+        column: usize,
     },
 }
 
@@ -599,6 +634,18 @@ impl CommandPaletteDelegate {
                     view_name.clone(),
                 ));
             }
+        }
+
+        self.rebuild_sections();
+    }
+
+    pub fn add_document_symbol_commands(&mut self, symbols: &[(String, usize, usize)]) {
+        self.commands
+            .retain(|cmd| !matches!(cmd.command_type, CommandType::DocumentSymbol { .. }));
+
+        for (label, line, column) in symbols {
+            self.commands
+                .push(Command::new_document_symbol(label.clone(), *line, *column));
         }
 
         self.rebuild_sections();
@@ -1104,6 +1151,16 @@ impl CommandPalette {
                 views,
                 object_capabilities,
             );
+        });
+    }
+
+    pub fn add_document_symbol_commands(
+        &mut self,
+        symbols: &[(String, usize, usize)],
+        cx: &mut Context<Self>,
+    ) {
+        self.list_state.update(cx, |state, _cx| {
+            state.delegate_mut().add_document_symbol_commands(symbols);
         });
     }
 

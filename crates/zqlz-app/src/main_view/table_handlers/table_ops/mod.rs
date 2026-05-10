@@ -9,9 +9,7 @@
 //! - Duplicating tables
 //! - Renaming tables
 //! - Importing and exporting data
-//! - Copying table names to clipboard
 
-mod copy_names;
 mod create;
 mod delete;
 pub(in crate::main_view) mod design;

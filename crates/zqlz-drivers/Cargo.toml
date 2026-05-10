@@ -5,16 +5,17 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["postgres", "mysql", "sqlite", "redis"]
+default = ["postgres", "mysql", "sqlite", "turso", "redis"]
 postgres = ["dep:zqlz-driver-postgres"]
 mysql = ["dep:zqlz-driver-mysql"]
 sqlite = ["dep:zqlz-driver-sqlite"]
+turso = ["dep:zqlz-driver-turso", "sqlite"]
 redis = ["dep:zqlz-driver-redis"]
 mssql = ["dep:zqlz-driver-mssql"]
 duckdb = ["dep:zqlz-driver-duckdb"]
 mongodb = ["dep:zqlz-driver-mongodb"]
 clickhouse = ["dep:zqlz-driver-clickhouse"]
-all-drivers = ["postgres", "mysql", "sqlite", "redis", "mssql", "duckdb", "mongodb", "clickhouse"]
+all-drivers = ["postgres", "mysql", "sqlite", "turso", "redis", "mssql", "duckdb", "mongodb", "clickhouse"]
 
 [dependencies]
 # Core
@@ -24,6 +25,7 @@ zqlz-core.workspace = true
 zqlz-driver-postgres = { workspace = true, optional = true }
 zqlz-driver-mysql = { workspace = true, optional = true }
 zqlz-driver-sqlite = { workspace = true, optional = true }
+zqlz-driver-turso = { workspace = true, optional = true }
 zqlz-driver-mssql = { workspace = true, optional = true }
 zqlz-driver-duckdb = { workspace = true, optional = true }
 zqlz-driver-redis = { workspace = true, optional = true }

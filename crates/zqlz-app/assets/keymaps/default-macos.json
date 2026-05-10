@@ -11,7 +11,8 @@
     "context": "MainView",
     "bindings": {
       "cmd-n": "zqlz::NewQuery",
-      "cmd-shift-n": "zqlz::NewConnection",
+      "cmd-shift-n": "zqlz::NewWindow",
+      "cmd-alt-n": "zqlz::NewConnection",
       "cmd-enter": "zqlz::ExecuteQuery",
       "cmd-b": "zqlz::ToggleLeftSidebar",
       "cmd-shift-b": "zqlz::ToggleRightSidebar",
@@ -21,9 +22,28 @@
       "cmd-3": "zqlz::FocusResults",
       "cmd-]": "tabs::ActivateNextTab",
       "cmd-[": "tabs::ActivatePrevTab",
+      "cmd-alt-left": "tabs::NavigateTabBack",
+      "cmd-alt-right": "tabs::NavigateTabForward",
       "cmd-w": "tabs::CloseActiveTab",
-      "cmd-shift-w": "tabs::CloseOtherTabs",
-      "cmd-alt-w": "tabs::CloseAllTabs"
+      "cmd-shift-w": "zqlz::CloseWindow",
+      "cmd-alt-shift-w": "tabs::CloseOtherTabs",
+      "cmd-k cmd-o": "tabs::MoveTabToNewWindow",
+      "cmd-k cmd-shift-w": "tabs::CloseTabsToLeft",
+      "cmd-k cmd-shift-p": "tabs::TogglePinActiveTab",
+      "cmd-k cmd-p": "tabs::MarkActiveTabAsPreview",
+      "cmd-k cmd-alt-p": "tabs::ClearActiveTabPreview",
+      "cmd-k cmd-w": "tabs::CloseCleanTabs",
+      "cmd-alt-w": "tabs::CloseAllTabs",
+      "cmd-k 1": "tabs::ActivateTab1",
+      "cmd-k 2": "tabs::ActivateTab2",
+      "cmd-k 3": "tabs::ActivateTab3",
+      "cmd-k 4": "tabs::ActivateTab4",
+      "cmd-k 5": "tabs::ActivateTab5",
+      "cmd-k 6": "tabs::ActivateTab6",
+      "cmd-k 7": "tabs::ActivateTab7",
+      "cmd-k 8": "tabs::ActivateTab8",
+      "cmd-k 9": "tabs::ActivateTab9",
+      "cmd-k 0": "tabs::ActivateLastTab"
     }
   },
   {
@@ -71,6 +91,15 @@
       "cmd-shift-z": "table_viewer::RedoEdit",
       "cmd-f": "table_viewer::ToggleSearch",
       "cmd-h": "table_viewer::ToggleReplace"
+    }
+  },
+  {
+    "context": "CellEditorPanel",
+    "bindings": {
+      "cmd-s": "cell_editor::SaveCellEdit",
+      "escape": "cell_editor::CancelCellEdit",
+      "cmd-shift-f": "cell_editor::FormatCellEdit",
+      "alt-z": "cell_editor::ToggleCellEditorWordWrap"
     }
   },
   {

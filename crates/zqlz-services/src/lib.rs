@@ -12,7 +12,7 @@
 //!     ↓
 //! Domain Layer (zqlz-query, zqlz-schema, zqlz-connection, zqlz-table-designer)
 //!     ↓
-//! Infrastructure Layer (zqlz-core, zqlz-drivers)
+//! Infrastructure Layer (zqlz-core abstractions, driver crates behind connection)
 //! ```
 //!
 //! # Services
@@ -33,25 +33,63 @@
 //! 4. **Use domain abstractions** - Services use SchemaCache, etc.
 
 mod connection_service;
+mod document_service;
 mod error;
+mod key_value_service;
+mod object_action_service;
 mod refresh_service;
 mod schema_service;
 mod table_design_service;
 mod table_service;
 mod view_models;
 
-pub use connection_service::{ConnectionInfo, ConnectionService, TestResult};
-pub use error::{ServiceError, ServiceResult};
-pub use refresh_service::{
-    ConnectionRefresh, ConnectionRefreshPayload, RedisConnectionRefresh, RefreshRequest,
-    RefreshService, RelationalConnectionRefresh,
+pub use connection_service::{
+    ConnectionDatabaseEntry, ConnectionInfo, ConnectionService, DatabaseScopedConnection,
+    DiscoverDatabasesSidebarOutcome, LazySidebarSectionLoadOutcome, PaletteSchemaCommandsData,
+    RedisDatabaseEntry, RelationalSidebarBootstrap, ResolvedConnection, SidebarSectionLoadOutcome,
+    SidebarSectionLoadResult, TestResult,
 };
-pub use schema_service::SchemaService;
+pub use document_service::DocumentService;
+pub use error::{ServiceError, ServiceResult};
+pub use key_value_service::{
+    KeyValueService, LoadKeyValueDatabaseRowsOutcome, LoadKeyValueDatabaseRowsRequest,
+    LoadKeyValueKeysOutcome, LoadKeyValueKeysRequest,
+};
+pub use object_action_service::{
+    classify_objects_panel_action_resolution, manifest_action_coverage_gaps,
+    object_type_for_kind_id, objects_panel_action_feature_availability,
+    objects_panel_action_issue_message, plan_object_form_action, schema_qualified_action_name,
+    selected_object_ref, ActionRegistryError, ObjectFormActionPlan, ObjectsPanelActionRegistry,
+    ObjectsPanelActionResolutionTelemetry, ResolvedObjectsPanelAction, SelectedObjectRef,
+};
+pub use refresh_service::{
+    ConnectionRefresh, ConnectionRefreshPayload, DocumentConnectionRefresh,
+    KeyValueConnectionRefresh, RefreshIntent, RefreshPlan, RefreshPlanStep, RefreshRequest,
+    RefreshService, RelationalConnectionRefresh, SurfaceRefreshKind,
+};
+pub use schema_service::{SchemaService, SidebarSectionLoadData};
 pub use table_service::{
-    BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest,
+    build_open_viewer_schema_viewer_metadata, build_schema_only_query_result, decide_delete_tables,
+    decide_design_tables, decide_duplicate_tables, decide_empty_tables,
+    decide_open_tables_workflow, decide_open_viewer_count_workflow,
+    should_use_schema_only_table_browse_fallback, BrowseLastPageRequest, BrowseNearEndPageRequest,
+    BrowseTableWithFiltersRequest, CommitCellChange, CommitTableChangesOutcome,
+    CommitTableChangesRequest, DeleteTablesDecision, DeleteTablesDecisionRequest,
+    DeleteTablesOutcome, DeleteTablesRequest, DesignTablesDecision, DesignTablesDecisionRequest,
+    DumpTablesSqlOutcome, DumpTablesSqlRequest, DuplicateTableOperation, DuplicateTableResult,
+    DuplicateTablesDecision, DuplicateTablesDecisionRequest, DuplicateTablesOutcome,
+    DuplicateTablesRequest, EmptyTablesDecision, EmptyTablesDecisionRequest, EmptyTablesOutcome,
+    EmptyTablesRequest, FailedModifiedCellCommit, FailedNewRowCommit, ForeignKeyValueOption,
+    GenerateTableChangesSqlRequest, LoadDistinctValuesOutcome, LoadDistinctValuesRequest,
+    LoadForeignKeyValuesOutcome, LoadForeignKeyValuesRequest, ModifiedCellSqlChange,
+    OpenTableViewerCountDecision, OpenTableViewerCountDecisionRequest, OpenTablesDecision,
+    OpenTablesDecisionRequest, OpenViewerInitialLoadOutcome, OpenViewerInitialLoadRequest,
+    OpenViewerSchemaLoad, OpenViewerSchemaViewerMetadata, RenameTableRequest, TableWorkflowError,
 };
 pub use table_service::{CellUpdateData, RowDeleteData, RowInsertData, TableService};
 pub use view_models::{ColumnInfo, DatabaseSchema, TableDetails};
+pub use zqlz_core::ConnectionFeatureSet;
+pub use zqlz_core::ConnectionScope;
 
 // Re-export table design types from zqlz-table-designer for backward compatibility
 pub use zqlz_table_designer::{

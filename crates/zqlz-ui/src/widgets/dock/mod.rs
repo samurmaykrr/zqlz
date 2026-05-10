@@ -178,6 +178,34 @@ impl DockItem {
         self
     }
 
+    pub fn pinned_indices(mut self, pinned_indices: &[usize], cx: &mut App) -> Self {
+        debug_assert!(
+            matches!(self, Self::Tabs { .. }),
+            "pinned_indices can only be set for DockItem::Tabs"
+        );
+
+        if let Self::Tabs { ref mut view, .. } = self {
+            view.update(cx, |tab_panel, cx| {
+                tab_panel.set_pinned_indices(pinned_indices, cx);
+            });
+        }
+        self
+    }
+
+    pub fn preview_index(mut self, preview_index: Option<usize>, cx: &mut App) -> Self {
+        debug_assert!(
+            matches!(self, Self::Tabs { .. }),
+            "preview_index can only be set for DockItem::Tabs"
+        );
+
+        if let Self::Tabs { ref mut view, .. } = self {
+            view.update(cx, |tab_panel, cx| {
+                tab_panel.set_preview_tab(preview_index, cx);
+            });
+        }
+        self
+    }
+
     /// Create DockItem::Split with given split layout.
     pub fn split(
         axis: Axis,
@@ -598,6 +626,12 @@ impl DockArea {
         }
     }
 
+    pub fn center_panels(&self, cx: &App) -> Vec<Arc<dyn PanelView>> {
+        self.center_tab_panel()
+            .map(|tab_panel| tab_panel.read(cx).panels().to_vec())
+            .unwrap_or_default()
+    }
+
     /// Subscribe to the tiles item drag item drop event
     fn subscribe_tiles_item_drop(
         &mut self,
@@ -917,6 +951,40 @@ impl DockArea {
         }
     }
 
+    pub fn replace_active_preview_tab(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let DockItem::Tabs { items, view, .. } = &mut self.items else {
+            return false;
+        };
+
+        let active_index = view.read(cx).active_ix;
+        let can_replace = view
+            .read(cx)
+            .panels()
+            .get(active_index)
+            .is_some_and(|active| {
+                view.read(cx).is_tab_preview(active_index, cx)
+                    && !view.read(cx).is_tab_pinned(active_index, cx)
+                    && !active.has_unsaved_changes(cx)
+            });
+
+        if !can_replace {
+            return false;
+        }
+
+        if active_index < items.len() {
+            items[active_index] = panel.clone();
+        }
+
+        view.update(cx, |tab_panel, cx| {
+            tab_panel.replace_panel_at(active_index, panel, window, cx)
+        })
+    }
+
     /// Remove panel from the DockArea at the given placement.
     pub fn remove_panel(
         &mut self,
@@ -1006,16 +1074,14 @@ impl DockArea {
         match &self.items {
             DockItem::Tabs { view, .. } => view.update(cx, |tab_panel, cx| {
                 let active_ix = tab_panel.active_ix;
-                tab_panel.force_close_panel_at(active_ix, window, cx);
-                true
+                tab_panel.force_close_panel_at(active_ix, window, cx)
             }),
             DockItem::Split { items, .. } => {
                 for item in items {
                     if let DockItem::Tabs { view, .. } = item {
                         return view.update(cx, |tab_panel, cx| {
                             let active_ix = tab_panel.active_ix;
-                            tab_panel.force_close_panel_at(active_ix, window, cx);
-                            true
+                            tab_panel.force_close_panel_at(active_ix, window, cx)
                         });
                     }
                 }
@@ -1062,6 +1128,31 @@ impl DockArea {
         }
     }
 
+    pub fn activate_panel_by_id(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            return tab_panel.update(cx, |tp, cx| tp.activate_panel_by_id(panel_id, window, cx));
+        }
+
+        false
+    }
+
+    pub fn navigate_tab_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.navigate_back(window, cx));
+        }
+    }
+
+    pub fn navigate_tab_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.navigate_forward(window, cx));
+        }
+    }
+
     /// Close all tabs except the active one in the center dock area.
     pub fn close_other_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(tab_panel) = self.center_tab_panel() {
@@ -1078,6 +1169,103 @@ impl DockArea {
             tab_panel.update(cx, |tp, cx| {
                 let active = tp.active_ix;
                 tp.close_tabs_to_right(active, window, cx);
+            });
+        }
+    }
+
+    /// Close all tabs to the left of the active one in the center dock area.
+    pub fn close_tabs_to_left(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                let active = tp.active_ix;
+                tp.close_tabs_to_left(active, window, cx);
+            });
+        }
+    }
+
+    /// Close all clean tabs in the center dock area.
+    pub fn close_clean_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| tp.close_clean_tabs(window, cx));
+        }
+    }
+
+    pub fn toggle_pin_active_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                let active = tp.active_ix;
+                tp.toggle_pin_tab(active, cx);
+            });
+        }
+    }
+
+    pub fn set_pin_active_tab(&mut self, pinned: bool, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                let active = tp.active_ix;
+                tp.set_pin_tab(active, pinned, cx);
+            });
+        }
+    }
+
+    pub fn mark_active_tab_as_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                tp.set_preview_tab(Some(tp.active_ix), cx);
+            });
+        }
+    }
+
+    pub fn clear_active_tab_preview(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                if tp.is_tab_preview(tp.active_ix, cx) {
+                    tp.set_preview_tab(None, cx);
+                }
+            });
+        }
+    }
+
+    pub fn active_tab_is_pinned(&self, cx: &App) -> bool {
+        self.center_tab_panel().is_some_and(|tab_panel| {
+            let tab_panel = tab_panel.read(cx);
+            tab_panel.is_tab_pinned(tab_panel.active_ix, cx)
+        })
+    }
+
+    pub fn active_tab_is_preview(&self, cx: &App) -> bool {
+        self.center_tab_panel().is_some_and(|tab_panel| {
+            let tab_panel = tab_panel.read(cx);
+            tab_panel.is_tab_preview(tab_panel.active_ix, cx)
+        })
+    }
+
+    pub fn take_center_tab_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<dyn PanelView>> {
+        self.center_tab_panel().and_then(|tab_panel| {
+            tab_panel.update(cx, |tab_panel, cx| {
+                tab_panel.take_panel_at(index, window, cx)
+            })
+        })
+    }
+
+    pub fn center_tab_metadata(&self, cx: &App) -> Vec<TabMetadata> {
+        self.center_tab_panel()
+            .map(|tab_panel| tab_panel.read(cx).tab_metadata(cx))
+            .unwrap_or_default()
+    }
+
+    pub fn pin_active_preview_tab(&mut self, cx: &mut Context<Self>) {
+        if let Some(tab_panel) = self.center_tab_panel() {
+            tab_panel.update(cx, |tp, cx| {
+                if tp.is_tab_preview(tp.active_ix, cx) {
+                    let active = tp.active_ix;
+                    tp.toggle_pin_tab(active, cx);
+                }
             });
         }
     }

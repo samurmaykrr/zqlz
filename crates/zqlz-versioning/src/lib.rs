@@ -52,9 +52,11 @@ mod diff;
 mod import_export;
 mod object_types;
 mod repository;
+mod restore_planner;
 mod storage;
 pub mod sync;
 pub mod widgets;
+mod workflows;
 
 pub use diff::{Change, ChangeType, DiffEngine};
 pub use import_export::{
@@ -63,9 +65,17 @@ pub use import_export::{
 };
 pub use object_types::DatabaseObjectType;
 pub use repository::{CurrentDiff, VersionDiff, VersionEntry, VersionRepository};
+pub use restore_planner::{
+    RestoreApplyResult, RestorePlan, RestorePlanningResult, apply_restore_plan, build_restore_plan,
+    version_restore_commit_message,
+};
 pub use storage::{TrackedObject, VersionStorage, VersionTag, VersionedObjectInfo, make_object_id};
 pub use sync::{
     DatabaseObject, PullConnection, PullOptions, PullResult, PullStatus, PullSummary,
     PushConnection, PushOptions, PushResult, PushStatus, pull_all, pull_from_database, push_all,
     push_to_database,
+};
+pub use workflows::{
+    DiffWithParentResult, diff_version_with_parent, diff_versions, resolve_version_for_restore,
+    tag_version,
 };

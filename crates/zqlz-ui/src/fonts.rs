@@ -13,7 +13,7 @@
 //!
 //! Always use theme values for font families - never hard-code font names:
 //!
-//! ```rust
+//! ```rust,ignore
 //! // ✅ CORRECT: Use theme values
 //! .font_family(cx.theme().font_family.clone())     // UI text
 //! .font_family(cx.theme().mono_font_family.clone()) // Code/SQL text

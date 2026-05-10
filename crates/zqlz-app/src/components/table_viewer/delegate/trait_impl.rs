@@ -1,7 +1,26 @@
 use super::*;
+use zqlz_core::SqlTypeFamily;
 
 const ROW_NUMBER_SELECTION_TOOLTIP: &str =
     "Tip: Cmd/Ctrl+Click toggles multi-selection. Shift+Click selects a range.";
+
+fn icon_for_type_family(family: SqlTypeFamily) -> ZqlzIcon {
+    match family {
+        SqlTypeFamily::Text => ZqlzIcon::TextAa,
+        SqlTypeFamily::Number => ZqlzIcon::Hash,
+        SqlTypeFamily::Boolean => ZqlzIcon::ToggleLeft,
+        SqlTypeFamily::Temporal => ZqlzIcon::Clock,
+        SqlTypeFamily::Json => ZqlzIcon::BracketsCurly,
+        SqlTypeFamily::Binary => ZqlzIcon::Code,
+        SqlTypeFamily::Uuid => ZqlzIcon::Key,
+        SqlTypeFamily::Enum => ZqlzIcon::ListBullets,
+        SqlTypeFamily::Network => ZqlzIcon::Link,
+        SqlTypeFamily::Geometry => ZqlzIcon::Info,
+        SqlTypeFamily::Array => ZqlzIcon::ListNumbers,
+        SqlTypeFamily::Range => ZqlzIcon::ListBullets,
+        SqlTypeFamily::Unknown => ZqlzIcon::Info,
+    }
+}
 
 impl TableDelegate for TableViewerDelegate {
     fn columns_count(&self, _cx: &App) -> usize {
@@ -173,12 +192,15 @@ impl TableDelegate for TableViewerDelegate {
                                 div().flex_1().overflow_hidden().child(
                                     Select::new(fk_select)
                                         .w_full()
+                                        .h_full()
                                         .with_size(Size::Small)
                                         .appearance(false)
-                                        // Keep inline-edit geometry stable with non-edit cell rendering.
                                         .border_0()
                                         .focus_border(false)
-                                        .menu_min_width(px(180.))
+                                        .px_0()
+                                        .py_0()
+                                        .font_family(theme.font_family.clone())
+                                        .menu_min_width(px(260.))
                                         .placeholder(display_value),
                                 ),
                             ),
@@ -415,31 +437,76 @@ impl TableDelegate for TableViewerDelegate {
             .is_some_and(|m| self.primary_key_columns.contains(&m.name));
         let is_foreign_key = self.fk_by_column.contains_key(&data_col_ix);
         let is_nullable = meta.as_ref().is_some_and(|m| m.nullable);
+        let type_presentation = meta
+            .as_ref()
+            .map(|metadata| Self::type_presentation_for_meta(metadata));
 
         div()
             .size_full()
             .flex()
-            .items_center()
-            .gap_1()
-            .when(is_primary_key, |this| {
-                this.child(Icon::new(ZqlzIcon::Key).size_3().text_color(theme.warning))
-            })
-            .when(is_foreign_key, |this| {
+            .flex_col()
+            .justify_center()
+            .gap_0()
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .line_height(relative(1.0))
+                    .overflow_hidden()
+                    .when(is_primary_key, |this| {
+                        this.child(Icon::new(ZqlzIcon::Key).size_3().text_color(theme.warning))
+                    })
+                    .when(is_foreign_key, |this| {
+                        this.child(
+                            Icon::new(IconName::ExternalLink)
+                                .size_3()
+                                .text_color(theme.accent),
+                        )
+                    })
+                    .child(
+                        div()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child(column.name.clone()),
+                    )
+                    .when(is_nullable, |this| {
+                        this.child(
+                            Button::new(format!("nullable-column-{}", data_col_ix))
+                                .text()
+                                .xsmall()
+                                .label("∅")
+                                .tooltip("Nullable column")
+                                .text_color(theme.muted_foreground.opacity(0.6)),
+                        )
+                    }),
+            )
+            .when_some(type_presentation, |this, presentation| {
+                let tooltip = presentation.tooltip.clone();
                 this.child(
-                    Icon::new(IconName::ExternalLink)
-                        .size_3()
-                        .text_color(theme.accent),
-                )
-            })
-            .child(column.name.clone())
-            .when(is_nullable, |this| {
-                this.child(
-                    Button::new(format!("nullable-column-{}", data_col_ix))
-                        .text()
-                        .xsmall()
-                        .label("∅")
-                        .tooltip("Nullable column")
-                        .text_color(theme.muted_foreground.opacity(0.6)),
+                    div()
+                        .id(("column-type", data_col_ix))
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .overflow_hidden()
+                        .text_xs()
+                        .line_height(relative(1.0))
+                        .text_color(theme.muted_foreground)
+                        .child(
+                            Icon::new(icon_for_type_family(presentation.family))
+                                .size_3()
+                                .text_color(theme.muted_foreground),
+                        )
+                        .child(
+                            div()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .child(presentation.label),
+                        )
+                        .tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx)),
                 )
             })
             .into_any_element()

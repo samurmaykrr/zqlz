@@ -7,7 +7,7 @@ mod schema;
 mod ssh;
 mod tls;
 
-pub use connection::PostgresConnection;
+pub use connection::{PostgresConnectOptions, PostgresConnection};
 pub use dialect::postgres_dialect;
 pub use driver::PostgresDriver;
 pub use ssh::{PostgresSshTunnel, SshTunnelError};

@@ -3,9 +3,10 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use zqlz_core::{
-    CellUpdateRequest, ColumnInfo, ColumnMeta, Connection, DatabaseObject, ForeignKeyInfo,
-    IndexInfo, PrimaryKeyInfo, QueryResult, Result, Row, SchemaIntrospection, SqlObjectName,
-    StatementResult, TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
+    BindPlaceholderPolicy, CellUpdateRequest, ColumnInfo, ColumnMeta, Connection, ConnectionScope,
+    DatabaseObject, ForeignKeyInfo, IndexInfo, PrimaryKeyInfo, QueryResult,
+    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SqlObjectName, StatementResult,
+    TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
 };
 
 /// Mock connection for testing service-layer logic without a real database.
@@ -24,8 +25,16 @@ pub struct MockConnection {
     /// the corresponding result is returned instead of the default.
     pub query_responses: Vec<(String, QueryResult)>,
     pub query_count: Arc<parking_lot::Mutex<usize>>,
+    /// Counts column introspection calls so cache invalidation tests can verify
+    /// whether table details were regenerated after a refresh.
+    pub get_columns_count: Arc<parking_lot::Mutex<usize>>,
+    /// Counts DDL generation calls so cache invalidation tests can observe when
+    /// the service had to regenerate object DDL instead of serving cached data.
+    pub generate_ddl_count: Arc<parking_lot::Mutex<usize>>,
     /// Log of all SQL queries executed, for assertion in tests
     pub query_log: Arc<parking_lot::Mutex<Vec<String>>>,
+    /// Schema arguments passed to list_tables, for scope assertions.
+    pub list_tables_schemas: Arc<parking_lot::Mutex<Vec<Option<String>>>>,
 }
 
 impl MockConnection {
@@ -37,7 +46,10 @@ impl MockConnection {
             query_results: vec![],
             query_responses: vec![],
             query_count: Arc::new(parking_lot::Mutex::new(0)),
+            get_columns_count: Arc::new(parking_lot::Mutex::new(0)),
+            generate_ddl_count: Arc::new(parking_lot::Mutex::new(0)),
             query_log: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            list_tables_schemas: Arc::new(parking_lot::Mutex::new(Vec::new())),
         }
     }
 
@@ -73,8 +85,34 @@ impl MockConnection {
         *self.query_count.lock()
     }
 
+    #[allow(dead_code)]
+    pub fn get_columns_count(&self) -> usize {
+        *self.get_columns_count.lock()
+    }
+
+    #[allow(dead_code)]
+    pub fn generate_ddl_count(&self) -> usize {
+        *self.generate_ddl_count.lock()
+    }
+
     pub fn query_log(&self) -> Vec<String> {
         self.query_log.lock().clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn list_tables_schemas(&self) -> Vec<Option<String>> {
+        self.list_tables_schemas.lock().clone()
+    }
+
+    async fn current_scalar_string(&self, sql: &str) -> Result<Option<String>> {
+        let result = self.query(sql, &[]).await?;
+        Ok(result.rows.first().and_then(|row| {
+            row.values.first().and_then(|value| match value {
+                Value::String(value) => Some(value.clone()),
+                Value::Null => None,
+                other => Some(other.to_string()),
+            })
+        }))
     }
 }
 
@@ -82,6 +120,193 @@ impl MockConnection {
 impl Connection for MockConnection {
     fn driver_name(&self) -> &str {
         &self.driver
+    }
+
+    fn dialect_id(&self) -> Option<&'static str> {
+        match self.driver.as_str() {
+            "postgres" | "postgresql" => Some("postgresql"),
+            "mysql" => Some("mysql"),
+            "mssql" => Some("mssql"),
+            "sqlite" => Some("sqlite"),
+            "duckdb" => Some("duckdb"),
+            _ => None,
+        }
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match self.driver.as_str() {
+            "postgres" | "postgresql" | "mssql" => match scope {
+                ConnectionScope::Default => {
+                    resolved.normalized_scope = ConnectionScope::Default;
+                    resolved.effective_database = self.current_database_name().await?;
+                    resolved.effective_namespace = self.current_namespace_name().await?;
+                }
+                ConnectionScope::Database(database_name) => {
+                    let database_name = database_name.trim().to_string();
+                    resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                    resolved.effective_database = Some(database_name.clone());
+                    resolved.physical_database_key = Some(database_name);
+                    resolved.requires_dedicated_connection = true;
+                    resolved.effective_namespace = self.current_namespace_name().await?;
+                }
+                ConnectionScope::Namespace(namespace) => {
+                    let namespace = namespace.trim().to_string();
+                    resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                    resolved.effective_database = self.current_database_name().await?;
+                    resolved.effective_namespace = Some(namespace.clone());
+                    resolved.introspection_scope = Some(namespace);
+                }
+                ConnectionScope::KeyValueDatabase(index) => {
+                    resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+                }
+            },
+            "mysql" => match scope {
+                ConnectionScope::Default => {
+                    resolved.normalized_scope = ConnectionScope::Default;
+                    let database_name = self.current_database_name().await?;
+                    resolved.effective_database = database_name.clone();
+                    resolved.effective_namespace = database_name.clone();
+                    resolved.introspection_scope = database_name;
+                }
+                ConnectionScope::Database(database_name)
+                | ConnectionScope::Namespace(database_name) => {
+                    let database_name = database_name.trim().to_string();
+                    resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                    resolved.effective_database = Some(database_name.clone());
+                    resolved.effective_namespace = Some(database_name.clone());
+                    resolved.introspection_scope = Some(database_name);
+                }
+                ConnectionScope::KeyValueDatabase(index) => {
+                    resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+                }
+            },
+            "sqlite" | "duckdb" => match scope {
+                ConnectionScope::Default => {
+                    resolved.normalized_scope = ConnectionScope::Default;
+                    resolved.effective_database = Some("main".to_string());
+                    resolved.effective_namespace = Some("main".to_string());
+                    resolved.introspection_scope = Some("main".to_string());
+                }
+                ConnectionScope::Database(namespace) | ConnectionScope::Namespace(namespace) => {
+                    let namespace = namespace.trim().to_string();
+                    resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                    resolved.effective_database = Some(namespace.clone());
+                    resolved.effective_namespace = Some(namespace.clone());
+                    resolved.introspection_scope = Some(namespace);
+                }
+                ConnectionScope::KeyValueDatabase(index) => {
+                    resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+                }
+            },
+            _ => {
+                resolved.normalized_scope = scope;
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        match self.driver.as_str() {
+            "postgres" | "postgresql" => {
+                self.current_scalar_string("SELECT current_database()")
+                    .await
+            }
+            "mysql" => self.current_scalar_string("SELECT DATABASE()").await,
+            "mssql" => self.current_scalar_string("SELECT DB_NAME()").await,
+            "sqlite" | "duckdb" => Ok(Some("main".to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    async fn current_namespace_name(&self) -> Result<Option<String>> {
+        match self.driver.as_str() {
+            "postgres" | "postgresql" => {
+                self.current_scalar_string("SELECT current_schema()").await
+            }
+            "mysql" => self.current_scalar_string("SELECT DATABASE()").await,
+            "mssql" => self.current_scalar_string("SELECT SCHEMA_NAME()").await,
+            "sqlite" | "duckdb" => Ok(Some("main".to_string())),
+            _ => Ok(None),
+        }
+    }
+
+    fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+        match self.driver.as_str() {
+            "postgres" | "postgresql" => BindPlaceholderPolicy::DollarNumbered,
+            _ => BindPlaceholderPolicy::QuestionMark,
+        }
+    }
+
+    fn quote_identifier(&self, identifier: &str) -> String {
+        match self.driver.as_str() {
+            "mysql" => format!("`{}`", identifier.replace('`', "``")),
+            _ => {
+                let escaped_identifier = identifier.replace('"', "\"\"");
+                format!("\"{}\"", escaped_identifier)
+            }
+        }
+    }
+
+    fn paginated_select_sql(&self, base_sql: &str, limit: u64, offset: u64) -> String {
+        format!("{} LIMIT {} OFFSET {}", base_sql, limit, offset)
+    }
+
+    fn limited_select_sql(&self, base_sql: &str, limit: u64) -> String {
+        format!("{} LIMIT {}", base_sql, limit)
+    }
+
+    fn supports_fast_exact_count(&self) -> bool {
+        matches!(self.driver.as_str(), "mock" | "sqlite" | "duckdb")
+    }
+
+    fn should_use_ddl_column_fallback(&self, table_type: TableType, _error_message: &str) -> bool {
+        self.driver == "sqlite" && table_type == TableType::VirtualTable
+    }
+
+    async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
+        let result = match self.driver.as_str() {
+            "mysql" => {
+                self.query(
+                    "SELECT TABLE_ROWS FROM information_schema.TABLES WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? LIMIT 1",
+                    &[],
+                )
+                .await?
+            }
+            "postgres" | "postgresql" => {
+                let sql = if table_name.namespace.is_some() {
+                    "SELECT reltuples FROM pg_class JOIN pg_namespace ON pg_namespace.oid = pg_class.relnamespace WHERE pg_namespace.nspname = $1 AND pg_class.relname = $2"
+                } else {
+                    "SELECT reltuples FROM pg_class WHERE relname = $1"
+                };
+                self.query(sql, &[]).await?
+            }
+            "mssql" => {
+                self.query(
+                    "SELECT SUM(rows) FROM sys.partitions WHERE object_id = OBJECT_ID(@P1)",
+                    &[],
+                )
+                .await?
+            }
+            "clickhouse" => {
+                self.query(
+                    "SELECT total_rows FROM system.tables WHERE database = ? AND name = ?",
+                    &[],
+                )
+                .await?
+            }
+            _ => return Ok(None),
+        };
+
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.values.first())
+            .and_then(|value| value.as_i64())
+            .and_then(|value| u64::try_from(value).ok()))
     }
 
     async fn execute(&self, sql: &str, _params: &[Value]) -> Result<StatementResult> {
@@ -345,10 +570,14 @@ impl SchemaIntrospection for MockConnection {
         Ok(vec![])
     }
 
-    async fn list_tables(&self, _schema: Option<&str>) -> Result<Vec<TableInfo>> {
+    async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>> {
         if self.should_fail {
             return Err(ZqlzError::Schema("Failed to list tables".into()));
         }
+
+        self.list_tables_schemas
+            .lock()
+            .push(schema.map(ToOwned::to_owned));
 
         Ok(vec![
             TableInfo {
@@ -407,6 +636,8 @@ impl SchemaIntrospection for MockConnection {
         if self.should_fail {
             return Err(ZqlzError::Schema("Failed to get columns".into()));
         }
+
+        *self.get_columns_count.lock() += 1;
 
         match table {
             "users" => Ok(vec![
@@ -555,6 +786,7 @@ impl SchemaIntrospection for MockConnection {
     }
 
     async fn generate_ddl(&self, _object: &DatabaseObject) -> Result<String> {
+        *self.generate_ddl_count.lock() += 1;
         Ok("CREATE TABLE mock (id INTEGER);".to_string())
     }
 

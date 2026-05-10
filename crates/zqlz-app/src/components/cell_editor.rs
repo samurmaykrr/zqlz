@@ -21,6 +21,9 @@ use zqlz_ui::widgets::{
 };
 
 use super::TableViewerPanel;
+use crate::actions::{CancelCellEdit, FormatCellEdit, SaveCellEdit, ToggleCellEditorWordWrap};
+
+const CELL_EDITOR_CONTEXT: &str = "CellEditorPanel";
 
 fn parse_editor_value(input: Option<&str>, cell_data: &CellData) -> Value {
     match input {
@@ -71,6 +74,30 @@ enum BinaryViewMode {
     Hex,
     /// Decoded as UTF-8 text (if valid)
     Text,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EditorValueKind {
+    Text,
+    Number,
+    Boolean,
+    DateTime,
+    Json,
+    Array,
+    Enum,
+    Set,
+    Uuid,
+    Binary,
+    Special,
+}
+
+struct EditorTypeProfile {
+    kind: EditorValueKind,
+    label: &'static str,
+    icon: ZqlzIcon,
+    accent: Rgba,
+    placeholder: &'static str,
+    hint: &'static str,
 }
 
 /// Cell editor panel
@@ -296,6 +323,7 @@ impl CellEditorPanel {
         let value = cell_data.current_value.display_for_editor();
         let language = self.detect_language(&cell_data.column_type, &value);
         let is_json = self.is_json_column(&cell_data.column_type);
+        let placeholder = SharedString::from(Self::type_profile(&cell_data).placeholder);
 
         let formatted_value = if is_json {
             self.format_json(&value).unwrap_or(value)
@@ -308,7 +336,7 @@ impl CellEditorPanel {
             let mut input = InputState::new(window, cx)
                 .multi_line(true)
                 .soft_wrap(word_wrap)
-                .placeholder("Enter value...");
+                .placeholder(placeholder);
 
             if let Some(lang) = language {
                 tracing::info!("Enabling syntax highlighting for language: {}", lang);
@@ -369,17 +397,30 @@ impl CellEditorPanel {
     }
 
     fn is_json_column(&self, column_type: &str) -> bool {
-        let lower = column_type.to_lowercase();
-        lower.contains("json") || lower.contains("jsonb")
+        Value::is_json_data_type(column_type)
+    }
+
+    fn is_array_column(column_type: &str) -> bool {
+        Value::is_array_data_type(column_type)
     }
 
     fn normalized_column_type(column_type: &str) -> String {
-        column_type.trim().to_lowercase()
+        Value::normalize_data_type(column_type)
     }
 
     fn base_column_type(column_type: &str) -> String {
-        let lower = column_type.trim().to_lowercase();
-        let without_array = lower.strip_suffix("[]").unwrap_or(&lower);
+        let lower = Value::normalize_data_type(column_type);
+        let without_array = lower
+            .strip_suffix("[]")
+            .or_else(|| lower.strip_suffix("array"))
+            .unwrap_or(&lower);
+        let without_array = match without_array {
+            "string" => "text",
+            "integer" => "int4",
+            "bigint" => "int8",
+            "smallint" => "int2",
+            other => other,
+        };
         without_array
             .split_once('(')
             .map(|(base, _)| base)
@@ -411,7 +452,7 @@ impl CellEditorPanel {
 
     fn validation_hint(column_type: &str) -> Option<&'static str> {
         let normalized = Self::normalized_column_type(column_type);
-        if normalized.ends_with("[]") {
+        if normalized.ends_with("[]") || normalized.ends_with("array") {
             return Some("a JSON-style array like [1, 2, 3]");
         }
 
@@ -443,10 +484,72 @@ impl CellEditorPanel {
         }
     }
 
+    fn should_reject_string_fallback(column_type: &str, typed_value: &Value) -> bool {
+        (!Self::is_string_like_column(column_type) || Self::is_array_column(column_type))
+            && matches!(typed_value, Value::String(_))
+    }
+
+    fn validate_enum_or_set_value(cell_data: &CellData, typed_value: &Value) -> Result<(), String> {
+        let Some(enum_values) = cell_data.column_meta.enum_values.as_ref() else {
+            return Ok(());
+        };
+
+        if enum_values.is_empty() {
+            return Ok(());
+        }
+
+        let allowed = |value: &str| enum_values.iter().any(|allowed| allowed == value);
+        let invalid_value_message = |value: &str| {
+            format!(
+                "Invalid value for '{}'. Expected one of: {}. Got '{}'.",
+                cell_data.column_name,
+                enum_values.join(", "),
+                value
+            )
+        };
+
+        match typed_value {
+            Value::String(value) if Self::base_column_type(&cell_data.column_type) == "set" => {
+                for value in value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                {
+                    if !allowed(value) {
+                        return Err(invalid_value_message(value));
+                    }
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    let Value::String(value) = value else {
+                        return Err(format!(
+                            "Invalid value for '{}'. Expected a set of text values.",
+                            cell_data.column_name
+                        ));
+                    };
+
+                    if !allowed(value) {
+                        return Err(invalid_value_message(value));
+                    }
+                }
+            }
+            Value::String(value) if !allowed(value) => {
+                return Err(invalid_value_message(value));
+            }
+            _ => {}
+        }
+
+        Ok(())
+    }
+
     fn validate_typed_value(&self, cell_data: &CellData, value: &str) -> Result<Value, String> {
         let typed_value = parse_editor_value(Some(value), cell_data);
 
-        if typed_value.is_null() && !Self::is_string_like_column(&cell_data.column_type) {
+        if typed_value.is_null()
+            && (!Self::is_string_like_column(&cell_data.column_type)
+                || Self::is_array_column(&cell_data.column_type))
+        {
             if value.trim().is_empty() {
                 return Err(format!(
                     "Enter a value for '{}' or enable NULL.",
@@ -462,10 +565,7 @@ impl CellEditorPanel {
             }
         }
 
-        let should_reject_string_fallback = !Self::is_string_like_column(&cell_data.column_type)
-            && matches!(typed_value, Value::String(_));
-
-        if should_reject_string_fallback {
+        if Self::should_reject_string_fallback(&cell_data.column_type, &typed_value) {
             let detail = Self::validation_hint(&cell_data.column_type)
                 .map(|hint| format!("Expected {}.", hint))
                 .unwrap_or_else(|| format!("Expected a valid {} value.", cell_data.column_type));
@@ -475,6 +575,8 @@ impl CellEditorPanel {
                 cell_data.column_name, detail
             ));
         }
+
+        Self::validate_enum_or_set_value(cell_data, &typed_value)?;
 
         Ok(typed_value)
     }
@@ -502,7 +604,10 @@ impl CellEditorPanel {
     fn detect_language(&self, column_type: &str, value: &str) -> Option<&'static str> {
         let lower = column_type.to_lowercase();
 
-        if lower.contains("json") || lower.contains("jsonb") {
+        if self.is_json_column(column_type)
+            || Self::is_array_column(column_type)
+            || Self::base_column_type(column_type) == "set"
+        {
             return Some("json");
         }
         if lower.contains("xml") {
@@ -538,6 +643,126 @@ impl CellEditorPanel {
         }
 
         None
+    }
+
+    fn type_profile(cell_data: &CellData) -> EditorTypeProfile {
+        let base_type = Self::base_column_type(&cell_data.column_type);
+        let has_enum_values = cell_data
+            .column_meta
+            .enum_values
+            .as_ref()
+            .is_some_and(|values| !values.is_empty());
+
+        if cell_data.raw_bytes.is_some() {
+            return EditorTypeProfile {
+                kind: EditorValueKind::Binary,
+                label: "Binary",
+                icon: ZqlzIcon::Code,
+                accent: rgb(0x8b5cf6),
+                placeholder: "Binary value",
+                hint: "Hex and decoded text preview",
+            };
+        }
+
+        if has_enum_values && base_type == "set" {
+            return EditorTypeProfile {
+                kind: EditorValueKind::Set,
+                label: "Set",
+                icon: ZqlzIcon::ListBullets,
+                accent: rgb(0x0d9488),
+                placeholder: "[\"read\", \"write\"]",
+                hint: "JSON array or comma-separated set values",
+            };
+        }
+
+        if has_enum_values || base_type == "enum" {
+            return EditorTypeProfile {
+                kind: EditorValueKind::Enum,
+                label: "Enum",
+                icon: ZqlzIcon::ListBullets,
+                accent: rgb(0x7c3aed),
+                placeholder: "Select or type an allowed value",
+                hint: "Must match one allowed value",
+            };
+        }
+
+        if Self::is_array_column(&cell_data.column_type) {
+            return EditorTypeProfile {
+                kind: EditorValueKind::Array,
+                label: "Array",
+                icon: ZqlzIcon::BracketsCurly,
+                accent: rgb(0x2563eb),
+                placeholder: "[\"one\", \"two\"]",
+                hint: "JSON-style array; null elements allowed",
+            };
+        }
+
+        if Value::is_json_data_type(&cell_data.column_type) {
+            return EditorTypeProfile {
+                kind: EditorValueKind::Json,
+                label: "JSON",
+                icon: ZqlzIcon::BracketsCurly,
+                accent: rgb(0x2563eb),
+                placeholder: "{\"key\": \"value\"}",
+                hint: "Valid JSON object, array, string, number, bool, or null",
+            };
+        }
+
+        match base_type.as_str() {
+            "bool" | "boolean" => EditorTypeProfile {
+                kind: EditorValueKind::Boolean,
+                label: "Boolean",
+                icon: ZqlzIcon::ToggleLeft,
+                accent: rgb(0x16a34a),
+                placeholder: "true",
+                hint: "Accepts true/false, yes/no, 1/0",
+            },
+            "int2" | "smallint" | "smallserial" | "int4" | "integer" | "int" | "mediumint"
+            | "serial" | "int8" | "bigint" | "bigserial" | "tinyint" | "float4" | "real"
+            | "float" | "float8" | "double precision" | "double" | "numeric" | "decimal"
+            | "money" => EditorTypeProfile {
+                kind: EditorValueKind::Number,
+                label: "Number",
+                icon: ZqlzIcon::Hash,
+                accent: rgb(0xea580c),
+                placeholder: "123",
+                hint: "Numeric value",
+            },
+            "date" | "time" | "timetz" | "timestamp" | "datetime" | "timestamptz" => {
+                EditorTypeProfile {
+                    kind: EditorValueKind::DateTime,
+                    label: "Date/Time",
+                    icon: ZqlzIcon::Clock,
+                    accent: rgb(0x0891b2),
+                    placeholder: "2024-03-15 14:30:00",
+                    hint: "Date/time string accepted by database",
+                }
+            }
+            "uuid" => EditorTypeProfile {
+                kind: EditorValueKind::Uuid,
+                label: "UUID",
+                icon: ZqlzIcon::Key,
+                accent: rgb(0x9333ea),
+                placeholder: "550e8400-e29b-41d4-a716-446655440000",
+                hint: "Canonical UUID",
+            },
+            _ if Value::requires_string_round_trip(&cell_data.column_type) => EditorTypeProfile {
+                kind: EditorValueKind::Special,
+                label: "Special",
+                icon: ZqlzIcon::Info,
+                accent: rgb(0x64748b),
+                placeholder: "Database literal",
+                hint: "Saved as typed database literal",
+            },
+            _ => EditorTypeProfile {
+                kind: EditorValueKind::Text,
+                label: "Text",
+                icon: ZqlzIcon::TextAa,
+                accent: rgb(0x64748b),
+                placeholder: "Enter text",
+                hint: "Plain text",
+            },
+        }
     }
 
     fn format_json(&self, value: &str) -> Option<String> {
@@ -712,12 +937,70 @@ impl CellEditorPanel {
         cx.notify();
     }
 
+    fn save_if_modified(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cell_data.is_none() || !self.has_modifications(cx) {
+            return;
+        }
+
+        self.save(window, cx);
+    }
+
     fn cancel(&mut self, cx: &mut Context<Self>) {
         self.cell_data = None;
         self.is_modified = false;
         self.validation_error = None;
         cx.emit(CellEditorEvent::Cancelled);
         cx.notify();
+    }
+
+    fn toggle_word_wrap(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.word_wrap = !self.word_wrap;
+        self.editor_input.update(cx, |input, cx| {
+            input.set_soft_wrap(self.word_wrap, window, cx);
+        });
+        cx.notify();
+    }
+
+    fn on_action_save_cell_edit(
+        &mut self,
+        _: &SaveCellEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.save_if_modified(window, cx);
+    }
+
+    fn on_action_cancel_cell_edit(
+        &mut self,
+        _: &CancelCellEdit,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cell_data.is_some() {
+            self.cancel(cx);
+        }
+    }
+
+    fn on_action_format_cell_edit(
+        &mut self,
+        _: &FormatCellEdit,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cell_data.is_some() && !self.is_null {
+            self.auto_format(window, cx);
+        }
+    }
+
+    fn on_action_toggle_word_wrap(
+        &mut self,
+        _: &ToggleCellEditorWordWrap,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.cell_data.is_some() {
+            self.toggle_word_wrap(window, cx);
+        }
     }
 
     pub fn clear(&mut self, cx: &mut Context<Self>) {
@@ -785,9 +1068,31 @@ impl CellEditorPanel {
             .child(label)
     }
 
+    fn render_type_badge(profile: &EditorTypeProfile, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        h_flex()
+            .gap_1()
+            .items_center()
+            .px_1p5()
+            .py_0p5()
+            .rounded_sm()
+            .bg(theme.muted)
+            .border_1()
+            .border_color(theme.border.opacity(0.55))
+            .child(Icon::new(profile.icon).size_3().text_color(profile.accent))
+            .child(
+                div()
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(profile.accent)
+                    .child(profile.label),
+            )
+    }
+
     fn render_header(&self, cell_data: &CellData, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let is_binary = cell_data.raw_bytes.is_some();
+        let profile = Self::type_profile(cell_data);
         let detected_language = if is_binary {
             None
         } else {
@@ -799,9 +1104,11 @@ impl CellEditorPanel {
             .child(
                 h_flex()
                     .gap_2()
-                    .items_center()
+                    .items_start()
+                    .flex_wrap()
                     .child(
                         div()
+                            .min_w_0()
                             .text_sm()
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(theme.foreground)
@@ -810,6 +1117,7 @@ impl CellEditorPanel {
                                 cell_data.table_name, cell_data.column_name
                             )),
                     )
+                    .child(Self::render_type_badge(&profile, cx))
                     .when(is_binary, |this| this.child(Self::render_binary_badge(cx)))
                     .when_some(detected_language, |this, lang| {
                         this.child(Self::render_language_badge(lang))
@@ -817,9 +1125,15 @@ impl CellEditorPanel {
             )
             .child(
                 div()
+                    .min_w_0()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child(format!("Type: {}", cell_data.column_type)),
+                    .child(format!(
+                        "Type: {} · row {} · column {}",
+                        cell_data.column_type,
+                        cell_data.row_index + 1,
+                        cell_data.col_index + 1
+                    )),
             )
     }
 
@@ -872,7 +1186,7 @@ impl CellEditorPanel {
         Button::new("format-json")
             .icon(Icon::new(ZqlzIcon::BracketsCurly).size_4())
             .ghost()
-            .tooltip("Format JSON")
+            .tooltip_with_action("Format JSON", &FormatCellEdit, Some(CELL_EDITOR_CONTEXT))
             .on_click(cx.listener(|this, _, window, cx| {
                 this.format_json_in_editor(window, cx);
             }))
@@ -882,7 +1196,11 @@ impl CellEditorPanel {
         Button::new("auto-format")
             .icon(Icon::new(ZqlzIcon::MagicWand).size_4())
             .ghost()
-            .tooltip("Auto Format (JSON/SQL)")
+            .tooltip_with_action(
+                "Auto Format (JSON/SQL)",
+                &FormatCellEdit,
+                Some(CELL_EDITOR_CONTEXT),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
                 this.auto_format(window, cx);
             }))
@@ -899,64 +1217,235 @@ impl CellEditorPanel {
             } else {
                 ButtonVariant::Ghost
             })
-            .tooltip(if is_wrapped {
-                "Disable Word Wrap"
-            } else {
-                "Enable Word Wrap"
-            })
+            .tooltip_with_action(
+                if is_wrapped {
+                    "Disable Word Wrap"
+                } else {
+                    "Enable Word Wrap"
+                },
+                &ToggleCellEditorWordWrap,
+                Some(CELL_EDITOR_CONTEXT),
+            )
             .on_click(cx.listener(|this, _, window, cx| {
-                this.word_wrap = !this.word_wrap;
-                this.editor_input.update(cx, |input, cx| {
-                    input.set_soft_wrap(this.word_wrap, window, cx);
-                });
-                cx.notify();
+                this.toggle_word_wrap(window, cx);
             }))
     }
 
     fn render_format_toolbar(
         &self,
-        is_json_column: bool,
+        profile: &EditorTypeProfile,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
+        let show_json_formatter = matches!(
+            profile.kind,
+            EditorValueKind::Json | EditorValueKind::Array | EditorValueKind::Set
+        );
         h_flex()
             .gap_1()
-            .when(is_json_column, |this| {
+            .when(show_json_formatter, |this| {
                 this.child(self.render_format_json_button(cx))
             })
-            .when(!is_json_column, |this| {
+            .when(!show_json_formatter, |this| {
                 this.child(self.render_auto_format_button(cx))
             })
             .child(self.render_word_wrap_button(cx))
     }
 
+    fn render_allowed_values(
+        &self,
+        cell_data: &CellData,
+        cx: &Context<Self>,
+    ) -> Option<impl IntoElement> {
+        let values = cell_data.column_meta.enum_values.as_ref()?;
+        if values.is_empty() {
+            return None;
+        }
+
+        let theme = cx.theme();
+        Some(
+            h_flex()
+                .gap_1()
+                .items_center()
+                .flex_wrap()
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Allowed"),
+                )
+                .children(values.iter().take(8).map(|value| {
+                    div()
+                        .px_1p5()
+                        .py_0p5()
+                        .rounded_sm()
+                        .bg(theme.muted)
+                        .border_1()
+                        .border_color(theme.border.opacity(0.45))
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.foreground)
+                        .child(value.clone())
+                }))
+                .when(values.len() > 8, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("+{}", values.len() - 8)),
+                    )
+                }),
+        )
+    }
+
+    fn render_editor_guidance(
+        &self,
+        cell_data: &CellData,
+        profile: &EditorTypeProfile,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let theme = cx.theme();
+        v_flex()
+            .gap_1()
+            .p_2()
+            .rounded_md()
+            .border_1()
+            .border_color(theme.border.opacity(0.55))
+            .bg(theme.muted.opacity(0.35))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_start()
+                    .flex_wrap()
+                    .child(Icon::new(profile.icon).size_3().text_color(profile.accent))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(180.0))
+                            .text_xs()
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(theme.foreground)
+                            .child(profile.hint),
+                    )
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(if cell_data.column_meta.nullable {
+                                "Nullable"
+                            } else {
+                                "Required"
+                            }),
+                    ),
+            )
+            .when_some(self.render_allowed_values(cell_data, cx), |this, values| {
+                this.child(values)
+            })
+    }
+
+    fn render_value_status(&self, cell_data: &CellData, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let has_modifications = self.has_modifications(cx);
+        let profile = Self::type_profile(cell_data);
+        let status_label = if self.is_null {
+            "NULL"
+        } else if has_modifications {
+            "Unsaved"
+        } else {
+            "Saved"
+        };
+        let status_color = if self.is_null {
+            theme.muted_foreground
+        } else if has_modifications {
+            theme.warning
+        } else {
+            theme.success
+        };
+
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(Icon::new(profile.icon).size_3().text_color(profile.accent))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(profile.label),
+                    ),
+            )
+            .child(
+                div()
+                    .px_1p5()
+                    .py_0p5()
+                    .rounded_sm()
+                    .bg(status_color.opacity(0.12))
+                    .text_xs()
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(status_color)
+                    .child(status_label),
+            )
+    }
+
     fn render_input_area(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         if self.is_null {
-            div().flex_1().w_full().child(
-                div()
-                    .w_full()
-                    .p_2()
-                    .rounded_md()
-                    .bg(theme.muted)
-                    .text_color(theme.muted_foreground)
-                    .child("Value is NULL"),
-            )
+            div()
+                .flex_1()
+                .w_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    div()
+                        .p_4()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(theme.border.opacity(0.5))
+                        .bg(theme.muted)
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("Value is NULL"),
+                )
         } else {
             div()
                 .flex_1()
                 .w_full()
                 .flex()
                 .flex_col()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .overflow_hidden()
                 .child(Input::new(&self.editor_input).w_full().h_full())
         }
     }
 
     fn render_validation_error(&self, cx: &Context<Self>) -> Option<impl IntoElement> {
         self.validation_error.as_ref().map(|error| {
-            div()
-                .text_xs()
-                .text_color(cx.theme().danger)
-                .child(error.clone())
+            let theme = cx.theme();
+            h_flex()
+                .gap_2()
+                .items_start()
+                .flex_wrap()
+                .p_2()
+                .rounded_md()
+                .border_1()
+                .border_color(theme.danger.opacity(0.35))
+                .bg(theme.danger.opacity(0.10))
+                .child(Icon::new(ZqlzIcon::Info).size_3().text_color(theme.danger))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(180.0))
+                        .text_xs()
+                        .text_color(theme.danger)
+                        .child(error.clone()),
+                )
         })
     }
 
@@ -969,6 +1458,11 @@ impl CellEditorPanel {
                 Button::new("cancel-edit")
                     .secondary_primary()
                     .label("Cancel")
+                    .tooltip_with_action(
+                        "Cancel cell edit",
+                        &CancelCellEdit,
+                        Some(CELL_EDITOR_CONTEXT),
+                    )
                     .on_click(cx.listener(|this, _, _window, cx| {
                         this.cancel(cx);
                     })),
@@ -978,8 +1472,9 @@ impl CellEditorPanel {
                     .label("Save")
                     .primary()
                     .disabled(!has_modifications)
+                    .tooltip_with_action("Save cell edit", &SaveCellEdit, Some(CELL_EDITOR_CONTEXT))
                     .on_click(cx.listener(|this, _, window, cx| {
-                        this.save(window, cx);
+                        this.save_if_modified(window, cx);
                     })),
             )
     }
@@ -1395,7 +1890,7 @@ impl CellEditorPanel {
         }
 
         // Normal text editing
-        let is_json = self.is_json_column(&cell_data.column_type);
+        let profile = Self::type_profile(&cell_data);
         let show_format_toolbar = !self.is_null;
 
         v_flex()
@@ -1403,14 +1898,21 @@ impl CellEditorPanel {
             .gap_3()
             .p_3()
             .child(self.render_header(&cell_data, cx))
+            .child(self.render_editor_guidance(&cell_data, &profile, cx))
             .child(
                 h_flex()
-                    .gap_4()
+                    .gap_3()
                     .items_center()
+                    .flex_wrap()
                     .child(self.render_null_checkbox(cx))
                     .when(show_format_toolbar, |this| {
-                        this.child(self.render_format_toolbar(is_json, cx))
-                    }),
+                        this.child(self.render_format_toolbar(&profile, cx))
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .child(self.render_value_status(&cell_data, cx)),
+                    ),
             )
             .child(self.render_input_area(cx))
             .when_some(self.render_validation_error(cx), |this, error| {
@@ -1441,7 +1943,12 @@ impl Render for CellEditorPanel {
 
         v_flex()
             .id("cell-editor-panel")
+            .key_context(CELL_EDITOR_CONTEXT)
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::on_action_save_cell_edit))
+            .on_action(cx.listener(Self::on_action_cancel_cell_edit))
+            .on_action(cx.listener(Self::on_action_format_cell_edit))
+            .on_action(cx.listener(Self::on_action_toggle_word_wrap))
             .size_full()
             .bg(theme.background)
             .child(self.render_editor(window, cx))
@@ -1473,5 +1980,95 @@ impl Panel for CellEditorPanel {
 
     fn closable(&self, _cx: &App) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{CellData, CellEditorPanel};
+    use uuid::Uuid;
+    use zqlz_core::{ColumnMeta, Value};
+
+    fn cell_data(column_type: &str, enum_values: Option<Vec<String>>) -> CellData {
+        CellData {
+            table_name: "items".to_string(),
+            column_name: "status".to_string(),
+            column_type: column_type.to_string(),
+            column_meta: ColumnMeta {
+                name: "status".to_string(),
+                data_type: column_type.to_string(),
+                nullable: true,
+                ordinal: 0,
+                max_length: None,
+                precision: None,
+                scale: None,
+                auto_increment: false,
+                default_value: None,
+                comment: None,
+                enum_values,
+            },
+            current_value: Value::Null,
+            row_index: 0,
+            col_index: 0,
+            connection_id: Uuid::nil(),
+            all_row_values: vec![],
+            all_column_names: vec![],
+            all_column_types: vec![],
+            raw_bytes: None,
+        }
+    }
+
+    #[test]
+    fn text_array_validation_accepts_array_and_rejects_string_fallback() {
+        assert!(CellEditorPanel::is_array_column("TextArray"));
+        assert!(!CellEditorPanel::should_reject_string_fallback(
+            "TextArray",
+            &Value::Array(vec![Value::String("one".to_string())])
+        ));
+        assert!(CellEditorPanel::should_reject_string_fallback(
+            "TextArray",
+            &Value::String("[not valid".to_string())
+        ));
+    }
+
+    #[test]
+    fn enum_and_set_validation_uses_allowed_values() {
+        let enum_cell = cell_data(
+            "enum",
+            Some(vec!["draft".to_string(), "published".to_string()]),
+        );
+        assert!(
+            CellEditorPanel::validate_enum_or_set_value(
+                &enum_cell,
+                &Value::String("draft".to_string())
+            )
+            .is_ok()
+        );
+        assert!(
+            CellEditorPanel::validate_enum_or_set_value(
+                &enum_cell,
+                &Value::String("archived".to_string())
+            )
+            .is_err()
+        );
+
+        let set_cell = cell_data("set", Some(vec!["read".to_string(), "write".to_string()]));
+        assert!(
+            CellEditorPanel::validate_enum_or_set_value(
+                &set_cell,
+                &Value::Array(vec![
+                    Value::String("read".to_string()),
+                    Value::String("write".to_string())
+                ])
+            )
+            .is_ok()
+        );
+        assert!(
+            CellEditorPanel::validate_enum_or_set_value(
+                &set_cell,
+                &Value::Array(vec![Value::String("delete".to_string())])
+            )
+            .is_err()
+        );
     }
 }

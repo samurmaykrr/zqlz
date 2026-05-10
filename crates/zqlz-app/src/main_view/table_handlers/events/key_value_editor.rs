@@ -8,118 +8,37 @@
 //! - Syncing field changes between row editor and table grid
 
 use gpui::*;
-use std::sync::Arc;
-use zqlz_core::{Connection, StatementResult, Value};
+use zqlz_core::{KeyValueDeleteRequest, KeyValueKind, KeyValueSaveRequest, Value};
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::components::{KeyValueEditorEvent, RedisValueType, TableViewerPanel};
 use crate::main_view::MainView;
-use crate::main_view::table_handlers_utils::{
-    conversion::resolve_schema_qualifier, formatting::escape_redis_value,
-};
+use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
+use crate::workspace::WorkspaceController;
 
-async fn execute_redis_command(
-    connection: &Arc<dyn Connection>,
-    command: String,
-) -> anyhow::Result<StatementResult> {
-    connection.execute(&command, &[]).await.map_err(Into::into)
-}
-
-fn empty_collection_save_error(value_type: RedisValueType) -> anyhow::Error {
-    anyhow::anyhow!(match value_type {
-        RedisValueType::List => {
-            "Cannot save an empty Redis list. Add an element or delete the key explicitly."
-        }
-        RedisValueType::Set => {
-            "Cannot save an empty Redis set. Add an element or delete the key explicitly."
-        }
-        RedisValueType::ZSet => {
-            "Cannot save an empty Redis sorted set. Add a member or delete the key explicitly."
-        }
-        RedisValueType::Hash => {
-            "Cannot save an empty Redis hash. Add a field or delete the key explicitly."
-        }
-        _ => "Cannot save an empty Redis collection.",
-    })
-}
-
-fn parse_collection_items(new_value: &str) -> Vec<String> {
-    if new_value.trim().starts_with('[') {
-        serde_json::from_str(new_value)
-            .unwrap_or_else(|_| new_value.lines().map(|value| value.to_string()).collect())
-    } else {
-        new_value.lines().map(|value| value.to_string()).collect()
+fn map_redis_value_type(value_type: RedisValueType) -> KeyValueKind {
+    match value_type {
+        RedisValueType::String => KeyValueKind::String,
+        RedisValueType::List => KeyValueKind::List,
+        RedisValueType::Set => KeyValueKind::Set,
+        RedisValueType::ZSet => KeyValueKind::ZSet,
+        RedisValueType::Hash => KeyValueKind::Hash,
+        RedisValueType::Stream => KeyValueKind::Stream,
+        RedisValueType::Json => KeyValueKind::Json,
     }
 }
 
-fn parse_zset_items(new_value: &str) -> anyhow::Result<Vec<(f64, String)>> {
-    let value = serde_json::from_str::<serde_json::Value>(new_value)?;
-
-    if let Some(map) = value.as_object() {
-        let mut items = Vec::with_capacity(map.len());
-        for (member, score_value) in map {
-            let score = score_value.as_f64().ok_or_else(|| {
-                anyhow::anyhow!("Invalid sorted set score for '{}': {}", member, score_value)
-            })?;
-            if !score.is_finite() {
-                return Err(anyhow::anyhow!(
-                    "Invalid sorted set score for '{}': {}",
-                    member,
-                    score_value
-                ));
-            }
-            items.push((score, member.clone()));
-        }
-        return Ok(items);
+fn refresh_active_table_viewer(workspace_controller: &Entity<WorkspaceController>, cx: &mut App) {
+    if let Some(viewer) = workspace_controller
+        .read(cx)
+        .active_center_view::<TableViewerPanel>(cx)
+    {
+        viewer.update(cx, |viewer, cx| {
+            viewer.refresh(cx);
+        });
     }
-
-    if let Some(array) = value.as_array() {
-        let mut items = Vec::new();
-        for chunk in array.chunks(2) {
-            if chunk.len() != 2 {
-                return Err(anyhow::anyhow!(
-                    "Invalid sorted set payload: expected score/member pairs"
-                ));
-            }
-
-            let score = chunk[0]
-                .as_f64()
-                .ok_or_else(|| anyhow::anyhow!("Invalid sorted set score: {}", chunk[0]))?;
-            if !score.is_finite() {
-                return Err(anyhow::anyhow!("Invalid sorted set score: {}", chunk[0]));
-            }
-
-            let member = chunk[1]
-                .as_str()
-                .ok_or_else(|| anyhow::anyhow!("Invalid sorted set member: {}", chunk[1]))?;
-            items.push((score, member.to_string()));
-        }
-        return Ok(items);
-    }
-
-    Err(anyhow::anyhow!(
-        "Invalid sorted set payload: expected JSON object or array"
-    ))
-}
-
-fn parse_hash_fields(new_value: &str) -> anyhow::Result<Vec<(String, String)>> {
-    let value = serde_json::from_str::<serde_json::Value>(new_value)?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| anyhow::anyhow!("Invalid hash payload: expected JSON object"))?;
-
-    Ok(object
-        .iter()
-        .map(|(field, value)| {
-            let value = match value {
-                serde_json::Value::String(string) => string.clone(),
-                _ => value.to_string(),
-            };
-            (field.clone(), value)
-        })
-        .collect())
 }
 
 impl MainView {
@@ -163,171 +82,73 @@ impl MainView {
                 };
 
                 let connection = connection.clone();
+                let key_value_service = app_state.key_value_service.clone();
                 let key = new_key.clone();
-                let dock_area = self.dock_area.clone();
+                let workspace_controller = self.workspace_controller.clone();
+                let key_value_editor_panel = self.key_value_editor_panel.clone();
                 let window_handle = window.window_handle();
+                let redis_value_type = map_redis_value_type(value_type);
+                let original_key_for_status = original_key.clone();
+                let new_key_for_status = new_key.clone();
+                let new_value_for_status = new_value.clone();
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    let escaped_key = escape_redis_value(&key);
-                    let temporary_key =
-                        format!("__zqlz_tmp__:{}:{}", connection_id, uuid::Uuid::new_v4());
-                    let escaped_temporary_key = escape_redis_value(&temporary_key);
-
-                    let temp_key_created = match value_type {
-                        RedisValueType::String | RedisValueType::Json => {
-                            let cmd = format!(
-                                "SET {} {}",
-                                escaped_temporary_key,
-                                escape_redis_value(&new_value)
-                            );
-                            execute_redis_command(&connection, cmd).await?;
-                            true
-                        }
-                        RedisValueType::List => {
-                            let items = parse_collection_items(&new_value);
-
-                            if !items.is_empty() {
-                                let escaped_items: Vec<String> =
-                                    items.iter().map(|i| escape_redis_value(i)).collect();
-                                let cmd = format!(
-                                    "RPUSH {} {}",
-                                    escaped_temporary_key,
-                                    escaped_items.join(" ")
-                                );
-                                execute_redis_command(&connection, cmd).await?;
-                                true
-                            } else {
-                                return Err(empty_collection_save_error(value_type));
-                            }
-                        }
-                        RedisValueType::Set => {
-                            let items = parse_collection_items(&new_value);
-
-                            if !items.is_empty() {
-                                let escaped_items: Vec<String> =
-                                    items.iter().map(|i| escape_redis_value(i)).collect();
-                                let cmd = format!(
-                                    "SADD {} {}",
-                                    escaped_temporary_key,
-                                    escaped_items.join(" ")
-                                );
-                                execute_redis_command(&connection, cmd).await?;
-                                true
-                            } else {
-                                return Err(empty_collection_save_error(value_type));
-                            }
-                        }
-                        RedisValueType::ZSet => {
-                            let items = parse_zset_items(&new_value)?;
-
-                            if !items.is_empty() {
-                                let args: Vec<String> = items
-                                    .iter()
-                                    .flat_map(|(score, member)| {
-                                        vec![score.to_string(), escape_redis_value(member)]
-                                    })
-                                    .collect();
-                                let cmd =
-                                    format!("ZADD {} {}", escaped_temporary_key, args.join(" "));
-                                execute_redis_command(&connection, cmd).await?;
-                                true
-                            } else {
-                                return Err(empty_collection_save_error(value_type));
-                            }
-                        }
-                        RedisValueType::Hash => {
-                            let fields = parse_hash_fields(&new_value)?;
-
-                            if !fields.is_empty() {
-                                let args: Vec<String> = fields
-                                    .iter()
-                                    .flat_map(|(k, v)| {
-                                        vec![escape_redis_value(k), escape_redis_value(v)]
-                                    })
-                                    .collect();
-                                let cmd =
-                                    format!("HSET {} {}", escaped_temporary_key, args.join(" "));
-                                execute_redis_command(&connection, cmd).await?;
-                                true
-                            } else {
-                                return Err(empty_collection_save_error(value_type));
-                            }
-                        }
-                        RedisValueType::Stream => {
-                            let cmd = format!(
-                                "XADD {} * message {}",
-                                escaped_temporary_key,
-                                escape_redis_value(&new_value)
-                            );
-                            execute_redis_command(&connection, cmd).await?;
-                            true
-                        }
-                    };
-
-                    let result: anyhow::Result<()> = if temp_key_created {
-                        match new_ttl {
-                            Some(ttl) => {
-                                execute_redis_command(
-                                    &connection,
-                                    format!("EXPIRE {} {}", escaped_temporary_key, ttl),
-                                )
-                                .await?;
-                            }
-                            None => {
-                                execute_redis_command(
-                                    &connection,
-                                    format!("PERSIST {}", escaped_temporary_key),
-                                )
-                                .await?;
-                            }
-                        }
-
-                        execute_redis_command(
-                            &connection,
-                            format!("RENAME {} {}", escaped_temporary_key, escaped_key),
+                    let temporary_key = format!(
+                        "__zqlz_tmp__:{}:{}",
+                        connection_id,
+                        uuid::Uuid::new_v4()
+                    );
+                    let result = key_value_service
+                        .save_key(
+                            connection,
+                            KeyValueSaveRequest {
+                                original_key,
+                                new_key,
+                                kind: redis_value_type,
+                                serialized_value: new_value,
+                                ttl_seconds: new_ttl,
+                                temporary_key,
+                            },
                         )
-                        .await?;
-
-                        if is_rename {
-                            let escaped_original_key = escape_redis_value(&original_key);
-                            execute_redis_command(
-                                &connection,
-                                format!("DEL {}", escaped_original_key),
-                            )
-                            .await?;
-                        }
-
-                        Ok(())
-                    } else {
-                        Ok(())
-                    };
+                        .await;
 
                     match result {
-                        Ok(_) => {
+                        Ok(_outcome) => {
                             tracing::info!("Redis key '{}' updated successfully", key);
-                            // Refresh the active TableViewer to show updated data
-                            _ = dock_area.update_in(cx, |dock_area, _window, cx| {
-                                if let Some(panel) = dock_area.active_panel(cx)
-                                    && panel.panel_name(cx) == "TableViewer"
-                                    && let Ok(viewer) = panel.view().downcast::<TableViewerPanel>()
-                                {
-                                    viewer.update(cx, |viewer, cx| {
-                                        viewer.refresh(cx);
-                                    });
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to update Redis key '{}': {}", key, e);
-                            _ = cx.update_window(window_handle, |_, window, cx| {
-                                window.push_notification(
-                                    Notification::error(format!(
-                                        "Failed to update Redis key '{}': {}",
-                                        key, e
-                                    )),
+                            key_value_editor_panel.update(cx, |editor, cx| {
+                                editor.mark_redis_save_succeeded(
+                                    &original_key_for_status,
+                                    new_key_for_status,
+                                    value_type,
+                                    new_value_for_status,
+                                    new_ttl,
                                     cx,
                                 );
                             });
+                            cx.update(|_window, cx| {
+                                refresh_active_table_viewer(&workspace_controller, cx);
+                            })?;
+                        }
+                        Err(error) => {
+                            tracing::error!("Failed to update Redis key '{}': {}", key, error);
+                            key_value_editor_panel.update(cx, |editor, cx| {
+                                editor.mark_redis_save_failed(
+                                    &original_key_for_status,
+                                    error.to_string(),
+                                    cx,
+                                );
+                            });
+                            if let Err(update_error) = cx.update_window(window_handle, |_, window, cx| {
+                                window.push_notification(
+                                    Notification::error(format!(
+                                        "Failed to update Redis key '{}': {}",
+                                        key, error
+                                    )),
+                                    cx,
+                                );
+                            }) {
+                                tracing::warn!(%update_error, "Failed to show Redis key save error notification");
+                            }
                         }
                     }
 
@@ -359,35 +180,53 @@ impl MainView {
                 };
 
                 let connection = connection.clone();
+                let key_value_service = app_state.key_value_service.clone();
                 let key_for_delete = key.clone();
-                let dock_area = self.dock_area.clone();
+                let workspace_controller = self.workspace_controller.clone();
+                let key_value_editor_panel = self.key_value_editor_panel.clone();
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    let result = connection
-                        .execute(&format!("DEL {}", escape_redis_value(&key_for_delete)), &[])
+                    let result = key_value_service
+                        .delete_keys(
+                            connection,
+                            KeyValueDeleteRequest {
+                                key_names: vec![key_for_delete.clone()],
+                                continue_on_error: false,
+                            },
+                        )
                         .await;
 
                     match result {
-                        Ok(_) => {
+                        outcome if outcome.errors.is_empty() => {
                             tracing::info!("Redis key '{}' deleted successfully", key_for_delete);
-                            // Refresh the active TableViewer to show updated data
-                            _ = dock_area.update_in(cx, |dock_area, _window, cx| {
-                                if let Some(panel) = dock_area.active_panel(cx)
-                                    && panel.panel_name(cx) == "TableViewer"
-                                    && let Ok(viewer) = panel.view().downcast::<TableViewerPanel>()
-                                {
-                                    viewer.update(cx, |viewer, cx| {
-                                        viewer.refresh(cx);
-                                    });
-                                }
+                            key_value_editor_panel.update(cx, |editor, cx| {
+                                editor.mark_redis_delete_succeeded(&key_for_delete, cx);
                             });
+                            cx.update(|_window, cx| {
+                                refresh_active_table_viewer(&workspace_controller, cx);
+                            })?;
                         }
-                        Err(e) => {
+                        outcome => {
+                            let error = outcome
+                                .errors
+                                .first()
+                                .cloned()
+                                .unwrap_or_else(|| "unknown error".to_string());
                             tracing::error!(
                                 "Failed to delete Redis key '{}': {}",
                                 key_for_delete,
-                                e
+                                error
                             );
+                            key_value_editor_panel.update(cx, |editor, cx| {
+                                editor.mark_redis_delete_failed(
+                                    &key_for_delete,
+                                    format!(
+                                        "Failed to delete Redis key '{}': {}",
+                                        key_for_delete, error
+                                    ),
+                                    cx,
+                                );
+                            });
                         }
                     }
 

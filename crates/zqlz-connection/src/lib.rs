@@ -18,6 +18,7 @@ pub use reconnect::{
     BackoffStrategy, ConnectionFactory, ReconnectConfig, ReconnectEvent, ReconnectingConnection,
 };
 pub use widgets::{
-    ConnectionEntry, ConnectionSidebar, ConnectionSidebarEvent, SavedQueryInfo, SchemaObjects,
-    SidebarObjectCapabilities,
+    ConnectionEntry, ConnectionForm, ConnectionFormEvent, ConnectionPicker, ConnectionPickerEvent,
+    ConnectionSidebar, ConnectionSidebarEvent, DatabaseType, SavedQueryInfo, SchemaObjects,
+    SidebarObjectCapabilities, SidebarSection, SidebarTableDetailsData, SidebarTableKey,
 };

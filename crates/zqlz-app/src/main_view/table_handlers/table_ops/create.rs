@@ -3,7 +3,7 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_table_designer::{TableDesignerPanel, TableLoader};
+use zqlz_table_designer::TableDesignerPanel;
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -23,14 +23,14 @@ impl MainView {
         };
 
         // Get the connection and driver name
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        // Get the driver name directly from the connection
-        let driver_name = connection.driver_name().to_string();
-        let dialect = TableLoader::detect_dialect_from_driver(&driver_name);
+        let dialect = app_state
+            .table_design_service
+            .dialect_for_connection(connection.as_ref());
 
         // Create an empty table designer panel
         let panel = cx.new(|cx| TableDesignerPanel::new(connection_id, dialect, window, cx));
@@ -44,16 +44,8 @@ impl MainView {
         });
         self._subscriptions.push(subscription);
 
-        // Add to center dock
-        let dock_area = self.dock_area.clone();
-        dock_area.update(cx, |area, cx| {
-            area.add_panel(
-                Arc::new(panel.clone()),
-                zqlz_ui::widgets::dock::DockPlacement::Center,
-                None,
-                window,
-                cx,
-            );
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.add_center_item(Arc::new(panel.clone()), window, cx);
         });
 
         tracing::info!("New table designer opened");

@@ -60,6 +60,7 @@ Name: "{app}"; AfterInstall: DisableAppDirInheritance
 
 [Files]
 Source: "{#ResourcesDir}\ZQLZ.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion
+Source: "{#ResourcesDir}\zqlz.exe"; DestDir: "{code:GetInstallDir}"; Flags: ignoreversion; Check: FileExists(ExpandConstant('{#ResourcesDir}\zqlz.exe'))
 Source: "{#ResourcesDir}\bin\*"; DestDir: "{code:GetInstallDir}\bin"; Flags: ignoreversion recursesubdirs createallsubdirs; Check: DirExists(ExpandConstant('{#ResourcesDir}\bin'))
 
 [Icons]

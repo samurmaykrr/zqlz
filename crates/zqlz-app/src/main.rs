@@ -19,6 +19,8 @@ mod main_view;
 mod panic_handler;
 mod sql_lsp;
 mod storage;
+mod window_manager;
+mod workspace;
 mod workspace_state;
 
 use gpui::*;
@@ -60,9 +62,8 @@ fn main() {
     tracing::info!(crash_log_dir = %log_dir.display(), "Panic handler initialized");
     tracing::info!(app_log_dir = %logging::log_directory().display(), "Application logs location");
 
-    // Create the GPUI application with combined assets
-    // This provides gpui-component icons plus ZQLZ-specific icons
-    let app = Application::new().with_assets(assets::CombinedAssets);
+    // Create the GPUI application with ZQLZ-specific assets.
+    let app = gpui_platform::application().with_assets(assets::CombinedAssets);
     let launch_targets = collect_launch_targets();
 
     app.on_open_urls({
@@ -92,6 +93,7 @@ fn main() {
 
         // Initialize the UI system (widgets, actions, keybindings, etc.)
         tracing::info!("Initializing UI system...");
+        window_manager::init(cx);
         zqlz_ui::init(cx);
         zqlz_text_editor::actions::init(cx);
         zqlz_text_editor::find_replace_panel::init(cx);
@@ -125,7 +127,7 @@ fn main() {
         // is Send + Sync without pulling AppState out of GPUI's context.
         let state = cx.global::<AppState>();
         let ipc_handle = ipc_server::IpcServerHandle {
-            connections: state.connections.clone(),
+            connection_service: state.connection_service.clone(),
             query_service: state.query_service.clone(),
             query_history: state.query_history.clone(),
             storage: state.storage.clone(),
@@ -202,68 +204,34 @@ fn open_main_window(
     launch_targets: Arc<Mutex<Vec<String>>>,
     forwarded_targets_queue: ipc_server::OpenTargetsQueue,
 ) -> anyhow::Result<()> {
-    use zqlz_ui::widgets::TitleBar;
+    window_manager::open_main_window(cx, move |window, cx| {
+        // Apply saved settings (fonts, scrollbar, mode)
+        // ZqlzSettings::apply sets mode/fonts from ZQLZ settings
+        ZqlzSettings::global(cx).clone().apply(cx);
 
-    let initial_window_size = if cfg!(target_os = "windows") {
-        size(px(1100.0), px(720.0))
-    } else {
-        size(px(1280.0), px(800.0))
-    };
+        // Create the main view
+        let main_view = cx.new(|cx| MainView::new(window, cx));
 
-    let window_options = WindowOptions {
-        titlebar: Some(TitleBar::title_bar_options()),
-        window_bounds: Some(WindowBounds::centered(initial_window_size, cx)),
-        window_min_size: Some(size(px(800.0), px(600.0))),
-        kind: WindowKind::Normal,
-        ..Default::default()
-    };
+        let startup_paths = drain_launch_target_paths(&launch_targets);
+        if !startup_paths.is_empty() {
+            main_view.update(cx, |main_view, cx| {
+                for path in &startup_paths {
+                    main_view.open_external_path(path, window, cx);
+                }
+            });
+        }
 
-    let window_title = if cfg!(debug_assertions) {
-        "ZQLZ - Database IDE [DEBUG BUILD]"
-    } else {
-        "ZQLZ - Database IDE"
-    };
+        start_forwarded_targets_runtime(
+            &main_view,
+            launch_targets.clone(),
+            forwarded_targets_queue.clone(),
+            window,
+            cx,
+        );
 
-    cx.spawn(async move |cx| {
-        cx.open_window(window_options, |window, cx| {
-            window.activate_window();
-            window.set_window_title(window_title);
-
-            // Apply saved settings (fonts, scrollbar, mode)
-            // ZqlzSettings::apply sets mode/fonts from ZQLZ settings
-            ZqlzSettings::global(cx).clone().apply(cx);
-
-            // Create the main view
-            let main_view = cx.new(|cx| MainView::new(window, cx));
-
-            let startup_paths = drain_launch_target_paths(&launch_targets);
-            if !startup_paths.is_empty() {
-                main_view.update(cx, |main_view, cx| {
-                    for path in &startup_paths {
-                        main_view.open_external_path(path, window, cx);
-                    }
-                });
-            }
-
-            start_forwarded_targets_runtime(
-                &main_view,
-                launch_targets.clone(),
-                forwarded_targets_queue.clone(),
-                window,
-                cx,
-            );
-
-            // Wrap in Root for theme support, dialogs, notifications, etc.
-            cx.new(|cx| Root::new(main_view, window, cx))
-        })?;
-
-        Ok::<_, anyhow::Error>(())
+        // Wrap in Root for theme support, dialogs, notifications, etc.
+        cx.new(|cx| Root::new(main_view, window, cx))
     })
-    .detach();
-
-    tracing::info!("Main window opened successfully");
-
-    Ok(())
 }
 
 fn collect_launch_targets() -> Arc<Mutex<Vec<String>>> {

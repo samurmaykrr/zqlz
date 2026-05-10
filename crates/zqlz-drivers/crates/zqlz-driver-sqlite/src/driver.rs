@@ -8,7 +8,7 @@ use zqlz_core::{
     DialectInfo, DriverCapabilities, Result, ZqlzError,
 };
 
-use crate::SqliteConnection;
+use crate::{SqliteConnection, SqliteOpenMode, SqliteOpenOptions};
 
 /// SQLite database driver
 pub struct SqliteDriver;
@@ -77,7 +77,8 @@ impl DatabaseDriver for SqliteDriver {
                 "SQLite requires 'path' or 'database' parameter. Example: { \"path\": \"/path/to/database.db\" }".into()
             ))?;
 
-        let conn = SqliteConnection::open(&path).map_err(|e| {
+        let conn = SqliteConnection::open_with_options(build_open_options(config, path.clone())?)
+            .map_err(|e| {
             tracing::error!(error = %e, "failed to connect to SQLite database");
             ZqlzError::Connection(format!("Failed to connect to SQLite database: {}", e))
         })?;
@@ -102,6 +103,8 @@ impl DatabaseDriver for SqliteDriver {
     }
 
     fn connection_field_schema(&self) -> ConnectionFieldSchema {
+        use zqlz_core::ConnectionFieldOption;
+
         ConnectionFieldSchema {
             title: Cow::Borrowed("SQLite Connection"),
             fields: vec![
@@ -110,7 +113,193 @@ impl DatabaseDriver for SqliteDriver {
                     .with_extensions(vec!["db", "sqlite", "sqlite3"])
                     .required()
                     .help_text("Use :memory: for an in-memory database"),
+                ConnectionField::select(
+                    "open_mode",
+                    "Open Mode",
+                    vec![
+                        ConnectionFieldOption::new("read_write_create", "Read/Write/Create"),
+                        ConnectionFieldOption::new("read_write", "Read/Write"),
+                        ConnectionFieldOption::new("read_only", "Read Only"),
+                    ],
+                )
+                .default_value("read_write_create")
+                .tab("advanced"),
+                ConnectionField::boolean("foreign_keys", "Foreign Keys")
+                    .default_value("true")
+                    .tab("advanced"),
+                ConnectionField::select(
+                    "journal_mode",
+                    "Journal Mode",
+                    vec![
+                        ConnectionFieldOption::new("WAL", "WAL"),
+                        ConnectionFieldOption::new("DELETE", "DELETE"),
+                        ConnectionFieldOption::new("TRUNCATE", "TRUNCATE"),
+                        ConnectionFieldOption::new("PERSIST", "PERSIST"),
+                        ConnectionFieldOption::new("MEMORY", "MEMORY"),
+                        ConnectionFieldOption::new("OFF", "OFF"),
+                    ],
+                )
+                .default_value("WAL")
+                .tab("advanced"),
+                ConnectionField::select(
+                    "synchronous",
+                    "Synchronous",
+                    vec![
+                        ConnectionFieldOption::new("NORMAL", "NORMAL"),
+                        ConnectionFieldOption::new("FULL", "FULL"),
+                        ConnectionFieldOption::new("EXTRA", "EXTRA"),
+                        ConnectionFieldOption::new("OFF", "OFF"),
+                    ],
+                )
+                .default_value("NORMAL")
+                .tab("advanced"),
+                ConnectionField::number("busy_timeout_ms", "Busy Timeout (ms)")
+                    .default_value("5000")
+                    .tab("advanced"),
+                ConnectionField::boolean("load_extensions", "Load Extensions")
+                    .default_value("false")
+                    .tab("advanced"),
+                ConnectionField::text("extension_paths", "Extension Paths")
+                    .help_text("Newline, comma, or semicolon separated")
+                    .tab("advanced"),
             ],
         }
+    }
+}
+
+fn build_open_options(config: &ConnectionConfig, path: String) -> Result<SqliteOpenOptions> {
+    let mut options = SqliteOpenOptions::new(path);
+
+    if let Some(open_mode) = config
+        .get_string("open_mode")
+        .filter(|value| !value.is_empty())
+    {
+        options.open_mode = SqliteOpenMode::parse(&open_mode)?;
+    }
+    options.foreign_keys = parse_bool(config, "foreign_keys", true);
+    if let Some(journal_mode) = config
+        .get_string("journal_mode")
+        .filter(|value| !value.is_empty())
+    {
+        options.journal_mode = journal_mode;
+    }
+    if let Some(synchronous) = config
+        .get_string("synchronous")
+        .filter(|value| !value.is_empty())
+    {
+        options.synchronous = synchronous;
+    }
+    if let Some(timeout) = config
+        .get_string("busy_timeout_ms")
+        .filter(|value| !value.is_empty())
+    {
+        options.busy_timeout_ms = timeout.parse::<u64>().map_err(|_| {
+            ZqlzError::Configuration("SQLite busy_timeout_ms must be a number".to_string())
+        })?;
+    }
+    options.load_extensions = parse_bool(config, "load_extensions", false);
+    if options.load_extensions {
+        options.extension_paths = parse_path_list(
+            config
+                .get_string("extension_paths")
+                .unwrap_or_default()
+                .as_str(),
+        );
+    }
+
+    Ok(options)
+}
+
+fn parse_bool(config: &ConnectionConfig, key: &str, default: bool) -> bool {
+    config
+        .get_string(key)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn parse_path_list(value: &str) -> Vec<std::path::PathBuf> {
+    value
+        .split(['\n', ',', ';'])
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(std::path::PathBuf::from)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zqlz_core::DatabaseDriver;
+
+    #[test]
+    fn sqlite_schema_exposes_advanced_options() {
+        let schema = SqliteDriver::new().connection_field_schema();
+        let field = |id: &str| schema.fields.iter().find(|field| field.id == id).unwrap();
+
+        assert!(field("path").required);
+        assert_eq!(field("open_mode").tab.as_deref(), Some("advanced"));
+        assert_eq!(
+            field("open_mode").default_value.as_deref(),
+            Some("read_write_create")
+        );
+        assert_eq!(field("foreign_keys").default_value.as_deref(), Some("true"));
+        assert_eq!(field("journal_mode").default_value.as_deref(), Some("WAL"));
+        assert_eq!(
+            field("synchronous").default_value.as_deref(),
+            Some("NORMAL")
+        );
+        assert_eq!(
+            field("busy_timeout_ms").default_value.as_deref(),
+            Some("5000")
+        );
+        assert_eq!(
+            field("load_extensions").default_value.as_deref(),
+            Some("false")
+        );
+        assert_eq!(field("extension_paths").tab.as_deref(), Some("advanced"));
+    }
+
+    #[test]
+    fn sqlite_options_ignore_extension_paths_when_disabled() {
+        let config =
+            ConnectionConfig::new("sqlite", "test").with_param("extension_paths", "/tmp/a\n/tmp/b");
+
+        let options = build_open_options(&config, ":memory:".to_string()).unwrap();
+
+        assert!(!options.load_extensions);
+        assert!(options.extension_paths.is_empty());
+    }
+
+    #[test]
+    fn sqlite_options_parse_extension_paths_when_enabled() {
+        let config = ConnectionConfig::new("sqlite", "test")
+            .with_param("load_extensions", "true")
+            .with_param("extension_paths", "/tmp/a,/tmp/b;/tmp/c");
+
+        let options = build_open_options(&config, ":memory:".to_string()).unwrap();
+
+        assert!(options.load_extensions);
+        assert_eq!(options.extension_paths.len(), 3);
+    }
+
+    #[test]
+    fn sqlite_read_only_missing_file_does_not_create_file() {
+        let tempdir = tempfile::tempdir().unwrap();
+        let database_path = tempdir.path().join("missing.sqlite");
+        let options = SqliteOpenOptions {
+            path: database_path.display().to_string(),
+            open_mode: SqliteOpenMode::ReadOnly,
+            ..SqliteOpenOptions::new(":memory:")
+        };
+
+        let result = SqliteConnection::open_with_options(options);
+
+        assert!(result.is_err());
+        assert!(!database_path.exists());
     }
 }

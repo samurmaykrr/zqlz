@@ -20,6 +20,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::Connection;
 use zqlz_core::ForeignKeyInfo;
+use zqlz_core::command::{CommandTokenizer, parse_commands};
 use zqlz_services::{DatabaseSchema, SchemaService};
 use zqlz_ui::widgets::Rope;
 use zqlz_ui::widgets::input::RopeExt;
@@ -63,6 +64,7 @@ pub enum DatabaseObject {
     Function(FunctionInfo),
     Trigger(TriggerInfo),
     Index(IndexInfo),
+    Sequence(zqlz_core::SequenceInfo),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -169,6 +171,9 @@ pub struct SqlLsp {
     /// other than the connection default).
     active_database: Option<String>,
 
+    /// Active schema selected by the user for schema-scoped drivers.
+    active_schema: Option<String>,
+
     /// Schema service for cached schema introspection
     schema_service: Arc<SchemaService>,
 
@@ -220,6 +225,16 @@ pub struct SchemaCache {
     pub functions: HashMap<String, FunctionInfo>,
     pub triggers: HashMap<String, TriggerInfo>,
     pub indexes: HashMap<String, IndexInfo>,
+    #[serde(default)]
+    pub sequences: HashMap<String, zqlz_core::SequenceInfo>,
+
+    /// Resolved database/schema metadata from last fetch.
+    #[serde(default)]
+    pub database_name: Option<String>,
+    #[serde(default)]
+    pub schema_name: Option<String>,
+    #[serde(default)]
+    pub schema_names: Vec<String>,
 
     /// Foreign key relationships: table_name -> Vec<ForeignKeyInfo>
     pub foreign_keys_by_table: HashMap<String, Vec<zqlz_core::ForeignKeyInfo>>,
@@ -340,6 +355,7 @@ impl SqlLsp {
             dialect: SqlDialect::Generic,
             schema_cache: SchemaCache::default(),
             active_database: None,
+            active_schema: None,
             schema_service,
             context_analyzer: ContextAnalyzer::new().ok(),
             schema_validator: SchemaValidator::new(),
@@ -365,6 +381,7 @@ impl SqlLsp {
             dialect,
             schema_cache: SchemaCache::default(),
             active_database: None,
+            active_schema: None,
             schema_service,
             context_analyzer: ContextAnalyzer::new().ok(),
             schema_validator: SchemaValidator::new(),
@@ -396,6 +413,7 @@ impl SqlLsp {
 
         self.schema_cache = SchemaCache::default();
         self.schema_loading = true;
+        self.active_schema = None;
     }
 
     /// Set the active logical database for schema introspection.
@@ -406,6 +424,16 @@ impl SqlLsp {
     /// Returns the active logical database selected for this LSP instance.
     pub fn active_database(&self) -> Option<String> {
         self.active_database.clone()
+    }
+
+    /// Set the active schema for schema-scoped introspection.
+    pub fn set_active_schema(&mut self, schema: Option<String>) {
+        self.active_schema = schema;
+    }
+
+    /// Returns the active schema selected for this LSP instance.
+    pub fn active_schema(&self) -> Option<String> {
+        self.active_schema.clone()
     }
 
     /// Get the appropriate SQL dialect for parsing
@@ -442,13 +470,15 @@ impl SqlLsp {
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
         active_database: Option<String>,
+        active_schema: Option<String>,
         schema_service: &SchemaService,
     ) -> Result<SchemaCache> {
         let db_schema = schema_service
-            .load_database_schema_for_database(
+            .load_database_schema_for_database_and_schema(
                 connection.clone(),
                 connection_id,
                 active_database.as_deref(),
+                active_schema.as_deref(),
             )
             .await?;
 
@@ -458,7 +488,12 @@ impl SqlLsp {
             db_schema.views.len()
         );
 
-        let mut cache = SchemaCache::default();
+        let mut cache = SchemaCache {
+            database_name: db_schema.database_name.clone(),
+            schema_name: db_schema.schema_name.clone(),
+            schema_names: db_schema.schema_names.clone(),
+            ..SchemaCache::default()
+        };
 
         for table in &db_schema.table_infos {
             let table_info = TableInfo {
@@ -494,87 +529,48 @@ impl SqlLsp {
             cache.objects.push(DatabaseObject::View(view_info));
         }
 
-        // Fetch column details for all tables concurrently. For remote databases
-        // each call is a network round-trip, so serial fetching multiplies latency by
-        // the number of tables. Firing them in parallel reduces total time to roughly
-        // one round-trip regardless of schema size.
-        let details_schema = match connection.driver_name() {
-            "mysql" | "mariadb" | "mssql" | "clickhouse" => active_database
-                .clone()
-                .or_else(|| db_schema.database_name.clone()),
-            _ => db_schema.schema_name.clone(),
-        };
+        if let Some(cached_details) = schema_service.get_all_cached_table_details(connection_id) {
+            for (table_name, details) in cached_details {
+                let fk_columns: std::collections::HashSet<String> = details
+                    .foreign_keys
+                    .iter()
+                    .flat_map(|fk| fk.columns.iter().cloned())
+                    .collect();
 
-        let table_detail_futures: Vec<_> = db_schema
-            .tables
-            .iter()
-            .map(|table_name| {
-                let connection = connection.clone();
-                let table_name = table_name.clone();
-                let details_schema = details_schema.clone();
-                async move {
-                    let result = schema_service
-                        .get_table_details(
-                            connection,
-                            connection_id,
-                            &table_name,
-                            details_schema.as_deref(),
-                        )
-                        .await;
-                    (table_name, result)
+                let column_infos: Vec<ColumnInfo> = details
+                    .columns
+                    .iter()
+                    .map(|column| ColumnInfo {
+                        table_name: table_name.clone(),
+                        name: column.name.clone(),
+                        data_type: column.data_type.clone(),
+                        nullable: column.nullable,
+                        default_value: column.default_value.clone(),
+                        is_primary_key: column.is_primary_key,
+                        is_foreign_key: fk_columns.contains(&column.name),
+                        comment: None,
+                    })
+                    .collect();
+
+                for column in &column_infos {
+                    cache.objects.push(DatabaseObject::Column(column.clone()));
                 }
-            })
-            .collect();
+                cache
+                    .columns_by_table
+                    .insert(table_name.clone(), column_infos);
 
-        let table_detail_results = futures::future::join_all(table_detail_futures).await;
-
-        for (table_name, result) in table_detail_results {
-            match result {
-                Ok(details) => {
-                    let fk_columns: std::collections::HashSet<String> = details
-                        .foreign_keys
-                        .iter()
-                        .flat_map(|fk| fk.columns.iter().cloned())
-                        .collect();
-
-                    let column_infos: Vec<ColumnInfo> = details
-                        .columns
-                        .iter()
-                        .map(|c| ColumnInfo {
-                            table_name: table_name.clone(),
-                            name: c.name.clone(),
-                            data_type: c.data_type.clone(),
-                            nullable: c.nullable,
-                            default_value: c.default_value.clone(),
-                            is_primary_key: c.is_primary_key,
-                            is_foreign_key: fk_columns.contains(&c.name),
-                            comment: None,
-                        })
-                        .collect();
-
-                    for col in &column_infos {
-                        cache.objects.push(DatabaseObject::Column(col.clone()));
-                    }
+                for foreign_key in &details.foreign_keys {
                     cache
-                        .columns_by_table
-                        .insert(table_name.clone(), column_infos);
+                        .foreign_keys_by_table
+                        .entry(table_name.clone())
+                        .or_default()
+                        .push(foreign_key.clone());
 
-                    for fk in &details.foreign_keys {
-                        cache
-                            .foreign_keys_by_table
-                            .entry(table_name.clone())
-                            .or_default()
-                            .push(fk.clone());
-
-                        cache
-                            .reverse_foreign_keys
-                            .entry(fk.referenced_table.clone())
-                            .or_default()
-                            .push((table_name.clone(), fk.clone()));
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load details for table {}: {}", table_name, e);
+                    cache
+                        .reverse_foreign_keys
+                        .entry(foreign_key.referenced_table.clone())
+                        .or_default()
+                        .push((table_name.clone(), foreign_key.clone()));
                 }
             }
         }
@@ -639,18 +635,44 @@ impl SqlLsp {
             }
         }
 
+        let metadata_schema = match connection.driver_name() {
+            "mysql" | "mariadb" | "mssql" | "clickhouse" => active_database
+                .clone()
+                .or_else(|| db_schema.database_name.clone()),
+            _ => active_schema
+                .clone()
+                .or_else(|| db_schema.schema_name.clone()),
+        };
+
+        if let Some(schema) = connection.as_schema_introspection() {
+            match schema.list_sequences(metadata_schema.as_deref()).await {
+                Ok(sequences) => {
+                    for sequence in sequences {
+                        cache
+                            .sequences
+                            .insert(sequence.name.clone(), sequence.clone());
+                        cache.objects.push(DatabaseObject::Sequence(sequence));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!("Failed to load sequences: {}", error);
+                }
+            }
+        }
+
         cache.last_refresh = Some(std::time::SystemTime::now());
 
         let total_columns: usize = cache.columns_by_table.values().map(|v| v.len()).sum();
         tracing::info!(
-            "Schema cache built: {} tables, {} views, {} columns, {} indexes, {} triggers, {} functions, {} procedures",
+            "Schema cache built: {} tables, {} views, {} columns, {} indexes, {} triggers, {} functions, {} procedures, {} sequences",
             cache.tables.len(),
             cache.views.len(),
             total_columns,
             cache.indexes.len(),
             cache.triggers.len(),
             cache.functions.len(),
-            cache.procedures.len()
+            cache.procedures.len(),
+            cache.sequences.len()
         );
 
         Ok(cache)
@@ -744,6 +766,7 @@ impl SqlLsp {
             conn,
             conn_id,
             self.active_database.clone(),
+            self.active_schema.clone(),
             &self.schema_service,
         )
         .await?;
@@ -2338,6 +2361,10 @@ impl SqlLsp {
             }
         }
 
+        if let Some(sequence) = self.sequence_info(&word) {
+            return Some(self.create_sequence_hover(sequence));
+        }
+
         // Check views
         if let Some(view) = self.schema_cache.views.get(&word) {
             let mut hover_text = format!("**View: {}**\n\n", view.name);
@@ -3647,6 +3674,34 @@ impl SqlLsp {
         self.markdown_hover(hover_text)
     }
 
+    fn create_sequence_hover(&self, sequence: &zqlz_core::SequenceInfo) -> Hover {
+        let mut hover_text = format!("**Sequence: {}**\n\n", sequence.name);
+
+        if let Some(schema) = &sequence.schema {
+            hover_text.push_str(&format!("Schema: `{}`\n", schema));
+        }
+
+        hover_text.push_str(&format!("Type: `{}`\n", sequence.data_type));
+        hover_text.push_str(&format!("Start: `{}`\n", sequence.start_value));
+        hover_text.push_str(&format!("Min: `{}`\n", sequence.min_value));
+        hover_text.push_str(&format!("Max: `{}`\n", sequence.max_value));
+        hover_text.push_str(&format!("Increment: `{}`\n", sequence.increment_by));
+
+        if let Some(current_value) = sequence.current_value {
+            hover_text.push_str(&format!("Current: `{}`\n", current_value));
+        }
+
+        if let Some(owner) = &sequence.owner {
+            hover_text.push_str(&format!("Owner: `{}`\n", owner));
+        }
+
+        if let Some(comment) = &sequence.comment {
+            hover_text.push_str(&format!("\n{}\n", comment));
+        }
+
+        self.markdown_hover(hover_text)
+    }
+
     fn internal_definition_location() -> GotoDefinitionResponse {
         GotoDefinitionResponse::Scalar(Location {
             uri: "sql://internal".parse::<Uri>().unwrap(),
@@ -3709,6 +3764,14 @@ impl SqlLsp {
             .map(|(_, columns)| columns)
     }
 
+    fn sequence_info(&self, sequence_name: &str) -> Option<&zqlz_core::SequenceInfo> {
+        self.schema_cache
+            .sequences
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(sequence_name))
+            .map(|(_, sequence)| sequence)
+    }
+
     fn foreign_keys_for_table(&self, table_name: &str) -> Option<&Vec<ForeignKeyInfo>> {
         self.schema_cache
             .foreign_keys_by_table
@@ -3745,6 +3808,10 @@ impl SqlLsp {
 
     fn derived_columns_for_identifier(&self, identifier: &str, text: &Rope) -> Option<Vec<String>> {
         let sql = text.to_string();
+        if !Self::is_query_like_sql(&sql) {
+            return None;
+        }
+
         let statements = Parser::parse_sql(&SQLiteDialect {}, &sql).ok()?;
         let mut derived_tables = HashMap::new();
 
@@ -3761,6 +3828,10 @@ impl SqlLsp {
         text: &Rope,
     ) -> Option<Vec<String>> {
         let sql = text.to_string();
+        if !Self::is_query_like_sql(&sql) {
+            return None;
+        }
+
         let identifier_lower = identifier.to_lowercase();
 
         if let Some(with_index) = sql.to_lowercase().find("with ") {
@@ -3793,6 +3864,18 @@ impl SqlLsp {
         }
 
         None
+    }
+
+    fn is_query_like_sql(sql: &str) -> bool {
+        let trimmed = sql.trim_start();
+        let upper = trimmed.to_ascii_uppercase();
+
+        upper.starts_with("SELECT")
+            || upper.starts_with("WITH")
+            || upper.contains(" FROM ")
+            || upper.contains("\nFROM ")
+            || upper.contains(" JOIN ")
+            || upper.contains("\nJOIN ")
     }
 
     fn parse_projection_column_names(&self, projection: &str) -> Vec<String> {
@@ -4388,8 +4471,20 @@ impl SqlLsp {
         }
 
         let current_line = before_cursor.rsplit('\n').next().unwrap_or_default();
-        let current_tokens: Vec<&str> = current_line.split_whitespace().collect();
-        let trailing_space = before_cursor.ends_with(' ');
+        if current_line.trim_start().starts_with('#') {
+            return Vec::new();
+        }
+        let trailing_space = current_line.ends_with([' ', '\t']);
+        let mut tokenizer = CommandTokenizer::new(current_line, false);
+        let tokens = tokenizer.tokenize();
+        let commands = parse_commands(&tokens);
+        let current_tokens: Vec<String> = match commands.as_slice() {
+            [] => Vec::new(),
+            [command] => std::iter::once(command.command.clone())
+                .chain(command.args.iter().cloned())
+                .collect(),
+            _ => return Vec::new(),
+        };
         let validator = crate::redis_validator::RedisValidator::new();
 
         if current_tokens.is_empty() {
@@ -4409,7 +4504,7 @@ impl SqlLsp {
 
         if current_tokens.len() == 1 && !trailing_space {
             return validator
-                .top_level_commands(Some(current_tokens[0]))
+                .top_level_commands(Some(current_tokens[0].as_str()))
                 .into_iter()
                 .map(|command| CompletionItem {
                     label: command.clone(),
@@ -4425,12 +4520,16 @@ impl SqlLsp {
         let subcommand_prefix = if trailing_space {
             None
         } else {
-            current_tokens.last().copied()
+            current_tokens.last().map(String::as_str)
         };
-        let command_path = if trailing_space {
-            current_tokens.clone()
+
+        let command_path: Vec<&str> = if trailing_space {
+            current_tokens.iter().map(String::as_str).collect()
         } else {
-            current_tokens[..current_tokens.len().saturating_sub(1)].to_vec()
+            current_tokens[..current_tokens.len().saturating_sub(1)]
+                .iter()
+                .map(String::as_str)
+                .collect()
         };
 
         validator
@@ -4547,6 +4646,7 @@ impl SqlLsp {
         let functions: Vec<String> = self.schema_cache.functions.keys().cloned().collect();
         let procedures: Vec<String> = self.schema_cache.procedures.keys().cloned().collect();
         let triggers: Vec<String> = self.schema_cache.triggers.keys().cloned().collect();
+        let sequences: Vec<String> = self.schema_cache.sequences.keys().cloned().collect();
         let views: Vec<String> = self
             .schema_cache
             .views
@@ -4594,16 +4694,22 @@ impl SqlLsp {
         DatabaseSchema {
             table_infos,
             objects_panel_data: None,
+            objects_panel_manifest: None,
             tables,
             views,
             materialized_views,
             triggers,
             functions,
             procedures,
+            events: Vec::new(),
+            sequences,
+            domains: Vec::new(),
+            types: Vec::new(),
+            extensions: Vec::new(),
             table_indexes,
-            database_name: None,
-            schema_name: None,
-            schema_names: Vec::new(),
+            database_name: self.schema_cache.database_name.clone(),
+            schema_name: self.schema_cache.schema_name.clone(),
+            schema_names: self.schema_cache.schema_names.clone(),
         }
     }
 }

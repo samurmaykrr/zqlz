@@ -26,23 +26,24 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
+        let table_service = app_state.table_service.clone();
+
         let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
 
         RenameWindow::open_table(
             connection_id,
             table_name,
             driver_name,
             connection.clone(),
+            table_service,
             cx.entity().downgrade(),
             cx,
         );

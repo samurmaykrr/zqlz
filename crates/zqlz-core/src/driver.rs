@@ -1,6 +1,6 @@
 //! Database driver trait definition
 
-use crate::{Connection, DialectBundle, DialectInfo, Result};
+use crate::{CodeFormatterProvider, Connection, DialectBundle, DialectInfo, Result};
 use async_trait::async_trait;
 use std::borrow::Cow;
 use std::collections::HashMap;
@@ -357,6 +357,10 @@ pub trait DatabaseDriver: Send + Sync {
         crate::get_dialect_profile(self.id())
     }
 
+    fn formatter_provider(&self) -> Option<Arc<dyn CodeFormatterProvider>> {
+        crate::formatter_provider_for_driver(self.id())
+    }
+
     /// Create a new connection
     async fn connect(&self, config: &ConnectionConfig) -> Result<Arc<dyn Connection>>;
 
@@ -365,9 +369,8 @@ pub trait DatabaseDriver: Send + Sync {
 
     /// Parse a connection string into a configuration
     fn parse_connection_string(&self, _conn_str: &str) -> Result<ConnectionConfig> {
-        // Default implementation that returns an error
         Err(crate::ZqlzError::NotImplemented(
-            "Connection string parsing not implemented for this driver".into(),
+            "Connection string parsing is not supported for this driver".into(),
         ))
     }
 

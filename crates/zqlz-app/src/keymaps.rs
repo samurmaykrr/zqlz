@@ -110,6 +110,11 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "zqlz::OpenSettings" => bind!(OpenSettings),
         "zqlz::OpenCommandPalette" => bind!(OpenCommandPalette),
         "zqlz::Quit" => bind!(Quit),
+        "zqlz::NewWindow" => bind!(NewWindow),
+        "zqlz::CloseWindow" => bind!(CloseWindow),
+        "zqlz::MinimizeWindow" => bind!(MinimizeWindow),
+        "zqlz::ZoomWindow" => bind!(ZoomWindow),
+        "tabs::MoveTabToNewWindow" => bind!(MoveTabToNewWindow),
         "zqlz::NewConnection" => bind!(NewConnection),
         "zqlz::RefreshConnection" => bind!(RefreshConnection),
         "zqlz::RefreshConnectionsList" => bind!(RefreshConnectionsList),
@@ -131,10 +136,17 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         // === tabs namespace (tab management actions) ===
         "tabs::ActivateNextTab" => bind!(ActivateNextTab),
         "tabs::ActivatePrevTab" => bind!(ActivatePrevTab),
+        "tabs::NavigateTabBack" => bind!(NavigateTabBack),
+        "tabs::NavigateTabForward" => bind!(NavigateTabForward),
         "tabs::CloseActiveTab" => bind!(CloseActiveTab),
         "tabs::CloseOtherTabs" => bind!(CloseOtherTabs),
         "tabs::CloseTabsToRight" => bind!(CloseTabsToRight),
+        "tabs::CloseTabsToLeft" => bind!(CloseTabsToLeft),
+        "tabs::CloseCleanTabs" => bind!(CloseCleanTabs),
         "tabs::CloseAllTabs" => bind!(CloseAllTabs),
+        "tabs::TogglePinActiveTab" => bind!(TogglePinActiveTab),
+        "tabs::MarkActiveTabAsPreview" => bind!(MarkActiveTabAsPreview),
+        "tabs::ClearActiveTabPreview" => bind!(ClearActiveTabPreview),
         "tabs::ActivateTab1" => bind!(ActivateTab1),
         "tabs::ActivateTab2" => bind!(ActivateTab2),
         "tabs::ActivateTab3" => bind!(ActivateTab3),
@@ -167,6 +179,10 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "editor::MoveToEnd" => bind!(editor::MoveToEnd),
         "editor::MoveToPreviousWordStart" => bind!(editor::MoveToPreviousWordStart),
         "editor::MoveToNextWordEnd" => bind!(editor::MoveToNextWordEnd),
+        "editor::MoveToParagraphStart" => bind!(editor::MoveToParagraphStart),
+        "editor::MoveToParagraphEnd" => bind!(editor::MoveToParagraphEnd),
+        "editor::MoveToNextSubwordEnd" => bind!(editor::MoveToNextSubwordEnd),
+        "editor::MoveToPreviousSubwordStart" => bind!(editor::MoveToPreviousSubwordStart),
         "editor::PageUp" => bind!(editor::PageUp),
         "editor::PageDown" => bind!(editor::PageDown),
         "editor::SelectLeft" => bind!(editor::SelectLeft),
@@ -179,11 +195,22 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "editor::SelectToEnd" => bind!(editor::SelectToEnd),
         "editor::SelectToPreviousWordStart" => bind!(editor::SelectToPreviousWordStart),
         "editor::SelectToNextWordEnd" => bind!(editor::SelectToNextWordEnd),
+        "editor::SelectToParagraphStart" => bind!(editor::SelectToParagraphStart),
+        "editor::SelectToParagraphEnd" => bind!(editor::SelectToParagraphEnd),
+        "editor::SelectToNextSubwordEnd" => bind!(editor::SelectToNextSubwordEnd),
+        "editor::SelectToPreviousSubwordStart" => bind!(editor::SelectToPreviousSubwordStart),
+        "editor::SelectPageUp" => bind!(editor::SelectPageUp),
+        "editor::SelectPageDown" => bind!(editor::SelectPageDown),
         "editor::SelectAll" => bind!(editor::SelectAll),
         "editor::Backspace" => bind!(editor::Backspace),
         "editor::Delete" => bind!(editor::Delete),
+        "editor::DeleteToBeginningOfLine" => bind!(editor::DeleteToBeginningOfLine),
+        "editor::DeleteToEndOfLine" => bind!(editor::DeleteToEndOfLine),
+        "editor::DeleteSubwordLeft" => bind!(editor::DeleteSubwordLeft),
+        "editor::DeleteSubwordRight" => bind!(editor::DeleteSubwordRight),
         "editor::Newline" => bind!(editor::Newline),
         "editor::Tab" => bind!(editor::Tab),
+        "editor::ShiftTab" => bind!(editor::ShiftTab),
         "editor::Copy" => bind!(editor::Copy),
         "editor::Cut" => bind!(editor::Cut),
         "editor::Paste" => bind!(editor::Paste),
@@ -193,56 +220,92 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "editor::OpenFindReplace" => bind!(editor::OpenFindReplace),
         "editor::FindNext" => bind!(editor::FindNext),
         "editor::FindPrevious" => bind!(editor::FindPrevious),
+        "editor::FindSelectAllMatches" => bind!(editor::FindSelectAllMatches),
+        "editor::FindToggleCaseSensitive" => bind!(editor::FindToggleCaseSensitive),
+        "editor::FindToggleWholeWord" => bind!(editor::FindToggleWholeWord),
+        "editor::FindToggleRegex" => bind!(editor::FindToggleRegex),
+        "editor::FindToggleSearchInSelection" => bind!(editor::FindToggleSearchInSelection),
+        "editor::ReplaceCurrentMatch" => bind!(editor::ReplaceCurrentMatch),
+        "editor::ReplaceAllMatches" => bind!(editor::ReplaceAllMatches),
         "editor::TriggerCompletion" => bind!(editor::TriggerCompletion),
         "editor::AcceptCompletion" => bind!(editor::AcceptCompletion),
         "editor::DismissCompletion" => bind!(editor::DismissCompletion),
+        "editor::SelectPreviousCompletion" => bind!(editor::SelectPreviousCompletion),
+        "editor::SelectNextCompletion" => bind!(editor::SelectNextCompletion),
         "editor::ToggleLineComment" => bind!(editor::ToggleLineComment),
         "editor::MoveLineUp" => bind!(editor::MoveLineUp),
         "editor::MoveLineDown" => bind!(editor::MoveLineDown),
         "editor::DeleteLine" => bind!(editor::DeleteLine),
+        "editor::DuplicateLineUp" => bind!(editor::DuplicateLineUp),
+        "editor::DuplicateLineDown" => bind!(editor::DuplicateLineDown),
+        "editor::NewlineAbove" => bind!(editor::NewlineAbove),
+        "editor::NewlineBelow" => bind!(editor::NewlineBelow),
+        "editor::JoinLines" => bind!(editor::JoinLines),
+        "editor::TransposeChars" => bind!(editor::TransposeChars),
+        "editor::IndentLine" => bind!(editor::IndentLine),
+        "editor::DedentLine" => bind!(editor::DedentLine),
+        "editor::SelectLine" => bind!(editor::SelectLine),
+        "editor::SelectNextOccurrence" => bind!(editor::SelectNextOccurrence),
+        "editor::SelectPreviousOccurrence" => bind!(editor::SelectPreviousOccurrence),
+        "editor::SelectAllOccurrences" => bind!(editor::SelectAllOccurrences),
+        "editor::AddCursorAbove" => bind!(editor::AddCursorAbove),
+        "editor::AddCursorBelow" => bind!(editor::AddCursorBelow),
+        "editor::UndoSelection" => bind!(editor::UndoSelection),
+        "editor::CutToEndOfLine" => bind!(editor::CutToEndOfLine),
+        "editor::ToggleBlockSelection" => bind!(editor::ToggleBlockSelection),
+        "editor::TransformUppercase" => bind!(editor::TransformUppercase),
+        "editor::TransformLowercase" => bind!(editor::TransformLowercase),
+        "editor::TransformTitleCase" => bind!(editor::TransformTitleCase),
+        "editor::TransformSnakeCase" => bind!(editor::TransformSnakeCase),
+        "editor::TransformCamelCase" => bind!(editor::TransformCamelCase),
+        "editor::TransformKebabCase" => bind!(editor::TransformKebabCase),
+        "editor::SortLinesAscending" => bind!(editor::SortLinesAscending),
+        "editor::SortLinesDescending" => bind!(editor::SortLinesDescending),
+        "editor::SortLinesByLength" => bind!(editor::SortLinesByLength),
+        "editor::ReverseLines" => bind!(editor::ReverseLines),
+        "editor::UniqueLines" => bind!(editor::UniqueLines),
+        "editor::InsertUuidV4" => bind!(editor::InsertUuidV4),
+        "editor::InsertUuidV7" => bind!(editor::InsertUuidV7),
+        "editor::RotateSelections" => bind!(editor::RotateSelections),
+        "editor::SwapSelectionEnds" => bind!(editor::SwapSelectionEnds),
+        "editor::CopyAsMarkdown" => bind!(editor::CopyAsMarkdown),
+        "editor::PasteAsPlainText" => bind!(editor::PasteAsPlainText),
+        "editor::GoToLine" => bind!(editor::GoToLine),
+        "editor::ToggleSoftWrap" => bind!(editor::ToggleSoftWrap),
         "editor::FormatSQL" => bind!(editor::FormatSQL),
         "editor::GoToDefinition" => bind!(editor::GoToDefinition),
         "editor::FindReferences" => bind!(editor::FindReferences),
         "editor::RenameSymbol" => bind!(editor::RenameSymbol),
+        "editor::OpenContextMenu" => bind!(editor::OpenContextMenu),
         "editor::Escape" => bind!(editor::Escape),
-        // Actions that exist in the JSON but have no equivalent yet — silently ignored.
-        "editor::SelectNext"
-        | "editor::SelectPrevious"
-        | "editor::SelectNextMatch"
-        | "editor::SelectPreviousMatch"
-        | "editor::SelectAllMatches"
-        | "editor::SelectLine"
-        | "editor::AddSelectionAbove"
-        | "editor::AddSelectionBelow"
-        | "editor::UndoSelection"
-        | "editor::DeleteToBeginningOfLine"
-        | "editor::DeleteToEndOfLine"
-        | "editor::DeleteToPreviousWordStart"
-        | "editor::DeleteToNextWordEnd"
-        | "editor::DuplicateLineDown"
-        | "editor::JoinLines"
-        | "editor::Transpose"
-        | "editor::Indent"
-        | "editor::Outdent"
-        | "editor::Fold"
-        | "editor::UnfoldLines"
-        | "editor::FoldAll"
-        | "editor::UnfoldAll"
-        | "editor::FoldAtLevel1"
-        | "editor::FoldAtLevel2"
-        | "editor::FoldAtLevel3"
-        | "editor::FoldAtLevel4"
-        | "editor::FoldAtLevel5"
-        | "editor::FoldAtLevel6"
-        | "editor::FoldAtLevel7"
-        | "editor::FoldAtLevel8"
-        | "editor::FoldAtLevel9"
-        | "editor::ToggleComments"
-        | "editor::FindNextMatch"
-        | "editor::FindPreviousMatch"
-        | "editor::SelectPageUp"
-        | "editor::SelectPageDown" => false,
-
+        "editor::SelectNext" | "editor::SelectNextMatch" => bind!(editor::SelectNextOccurrence),
+        "editor::SelectPrevious" | "editor::SelectPreviousMatch" => {
+            bind!(editor::SelectPreviousOccurrence)
+        }
+        "editor::AddSelectionAbove" => bind!(editor::AddCursorAbove),
+        "editor::AddSelectionBelow" => bind!(editor::AddCursorBelow),
+        "editor::SelectAllMatches" => bind!(editor::SelectAllOccurrences),
+        "editor::Transpose" => bind!(editor::TransposeChars),
+        "editor::Indent" => bind!(editor::IndentLine),
+        "editor::Outdent" => bind!(editor::DedentLine),
+        "editor::Fold" => bind!(editor::Fold),
+        "editor::UnfoldLines" => bind!(editor::UnfoldLines),
+        "editor::FoldAll" => bind!(editor::FoldAll),
+        "editor::UnfoldAll" => bind!(editor::UnfoldAll),
+        "editor::FoldAtLevel1" => bind!(editor::FoldAtLevel1),
+        "editor::FoldAtLevel2" => bind!(editor::FoldAtLevel2),
+        "editor::FoldAtLevel3" => bind!(editor::FoldAtLevel3),
+        "editor::FoldAtLevel4" => bind!(editor::FoldAtLevel4),
+        "editor::FoldAtLevel5" => bind!(editor::FoldAtLevel5),
+        "editor::FoldAtLevel6" => bind!(editor::FoldAtLevel6),
+        "editor::FoldAtLevel7" => bind!(editor::FoldAtLevel7),
+        "editor::FoldAtLevel8" => bind!(editor::FoldAtLevel8),
+        "editor::FoldAtLevel9" => bind!(editor::FoldAtLevel9),
+        "editor::ToggleComments" => bind!(editor::ToggleLineComment),
+        "editor::FindNextMatch" => bind!(editor::FindNext),
+        "editor::FindPreviousMatch" => bind!(editor::FindPrevious),
+        "editor::DeleteToPreviousWordStart" => bind!(editor::DeleteSubwordLeft),
+        "editor::DeleteToNextWordEnd" => bind!(editor::DeleteSubwordRight),
         // For buffer_search:: actions, silently ignored (find/replace is built into the editor).
         action_name if action_name.starts_with("buffer_search::") => false,
 
@@ -264,6 +327,10 @@ fn bind_action(cx: &mut App, keystroke: &str, action_name: &str, context: Option
         "table_viewer::OpenRowEditor" => {
             bind!(crate::components::table_viewer::OpenRowEditor)
         }
+        "cell_editor::SaveCellEdit" => bind!(SaveCellEdit),
+        "cell_editor::CancelCellEdit" => bind!(CancelCellEdit),
+        "cell_editor::FormatCellEdit" => bind!(FormatCellEdit),
+        "cell_editor::ToggleCellEditorWordWrap" => bind!(ToggleCellEditorWordWrap),
         "table_viewer::CopySelection" => {
             bind!(crate::components::table_viewer::CopySelection)
         }

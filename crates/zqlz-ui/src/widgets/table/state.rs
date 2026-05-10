@@ -169,6 +169,12 @@ impl<D> TableState<D>
 where
     D: TableDelegate,
 {
+    fn header_height(&self) -> Pixels {
+        self.options
+            .header_height
+            .unwrap_or_else(|| self.options.size.table_row_height())
+    }
+
     /// Create a new TableState with the given delegate.
     pub fn new(delegate: D, _: &mut Window, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
@@ -1926,7 +1932,7 @@ where
         header
             .h_flex()
             .w_full()
-            .h(self.options.size.table_row_height())
+            .h(self.header_height())
             .flex_shrink_0()
             .border_b_1()
             .border_color(cx.theme().border.opacity(0.25))
@@ -2299,7 +2305,7 @@ where
             div()
                 .occlude()
                 .absolute()
-                .top(self.options.size.table_row_height())
+                .top(self.header_height())
                 .right_0()
                 .bottom_0()
                 .w(Scrollbar::width())

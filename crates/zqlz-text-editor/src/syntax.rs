@@ -110,11 +110,13 @@ pub struct Highlight {
 /// ```
 pub struct SyntaxHighlighter {
     parser: Parser,
+    language_profile: &'static str,
     /// Cached mapping from tree-sitter node types to highlight kinds
     node_type_map: HashMap<&'static str, HighlightKind>,
     function_like_nodes: HashSet<&'static str>,
     identifier_like_nodes: HashSet<&'static str>,
     punctuation_like_nodes: HashSet<&'static str>,
+    dialect_keywords: HashSet<&'static str>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -266,14 +268,32 @@ impl SyntaxHighlighter {
         let identifier_like_nodes = HashSet::from(["identifier", "object_reference", "all_fields"]);
 
         let punctuation_like_nodes = HashSet::from(["(", ")", "[", "]", "{", "}", ",", ";", "."]);
+        let language_profile = "sql";
 
         Ok(Self {
             parser,
+            language_profile,
             node_type_map,
             function_like_nodes,
             identifier_like_nodes,
             punctuation_like_nodes,
+            dialect_keywords: dialect_keywords_for(language_profile),
         })
+    }
+
+    pub fn language_profile(&self) -> &'static str {
+        self.language_profile
+    }
+
+    pub fn set_language_profile(&mut self, language_profile: &'static str) {
+        let language_profile = normalize_language_profile(language_profile);
+        if self.language_profile == language_profile {
+            return;
+        }
+
+        self.language_profile = language_profile;
+        self.dialect_keywords = dialect_keywords_for(language_profile);
+        self.invalidate_tree();
     }
 
     /// Discards the cached parse tree, forcing a full re-parse on the next
@@ -471,6 +491,15 @@ impl SyntaxHighlighter {
         HighlightKind::Default
     }
 
+    fn classify_identifier_text(&self, text: &str) -> HighlightKind {
+        let normalized = text.trim_matches('"').to_ascii_uppercase();
+        if self.dialect_keywords.contains(normalized.as_str()) {
+            HighlightKind::Keyword
+        } else {
+            HighlightKind::Default
+        }
+    }
+
     fn identifier_is_function_name(&self, node: Node) -> bool {
         let Some(parent) = node.parent() else {
             return false;
@@ -506,16 +535,82 @@ impl SyntaxHighlighter {
             HighlightKind::Boolean
         } else if text.eq_ignore_ascii_case("null") {
             HighlightKind::Null
-        } else if text
-            .chars()
-            .next()
-            .map(|character| character.is_ascii_digit())
-            .unwrap_or(false)
-        {
+        } else if Self::looks_like_number_literal(text) {
             HighlightKind::Number
         } else {
             HighlightKind::Default
         }
+    }
+
+    fn looks_like_number_literal(text: &str) -> bool {
+        let mut text = text.trim();
+        if let Some(stripped) = text.strip_prefix('+').or_else(|| text.strip_prefix('-')) {
+            text = stripped;
+        }
+
+        let lower = text.to_ascii_lowercase();
+        if let Some(hex) = lower.strip_prefix("0x") {
+            return !hex.is_empty() && hex.chars().all(|character| character.is_ascii_hexdigit());
+        }
+        if let Some(binary) = lower.strip_prefix("0b") {
+            return !binary.is_empty()
+                && binary
+                    .chars()
+                    .all(|character| matches!(character, '0' | '1'));
+        }
+
+        let mut chars = text.chars().peekable();
+        let mut digits_before_decimal = false;
+        while chars
+            .peek()
+            .is_some_and(|character| character.is_ascii_digit())
+        {
+            digits_before_decimal = true;
+            chars.next();
+        }
+
+        let mut digits_after_decimal = false;
+        if chars.peek() == Some(&'.') {
+            chars.next();
+            while chars
+                .peek()
+                .is_some_and(|character| character.is_ascii_digit())
+            {
+                digits_after_decimal = true;
+                chars.next();
+            }
+        }
+
+        if !digits_before_decimal && !digits_after_decimal {
+            return false;
+        }
+
+        if chars
+            .peek()
+            .is_some_and(|character| matches!(character, 'e' | 'E'))
+        {
+            chars.next();
+            if chars
+                .peek()
+                .is_some_and(|character| matches!(character, '+' | '-'))
+            {
+                chars.next();
+            }
+
+            let mut exponent_digits = false;
+            while chars
+                .peek()
+                .is_some_and(|character| character.is_ascii_digit())
+            {
+                exponent_digits = true;
+                chars.next();
+            }
+            if !exponent_digits {
+                return false;
+            }
+        }
+
+        chars.next().is_none()
     }
 
     fn classify_terminal_text(&self, text: &str) -> HighlightKind {
@@ -544,7 +639,7 @@ impl SyntaxHighlighter {
     fn collect_highlights(&self, node: Node, text: &str, highlights: &mut Vec<Highlight>) {
         let node_kind = node.kind();
 
-        let kind = if node_kind == "literal" {
+        let mut kind = if node_kind == "literal" {
             let start = node.start_byte();
             let end = node.end_byte();
             if start > text.len()
@@ -559,6 +654,21 @@ impl SyntaxHighlighter {
         } else {
             self.classify_non_literal_node(node)
         };
+
+        if matches!(kind, HighlightKind::Default | HighlightKind::Identifier) {
+            let start = node.start_byte();
+            let end = node.end_byte();
+            if start <= text.len()
+                && end <= text.len()
+                && text.is_char_boundary(start)
+                && text.is_char_boundary(end)
+            {
+                let dialect_kind = self.classify_identifier_text(&text[start..end]);
+                if dialect_kind != HighlightKind::Default {
+                    kind = dialect_kind;
+                }
+            }
+        }
 
         if Self::should_emit_highlight(node, kind) {
             highlights.push(Highlight {
@@ -604,12 +714,22 @@ impl SyntaxHighlighter {
     ) {
         let node_kind = node.kind();
 
-        let kind = if node_kind == "literal" {
+        let mut kind = if node_kind == "literal" {
             Self::classify_literal_from_rope(text, node.start_byte(), node.end_byte())
                 .unwrap_or(HighlightKind::Default)
         } else {
             self.classify_non_literal_node(node)
         };
+
+        if matches!(kind, HighlightKind::Default | HighlightKind::Identifier)
+            && let Some(text_slice) =
+                Self::rope_text_range(text, node.start_byte(), node.end_byte())
+        {
+            let dialect_kind = self.classify_identifier_text(&text_slice);
+            if dialect_kind != HighlightKind::Default {
+                kind = dialect_kind;
+            }
+        }
 
         if Self::should_emit_highlight(node, kind) {
             highlights.push(Highlight {
@@ -775,6 +895,94 @@ fn shift_highlight(highlight: &Highlight, delta: isize) -> Highlight {
     }
 }
 
+fn normalize_language_profile(language_profile: &str) -> &'static str {
+    match language_profile.to_ascii_lowercase().as_str() {
+        "postgres" | "postgresql" => "postgresql",
+        "mysql" | "mariadb" => "mysql",
+        "sqlite" => "sqlite",
+        "clickhouse" => "clickhouse",
+        _ => "sql",
+    }
+}
+
+fn dialect_keywords_for(language_profile: &str) -> HashSet<&'static str> {
+    let mut keywords = HashSet::from([
+        "ARRAY",
+        "AUTO_INCREMENT",
+        "AUTOINCREMENT",
+        "CONFLICT",
+        "DATABASE",
+        "ENUM",
+        "EXPLAIN",
+        "JSON",
+        "MERGE",
+        "RETURNING",
+        "UPSERT",
+    ]);
+
+    match normalize_language_profile(language_profile) {
+        "postgresql" => keywords.extend([
+            "BIGSERIAL",
+            "BYTEA",
+            "CITEXT",
+            "CONCURRENTLY",
+            "DO",
+            "ILIKE",
+            "JSONB",
+            "MATERIALIZED",
+            "NOTIFY",
+            "PLPGSQL",
+            "SERIAL",
+            "SMALLSERIAL",
+            "UNLOGGED",
+            "VACUUM",
+        ]),
+        "mysql" => keywords.extend([
+            "ANALYZE",
+            "AUTO_INCREMENT",
+            "ENGINE",
+            "FORCE",
+            "KEY",
+            "LOCK",
+            "MODIFY",
+            "OPTIMIZE",
+            "REGEXP",
+            "REPLACE",
+            "STRAIGHT_JOIN",
+            "UNLOCK",
+            "UNSIGNED",
+            "ZEROFILL",
+        ]),
+        "sqlite" => keywords.extend([
+            "ABORT",
+            "AUTOINCREMENT",
+            "GLOB",
+            "INDEXED",
+            "PRAGMA",
+            "RAISE",
+            "REGEXP",
+            "ROWID",
+            "VACUUM",
+            "WITHOUT",
+        ]),
+        "clickhouse" => keywords.extend([
+            "ARRAY",
+            "CODEC",
+            "FINAL",
+            "LOWCARDINALITY",
+            "MATERIALIZED",
+            "PREWHERE",
+            "SAMPLE",
+            "SETTINGS",
+            "TTL",
+            "TUPLE",
+        ]),
+        _ => {}
+    }
+
+    keywords
+}
+
 fn merge_adjacent_same_kind(highlights: &[Highlight]) -> Vec<Highlight> {
     if highlights.is_empty() {
         return Vec::new();
@@ -891,6 +1099,42 @@ mod tests {
             .collect();
 
         assert!(!number_highlights.is_empty());
+    }
+
+    #[test]
+    fn test_classify_numeric_literal_variants() {
+        for literal in ["1.5", ".5", "1e-9", "0xFF", "0b1010", "-42", "+3.14"] {
+            assert_eq!(
+                SyntaxHighlighter::classify_literal_text(literal),
+                HighlightKind::Number,
+                "{literal}"
+            );
+        }
+
+        for literal in ["1e", "0x", "0b102", "+"] {
+            assert_ne!(
+                SyntaxHighlighter::classify_literal_text(literal),
+                HighlightKind::Number,
+                "{literal}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_dialect_profile_classifies_extra_keywords() {
+        let mut highlighter = SyntaxHighlighter::new().unwrap();
+        assert_eq!(highlighter.language_profile(), "sql");
+        assert_eq!(
+            highlighter.classify_identifier_text("jsonb"),
+            HighlightKind::Default
+        );
+
+        highlighter.set_language_profile("postgresql");
+        assert_eq!(highlighter.language_profile(), "postgresql");
+        assert_eq!(
+            highlighter.classify_identifier_text("jsonb"),
+            HighlightKind::Keyword
+        );
     }
 
     #[test]

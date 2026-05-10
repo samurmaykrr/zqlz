@@ -1,22 +1,23 @@
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 
 use gpui::{
-    App, AppContext, ClickEvent, Context, Corner, DismissEvent, Div, DragMoveEvent, Empty, Entity,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, MouseButton,
-    MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
+    Anchor, App, AppContext, ClickEvent, Context, DismissEvent, Div, DragMoveEvent, Empty, Entity,
+    EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
+    MouseButton, MouseDownEvent, ParentElement, Pixels, Point, Render, ScrollHandle, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, WeakEntity, Window, div,
     prelude::FluentBuilder, px, relative, rems,
 };
 use rust_i18n::t;
 
 use crate::widgets::{
-    ActiveTheme, AxisExt, IconName, Placement, Selectable, Sizable, WindowExt as _,
+    ActiveTheme, AxisExt, Icon, IconName, Placement, Selectable, Sizable, WindowExt as _, ZqlzIcon,
     button::{Button, ButtonVariant, ButtonVariants as _},
     dialog::DialogButtonProps,
     dock::PanelInfo,
     h_flex,
-    menu::{DropdownMenu, PopupMenu},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
     tab::{Tab, TabBar},
+    tooltip::Tooltip,
     v_flex,
 };
 
@@ -32,6 +33,18 @@ struct TabState {
     draggable: bool,
     droppable: bool,
     active_panel: Option<Arc<dyn PanelView>>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct TabMetadata {
+    pub visible: bool,
+    pub tab_name: Option<SharedString>,
+    pub tab_icon: Option<ZqlzIcon>,
+    pub tooltip: Option<SharedString>,
+    pub closable: bool,
+    pub dirty: bool,
+    pub pinned: bool,
+    pub preview: bool,
 }
 
 #[derive(Clone)]
@@ -75,6 +88,37 @@ pub struct TabContextMenuEvent {
     pub position: Point<Pixels>,
 }
 
+#[derive(Clone, Debug)]
+pub struct TabCloseRequestEvent {
+    pub tab_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabCommand {
+    CloseOthers { keep_index: usize },
+    CloseRight { from_index: usize },
+    CloseLeft { from_index: usize },
+    CloseClean,
+    CloseAll,
+    MoveToNewWindow { index: usize },
+    TogglePin { index: usize },
+    SetPreview { index: Option<usize> },
+}
+
+#[derive(Clone, Debug)]
+pub struct TabCommandEvent {
+    pub command: TabCommand,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BulkCloseMode {
+    Others { keep_index: usize },
+    Right { from_index: usize },
+    Left { from_index: usize },
+    Clean,
+    All,
+}
+
 pub struct TabPanel {
     focus_handle: FocusHandle,
     dock_area: WeakEntity<DockArea>,
@@ -93,8 +137,132 @@ pub struct TabPanel {
     collapsed: bool,
     /// When drag move, will get the placement of the panel to be split
     will_split_placement: Option<Placement>,
+    pinned_panel_ids: HashSet<EntityId>,
+    preview_panel_id: Option<EntityId>,
+    navigation_back_stack: Vec<EntityId>,
+    navigation_forward_stack: Vec<EntityId>,
     /// Is TabPanel used in Tiles.
     in_tiles: bool,
+}
+
+fn next_active_ix_after_remove(
+    previous_active_ix: usize,
+    removed_index: usize,
+    remaining_len: usize,
+) -> Option<usize> {
+    if remaining_len == 0 {
+        return None;
+    }
+
+    if removed_index < previous_active_ix {
+        Some(previous_active_ix.saturating_sub(1).min(remaining_len - 1))
+    } else if removed_index == previous_active_ix {
+        Some(removed_index.min(remaining_len - 1))
+    } else {
+        Some(previous_active_ix.min(remaining_len - 1))
+    }
+}
+
+fn recent_active_ix_after_remove(
+    removed_index: usize,
+    panel_ids: &[EntityId],
+    navigation_back_stack: &[EntityId],
+) -> Option<usize> {
+    let removed_panel_id = panel_ids.get(removed_index)?;
+
+    navigation_back_stack.iter().rev().find_map(|panel_id| {
+        if panel_id == removed_panel_id {
+            return None;
+        }
+
+        panel_ids
+            .iter()
+            .enumerate()
+            .find(|(index, candidate_id)| *index != removed_index && *candidate_id == panel_id)
+            .map(|(index, _)| {
+                if index > removed_index {
+                    index.saturating_sub(1)
+                } else {
+                    index
+                }
+            })
+    })
+}
+
+fn should_close_for_bulk_mode(
+    mode: BulkCloseMode,
+    index: usize,
+    closable: bool,
+    dirty: bool,
+    pinned: bool,
+) -> bool {
+    if !closable || dirty || pinned {
+        return false;
+    }
+
+    match mode {
+        BulkCloseMode::Others { keep_index } => index != keep_index,
+        BulkCloseMode::Right { from_index } => index > from_index,
+        BulkCloseMode::Left { from_index } => index < from_index,
+        BulkCloseMode::Clean | BulkCloseMode::All => true,
+    }
+}
+
+fn preview_panel_id_for_index(
+    index: Option<usize>,
+    panel_count: usize,
+    panel_id_at_index: impl Fn(usize) -> EntityId,
+    panel_is_pinned: impl Fn(usize) -> bool,
+) -> Option<EntityId> {
+    let index = index?;
+    if index >= panel_count || panel_is_pinned(index) {
+        return None;
+    }
+
+    Some(panel_id_at_index(index))
+}
+
+fn should_toggle_pin_for_target(currently_pinned: bool, target_pinned: bool) -> bool {
+    currently_pinned != target_pinned
+}
+
+fn remove_navigation_entry(stack: &mut Vec<EntityId>, removed_panel_id: EntityId) {
+    stack.retain(|panel_id| *panel_id != removed_panel_id);
+}
+
+fn active_ix_after_move(active_ix: usize, from_ix: usize, to_ix: usize) -> usize {
+    if active_ix == from_ix {
+        return to_ix;
+    }
+
+    if from_ix < to_ix {
+        if active_ix > from_ix && active_ix <= to_ix {
+            active_ix - 1
+        } else {
+            active_ix
+        }
+    } else if active_ix >= to_ix && active_ix < from_ix {
+        active_ix + 1
+    } else {
+        active_ix
+    }
+}
+
+fn new_tab_insert_ix(
+    panel_count: usize,
+    active_ix: usize,
+    pinned_count: usize,
+    active_is_pinned: bool,
+) -> usize {
+    if panel_count == 0 {
+        return 0;
+    }
+
+    if active_is_pinned {
+        pinned_count.min(panel_count)
+    } else {
+        active_ix.saturating_add(1).min(panel_count)
+    }
 }
 
 impl Panel for TabPanel {
@@ -156,9 +324,13 @@ impl Panel for TabPanel {
 
     fn dump(&self, cx: &App) -> PanelState {
         let mut state = PanelState::new(self);
+        let pinned_indices = self.pinned_indices(cx);
+        let preview_index = self.preview_index(cx);
+        state.info =
+            PanelInfo::tabs_with_pinned_and_preview(self.active_ix, pinned_indices, preview_index);
+
         for panel in self.panels.iter() {
             state.add_child(panel.dump(cx));
-            state.info = PanelInfo::tabs(self.active_ix);
         }
         state
     }
@@ -187,6 +359,10 @@ impl TabPanel {
             zoomed: false,
             collapsed: false,
             closable: true,
+            pinned_panel_ids: HashSet::new(),
+            preview_panel_id: None,
+            navigation_back_stack: Vec::new(),
+            navigation_forward_stack: Vec::new(),
             in_tiles: false,
         }
     }
@@ -198,6 +374,251 @@ impl TabPanel {
 
     pub(super) fn set_parent(&mut self, view: WeakEntity<StackPanel>) {
         self.stack_panel = Some(view);
+    }
+
+    pub fn context_menu_for_tab(
+        tab_panel: WeakEntity<Self>,
+        tab_index: usize,
+        focus_handle: FocusHandle,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Entity<PopupMenu> {
+        let (
+            is_first_tab,
+            is_last_tab,
+            is_pinned,
+            is_preview,
+            can_move_to_new_window,
+            can_close_other_tabs,
+            can_close_tabs_to_right,
+            can_close_tabs_to_left,
+            can_close_clean_tabs,
+            can_close_all_tabs,
+        ) = tab_panel
+            .upgrade()
+            .map(|panel| {
+                let panel = panel.read(cx);
+                let tab_count = panel.panel_count();
+                (
+                    tab_index == 0,
+                    tab_index >= tab_count.saturating_sub(1),
+                    panel
+                        .panels
+                        .get(tab_index)
+                        .is_some_and(|item| panel.is_panel_pinned(item.as_ref(), cx)),
+                    panel
+                        .panels
+                        .get(tab_index)
+                        .is_some_and(|item| panel.is_panel_preview(item.as_ref(), cx)),
+                    panel
+                        .panels
+                        .get(tab_index)
+                        .is_some_and(|item| item.can_move_to_new_window(cx)),
+                    panel.bulk_close_count(
+                        BulkCloseMode::Others {
+                            keep_index: tab_index,
+                        },
+                        cx,
+                    ) > 0,
+                    panel.bulk_close_count(
+                        BulkCloseMode::Right {
+                            from_index: tab_index,
+                        },
+                        cx,
+                    ) > 0,
+                    panel.bulk_close_count(
+                        BulkCloseMode::Left {
+                            from_index: tab_index,
+                        },
+                        cx,
+                    ) > 0,
+                    panel.bulk_close_count(BulkCloseMode::Clean, cx) > 0,
+                    panel.bulk_close_count(BulkCloseMode::All, cx) > 0,
+                )
+            })
+            .unwrap_or((
+                true, true, false, false, false, false, false, false, false, false,
+            ));
+
+        PopupMenu::build(window, cx, |menu, _window, _cx| {
+            menu.action_context(focus_handle)
+                .item(
+                    PopupMenuItem::new(if is_pinned { "Unpin Tab" } else { "Pin Tab" }).on_click({
+                        let panel = tab_panel.clone();
+                        move |_event, _window, cx| {
+                            if let Err(error) = panel.update(cx, |_panel, cx| {
+                                cx.emit(TabCommandEvent {
+                                    command: TabCommand::TogglePin { index: tab_index },
+                                });
+                            }) {
+                                tracing::warn!(%error, tab_index, "Failed to toggle tab pin");
+                            }
+                        }
+                    }),
+                )
+                .item(
+                    PopupMenuItem::new(if is_preview {
+                        "Clear Preview Tab"
+                    } else {
+                        "Mark as Preview Tab"
+                    })
+                    .disabled(is_pinned)
+                    .on_click({
+                        let panel = tab_panel.clone();
+                        move |_event, _window, cx| {
+                            if let Err(error) = panel.update(cx, |_panel, cx| {
+                                cx.emit(TabCommandEvent {
+                                    command: TabCommand::SetPreview {
+                                        index: if is_preview { None } else { Some(tab_index) },
+                                    },
+                                });
+                            }) {
+                                tracing::warn!(%error, tab_index, "Failed to update tab preview state");
+                            }
+                        }
+                    }),
+                )
+                .separator()
+                .item(PopupMenuItem::new("Close").on_click({
+                    let panel = tab_panel.clone();
+                    move |_event, _window, cx| {
+                        if let Err(error) = panel.update(cx, |_panel, cx| {
+                            cx.emit(TabCloseRequestEvent { tab_index });
+                        }) {
+                            tracing::warn!(
+                                %error,
+                                tab_index,
+                                "Failed to close tab from tab context menu"
+                            );
+                        }
+                    }
+                }))
+                .item(
+                    PopupMenuItem::new("Close Other Tabs")
+                        .disabled(!can_close_other_tabs)
+                        .on_click({
+                            let panel = tab_panel.clone();
+                            move |_event, _window, cx| {
+                                if let Err(error) = panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::CloseOthers {
+                                            keep_index: tab_index,
+                                        },
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        tab_index,
+                                        "Failed to close other tabs from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Close Tabs to the Right")
+                        .disabled(is_last_tab || !can_close_tabs_to_right)
+                        .on_click({
+                            let panel = tab_panel.clone();
+                            move |_event, _window, cx| {
+                                if let Err(error) = panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::CloseRight {
+                                            from_index: tab_index,
+                                        },
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        tab_index,
+                                        "Failed to close tabs to the right from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Close Tabs to the Left")
+                        .disabled(is_first_tab || !can_close_tabs_to_left)
+                        .on_click({
+                            let panel = tab_panel.clone();
+                            move |_event, _window, cx| {
+                                if let Err(error) = panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::CloseLeft {
+                                            from_index: tab_index,
+                                        },
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        tab_index,
+                                        "Failed to close tabs to the left from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+                .item(
+                    PopupMenuItem::new("Move Tab to New Window")
+                        .disabled(!can_move_to_new_window)
+                        .on_click({
+                            let panel = tab_panel.clone();
+                            move |_event, _window, cx| {
+                                if let Err(error) = panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::MoveToNewWindow { index: tab_index },
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        tab_index,
+                                        "Failed to move tab to new window from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Close Clean Tabs")
+                        .disabled(!can_close_clean_tabs)
+                        .on_click({
+                            let panel = tab_panel.clone();
+                            move |_event, _window, cx| {
+                                if let Err(error) = panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::CloseClean,
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        "Failed to close clean tabs from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+                .separator()
+                .item(
+                    PopupMenuItem::new("Close All")
+                        .disabled(!can_close_all_tabs)
+                        .on_click({
+                            move |_event, _window, cx| {
+                                if let Err(error) = tab_panel.update(cx, |_panel, cx| {
+                                    cx.emit(TabCommandEvent {
+                                        command: TabCommand::CloseAll,
+                                    });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        "Failed to close all tabs from tab context menu"
+                                    );
+                                }
+                            }
+                        }),
+                )
+        })
     }
 
     /// Return current active_panel View
@@ -223,6 +644,157 @@ impl TabPanel {
         self.panels.len()
     }
 
+    pub fn active_index(&self) -> Option<usize> {
+        (!self.panels.is_empty()).then_some(self.active_ix)
+    }
+
+    pub fn is_tab_pinned(&self, index: usize, cx: &App) -> bool {
+        self.panels
+            .get(index)
+            .is_some_and(|panel| self.is_panel_pinned(panel.as_ref(), cx))
+    }
+
+    pub fn is_tab_preview(&self, index: usize, cx: &App) -> bool {
+        self.panels
+            .get(index)
+            .is_some_and(|panel| self.is_panel_preview(panel.as_ref(), cx))
+    }
+
+    pub fn tab_metadata(&self, cx: &App) -> Vec<TabMetadata> {
+        self.panels
+            .iter()
+            .map(|panel| TabMetadata {
+                visible: panel.visible(cx),
+                tab_name: panel.tab_name(cx),
+                tab_icon: panel.tab_icon(cx),
+                tooltip: panel.tab_tooltip(cx),
+                closable: panel.closable(cx),
+                dirty: panel.has_unsaved_changes(cx),
+                pinned: self.is_panel_pinned(panel.as_ref(), cx),
+                preview: self.is_panel_preview(panel.as_ref(), cx),
+            })
+            .collect()
+    }
+
+    pub fn toggle_pin_tab(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(panel) = self.panels.get(index) else {
+            return;
+        };
+
+        let panel_id = panel.panel_id(cx);
+        let was_pinned = self.pinned_panel_ids.remove(&panel_id);
+        if was_pinned {
+            let pinned_count = self.pinned_indices(cx).len();
+            self.move_panel_with_active_ix(index, pinned_count);
+        } else {
+            self.pinned_panel_ids.insert(panel_id);
+            if self.preview_panel_id == Some(panel_id) {
+                self.preview_panel_id = None;
+            }
+            let pinned_count = self.pinned_indices(cx).len();
+            self.move_panel_with_active_ix(index, pinned_count.saturating_sub(1));
+        }
+        cx.notify();
+    }
+
+    pub fn set_pin_tab(&mut self, index: usize, pinned: bool, cx: &mut Context<Self>) {
+        if should_toggle_pin_for_target(self.is_tab_pinned(index, cx), pinned) {
+            self.toggle_pin_tab(index, cx);
+        }
+    }
+
+    pub fn set_pinned_indices(&mut self, pinned_indices: &[usize], cx: &mut Context<Self>) {
+        self.pinned_panel_ids = pinned_indices
+            .iter()
+            .filter_map(|index| self.panels.get(*index).map(|panel| panel.panel_id(cx)))
+            .collect();
+
+        if self
+            .preview_panel_id
+            .is_some_and(|preview_id| self.pinned_panel_ids.contains(&preview_id))
+        {
+            self.preview_panel_id = None;
+        }
+
+        cx.notify();
+    }
+
+    fn pinned_indices(&self, cx: &App) -> Vec<usize> {
+        self.panels
+            .iter()
+            .enumerate()
+            .filter_map(|(index, panel)| self.is_panel_pinned(panel.as_ref(), cx).then_some(index))
+            .collect()
+    }
+
+    pub fn set_preview_tab(&mut self, index: Option<usize>, cx: &mut Context<Self>) {
+        self.preview_panel_id = preview_panel_id_for_index(
+            index,
+            self.panels.len(),
+            |index| self.panels[index].panel_id(cx),
+            |index| self.is_panel_pinned(self.panels[index].as_ref(), cx),
+        );
+        cx.notify();
+    }
+
+    pub fn preview_index(&self, cx: &App) -> Option<usize> {
+        self.panels
+            .iter()
+            .position(|panel| self.is_panel_preview(panel.as_ref(), cx))
+    }
+
+    fn move_panel_with_active_ix(&mut self, from_ix: usize, to_ix: usize) {
+        if from_ix == to_ix || from_ix >= self.panels.len() || to_ix >= self.panels.len() {
+            return;
+        }
+
+        let panel = self.panels.remove(from_ix);
+        self.panels.insert(to_ix, panel);
+        self.active_ix = active_ix_after_move(self.active_ix, from_ix, to_ix);
+        self.tab_bar_scroll_handle.scroll_to_item(self.active_ix);
+    }
+
+    fn is_panel_pinned(&self, panel: &dyn PanelView, cx: &App) -> bool {
+        panel.is_tab_pinned(cx) || self.pinned_panel_ids.contains(&panel.panel_id(cx))
+    }
+
+    fn is_panel_preview(&self, panel: &dyn PanelView, cx: &App) -> bool {
+        panel.is_preview_tab(cx) || self.preview_panel_id == Some(panel.panel_id(cx))
+    }
+
+    fn bulk_close_panels(&self, mode: BulkCloseMode, cx: &App) -> Vec<Arc<dyn PanelView>> {
+        self.panels
+            .iter()
+            .enumerate()
+            .filter(|(index, panel)| {
+                should_close_for_bulk_mode(
+                    mode,
+                    *index,
+                    panel.closable(cx),
+                    panel.has_unsaved_changes(cx),
+                    self.is_panel_pinned(panel.as_ref(), cx),
+                )
+            })
+            .map(|(_, panel)| panel.clone())
+            .collect()
+    }
+
+    fn bulk_close_count(&self, mode: BulkCloseMode, cx: &App) -> usize {
+        self.panels
+            .iter()
+            .enumerate()
+            .filter(|(index, panel)| {
+                should_close_for_bulk_mode(
+                    mode,
+                    *index,
+                    panel.closable(cx),
+                    panel.has_unsaved_changes(cx),
+                    self.is_panel_pinned(panel.as_ref(), cx),
+                )
+            })
+            .count()
+    }
+
     /// Returns a slice of all panels in this tab panel.
     ///
     /// This is useful for iterating over all panels, for example to update
@@ -232,11 +804,26 @@ impl TabPanel {
     }
 
     fn set_active_ix(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        self.set_active_ix_with_history(ix, true, window, cx);
+    }
+
+    fn set_active_ix_with_history(
+        &mut self,
+        ix: usize,
+        record_history: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if ix == self.active_ix {
             return;
         }
 
         let last_active_ix = self.active_ix;
+        if record_history && let Some(last_active_panel) = self.panels.get(last_active_ix) {
+            self.navigation_back_stack
+                .push(last_active_panel.panel_id(cx));
+            self.navigation_forward_stack.clear();
+        }
 
         self.active_ix = ix;
         self.tab_bar_scroll_handle.scroll_to_item(ix);
@@ -259,6 +846,43 @@ impl TabPanel {
 
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
+    }
+
+    pub fn navigate_back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(panel_id) = self.navigation_back_stack.pop() {
+            let Some(index) = self
+                .panels
+                .iter()
+                .position(|panel| panel.panel_id(cx) == panel_id)
+            else {
+                continue;
+            };
+
+            if let Some(active_panel) = self.panels.get(self.active_ix) {
+                self.navigation_forward_stack
+                    .push(active_panel.panel_id(cx));
+            }
+            self.set_active_ix_with_history(index, false, window, cx);
+            return;
+        }
+    }
+
+    pub fn navigate_forward(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        while let Some(panel_id) = self.navigation_forward_stack.pop() {
+            let Some(index) = self
+                .panels
+                .iter()
+                .position(|panel| panel.panel_id(cx) == panel_id)
+            else {
+                continue;
+            };
+
+            if let Some(active_panel) = self.panels.get(self.active_ix) {
+                self.navigation_back_stack.push(active_panel.panel_id(cx));
+            }
+            self.set_active_ix_with_history(index, false, window, cx);
+            return;
+        }
     }
 
     /// Switch to the next tab, wrapping around to the first if at the end.
@@ -298,6 +922,24 @@ impl TabPanel {
         self.set_active_ix(ix, window, cx);
     }
 
+    pub fn activate_panel_by_id(
+        &mut self,
+        panel_id: EntityId,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(index) = self
+            .panels
+            .iter()
+            .position(|panel| panel.panel_id(cx) == panel_id)
+        else {
+            return false;
+        };
+
+        self.set_active_ix(index, window, cx);
+        true
+    }
+
     /// Add a panel to the end of the tabs
     pub fn add_panel(
         &mut self,
@@ -306,6 +948,42 @@ impl TabPanel {
         cx: &mut Context<Self>,
     ) {
         self.add_panel_with_active(panel, true, window, cx);
+    }
+
+    pub fn replace_panel_at(
+        &mut self,
+        index: usize,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if index >= self.panels.len()
+            || self
+                .panels
+                .iter()
+                .any(|existing| existing.view().entity_id() == panel.view().entity_id())
+        {
+            return false;
+        }
+
+        let old_panel = std::mem::replace(&mut self.panels[index], panel);
+        let old_panel_id = old_panel.panel_id(cx);
+        old_panel.on_removed(window, cx);
+        self.pinned_panel_ids.remove(&old_panel_id);
+        remove_navigation_entry(&mut self.navigation_back_stack, old_panel_id);
+        remove_navigation_entry(&mut self.navigation_forward_stack, old_panel_id);
+
+        if let Some(new_panel) = self.panels.get(index).cloned() {
+            new_panel.on_added_to(cx.entity().downgrade(), window, cx);
+            self.preview_panel_id = Some(new_panel.panel_id(cx));
+        }
+
+        self.active_ix = index;
+        self.tab_bar_scroll_handle.scroll_to_item(index);
+        self.focus_active_panel(window, cx);
+        cx.emit(PanelEvent::LayoutChanged);
+        cx.notify();
+        true
     }
 
     fn add_panel_with_active(
@@ -329,11 +1007,25 @@ impl TabPanel {
             return;
         }
 
+        let insert_ix = if active {
+            new_tab_insert_ix(
+                self.panels.len(),
+                self.active_ix,
+                self.pinned_indices(cx).len(),
+                self.active_panel(cx)
+                    .is_some_and(|panel| self.is_panel_pinned(panel.as_ref(), cx)),
+            )
+        } else {
+            self.panels.len()
+        };
+
         panel.on_added_to(cx.entity().downgrade(), window, cx);
-        self.panels.push(panel);
-        // set the active panel to the new panel
+        self.panels.insert(insert_ix, panel);
+
         if active {
-            self.set_active_ix(self.panels.len() - 1, window, cx);
+            self.set_active_ix(insert_ix, window, cx);
+        } else if insert_ix <= self.active_ix {
+            self.active_ix = self.active_ix.saturating_add(1);
         }
         cx.emit(PanelEvent::LayoutChanged);
         cx.notify();
@@ -392,6 +1084,14 @@ impl TabPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let panel_id = panel.panel_id(cx);
+        self.pinned_panel_ids.remove(&panel_id);
+        remove_navigation_entry(&mut self.navigation_back_stack, panel_id);
+        remove_navigation_entry(&mut self.navigation_forward_stack, panel_id);
+        if self.preview_panel_id == Some(panel_id) {
+            self.preview_panel_id = None;
+        }
+
         self.detach_panel(panel, window, cx);
         self.remove_self_if_empty(window, cx);
         cx.emit(PanelEvent::ZoomOut);
@@ -403,17 +1103,21 @@ impl TabPanel {
     /// This method closes the tab that is currently active/visible.
     /// Returns true if a tab was closed, false if no tab was active or the tab wasn't closable.
     pub fn close_active_tab(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
-        self.close_panel_at(self.active_ix, window, cx);
-        true
+        self.close_panel_at(self.active_ix, window, cx)
     }
 
     /// Close a panel at the specified index.
     ///
     /// This method is called when clicking the close button (×) on a tab.
     /// It removes the panel at the given index and updates the active tab if needed.
-    pub fn close_panel_at(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn close_panel_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if index >= self.panels.len() {
-            return;
+            return false;
         }
 
         // Get the panel at this index
@@ -422,7 +1126,7 @@ impl TabPanel {
         if let Some(panel) = panel {
             // Check if this panel is closable
             if !panel.closable(cx) {
-                return;
+                return false;
             }
 
             // Check for unsaved changes and prompt if needed
@@ -457,12 +1161,15 @@ impl TabPanel {
                             true
                         })
                 });
-                return;
+                return false;
             }
 
             // Remove the panel
             self.remove_panel(panel, window, cx);
+            return true;
         }
+
+        false
     }
 
     pub fn force_close_panel_at(
@@ -470,20 +1177,32 @@ impl TabPanel {
         index: usize,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if index >= self.panels.len() {
-            return;
+            return false;
         }
 
         let Some(panel) = self.panels.get(index).cloned() else {
-            return;
+            return false;
         };
 
         if !panel.closable(cx) {
-            return;
+            return false;
         }
 
         self.remove_panel(panel, window, cx);
+        true
+    }
+
+    pub fn take_panel_at(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Arc<dyn PanelView>> {
+        let panel = self.panels.get(index).cloned()?;
+        self.detach_panel_without_removal(panel.clone(), window, cx);
+        Some(panel)
     }
 
     /// Close all tabs except the one at the specified index.
@@ -496,18 +1215,7 @@ impl TabPanel {
         cx: &mut Context<Self>,
     ) {
         // Collect panels to close (all except keep_index)
-        let panels_to_close: Vec<_> = self
-            .panels
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, panel)| {
-                if ix != keep_index && panel.closable(cx) {
-                    Some(panel.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let panels_to_close = self.bulk_close_panels(BulkCloseMode::Others { keep_index }, cx);
 
         // Close each panel
         for panel in panels_to_close {
@@ -525,20 +1233,32 @@ impl TabPanel {
         cx: &mut Context<Self>,
     ) {
         // Collect panels to close (all after from_index)
-        let panels_to_close: Vec<_> = self
-            .panels
-            .iter()
-            .enumerate()
-            .filter_map(|(ix, panel)| {
-                if ix > from_index && panel.closable(cx) {
-                    Some(panel.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let panels_to_close = self.bulk_close_panels(BulkCloseMode::Right { from_index }, cx);
 
         // Close each panel
+        for panel in panels_to_close {
+            self.remove_panel(panel, window, cx);
+        }
+    }
+
+    /// Close all tabs to the left of the specified index.
+    pub fn close_tabs_to_left(
+        &mut self,
+        from_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panels_to_close = self.bulk_close_panels(BulkCloseMode::Left { from_index }, cx);
+
+        for panel in panels_to_close {
+            self.remove_panel(panel, window, cx);
+        }
+    }
+
+    /// Close all closable tabs without unsaved changes.
+    pub fn close_clean_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let panels_to_close = self.bulk_close_panels(BulkCloseMode::Clean, cx);
+
         for panel in panels_to_close {
             self.remove_panel(panel, window, cx);
         }
@@ -549,17 +1269,7 @@ impl TabPanel {
     /// Used by "Close All" context menu option.
     pub fn close_all_tabs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // Collect all closable panels
-        let panels_to_close: Vec<_> = self
-            .panels
-            .iter()
-            .filter_map(|panel| {
-                if panel.closable(cx) {
-                    Some(panel.clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let panels_to_close = self.bulk_close_panels(BulkCloseMode::All, cx);
 
         // Close each panel
         for panel in panels_to_close {
@@ -574,11 +1284,41 @@ impl TabPanel {
         cx: &mut Context<Self>,
     ) {
         panel.on_removed(window, cx);
-        let panel_view = panel.view();
-        self.panels.retain(|p| p.view() != panel_view);
-        if self.active_ix >= self.panels.len() {
-            self.set_active_ix(self.panels.len().saturating_sub(1), window, cx)
-        }
+        self.detach_panel_without_removal(panel, window, cx);
+    }
+
+    fn detach_panel_without_removal(
+        &mut self,
+        panel: Arc<dyn PanelView>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(removed_index) = self.panels.iter().position(|item| item == &panel) else {
+            return;
+        };
+        let previous_active_ix = self.active_ix;
+
+        let recent_active_ix = if removed_index == previous_active_ix {
+            let panel_ids = self
+                .panels
+                .iter()
+                .map(|panel| panel.panel_id(cx))
+                .collect::<Vec<_>>();
+            recent_active_ix_after_remove(removed_index, &panel_ids, &self.navigation_back_stack)
+        } else {
+            None
+        };
+        self.panels.remove(removed_index);
+
+        let Some(next_active_ix) = recent_active_ix.or_else(|| {
+            next_active_ix_after_remove(previous_active_ix, removed_index, self.panels.len())
+        }) else {
+            self.active_ix = 0;
+            return;
+        };
+
+        self.active_ix = usize::MAX;
+        self.set_active_ix(next_active_ix, window, cx);
     }
 
     /// Check to remove self from the parent StackPanel, if there is no panel left
@@ -742,7 +1482,7 @@ impl TabPanel {
                                 })
                             }
                         })
-                        .anchor(Corner::TopRight),
+                        .anchor(Anchor::TopRight),
                 )
             })
     }
@@ -935,11 +1675,7 @@ impl TabPanel {
         // Pre-collect per-tab props before entering the element builder so we avoid calling
         // entity-read methods inside the iterator closure (which would register O(N) reactive
         // dependencies per render).
-        let tab_props: Vec<(bool, Option<SharedString>, bool)> = self
-            .panels
-            .iter()
-            .map(|panel| (panel.visible(cx), panel.tab_name(cx), panel.closable(cx)))
-            .collect();
+        let tab_metadata = self.tab_metadata(cx);
 
         TabBar::new("tab-bar")
             .tab_item_top_offset(-px(1.))
@@ -962,12 +1698,11 @@ impl TabPanel {
                 )
             })
             .children(self.panels.iter().enumerate().filter_map(|(ix, panel)| {
-                let (visible, tab_name, closable) =
-                    tab_props.get(ix).cloned().unwrap_or((false, None, false));
+                let props = tab_metadata.get(ix).cloned().unwrap_or_default();
                 let mut active = state.active_panel.as_ref() == Some(panel);
                 let droppable = self.collapsed;
 
-                if !visible {
+                if !props.visible {
                     return None;
                 }
 
@@ -980,40 +1715,103 @@ impl TabPanel {
                     Tab::new()
                         .ix(ix)
                         .tab_bar_prefix(has_extend_dock_button)
+                        .when_some(props.tooltip, |this, tooltip| {
+                            this.tooltip(move |window, cx| {
+                                Tooltip::new(tooltip.clone()).build(window, cx)
+                            })
+                        })
                         .map(|this| {
-                            if let Some(name) = tab_name {
+                            let this = this.when_some(props.tab_icon, |this, icon| {
+                                this.child(
+                                    Icon::new(icon)
+                                        .size_3()
+                                        .text_color(cx.theme().muted_foreground),
+                                )
+                            });
+
+                            if let Some(name) = props.tab_name {
                                 this.child(name)
                             } else {
                                 this.child(panel.title(window, cx))
                             }
                         })
                         .selected(active)
-                        // Add close button as suffix if panel is closable
-                        .when(closable, |this| {
-                            this.suffix(
-                                div()
-                                    .id(SharedString::from(format!("close-tab-{}", ix)))
-                                    .ml_1()
-                                    .flex()
-                                    .items_center()
-                                    .justify_center()
-                                    .size_4()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .hover(|style| {
-                                        style.bg(cx.theme().muted).text_color(cx.theme().foreground)
-                                    })
-                                    .on_click(cx.listener(
-                                        move |view, _event: &ClickEvent, window, cx| {
-                                            // Stop propagation so clicking close doesn't switch tabs
-                                            cx.stop_propagation();
-
-                                            // Close this panel
-                                            view.close_panel_at(ix, window, cx);
-                                        },
-                                    ))
-                                    .child("×"), // Unicode multiplication sign looks like an X
-                            )
-                        })
+                        .when(
+                            props.dirty || props.pinned || props.preview || props.closable,
+                            |this| {
+                                this.suffix(
+                                    h_flex()
+                                        .ml_0p5()
+                                        .gap_1()
+                                        .items_center()
+                                        .when(props.preview, |this| {
+                                            this.child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "preview-tab-{}",
+                                                        ix
+                                                    )))
+                                                    .size_1p5()
+                                                    .rounded_full()
+                                                    .border_1()
+                                                    .border_color(cx.theme().muted_foreground),
+                                            )
+                                        })
+                                        .when(props.pinned, |this| {
+                                            this.child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "pinned-tab-{}",
+                                                        ix
+                                                    )))
+                                                    .child(
+                                                        Icon::new(IconName::Star)
+                                                            .size_3()
+                                                            .text_color(cx.theme().accent),
+                                                    ),
+                                            )
+                                        })
+                                        .when(props.dirty, |this| {
+                                            this.child(
+                                                div()
+                                                    .id(SharedString::from(format!(
+                                                        "dirty-tab-{}",
+                                                        ix
+                                                    )))
+                                                    .size_1p5()
+                                                    .rounded_full()
+                                                    .bg(cx.theme().warning),
+                                            )
+                                        })
+                                        .when(props.closable, |this| {
+                                            this.child(
+                                            div()
+                                                .id(SharedString::from(format!("close-tab-{}", ix)))
+                                                .flex()
+                                                .items_center()
+                                                .justify_center()
+                                                .size_4()
+                                                .text_color(cx.theme().muted_foreground)
+                                                .hover(|style| {
+                                                    style
+                                                        .bg(cx.theme().muted)
+                                                        .text_color(cx.theme().foreground)
+                                                })
+                                                .on_click(cx.listener(
+                                                    move |_view, _event: &ClickEvent, _window, cx| {
+                                                        cx.stop_propagation();
+                                                        cx.emit(TabCloseRequestEvent {
+                                                            tab_index: ix,
+                                                        });
+                                                    },
+                                                ))
+                                                .child("×"),
+                                        )
+                                        })
+                                        .flex(),
+                                )
+                            },
+                        )
                         .on_click(cx.listener({
                             let is_collapsed = self.collapsed;
                             let dock_area = self.dock_area.clone();
@@ -1453,6 +2251,8 @@ impl Focusable for TabPanel {
 impl EventEmitter<DismissEvent> for TabPanel {}
 impl EventEmitter<PanelEvent> for TabPanel {}
 impl EventEmitter<TabContextMenuEvent> for TabPanel {}
+impl EventEmitter<TabCloseRequestEvent> for TabPanel {}
+impl EventEmitter<TabCommandEvent> for TabPanel {}
 impl Render for TabPanel {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl gpui::IntoElement {
         let focus_handle = self.focus_handle(cx);
@@ -1474,5 +2274,234 @@ impl Render for TabPanel {
             .bg(cx.theme().background)
             .child(self.render_title_bar(&state, window, cx))
             .child(self.render_active_panel(&state, window, cx))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        BulkCloseMode, active_ix_after_move, new_tab_insert_ix, next_active_ix_after_remove,
+        preview_panel_id_for_index, recent_active_ix_after_remove, should_close_for_bulk_mode,
+        should_toggle_pin_for_target,
+    };
+    use gpui::EntityId;
+
+    #[test]
+    fn close_active_middle_selects_next_tab() {
+        assert_eq!(next_active_ix_after_remove(2, 2, 4), Some(2));
+    }
+
+    #[test]
+    fn close_active_last_selects_previous_tab() {
+        assert_eq!(next_active_ix_after_remove(4, 4, 4), Some(3));
+    }
+
+    #[test]
+    fn close_tab_left_of_active_shifts_active_left() {
+        assert_eq!(next_active_ix_after_remove(3, 1, 4), Some(2));
+    }
+
+    #[test]
+    fn close_tab_right_of_active_keeps_active_index() {
+        assert_eq!(next_active_ix_after_remove(1, 3, 4), Some(1));
+    }
+
+    #[test]
+    fn close_only_tab_clears_active_index() {
+        assert_eq!(next_active_ix_after_remove(0, 0, 0), None);
+    }
+
+    #[test]
+    fn close_removed_index_past_active_clamps_to_remaining_tabs() {
+        assert_eq!(next_active_ix_after_remove(4, 6, 3), Some(2));
+    }
+
+    #[test]
+    fn close_active_index_past_end_clamps_to_last_tab() {
+        assert_eq!(next_active_ix_after_remove(6, 6, 3), Some(2));
+    }
+
+    #[test]
+    fn close_active_prefers_recent_history_tab() {
+        let panels = [
+            EntityId::from(10),
+            EntityId::from(11),
+            EntityId::from(12),
+            EntityId::from(13),
+        ];
+        let history = [panels[0], panels[2]];
+
+        assert_eq!(recent_active_ix_after_remove(3, &panels, &history), Some(2));
+    }
+
+    #[test]
+    fn close_active_history_index_shifts_after_removed_tab() {
+        let panels = [
+            EntityId::from(10),
+            EntityId::from(11),
+            EntityId::from(12),
+            EntityId::from(13),
+        ];
+        let history = [panels[3]];
+
+        assert_eq!(recent_active_ix_after_remove(1, &panels, &history), Some(2));
+    }
+
+    #[test]
+    fn close_active_history_skips_removed_and_missing_tabs() {
+        let panels = [EntityId::from(10), EntityId::from(11), EntityId::from(12)];
+        let history = [panels[1], EntityId::from(99), panels[0]];
+
+        assert_eq!(recent_active_ix_after_remove(1, &panels, &history), Some(0));
+    }
+
+    #[test]
+    fn close_active_history_returns_none_without_valid_target() {
+        let panels = [EntityId::from(10), EntityId::from(11)];
+        let history = [panels[1], EntityId::from(99)];
+
+        assert_eq!(recent_active_ix_after_remove(1, &panels, &history), None);
+    }
+
+    #[test]
+    fn moving_active_tab_tracks_new_index() {
+        assert_eq!(active_ix_after_move(3, 3, 1), 1);
+    }
+
+    #[test]
+    fn moving_tab_left_of_active_shifts_active_right() {
+        assert_eq!(active_ix_after_move(1, 3, 0), 2);
+    }
+
+    #[test]
+    fn moving_tab_right_of_active_shifts_active_left() {
+        assert_eq!(active_ix_after_move(3, 1, 4), 2);
+    }
+
+    #[test]
+    fn moving_unrelated_tab_keeps_active_index() {
+        assert_eq!(active_ix_after_move(0, 2, 4), 0);
+    }
+
+    #[test]
+    fn new_tab_inserts_after_active_unpinned_tab() {
+        assert_eq!(new_tab_insert_ix(5, 2, 1, false), 3);
+    }
+
+    #[test]
+    fn new_tab_after_active_pinned_tab_inserts_after_pinned_block() {
+        assert_eq!(new_tab_insert_ix(5, 0, 2, true), 2);
+    }
+
+    #[test]
+    fn new_tab_insert_clamps_after_last_active_tab() {
+        assert_eq!(new_tab_insert_ix(5, 4, 2, false), 5);
+    }
+
+    #[test]
+    fn new_tab_insert_handles_empty_panel() {
+        assert_eq!(new_tab_insert_ix(0, 0, 0, false), 0);
+    }
+
+    #[test]
+    fn bulk_close_skips_dirty_pinned_and_non_closable_tabs() {
+        let mode = BulkCloseMode::Clean;
+
+        assert!(should_close_for_bulk_mode(mode, 0, true, false, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, false, false, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, true, true, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, true, false, true));
+    }
+
+    #[test]
+    fn bulk_close_others_keeps_anchor_tab() {
+        let mode = BulkCloseMode::Others { keep_index: 1 };
+
+        assert!(should_close_for_bulk_mode(mode, 0, true, false, false));
+        assert!(!should_close_for_bulk_mode(mode, 1, true, false, false));
+        assert!(should_close_for_bulk_mode(mode, 2, true, false, false));
+    }
+
+    #[test]
+    fn bulk_close_left_and_right_respect_anchor_side() {
+        assert!(should_close_for_bulk_mode(
+            BulkCloseMode::Left { from_index: 2 },
+            1,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_close_for_bulk_mode(
+            BulkCloseMode::Left { from_index: 2 },
+            2,
+            true,
+            false,
+            false
+        ));
+        assert!(should_close_for_bulk_mode(
+            BulkCloseMode::Right { from_index: 2 },
+            3,
+            true,
+            false,
+            false
+        ));
+        assert!(!should_close_for_bulk_mode(
+            BulkCloseMode::Right { from_index: 2 },
+            2,
+            true,
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn bulk_close_all_still_respects_dirty_pinned_and_non_closable_tabs() {
+        let mode = BulkCloseMode::All;
+
+        assert!(should_close_for_bulk_mode(mode, 0, true, false, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, false, false, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, true, true, false));
+        assert!(!should_close_for_bulk_mode(mode, 0, true, false, true));
+    }
+
+    #[test]
+    fn preview_tab_can_target_unpinned_existing_panel() {
+        let panels = [EntityId::from(10), EntityId::from(11)];
+
+        assert_eq!(
+            preview_panel_id_for_index(Some(1), panels.len(), |index| panels[index], |_| false),
+            Some(panels[1])
+        );
+    }
+
+    #[test]
+    fn preview_tab_ignores_pinned_or_missing_panel() {
+        let panels = [EntityId::from(10), EntityId::from(11)];
+
+        assert_eq!(
+            preview_panel_id_for_index(
+                Some(1),
+                panels.len(),
+                |index| panels[index],
+                |index| { index == 1 }
+            ),
+            None
+        );
+        assert_eq!(
+            preview_panel_id_for_index(Some(4), panels.len(), |index| panels[index], |_| false),
+            None
+        );
+        assert_eq!(
+            preview_panel_id_for_index(None, panels.len(), |index| panels[index], |_| false),
+            None
+        );
+    }
+
+    #[test]
+    fn set_pin_target_only_toggles_when_state_changes() {
+        assert!(!should_toggle_pin_for_target(false, false));
+        assert!(should_toggle_pin_for_target(false, true));
+        assert!(should_toggle_pin_for_target(true, false));
+        assert!(!should_toggle_pin_for_target(true, true));
     }
 }

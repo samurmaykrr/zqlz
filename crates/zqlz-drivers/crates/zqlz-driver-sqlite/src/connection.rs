@@ -3,16 +3,18 @@
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use rusqlite::{Connection as RusqliteConnection, InterruptHandle, OpenFlags, params_from_iter};
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use zqlz_core::{
     BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnInfo, ColumnMeta, Connection,
-    ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency, DropTableOptions, DropTriggerOptions,
-    DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyAction, ForeignKeyChecksSql,
-    ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities, IndexInfo, ObjectsPanelColumn,
-    ObjectsPanelData, ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle,
-    QueryResult, Result, Row, SchemaInfo, SchemaIntrospection, SequenceInfo, SqlObjectName,
-    StatementResult, TableDetails, TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value,
-    ViewInfo, ZqlzError,
+    ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency, DropTableOptions,
+    DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyAction,
+    ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities, IndexInfo,
+    ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef, ObjectsPanelRow, PrimaryKeyInfo,
+    ProcedureInfo, QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row,
+    SchemaInfo, SchemaIntrospection, SequenceInfo, SqlObjectName, StatementResult, TableDetails,
+    TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
 };
 
 fn strip_pg_casts(expr: &str) -> String {
@@ -60,6 +62,54 @@ pub struct SqliteConnection {
     interrupt_handle: Arc<InterruptHandle>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SqliteOpenMode {
+    Create,
+    ReadWrite,
+    ReadOnly,
+}
+
+impl SqliteOpenMode {
+    pub fn parse(value: &str) -> Result<Self> {
+        match value {
+            "read_write_create" => Ok(Self::Create),
+            "read_write" => Ok(Self::ReadWrite),
+            "read_only" => Ok(Self::ReadOnly),
+            _ => Err(ZqlzError::Configuration(format!(
+                "Invalid SQLite open mode: {}",
+                value
+            ))),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SqliteOpenOptions {
+    pub path: String,
+    pub open_mode: SqliteOpenMode,
+    pub foreign_keys: bool,
+    pub journal_mode: String,
+    pub synchronous: String,
+    pub busy_timeout_ms: u64,
+    pub load_extensions: bool,
+    pub extension_paths: Vec<PathBuf>,
+}
+
+impl SqliteOpenOptions {
+    pub fn new(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            open_mode: SqliteOpenMode::Create,
+            foreign_keys: true,
+            journal_mode: "WAL".to_string(),
+            synchronous: "NORMAL".to_string(),
+            busy_timeout_ms: 5000,
+            load_extensions: false,
+            extension_paths: Vec::new(),
+        }
+    }
+}
+
 impl SqliteConnection {
     fn sqlite_identifier_literal(identifier: &str) -> String {
         identifier.replace('"', "\"\"")
@@ -87,22 +137,30 @@ impl SqliteConnection {
 
     /// Open a SQLite database
     pub fn open(path: &str) -> Result<Self> {
-        tracing::info!(path = %path, "opening SQLite database");
-        // Expand path to handle ~ and relative paths
-        let expanded_path = Self::expand_path(path)?;
+        Self::open_with_options(SqliteOpenOptions::new(path))
+    }
 
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_URI
+    pub fn open_with_options(options: SqliteOpenOptions) -> Result<Self> {
+        tracing::info!(path = %options.path, open_mode = ?options.open_mode, "opening SQLite database");
+        // Expand path to handle ~ and relative paths
+        let expanded_path = Self::expand_path(&options.path)?;
+
+        let flags = match options.open_mode {
+            SqliteOpenMode::Create => {
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE
+            }
+            SqliteOpenMode::ReadWrite => OpenFlags::SQLITE_OPEN_READ_WRITE,
+            SqliteOpenMode::ReadOnly => OpenFlags::SQLITE_OPEN_READ_ONLY,
+        } | OpenFlags::SQLITE_OPEN_URI
             | OpenFlags::SQLITE_OPEN_NO_MUTEX;
 
-        let conn = if path == ":memory:" {
+        let conn = if options.path == ":memory:" {
             RusqliteConnection::open_in_memory().map_err(|e| {
                 ZqlzError::Connection(format!("Failed to open in-memory database: {}", e))
             })?
         } else {
             // Validate that parent directory exists for non-URI paths
-            if !expanded_path.starts_with("file:") {
+            if options.open_mode == SqliteOpenMode::Create && !expanded_path.starts_with("file:") {
                 let file_path = std::path::Path::new(&expanded_path);
                 if let Some(parent) = file_path.parent()
                     && !parent.exists()
@@ -122,16 +180,41 @@ impl SqliteConnection {
             })?
         };
 
-        // Enable foreign keys (PRAGMA commands return results, so use pragma_update)
-        conn.pragma_update(None, "foreign_keys", "ON")
-            .map_err(|e| ZqlzError::Connection(format!("Failed to enable foreign keys: {}", e)))?;
+        conn.pragma_update(
+            None,
+            "foreign_keys",
+            if options.foreign_keys { "ON" } else { "OFF" },
+        )
+        .map_err(|e| ZqlzError::Connection(format!("Failed to set foreign keys: {}", e)))?;
 
-        // Set other useful pragmas for better performance and safety
-        conn.pragma_update(None, "journal_mode", "WAL")
+        conn.pragma_update(None, "journal_mode", options.journal_mode.as_str())
             .map_err(|e| ZqlzError::Connection(format!("Failed to set journal mode: {}", e)))?;
 
-        conn.pragma_update(None, "synchronous", "NORMAL")
+        conn.pragma_update(None, "synchronous", options.synchronous.as_str())
             .map_err(|e| ZqlzError::Connection(format!("Failed to set synchronous mode: {}", e)))?;
+
+        conn.busy_timeout(Duration::from_millis(options.busy_timeout_ms))
+            .map_err(|e| ZqlzError::Connection(format!("Failed to set busy timeout: {}", e)))?;
+
+        if options.load_extensions {
+            unsafe {
+                conn.load_extension_enable().map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to enable extension loading: {}", e))
+                })?;
+                for path in &options.extension_paths {
+                    conn.load_extension(path, None::<&str>).map_err(|e| {
+                        ZqlzError::Connection(format!(
+                            "Failed to load SQLite extension '{}': {}",
+                            path.display(),
+                            e
+                        ))
+                    })?;
+                }
+                conn.load_extension_disable().map_err(|e| {
+                    ZqlzError::Connection(format!("Failed to disable extension loading: {}", e))
+                })?;
+            }
+        }
 
         // Get interrupt handle before wrapping connection in Mutex
         // This handle can be used from any thread to cancel running queries
@@ -363,6 +446,33 @@ impl Connection for SqliteConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("sqlite")
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                resolved.effective_database = Some("main".to_string());
+                resolved.effective_namespace = Some("main".to_string());
+                resolved.introspection_scope = Some("main".to_string());
+            }
+            ConnectionScope::Database(database_name)
+            | ConnectionScope::Namespace(database_name) => {
+                let namespace = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                resolved.effective_database = Some(namespace.clone());
+                resolved.effective_namespace = Some(namespace.clone());
+                resolved.introspection_scope = Some(namespace);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
     }
 
     fn explain_config(&self) -> ExplainConfig {
@@ -685,12 +795,31 @@ impl Connection for SqliteConnection {
         Ok(Some("main".to_string()))
     }
 
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        Ok(Some("main".to_string()))
+    }
+
     fn has_session_namespace(&self) -> bool {
         false
     }
 
     fn supports_fast_exact_count(&self) -> bool {
         true
+    }
+
+    fn should_use_schema_only_table_browse_fallback(
+        &self,
+        table_type: TableType,
+        error_message: &str,
+    ) -> bool {
+        table_type == TableType::VirtualTable
+            && error_message
+                .to_ascii_lowercase()
+                .contains("vtable constructor failed")
+    }
+
+    fn should_use_ddl_column_fallback(&self, table_type: TableType, _error_message: &str) -> bool {
+        table_type == TableType::VirtualTable
     }
 
     fn check_constraint_enforcement(&self) -> CheckConstraintEnforcement {
@@ -1369,9 +1498,10 @@ impl SchemaIntrospection for SqliteConnection {
             }
 
             rows.push(ObjectsPanelRow {
-                name,
+                name: name.clone(),
                 schema: None,
-                object_type: obj_type,
+                object_type: obj_type.clone(),
+                object_ref: Some(ObjectsPanelObjectRef::new(obj_type, name)),
                 values,
                 redis_database_index: None,
                 key_value_info: None,
@@ -1585,7 +1715,9 @@ fn value_to_rusqlite(value: &Value) -> rusqlite::types::Value {
         Value::DateTimeUtc(dt) => rusqlite::types::Value::Text(dt.to_rfc3339()),
         Value::Json(j) => rusqlite::types::Value::Text(j.to_string()),
         Value::Uuid(u) => rusqlite::types::Value::Text(u.to_string()),
-        Value::Array(_) => rusqlite::types::Value::Null,
+        Value::Array(values) => rusqlite::types::Value::Text(
+            serde_json::Value::Array(values.iter().map(Value::to_json_value).collect()).to_string(),
+        ),
     }
 }
 
@@ -1618,8 +1750,8 @@ fn rusqlite_to_value(row: &rusqlite::Row, idx: usize) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::object_type_to_sqlite;
-    use zqlz_core::{ObjectType, ZqlzError};
+    use super::{object_type_to_sqlite, value_to_rusqlite};
+    use zqlz_core::{ObjectType, Value, ZqlzError};
 
     #[test]
     fn object_type_to_sqlite_maps_supported_types() {
@@ -1642,5 +1774,19 @@ mod tests {
             }
             other => panic!("Expected NotImplemented, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn sqlite_array_values_serialize_as_json_text() {
+        let value = value_to_rusqlite(&Value::Array(vec![
+            Value::String("one".to_string()),
+            Value::Int32(2),
+            Value::Null,
+        ]));
+
+        assert_eq!(
+            value,
+            rusqlite::types::Value::Text("[\"one\",2,null]".to_string())
+        );
     }
 }

@@ -1,4 +1,4 @@
-use crate::widgets::{button::Button, dock::TabPanel, menu::PopupMenu};
+use crate::widgets::{ZqlzIcon, button::Button, dock::TabPanel, menu::PopupMenu};
 use gpui::{
     AnyElement, AnyView, App, AppContext as _, Context, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, Global, Hsla, IntoElement, Render, SharedString, WeakEntity, Window,
@@ -65,9 +65,25 @@ pub trait Panel: EventEmitter<PanelEvent> + Render + Focusable {
         None
     }
 
+    fn tab_tooltip(&self, cx: &App) -> Option<SharedString> {
+        self.tab_name(cx)
+    }
+
+    fn is_tab_pinned(&self, cx: &App) -> bool {
+        false
+    }
+
+    fn is_preview_tab(&self, cx: &App) -> bool {
+        false
+    }
+
     /// The title of the panel
     fn title(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         SharedString::from(t!("Dock.Unnamed"))
+    }
+
+    fn tab_icon(&self, cx: &App) -> Option<ZqlzIcon> {
+        None
     }
 
     /// The theme of the panel title, default is `None`.
@@ -91,6 +107,14 @@ pub trait Panel: EventEmitter<PanelEvent> + Render + Focusable {
     /// This method called in Panel render, we should make sure it is fast.
     fn closable(&self, cx: &App) -> bool {
         true
+    }
+
+    fn can_split(&self, cx: &App) -> bool {
+        false
+    }
+
+    fn can_move_to_new_window(&self, cx: &App) -> bool {
+        false
     }
 
     /// Return `PanelControl` if the panel is zoomable, default is `None`.
@@ -176,10 +200,16 @@ pub trait PanelView: 'static + Send + Sync {
     fn panel_name(&self, cx: &App) -> &'static str;
     fn panel_id(&self, cx: &App) -> EntityId;
     fn tab_name(&self, cx: &App) -> Option<SharedString>;
+    fn tab_icon(&self, cx: &App) -> Option<ZqlzIcon>;
+    fn tab_tooltip(&self, cx: &App) -> Option<SharedString>;
+    fn is_tab_pinned(&self, cx: &App) -> bool;
+    fn is_preview_tab(&self, cx: &App) -> bool;
     fn title(&self, window: &mut Window, cx: &mut App) -> AnyElement;
     fn title_suffix(&self, window: &mut Window, cx: &mut App) -> Option<AnyElement>;
     fn title_style(&self, cx: &App) -> Option<TitleStyle>;
     fn closable(&self, cx: &App) -> bool;
+    fn can_split(&self, cx: &App) -> bool;
+    fn can_move_to_new_window(&self, cx: &App) -> bool;
     fn zoomable(&self, cx: &App) -> Option<PanelControl>;
     fn visible(&self, cx: &App) -> bool;
     fn set_active(&self, active: bool, window: &mut Window, cx: &mut App);
@@ -208,6 +238,22 @@ impl<T: Panel> PanelView for Entity<T> {
         self.read(cx).tab_name(cx)
     }
 
+    fn tab_icon(&self, cx: &App) -> Option<ZqlzIcon> {
+        self.read(cx).tab_icon(cx)
+    }
+
+    fn tab_tooltip(&self, cx: &App) -> Option<SharedString> {
+        self.read(cx).tab_tooltip(cx)
+    }
+
+    fn is_tab_pinned(&self, cx: &App) -> bool {
+        self.read(cx).is_tab_pinned(cx)
+    }
+
+    fn is_preview_tab(&self, cx: &App) -> bool {
+        self.read(cx).is_preview_tab(cx)
+    }
+
     fn title(&self, window: &mut Window, cx: &mut App) -> AnyElement {
         self.update(cx, |this, cx| this.title(window, cx).into_any_element())
     }
@@ -225,6 +271,14 @@ impl<T: Panel> PanelView for Entity<T> {
 
     fn closable(&self, cx: &App) -> bool {
         self.read(cx).closable(cx)
+    }
+
+    fn can_split(&self, cx: &App) -> bool {
+        self.read(cx).can_split(cx)
+    }
+
+    fn can_move_to_new_window(&self, cx: &App) -> bool {
+        self.read(cx).can_move_to_new_window(cx)
     }
 
     fn zoomable(&self, cx: &App) -> Option<PanelControl> {

@@ -131,6 +131,7 @@ impl DatabaseObjectType {
                 | Self::View
                 | Self::MaterializedView
                 | Self::Trigger
+                | Self::Event
                 | Self::Type
                 | Self::Policy
         )
@@ -164,6 +165,7 @@ mod tests {
             DatabaseObjectType::View,
             DatabaseObjectType::MaterializedView,
             DatabaseObjectType::Trigger,
+            DatabaseObjectType::Event,
         ];
 
         for t in types {
@@ -187,5 +189,15 @@ mod tests {
             DatabaseObjectType::parse("matview"),
             DatabaseObjectType::MaterializedView
         );
+        assert_eq!(
+            DatabaseObjectType::parse("scheduled_job"),
+            DatabaseObjectType::Event
+        );
+    }
+
+    #[test]
+    fn test_event_is_executable_and_applyable() {
+        assert!(DatabaseObjectType::Event.is_executable());
+        assert!(DatabaseObjectType::Event.is_applyable());
     }
 }

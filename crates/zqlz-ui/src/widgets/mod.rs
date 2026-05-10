@@ -20,6 +20,7 @@ mod zqlz_icons;
 
 pub(crate) mod actions;
 
+pub mod alert;
 pub mod animation;
 pub mod badge;
 pub mod button;
@@ -31,6 +32,8 @@ pub mod dialog;
 pub mod divider;
 pub mod dock;
 pub mod documentation_popover;
+pub mod form;
+pub mod group_box;
 pub mod highlighter;
 pub mod history;
 pub mod hover_card;
@@ -42,17 +45,21 @@ pub mod list;
 pub mod menu;
 pub mod notification;
 pub mod popover;
+pub mod progress;
 pub mod radio;
 pub mod resizable;
 pub mod scroll;
 pub mod select;
+pub mod setting;
 pub mod sheet;
+pub mod sidebar;
 pub mod skeleton;
 pub mod slider;
 pub mod spinner;
 pub mod switch;
 pub mod tab;
 pub mod table;
+pub mod tag;
 pub mod text;
 pub mod theme;
 pub mod title_bar;
@@ -62,17 +69,24 @@ pub mod typography;
 pub mod window_border;
 
 pub use crate::widgets::styled::Disableable;
+pub use alert::*;
 pub use anchored::anchored;
 pub use documentation_popover::DocumentationPopover;
 pub use element_ext::ElementExt;
 pub use event::InteractiveElementExt;
+pub use form::*;
 pub use geometry::*;
+pub use group_box::*;
 pub use icon::*;
 pub use index_path::IndexPath;
 pub use input::{Rope, RopeExt, RopeLines};
+pub use progress::*;
 pub use root::Root;
+pub use setting::*;
+pub use sidebar::*;
 pub use status_dot::{ConnectionStatus, StatusDot};
 pub use styled::*;
+pub use tag::*;
 pub use theme::*;
 pub use title_bar::{TITLE_BAR_HEIGHT, TitleBar};
 pub use typography::{
@@ -82,7 +96,7 @@ pub use typography::{
 pub use virtual_list::{VirtualList, VirtualListScrollHandle, h_virtual_list, v_virtual_list};
 pub use window_border::{WindowBorder, window_border, window_paddings};
 pub use window_ext::WindowExt;
-pub use zqlz_icons::{DatabaseLogo, ZqlzIcon};
+pub use zqlz_icons::{DatabaseLogo, ZqlzIcon, action_icon_from_key, object_icon_from_key};
 
 /// Initialize the widget system
 pub fn init(cx: &mut App) {

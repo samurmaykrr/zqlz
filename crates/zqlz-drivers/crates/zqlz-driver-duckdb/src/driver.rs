@@ -7,10 +7,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 use zqlz_core::{
     AutoIncrementInfo, AutoIncrementStyle, ColumnMeta, CommentStyles, Connection, ConnectionConfig,
-    ConnectionField, ConnectionFieldSchema, DataTypeCategory, DataTypeInfo, DatabaseDriver,
-    DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions, DropViewOptions,
-    ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory, KeywordInfo, QueryResult,
-    Result, Row, SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    ConnectionField, ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo,
+    DatabaseDriver, DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions,
+    DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory,
+    KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName,
+    StatementResult, Transaction, Value, ZqlzError,
 };
 
 /// DuckDB database driver
@@ -182,6 +183,41 @@ impl Connection for DuckDbConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("duckdb")
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                resolved.effective_database = Some("main".to_string());
+                resolved.effective_namespace = Some("main".to_string());
+                resolved.introspection_scope = Some("main".to_string());
+            }
+            ConnectionScope::Database(database_name)
+            | ConnectionScope::Namespace(database_name) => {
+                let namespace = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                resolved.effective_database = Some(namespace.clone());
+                resolved.effective_namespace = Some(namespace.clone());
+                resolved.introspection_scope = Some(namespace);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        Ok(Some("main".to_string()))
+    }
+
+    async fn current_namespace_name(&self) -> Result<Option<String>> {
+        Ok(Some("main".to_string()))
     }
 
     fn explain_config(&self) -> ExplainConfig {

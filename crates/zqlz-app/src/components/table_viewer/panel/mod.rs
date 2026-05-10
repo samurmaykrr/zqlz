@@ -19,6 +19,10 @@ use zqlz_ui::widgets::{
 
 use crate::actions::{CancelCellEditing, CommitChanges, DeleteSelectedRows, RedoEdit, UndoEdit};
 use crate::icons::ZqlzIcon;
+use crate::workspace_state::{
+    WorkspaceSessionFilterCondition, WorkspaceSessionSortCriterion,
+    WorkspaceSessionTableViewerState,
+};
 
 actions!(
     table_viewer,
@@ -181,6 +185,9 @@ pub struct TableViewerPanel {
 
     /// Lightweight performance profile derived from loaded table schema.
     pub(crate) performance_profile: Option<TablePerformanceProfile>,
+
+    /// Session state waiting for filter/column-visibility controls to exist.
+    pub(crate) pending_session_state: Option<WorkspaceSessionTableViewerState>,
 }
 
 impl TableViewerPanel {
@@ -219,6 +226,7 @@ impl TableViewerPanel {
             active_request_generation: 0,
             selection_stats: None,
             performance_profile: None,
+            pending_session_state: None,
         }
     }
 
@@ -240,6 +248,113 @@ impl TableViewerPanel {
     /// Returns the database name (if set) for MySQL multi-database context
     pub(crate) fn database_name(&self) -> Option<String> {
         self.database_name.clone()
+    }
+
+    pub(crate) fn session_state_snapshot(
+        &self,
+        cx: &App,
+    ) -> Option<(
+        Uuid,
+        String,
+        Option<String>,
+        WorkspaceSessionTableViewerState,
+    )> {
+        let connection_id = self.connection_id?;
+        let table_name = self.table_name.clone()?;
+        let filters = self
+            .filter_panel_state
+            .as_ref()
+            .map(|state| state.read(cx).get_filter_conditions())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|filter| WorkspaceSessionFilterCondition {
+                id: filter.id,
+                enabled: filter.enabled,
+                column: filter.column,
+                operator: format!("{:?}", filter.operator),
+                value: filter.value,
+                value2: filter.value2,
+                custom_sql: filter.custom_sql,
+                logical_operator: format!("{:?}", filter.logical_operator),
+            })
+            .collect();
+        let sorts = self
+            .filter_panel_state
+            .as_ref()
+            .map(|state| state.read(cx).get_sort_criteria())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|sort| WorkspaceSessionSortCriterion {
+                id: sort.id,
+                column: sort.column,
+                direction: format!("{:?}", sort.direction),
+            })
+            .collect();
+        let visible_columns = self
+            .column_visibility_state
+            .as_ref()
+            .map(|state| state.read(cx).visible_columns())
+            .unwrap_or_default();
+
+        Some((
+            connection_id,
+            table_name,
+            self.database_name.clone(),
+            WorkspaceSessionTableViewerState {
+                filters,
+                sorts,
+                visible_columns,
+                search_text: self.search_text.clone(),
+            },
+        ))
+    }
+
+    pub(crate) fn set_pending_session_state(
+        &mut self,
+        session_state: Option<WorkspaceSessionTableViewerState>,
+        cx: &mut Context<Self>,
+    ) {
+        self.pending_session_state = session_state;
+        cx.notify();
+    }
+
+    pub(crate) fn apply_pending_session_state(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(session_state) = self.pending_session_state.take() else {
+            return;
+        };
+
+        self.search_text = session_state.search_text.clone();
+        if let Some(filter_state) = &self.filter_panel_state {
+            filter_state.update(cx, |state, cx| {
+                state.restore_criteria(&session_state.filters, &session_state.sorts, window, cx);
+            });
+        }
+        if let Some(column_visibility_state) = &self.column_visibility_state
+            && !session_state.visible_columns.is_empty()
+        {
+            let visible_columns = std::collections::HashSet::<String>::from_iter(
+                session_state.visible_columns.iter().cloned(),
+            );
+            column_visibility_state.update(cx, |state, cx| {
+                let column_names = state
+                    .visible_columns()
+                    .into_iter()
+                    .chain(state.hidden_columns())
+                    .collect::<Vec<_>>();
+                for column_name in column_names {
+                    state.set_column_visibility(
+                        &column_name,
+                        visible_columns.contains(&column_name),
+                        cx,
+                    );
+                }
+            });
+        }
+        cx.notify();
     }
 }
 

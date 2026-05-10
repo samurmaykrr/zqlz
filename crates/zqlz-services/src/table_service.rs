@@ -3,9 +3,164 @@
 //! Provides table browsing, data retrieval, and cell editing operations.
 
 use std::sync::Arc;
-use zqlz_core::{CellUpdateRequest, Connection, QueryResult, RowIdentifier, Value};
+use uuid::Uuid;
+use zqlz_core::{
+    CellUpdateRequest, Connection, DatabaseObject, DriverCategory, DropTableOptions, ObjectType,
+    QueryResult, RowIdentifier, SqlObjectName, Value,
+};
+pub use zqlz_table_workflows::{
+    decide_delete_tables, decide_design_tables, decide_duplicate_tables, decide_empty_tables,
+    DeleteTablesDecision, DeleteTablesDecisionRequest, DesignTablesDecision,
+    DesignTablesDecisionRequest, DuplicateTablesDecision, DuplicateTablesDecisionRequest,
+    EmptyTablesDecision, EmptyTablesDecisionRequest, OpenTableViewerCountDecision,
+    OpenTableViewerCountDecisionRequest, OpenTablesDecision, OpenTablesDecisionRequest,
+    TableWorkflowError,
+};
 
 use crate::error::{ServiceError, ServiceResult};
+use crate::schema_service::SchemaService;
+use crate::view_models::TableDetails;
+
+/// Determine whether table browsing should degrade to schema-only mode when
+/// the driver declares that metadata can still be shown after a browse error.
+pub fn should_use_schema_only_table_browse_fallback(
+    connection: &dyn Connection,
+    error: &ServiceError,
+    details: &TableDetails,
+) -> bool {
+    connection.should_use_schema_only_table_browse_fallback(details.table_type, &error.to_string())
+}
+
+/// Build an empty query result from schema details when data browsing is not
+/// available but table metadata can still be shown.
+pub fn build_schema_only_query_result(details: &TableDetails) -> QueryResult {
+    let columns = details
+        .columns
+        .iter()
+        .enumerate()
+        .map(|(ordinal, column)| zqlz_core::ColumnMeta {
+            name: column.name.clone(),
+            data_type: column.data_type.clone(),
+            nullable: column.nullable,
+            ordinal,
+            max_length: column.max_length,
+            precision: column.precision,
+            scale: column.scale,
+            auto_increment: column.is_auto_increment,
+            default_value: column.default_value.clone(),
+            comment: column.comment.clone(),
+            enum_values: column.enum_values.clone(),
+        })
+        .collect();
+
+    let warning = match details.table_type {
+        zqlz_core::TableType::ForeignTable => {
+            "Schema-only fallback: foreign table metadata loaded, but data browsing failed"
+        }
+        zqlz_core::TableType::VirtualTable => {
+            "Schema-only fallback: virtual table metadata loaded, but data browsing failed"
+        }
+        _ => "Schema-only fallback: metadata loaded, but data browsing failed",
+    };
+
+    QueryResult {
+        id: Uuid::new_v4(),
+        columns,
+        rows: Vec::new(),
+        total_rows: Some(0),
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms: 0,
+        warnings: vec![warning.to_string()],
+    }
+}
+
+/// Input for open-viewer initial load orchestration.
+///
+/// This keeps open-viewer data/schema loading policy in the service layer while
+/// preserving app-layer control over UI rendering and state updates.
+pub struct OpenViewerInitialLoadRequest {
+    pub connection: Arc<dyn Connection>,
+    pub connection_id: Uuid,
+    pub table_name: String,
+    pub database_name: Option<String>,
+    pub is_view: bool,
+    pub limit: Option<usize>,
+}
+
+/// Schema payload returned by open-viewer initial load.
+pub struct OpenViewerSchemaLoad {
+    pub table_details: TableDetails,
+    pub create_statement: Option<String>,
+}
+
+/// Non-UI schema metadata that the table viewer needs after schema load.
+pub struct OpenViewerSchemaViewerMetadata {
+    pub foreign_keys_for_viewer: Vec<zqlz_core::ForeignKeyInfo>,
+    pub schema_columns: Vec<crate::view_models::ColumnInfo>,
+    pub primary_key_columns: Vec<String>,
+}
+
+/// Service-layer outcome for open-viewer initial load.
+pub struct OpenViewerInitialLoadOutcome {
+    pub browse_result: ServiceResult<QueryResult>,
+    pub schema_result: ServiceResult<OpenViewerSchemaLoad>,
+    pub used_schema_only_fallback: bool,
+    pub schema_qualifier: Option<String>,
+}
+
+/// Build table-viewer metadata from loaded schema details.
+///
+/// The app uses this to update table-viewer state while keeping schema-shaping
+/// rules outside the UI layer.
+pub fn build_open_viewer_schema_viewer_metadata(
+    schema_load: &OpenViewerSchemaLoad,
+) -> OpenViewerSchemaViewerMetadata {
+    let foreign_keys_for_viewer: Vec<zqlz_core::ForeignKeyInfo> = schema_load
+        .table_details
+        .foreign_keys
+        .iter()
+        .map(|foreign_key| zqlz_core::ForeignKeyInfo {
+            name: foreign_key.name.clone(),
+            columns: foreign_key.columns.clone(),
+            referenced_table: foreign_key.referenced_table.clone(),
+            referenced_schema: foreign_key.referenced_schema.clone(),
+            referenced_columns: foreign_key.referenced_columns.clone(),
+            on_update: foreign_key.on_update,
+            on_delete: foreign_key.on_delete,
+            is_deferrable: false,
+            initially_deferred: false,
+        })
+        .collect();
+
+    OpenViewerSchemaViewerMetadata {
+        foreign_keys_for_viewer,
+        schema_columns: schema_load.table_details.columns.clone(),
+        primary_key_columns: schema_load.table_details.primary_key_columns.clone(),
+    }
+}
+
+/// Decide whether open-viewer should trigger a background row-count query.
+///
+/// Keeping this adapter in `zqlz-services` ensures app handlers do not reach
+/// into workflow crates directly for table-viewer orchestration decisions.
+pub fn decide_open_viewer_count_workflow(
+    request: OpenTableViewerCountDecisionRequest,
+) -> OpenTableViewerCountDecision {
+    zqlz_table_workflows::decide_open_table_viewer_count(request)
+}
+
+/// Decide how many table-viewer open requests should be produced from a batch
+/// table-open action.
+///
+/// The UI layer should rely on this service adapter rather than calling
+/// workflow crates directly so table-open decision policy remains crate-owned
+/// and can evolve without widening app-side dependencies.
+pub fn decide_open_tables_workflow(
+    request: OpenTablesDecisionRequest,
+) -> Result<OpenTablesDecision, TableWorkflowError> {
+    zqlz_table_workflows::decide_open_tables(request)
+}
 
 /// Service for table-level operations
 ///
@@ -18,6 +173,172 @@ pub struct TableService {
 }
 
 impl TableService {
+    fn ensure_relational_connection(connection: &dyn Connection) -> ServiceResult<()> {
+        match connection.driver_category() {
+            DriverCategory::KeyValue | DriverCategory::Document => {
+                Err(ServiceError::TableOperationFailed(
+                    "TableService only supports relational connections".to_string(),
+                ))
+            }
+            _ => Ok(()),
+        }
+    }
+
+    /// Load open-viewer browse and schema payloads concurrently.
+    ///
+    /// This method intentionally returns both result channels so callers can
+    /// preserve partial-delivery behavior (rows first, schema second) without
+    /// re-implementing driver/fallback branching in the app shell.
+    pub async fn load_open_viewer_initial_data(
+        &self,
+        schema_service: Arc<SchemaService>,
+        request: OpenViewerInitialLoadRequest,
+    ) -> OpenViewerInitialLoadOutcome {
+        let OpenViewerInitialLoadRequest {
+            connection,
+            connection_id,
+            table_name,
+            database_name,
+            is_view,
+            limit,
+        } = request;
+
+        let schema_qualifier = zqlz_core::resolve_schema_qualifier_for_connection(
+            connection.as_ref(),
+            database_name.as_deref(),
+        );
+        let (resolved_table_name, resolved_schema) = self
+            .resolve_open_viewer_relation_reference(
+                connection.clone(),
+                &table_name,
+                schema_qualifier.as_deref(),
+                is_view,
+            )
+            .await;
+        let schema_ref = resolved_schema.as_deref();
+
+        let (mut browse_result, schema_result) = tokio::join!(
+            async {
+                self.browse_table(
+                    connection.clone(),
+                    &resolved_table_name,
+                    schema_ref,
+                    limit,
+                    None,
+                )
+                .await
+            },
+            async {
+                let table_details = schema_service
+                    .get_table_details(
+                        connection.clone(),
+                        connection_id,
+                        &resolved_table_name,
+                        schema_ref,
+                    )
+                    .await?;
+                let create_statement = schema_service
+                    .get_or_generate_ddl(
+                        &connection,
+                        connection_id,
+                        &resolved_table_name,
+                        schema_ref,
+                        if is_view {
+                            Some(zqlz_core::ObjectType::View)
+                        } else {
+                            None
+                        },
+                    )
+                    .await;
+
+                Ok(OpenViewerSchemaLoad {
+                    table_details,
+                    create_statement,
+                })
+            }
+        );
+
+        let mut used_schema_only_fallback = false;
+        if let (Err(browse_error), Ok(schema_payload)) = (&browse_result, &schema_result) {
+            if should_use_schema_only_table_browse_fallback(
+                connection.as_ref(),
+                browse_error,
+                &schema_payload.table_details,
+            ) {
+                browse_result = Ok(build_schema_only_query_result(
+                    &schema_payload.table_details,
+                ));
+                used_schema_only_fallback = true;
+            }
+        }
+
+        OpenViewerInitialLoadOutcome {
+            browse_result,
+            schema_result,
+            used_schema_only_fallback,
+            schema_qualifier: resolved_schema.or(schema_qualifier),
+        }
+    }
+
+    async fn resolve_open_viewer_relation_reference(
+        &self,
+        connection: Arc<dyn Connection>,
+        table_name: &str,
+        schema: Option<&str>,
+        is_view: bool,
+    ) -> (String, Option<String>) {
+        let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+        if embedded_schema.is_some() {
+            return (embedded_name, embedded_schema);
+        }
+
+        let Some(schema_introspection) = connection.as_schema_introspection() else {
+            return (embedded_name, None);
+        };
+
+        if !is_view {
+            if let Ok(tables) = schema_introspection.list_tables(schema).await {
+                if let Some(table) = tables
+                    .into_iter()
+                    .find(|table| relation_info_matches_name(&table.name, &embedded_name))
+                {
+                    return (
+                        relation_display_name(&table.name, &embedded_name),
+                        table.schema,
+                    );
+                }
+            }
+        }
+
+        if let Ok(views) = schema_introspection.list_views(schema).await {
+            if let Some(view) = views
+                .into_iter()
+                .find(|view| relation_info_matches_name(&view.name, &embedded_name))
+            {
+                return (
+                    relation_display_name(&view.name, &embedded_name),
+                    view.schema,
+                );
+            }
+        }
+
+        if connection.supports_materialized_views() {
+            if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
+                if let Some(view) = views
+                    .into_iter()
+                    .find(|view| relation_info_matches_name(&view.name, &embedded_name))
+                {
+                    return (
+                        relation_display_name(&view.name, &embedded_name),
+                        view.schema,
+                    );
+                }
+            }
+        }
+
+        (embedded_name, None)
+    }
+
     /// Create a new table service
     ///
     /// # Arguments
@@ -52,6 +373,7 @@ impl TableService {
         connection: Arc<dyn Connection>,
         request: BrowseTableWithFiltersRequest<'_>,
     ) -> ServiceResult<QueryResult> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         let BrowseTableWithFiltersRequest {
             table_name,
             schema,
@@ -64,7 +386,6 @@ impl TableService {
         } = request;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
-        let driver_name = connection.driver_name();
         let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
 
         // Build WHERE clause (needed for both COUNT and SELECT)
@@ -154,7 +475,9 @@ impl TableService {
             (result, total_rows, false)
         } else if has_filters {
             // Metadata estimates don't reflect WHERE filters, so skip counting
-            tracing::debug!("Driver '{}' with active filters: skipping count (estimates don't apply to filtered queries)", driver_name);
+            tracing::debug!(
+                "Active filters present, skipping metadata estimate because estimates do not apply"
+            );
             let data_result = connection.query(&data_sql, &[]).await;
             let result =
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
@@ -170,7 +493,8 @@ impl TableService {
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
             let (total_rows, is_estimated) = match estimate_result {
-                Ok((total, estimated)) => (Some(total), estimated),
+                Ok(Some((total, estimated))) => (Some(total), estimated),
+                Ok(None) => (None, false),
                 Err(error) => {
                     tracing::warn!(
                         "Estimated row count query failed, pagination total unavailable: {}",
@@ -311,7 +635,7 @@ impl TableService {
             "SELECT {} FROM {}{} ORDER BY {}",
             columns, qualified, where_clause, reversed_order
         );
-        let data_sql = connection.paginated_select_sql(&base_sql, limit as u64, 0);
+        let data_sql = connection.limited_select_sql(&base_sql, limit as u64);
 
         let count_base_sql = format!("SELECT COUNT(*) FROM {}{}", qualified, where_clause);
         let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
@@ -527,9 +851,8 @@ impl TableService {
         connection: Arc<dyn Connection>,
         table_name: &str,
         schema: Option<&str>,
-    ) -> ServiceResult<(u64, bool)> {
-        let driver_name = connection.driver_name();
-
+    ) -> ServiceResult<Option<(u64, bool)>> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         if connection.supports_fast_exact_count() {
             let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
             let count_base_sql = format!("SELECT COUNT(*) FROM {}", qualified);
@@ -551,34 +874,36 @@ impl TableService {
                     )
                 })?;
 
-            return Ok((total, false));
+            return Ok(Some((total, false)));
         }
 
-        let qualified_table_name = match schema {
-            Some(schema_name) if !schema_name.is_empty() => {
-                zqlz_core::SqlObjectName::with_namespace(schema_name, table_name)
-            }
-            _ => zqlz_core::SqlObjectName::new(table_name),
+        let (schema_name, table_name) = resolve_table_reference(table_name, schema);
+        let qualified_table_name = match schema_name {
+            Some(schema_name) => zqlz_core::SqlObjectName::with_namespace(schema_name, table_name),
+            None => zqlz_core::SqlObjectName::new(table_name),
         };
 
         let estimated = connection
             .estimated_row_count(&qualified_table_name)
             .await
-            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
-            .ok_or_else(|| {
-                ServiceError::TableOperationFailed(
-                    "Estimated row count query returned no result".to_string(),
-                )
-            })?;
+            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
+
+        let Some(estimated) = estimated else {
+            tracing::debug!(
+                table_name = %qualified_table_name.name,
+                schema = ?qualified_table_name.namespace,
+                "Estimated row count unavailable from metadata"
+            );
+            return Ok(None);
+        };
 
         tracing::info!(
             table_name = %qualified_table_name.name,
             estimated = estimated,
-            driver = driver_name,
             "Estimated row count from metadata"
         );
 
-        Ok((estimated, true))
+        Ok(Some((estimated, true)))
     }
 
     /// Browse table data with automatic LIMIT
@@ -602,6 +927,7 @@ impl TableService {
         limit: Option<usize>,
         offset: Option<usize>,
     ) -> ServiceResult<QueryResult> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
         let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
@@ -653,7 +979,8 @@ impl TableService {
                 data_result.map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
 
             let (total_rows, is_estimated) = match estimate_result {
-                Ok((total, estimated)) => (Some(total), estimated),
+                Ok(Some((total, estimated))) => (Some(total), estimated),
+                Ok(None) => (None, false),
                 Err(error) => {
                     tracing::warn!(
                         "Estimated row count query failed, pagination total unavailable: {}",
@@ -702,6 +1029,7 @@ impl TableService {
         schema: Option<&str>,
         cell_data: CellUpdateData,
     ) -> ServiceResult<()> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         tracing::debug!("Updating cell in table {}", table_name);
         // Build row identifier (use primary key if available)
         let row_identifier = self
@@ -731,6 +1059,13 @@ impl TableService {
         let update_request = CellUpdateRequest {
             table_name: table_name_with_schema,
             column_name: cell_data.column_name.clone(),
+            column_type: target_col_type.map(str::to_string),
+            row_column_types: cell_data
+                .all_column_names
+                .iter()
+                .cloned()
+                .zip(cell_data.all_column_types.iter().cloned())
+                .collect(),
             new_value,
             row_identifier,
         };
@@ -860,7 +1195,25 @@ impl TableService {
 
     /// Parse a value string using the known database column type
     fn parse_value_with_type(&self, value_str: &str, column_type: &str) -> ServiceResult<Value> {
-        let col_type = column_type.to_lowercase();
+        let col_type = Value::normalize_data_type(column_type);
+
+        if Value::array_element_type(&col_type).is_some() {
+            return Ok(Value::parse_from_string(value_str, &col_type));
+        }
+
+        if matches!(col_type.as_str(), "json" | "jsonb") {
+            return match Value::parse_from_string(value_str, &col_type) {
+                Value::Json(value) => Ok(Value::Json(value)),
+                _ => Err(ServiceError::InvalidValue(format!(
+                    "Invalid JSON value for {} column",
+                    column_type
+                ))),
+            };
+        }
+
+        if col_type == "set" {
+            return Ok(Value::parse_from_string(value_str, &col_type));
+        }
 
         if Self::is_string_type(&col_type) {
             return Ok(Value::String(value_str.to_string()));
@@ -980,6 +1333,14 @@ impl TableService {
             {
                 (Some(explicit_schema), embedded_table)
             }
+            (None, Some((embedded_schema, embedded_table)))
+                if embedded_table.starts_with(&format!("{embedded_schema}.")) =>
+            {
+                let table_name = embedded_table
+                    .strip_prefix(&format!("{embedded_schema}."))
+                    .unwrap_or(embedded_table);
+                (Some(embedded_schema), table_name)
+            }
             (Some(explicit_schema), _) => (Some(explicit_schema), table_name),
             (None, Some((embedded_schema, embedded_table))) => {
                 (Some(embedded_schema), embedded_table)
@@ -1020,233 +1381,6 @@ impl TableService {
         self.default_limit = limit;
     }
 
-    /// Browse a Redis key and return its data as a QueryResult
-    ///
-    /// This method detects the key type and uses the appropriate Redis command
-    /// to fetch the data, then formats it as a QueryResult compatible with
-    /// the table viewer.
-    ///
-    /// # Arguments
-    ///
-    /// * `connection` - Redis connection
-    /// * `key_name` - Name of the Redis key to browse
-    /// * `limit` - Optional limit for list/set/zset types
-    ///
-    /// # Returns
-    ///
-    /// A `QueryResult` containing the key data
-    #[tracing::instrument(skip(self, connection))]
-    pub async fn browse_redis_key(
-        &self,
-        connection: Arc<dyn Connection>,
-        key_name: &str,
-        limit: Option<usize>,
-    ) -> ServiceResult<QueryResult> {
-        let limit = limit.unwrap_or(self.default_limit);
-
-        // First, get the key type
-        let type_result = connection
-            .query(&format!("TYPE {}", key_name), &[])
-            .await
-            .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?;
-
-        let key_type = type_result
-            .rows
-            .first()
-            .and_then(|r| r.get_by_name("value"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("none")
-            .to_lowercase();
-
-        tracing::debug!(key_name = %key_name, key_type = %key_type, "Browsing Redis key");
-
-        // Execute appropriate command based on key type
-        let result = match key_type.as_str() {
-            "string" => connection
-                .query(&format!("GET {}", key_name), &[])
-                .await
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?,
-            "hash" => connection
-                .query(&format!("HGETALL {}", key_name), &[])
-                .await
-                .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?,
-            "list" => {
-                // LRANGE key 0 (limit-1) to get first `limit` elements
-                let end = if limit > 0 {
-                    limit - 1
-                } else {
-                    -1_isize as usize
-                };
-                connection
-                    .query(&format!("LRANGE {} 0 {}", key_name, end), &[])
-                    .await
-                    .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
-            }
-            "set" => {
-                // SSCAN for sets (SMEMBERS can be slow for large sets)
-                connection
-                    .query(&format!("SMEMBERS {}", key_name), &[])
-                    .await
-                    .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
-            }
-            "zset" => {
-                // ZRANGE with WITHSCORES for sorted sets
-                let end = if limit > 0 {
-                    limit - 1
-                } else {
-                    -1_isize as usize
-                };
-                connection
-                    .query(&format!("ZRANGE {} 0 {} WITHSCORES", key_name, end), &[])
-                    .await
-                    .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
-            }
-            "stream" => {
-                // XRANGE for streams
-                connection
-                    .query(&format!("XRANGE {} - + COUNT {}", key_name, limit), &[])
-                    .await
-                    .map_err(|e| ServiceError::TableOperationFailed(e.to_string()))?
-            }
-            _ => {
-                return Err(ServiceError::TableOperationFailed(format!(
-                    "Unknown or unsupported Redis key type: {}",
-                    key_type
-                )));
-            }
-        };
-
-        tracing::info!(
-            key_name = %key_name,
-            key_type = %key_type,
-            rows = result.rows.len(),
-            "Redis key data loaded"
-        );
-
-        Ok(result)
-    }
-
-    /// Update a Redis key value
-    ///
-    /// Maps the cell update to the appropriate Redis command based on key type.
-    ///
-    /// # Arguments
-    ///
-    /// * `connection` - Redis connection
-    /// * `key_name` - Name of the Redis key
-    /// * `key_type` - Type of the key (hash, list, set, zset, string)
-    /// * `cell_data` - Cell update data
-    ///
-    /// # Returns
-    ///
-    /// `Ok(())` if the update succeeds
-    #[tracing::instrument(skip(self, connection, cell_data))]
-    pub async fn update_redis_key(
-        &self,
-        connection: Arc<dyn Connection>,
-        key_name: &str,
-        key_type: &str,
-        cell_data: CellUpdateData,
-    ) -> ServiceResult<()> {
-        let new_value = cell_data
-            .new_value
-            .as_ref()
-            .map(Self::value_to_redis_argument)
-            .unwrap_or_default();
-
-        let cmd = match key_type {
-            "string" => {
-                // SET key value
-                format!("SET {} {}", key_name, new_value)
-            }
-            "hash" => {
-                // HSET key field value
-                // The field name should be in the row data
-                let field = cell_data
-                    .all_row_values
-                    .first()
-                    .ok_or_else(|| ServiceError::UpdateFailed("No field name found".to_string()))?;
-                format!(
-                    "HSET {} {} {}",
-                    key_name,
-                    Self::value_to_redis_argument(field),
-                    new_value
-                )
-            }
-            "list" => {
-                // LSET key index value
-                let index = cell_data
-                    .all_row_values
-                    .first()
-                    .ok_or_else(|| ServiceError::UpdateFailed("No index found".to_string()))?;
-                format!(
-                    "LSET {} {} {}",
-                    key_name,
-                    Self::value_to_redis_argument(index),
-                    new_value
-                )
-            }
-            "zset" => {
-                // For sorted sets, we need to know if we're updating member or score
-                if cell_data.column_name == "score" {
-                    // ZADD key score member (updates score for existing member)
-                    let member = cell_data
-                        .all_row_values
-                        .first()
-                        .ok_or_else(|| ServiceError::UpdateFailed("No member found".to_string()))?;
-                    format!(
-                        "ZADD {} {} {}",
-                        key_name,
-                        new_value,
-                        Self::value_to_redis_argument(member)
-                    )
-                } else {
-                    // Can't rename member directly - would need ZREM + ZADD
-                    return Err(ServiceError::UpdateFailed(
-                        "Cannot rename sorted set member directly. Delete and re-add instead."
-                            .to_string(),
-                    ));
-                }
-            }
-            "set" => {
-                // Sets don't really support "update" - only add/remove
-                return Err(ServiceError::UpdateFailed(
-                    "Set members cannot be updated. Use add/remove operations instead.".to_string(),
-                ));
-            }
-            _ => {
-                return Err(ServiceError::UpdateFailed(format!(
-                    "Update not supported for key type: {}",
-                    key_type
-                )));
-            }
-        };
-
-        tracing::debug!(command = %cmd, "Executing Redis update");
-
-        connection
-            .execute(&cmd, &[])
-            .await
-            .map_err(|e| ServiceError::UpdateFailed(e.to_string()))?;
-
-        tracing::info!(
-            key_name = %key_name,
-            key_type = %key_type,
-            column = %cell_data.column_name,
-            "Redis key updated successfully"
-        );
-
-        Ok(())
-    }
-
-    fn value_to_redis_argument(value: &Value) -> String {
-        match value {
-            Value::Null => String::new(),
-            Value::String(text) => text.clone(),
-            other => other.display_for_editor(),
-        }
-    }
-
     /// Insert a new row into a table
     ///
     /// # Arguments
@@ -1266,6 +1400,7 @@ impl TableService {
         schema: Option<&str>,
         row_data: RowInsertData,
     ) -> ServiceResult<()> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         tracing::debug!("Inserting row into table {}", table_name);
         if row_data.column_names.is_empty() {
             return Err(ServiceError::TableOperationFailed(
@@ -1416,6 +1551,7 @@ impl TableService {
         schema: Option<&str>,
         delete_data: RowDeleteData,
     ) -> ServiceResult<u64> {
+        Self::ensure_relational_connection(connection.as_ref())?;
         tracing::debug!(
             "Deleting {} rows from table {}",
             delete_data.rows.len(),
@@ -1667,9 +1803,1259 @@ pub struct RowDeleteData {
     pub rows: Vec<Vec<Value>>,
 }
 
+/// Request for duplicating multiple tables on one connection.
+#[derive(Debug, Clone)]
+pub struct DuplicateTablesRequest {
+    /// Source/target table mappings to duplicate.
+    pub operations: Vec<DuplicateTableOperation>,
+    /// When true, continue processing remaining tables after one failure.
+    pub continue_on_error: bool,
+}
+
+/// One duplicate-table operation.
+#[derive(Debug, Clone)]
+pub struct DuplicateTableOperation {
+    /// Source table name.
+    pub source_table_name: String,
+    /// Target table name.
+    pub target_table_name: String,
+}
+
+/// Outcome for one duplicated table.
+#[derive(Debug, Clone)]
+pub struct DuplicateTableResult {
+    /// Source table name.
+    pub source_table_name: String,
+    /// Generated target table name.
+    pub target_table_name: String,
+}
+
+/// Aggregate result for a duplicate-tables operation.
+#[derive(Debug, Clone, Default)]
+pub struct DuplicateTablesOutcome {
+    /// Tables duplicated successfully.
+    pub duplicated_tables: Vec<DuplicateTableResult>,
+    /// Per-table failures.
+    pub errors: Vec<String>,
+}
+
+/// Request for deleting multiple tables on one connection.
+#[derive(Debug, Clone)]
+pub struct DeleteTablesRequest {
+    /// Table names to delete.
+    pub table_names: Vec<String>,
+    /// When true, continue processing remaining tables after one failure.
+    pub continue_on_error: bool,
+}
+
+/// Aggregate result for a delete-tables operation.
+#[derive(Debug, Clone, Default)]
+pub struct DeleteTablesOutcome {
+    /// Table names deleted successfully.
+    pub deleted_table_names: Vec<String>,
+    /// Per-table failures.
+    pub errors: Vec<String>,
+}
+
+/// Request for emptying (truncating) multiple tables on one connection.
+#[derive(Debug, Clone)]
+pub struct EmptyTablesRequest {
+    /// Table names to empty.
+    pub table_names: Vec<String>,
+    /// When true, continue processing remaining tables after one failure.
+    pub continue_on_error: bool,
+}
+
+/// Aggregate result for an empty-tables operation.
+#[derive(Debug, Clone, Default)]
+pub struct EmptyTablesOutcome {
+    /// Table names emptied successfully.
+    pub emptied_table_names: Vec<String>,
+    /// Sum of affected rows reported by the driver.
+    pub total_rows_deleted: u64,
+    /// Per-table failures.
+    pub errors: Vec<String>,
+}
+
+/// Request for renaming a table on one connection.
+#[derive(Debug, Clone)]
+pub struct RenameTableRequest {
+    /// Existing table name.
+    pub source_table_name: String,
+    /// New table name.
+    pub target_table_name: String,
+}
+
+/// Request for generating SQL dumps for one or more tables.
+#[derive(Debug, Clone)]
+pub struct DumpTablesSqlRequest {
+    /// Table names to include in the dump.
+    pub table_names: Vec<String>,
+    /// Include INSERT statements for table data in addition to CREATE TABLE.
+    pub include_data: bool,
+}
+
+/// Aggregate result for a SQL-dump operation.
+#[derive(Debug, Clone, Default)]
+pub struct DumpTablesSqlOutcome {
+    /// Concatenated SQL content for all requested tables.
+    pub sql: String,
+    /// Tables that were processed (even when individual sections contain warnings).
+    pub processed_table_names: Vec<String>,
+    /// Per-table errors captured while building the dump.
+    pub errors: Vec<String>,
+}
+
+/// Request for loading distinct non-null values from one table column.
+#[derive(Debug, Clone)]
+pub struct LoadDistinctValuesRequest {
+    /// Source table name (optionally schema-qualified as `schema.table`).
+    pub table_name: String,
+    /// Column to project distinct values from.
+    pub column_name: String,
+    /// Maximum number of values to return.
+    pub limit: u64,
+}
+
+/// Request for loading foreign-key candidate values from a referenced table.
+#[derive(Debug, Clone)]
+pub struct LoadForeignKeyValuesRequest {
+    /// Referenced table name (may be schema-qualified as `schema.table`).
+    pub referenced_table: String,
+    /// Optional schema/database hint when `referenced_table` is unqualified.
+    pub referenced_schema: Option<String>,
+    /// Referenced key columns used for selected values.
+    pub referenced_columns: Vec<String>,
+    /// Optional search query used for LIKE filtering.
+    pub query: Option<String>,
+    /// Maximum number of rows to return.
+    pub limit: usize,
+}
+
+/// One foreign-key selection option produced by the service.
+#[derive(Debug, Clone, Default)]
+pub struct ForeignKeyValueOption {
+    /// Raw value that should be stored in the cell.
+    pub value: String,
+    /// User-facing label shown in the selection UI.
+    pub label: String,
+}
+
+/// Service-layer outcome for loading foreign-key values.
+#[derive(Debug, Clone, Default)]
+pub struct LoadForeignKeyValuesOutcome {
+    /// Candidate values ready for UI mapping.
+    pub values: Vec<ForeignKeyValueOption>,
+}
+
+/// Service-layer outcome for loading distinct values.
+#[derive(Debug, Clone, Default)]
+pub struct LoadDistinctValuesOutcome {
+    /// Distinct non-null values converted to display strings.
+    pub values: Vec<String>,
+}
+
+/// One edited cell to include when generating SQL for pending table changes.
+#[derive(Debug, Clone)]
+pub struct ModifiedCellSqlChange {
+    /// Zero-based row index in `all_rows`.
+    pub row_index: usize,
+    /// Zero-based column index in `column_names`.
+    pub column_index: usize,
+    /// New value that should be persisted for this cell.
+    pub new_value: Value,
+}
+
+/// One pending cell edit to apply during commit.
+#[derive(Debug, Clone)]
+pub struct CommitCellChange {
+    /// Zero-based row index in `all_rows`.
+    pub row_index: usize,
+    /// Zero-based column index in `column_meta`.
+    pub column_index: usize,
+    /// Original persisted value before editing.
+    pub original_value: Value,
+    /// New value that should be persisted.
+    pub new_value: Value,
+}
+
+/// Failed modified-cell update details returned by commit orchestration.
+#[derive(Debug, Clone)]
+pub struct FailedModifiedCellCommit {
+    /// Persisted row values used for the update WHERE clause.
+    pub original_row_values: Vec<Value>,
+    /// Zero-based edited column index.
+    pub column_index: usize,
+    /// Edited column name (for UI error summaries).
+    pub column_name: String,
+    /// Original value for rehydrating pending state in the UI.
+    pub original_value: Value,
+    /// New value for rehydrating pending state in the UI.
+    pub new_value: Value,
+    /// Underlying service/driver error text.
+    pub error_message: String,
+}
+
+/// Failed insert details returned by commit orchestration.
+#[derive(Debug, Clone)]
+pub struct FailedNewRowCommit {
+    /// One-based row number in the pending-new-rows batch.
+    pub row_number: usize,
+    /// New-row values that failed to insert.
+    pub row_values: Vec<Value>,
+    /// Underlying service/driver error text.
+    pub error_message: String,
+}
+
+/// Request payload for committing pending table edits in one orchestration call.
+#[derive(Debug, Clone)]
+pub struct CommitTableChangesRequest {
+    /// Target table name.
+    pub table_name: String,
+    /// Optional schema/database qualifier for the table.
+    pub schema: Option<String>,
+    /// Ordered table columns metadata.
+    pub column_meta: Vec<zqlz_core::ColumnMeta>,
+    /// Edited cells to apply as UPDATE statements.
+    pub modified_cells: Vec<CommitCellChange>,
+    /// Zero-based row indexes to delete from `all_rows`.
+    pub deleted_row_indices: Vec<usize>,
+    /// Newly-added rows to convert into INSERT statements.
+    pub new_rows: Vec<Vec<Value>>,
+    /// Snapshot of currently-loaded rows.
+    pub all_rows: Vec<Vec<Value>>,
+    /// Optional text placeholder representing auto-increment values in app state.
+    pub auto_increment_placeholder: Option<String>,
+}
+
+/// Commit orchestration outcome for pending table edits.
+#[derive(Debug, Clone, Default)]
+pub struct CommitTableChangesOutcome {
+    /// Count of successful update/delete/insert operations.
+    pub successful_operations: usize,
+    /// Modified cells that failed to persist.
+    pub failed_modified_cells: Vec<FailedModifiedCellCommit>,
+    /// Rows that failed to delete.
+    pub failed_deleted_rows: Vec<Vec<Value>>,
+    /// New rows that failed to insert.
+    pub failed_new_rows: Vec<FailedNewRowCommit>,
+}
+
+/// Request payload for generating SQL statements that represent pending table
+/// edits (updates, deletes, inserts).
+#[derive(Debug, Clone)]
+pub struct GenerateTableChangesSqlRequest {
+    /// Target table name.
+    pub table_name: String,
+    /// Ordered table columns used by edited/deleted/new rows.
+    pub column_names: Vec<String>,
+    /// Edited cells to apply as UPDATE statements.
+    pub modified_cells: Vec<ModifiedCellSqlChange>,
+    /// Zero-based row indexes to delete from `all_rows`.
+    pub deleted_row_indices: Vec<usize>,
+    /// Newly-added rows to convert into INSERT statements.
+    pub new_rows: Vec<Vec<Value>>,
+    /// Snapshot of currently-loaded persisted rows.
+    pub all_rows: Vec<Vec<Value>>,
+}
+
+impl TableService {
+    /// Generate SQL for pending table edits without executing it.
+    ///
+    /// This keeps statement-shaping rules in `zqlz-services` while the app layer
+    /// stays focused on UI actions such as copying generated SQL to clipboard.
+    pub fn generate_table_changes_sql(&self, request: GenerateTableChangesSqlRequest) -> String {
+        let GenerateTableChangesSqlRequest {
+            table_name,
+            column_names,
+            modified_cells,
+            deleted_row_indices,
+            new_rows,
+            all_rows,
+        } = request;
+
+        let mut sql_statements: Vec<String> = Vec::new();
+
+        let mut row_updates: std::collections::HashMap<usize, Vec<&ModifiedCellSqlChange>> =
+            std::collections::HashMap::new();
+        for change in &modified_cells {
+            row_updates
+                .entry(change.row_index)
+                .or_default()
+                .push(change);
+        }
+
+        for (row_index, changes) in row_updates {
+            let Some(row_values) = all_rows.get(row_index) else {
+                continue;
+            };
+
+            let set_parts: Vec<String> = changes
+                .iter()
+                .filter_map(|change| {
+                    column_names.get(change.column_index).map(|column_name| {
+                        let value = Self::value_to_change_sql_literal(&change.new_value);
+                        format!("\"{}\" = {}", column_name, value)
+                    })
+                })
+                .collect();
+
+            if set_parts.is_empty() {
+                continue;
+            }
+
+            let where_parts: Vec<String> = column_names
+                .iter()
+                .zip(row_values.iter())
+                .map(|(column_name, value)| {
+                    if value.is_null() {
+                        format!("\"{}\" IS NULL", column_name)
+                    } else {
+                        let sql_value = Self::value_to_change_sql_literal(value);
+                        format!("\"{}\" = {}", column_name, sql_value)
+                    }
+                })
+                .collect();
+
+            sql_statements.push(format!(
+                "UPDATE \"{}\" SET {} WHERE {};",
+                table_name,
+                set_parts.join(", "),
+                where_parts.join(" AND ")
+            ));
+        }
+
+        for row_index in deleted_row_indices {
+            let Some(row_values) = all_rows.get(row_index) else {
+                continue;
+            };
+
+            let where_parts: Vec<String> = column_names
+                .iter()
+                .zip(row_values.iter())
+                .map(|(column_name, value)| {
+                    if value.is_null() {
+                        format!("\"{}\" IS NULL", column_name)
+                    } else {
+                        let sql_value = Self::value_to_change_sql_literal(value);
+                        format!("\"{}\" = {}", column_name, sql_value)
+                    }
+                })
+                .collect();
+
+            sql_statements.push(format!(
+                "DELETE FROM \"{}\" WHERE {};",
+                table_name,
+                where_parts.join(" AND ")
+            ));
+        }
+
+        for row_values in &new_rows {
+            let column_list = column_names
+                .iter()
+                .map(|name| format!("\"{}\"", name))
+                .collect::<Vec<_>>()
+                .join(", ");
+
+            let values: Vec<String> = row_values
+                .iter()
+                .map(Self::value_to_change_sql_literal)
+                .collect();
+
+            sql_statements.push(format!(
+                "INSERT INTO \"{}\" ({}) VALUES ({});",
+                table_name,
+                column_list,
+                values.join(", ")
+            ));
+        }
+
+        sql_statements.join("\n")
+    }
+
+    /// Commit pending table changes (updates, deletes, inserts) while returning
+    /// enough structured failure details for UI rehydration.
+    pub async fn commit_table_changes(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: CommitTableChangesRequest,
+    ) -> ServiceResult<CommitTableChangesOutcome> {
+        let CommitTableChangesRequest {
+            table_name,
+            schema,
+            column_meta,
+            modified_cells,
+            deleted_row_indices,
+            new_rows,
+            all_rows,
+            auto_increment_placeholder,
+        } = request;
+
+        let column_names: Vec<String> = column_meta
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let column_types: Vec<String> = column_meta
+            .iter()
+            .map(|column| column.data_type.clone())
+            .collect();
+
+        let Some(original_row_count) = all_rows.len().checked_sub(new_rows.len()) else {
+            return Err(ServiceError::TableOperationFailed(
+                "Pending new-row count exceeds loaded rows; refresh and retry commit".to_string(),
+            ));
+        };
+
+        let mut outcome = CommitTableChangesOutcome::default();
+
+        let mut row_updates: std::collections::HashMap<usize, Vec<&CommitCellChange>> =
+            std::collections::HashMap::new();
+        for change in &modified_cells {
+            row_updates
+                .entry(change.row_index)
+                .or_default()
+                .push(change);
+        }
+
+        for (row_index, changes) in row_updates {
+            if row_index >= original_row_count {
+                tracing::warn!(
+                    row_index,
+                    original_row_count,
+                    "Skipping modified-cell commit because row belongs to pending new rows"
+                );
+                continue;
+            }
+
+            let Some(row_values) = all_rows.get(row_index) else {
+                continue;
+            };
+
+            let mut original_row_values = row_values.clone();
+            for row_change in &changes {
+                if let Some(cell) = original_row_values.get_mut(row_change.column_index) {
+                    *cell = row_change.original_value.clone();
+                }
+            }
+
+            for change in changes {
+                let Some(column_name) = column_names.get(change.column_index).cloned() else {
+                    continue;
+                };
+
+                let cell_update = CellUpdateData {
+                    column_name: column_name.clone(),
+                    new_value: Some(change.new_value.clone()).filter(|value| !value.is_null()),
+                    all_column_names: column_names.clone(),
+                    all_row_values: original_row_values.clone(),
+                    all_column_types: column_types.clone(),
+                };
+
+                match self
+                    .update_cell(
+                        connection.clone(),
+                        &table_name,
+                        schema.as_deref(),
+                        cell_update,
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        outcome.successful_operations =
+                            outcome.successful_operations.saturating_add(1);
+                    }
+                    Err(error) => {
+                        outcome
+                            .failed_modified_cells
+                            .push(FailedModifiedCellCommit {
+                                original_row_values: original_row_values.clone(),
+                                column_index: change.column_index,
+                                column_name,
+                                original_value: change.original_value.clone(),
+                                new_value: change.new_value.clone(),
+                                error_message: error.to_string(),
+                            });
+                    }
+                }
+            }
+        }
+
+        if !deleted_row_indices.is_empty() {
+            let rows_to_delete: Vec<Vec<Value>> = deleted_row_indices
+                .iter()
+                .filter_map(|row_index| all_rows.get(*row_index).cloned())
+                .collect();
+
+            if !rows_to_delete.is_empty() {
+                let row_delete_data = RowDeleteData {
+                    all_column_names: column_names.clone(),
+                    rows: rows_to_delete.clone(),
+                };
+
+                match self
+                    .delete_rows(
+                        connection.clone(),
+                        &table_name,
+                        schema.as_deref(),
+                        row_delete_data,
+                    )
+                    .await
+                {
+                    Ok(deleted_count) => {
+                        outcome.successful_operations = outcome
+                            .successful_operations
+                            .saturating_add(deleted_count as usize);
+                    }
+                    Err(_) => {
+                        outcome.failed_deleted_rows = rows_to_delete;
+                    }
+                }
+            }
+        }
+
+        for (new_row_index, row_values) in new_rows.iter().enumerate() {
+            let insert_values: Vec<Option<Value>> = row_values
+                .iter()
+                .map(|value| {
+                    if let (Some(placeholder), Value::String(text)) =
+                        (auto_increment_placeholder.as_ref(), value)
+                    {
+                        if text == placeholder {
+                            None
+                        } else {
+                            Some(value.clone())
+                        }
+                    } else {
+                        Some(value.clone())
+                    }
+                })
+                .collect();
+
+            let row_insert_data = RowInsertData {
+                column_names: column_names.clone(),
+                values: insert_values,
+                column_types: column_types.clone(),
+            };
+
+            match self
+                .insert_row(
+                    connection.clone(),
+                    &table_name,
+                    schema.as_deref(),
+                    row_insert_data,
+                )
+                .await
+            {
+                Ok(()) => {
+                    outcome.successful_operations = outcome.successful_operations.saturating_add(1);
+                }
+                Err(error) => {
+                    outcome.failed_new_rows.push(FailedNewRowCommit {
+                        row_number: new_row_index.saturating_add(1),
+                        row_values: row_values.clone(),
+                        error_message: error.to_string(),
+                    });
+                }
+            }
+        }
+
+        Ok(outcome)
+    }
+
+    /// Duplicate multiple tables by creating `source + suffix` copies.
+    ///
+    /// The service owns SQL-construction and execution branching so UI layers can
+    /// remain focused on confirmation dialogs and refresh orchestration.
+    pub async fn duplicate_tables(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: DuplicateTablesRequest,
+    ) -> DuplicateTablesOutcome {
+        let DuplicateTablesRequest {
+            operations,
+            continue_on_error,
+        } = request;
+
+        let mut outcome = DuplicateTablesOutcome::default();
+
+        for operation in operations {
+            let DuplicateTableOperation {
+                source_table_name,
+                target_table_name,
+            } = operation;
+            let sql = match connection.duplicate_table_sql(
+                &SqlObjectName::new(&source_table_name),
+                &SqlObjectName::new(&target_table_name),
+            ) {
+                Ok(sql) => sql,
+                Err(error) => {
+                    let error_message = format!(
+                        "'{}': failed to build duplicate SQL ({})",
+                        source_table_name, error
+                    );
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            };
+
+            match connection.execute(&sql, &[]).await {
+                Ok(_) => {
+                    outcome.duplicated_tables.push(DuplicateTableResult {
+                        source_table_name,
+                        target_table_name,
+                    });
+                }
+                Err(error) => {
+                    let error_message = format!("'{}': {}", source_table_name, error);
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            }
+        }
+
+        outcome
+    }
+
+    /// Delete multiple tables.
+    ///
+    /// The service centralizes SQL-construction and best-effort/bail-fast error
+    /// behavior so app handlers only coordinate UI state.
+    pub async fn delete_tables(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: DeleteTablesRequest,
+    ) -> DeleteTablesOutcome {
+        let DeleteTablesRequest {
+            table_names,
+            continue_on_error,
+        } = request;
+
+        let mut outcome = DeleteTablesOutcome::default();
+
+        for table_name in table_names {
+            let sql = match connection.drop_table_sql(
+                &SqlObjectName::new(&table_name),
+                DropTableOptions::default(),
+            ) {
+                Ok(sql) => sql,
+                Err(error) => {
+                    let error_message = format!(
+                        "'{}': failed to build DROP TABLE SQL ({})",
+                        table_name, error
+                    );
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            };
+
+            match connection.execute(&sql, &[]).await {
+                Ok(_) => outcome.deleted_table_names.push(table_name),
+                Err(error) => {
+                    let error_message = format!("'{}': {}", table_name, error);
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            }
+        }
+
+        outcome
+    }
+
+    /// Empty multiple tables while preserving table structure.
+    ///
+    /// The service centralizes truncate SQL generation plus best-effort vs
+    /// bail-fast behavior so app handlers can remain UI-orchestration only.
+    pub async fn empty_tables(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: EmptyTablesRequest,
+    ) -> EmptyTablesOutcome {
+        let EmptyTablesRequest {
+            table_names,
+            continue_on_error,
+        } = request;
+
+        let mut outcome = EmptyTablesOutcome::default();
+
+        for table_name in table_names {
+            let sql = match connection.truncate_table_sql(&SqlObjectName::new(&table_name)) {
+                Ok(sql) => sql,
+                Err(error) => {
+                    let error_message =
+                        format!("'{}': failed to build truncate SQL ({})", table_name, error);
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            };
+
+            match connection.execute(&sql, &[]).await {
+                Ok(result) => {
+                    outcome.total_rows_deleted = outcome
+                        .total_rows_deleted
+                        .saturating_add(result.affected_rows);
+                    outcome.emptied_table_names.push(table_name);
+                }
+                Err(error) => {
+                    let error_message = format!("'{}': {}", table_name, error);
+                    if continue_on_error {
+                        outcome.errors.push(error_message);
+                        continue;
+                    }
+                    outcome.errors.push(error_message);
+                    return outcome;
+                }
+            }
+        }
+
+        outcome
+    }
+
+    /// Rename one table.
+    ///
+    /// The service owns SQL generation + execution so app handlers and windows
+    /// can stay focused on validation, prompts, and refresh orchestration.
+    pub async fn rename_table(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: RenameTableRequest,
+    ) -> ServiceResult<()> {
+        let RenameTableRequest {
+            source_table_name,
+            target_table_name,
+        } = request;
+
+        let sql = connection
+            .rename_table_sql(&SqlObjectName::new(&source_table_name), &target_table_name)
+            .map_err(|error| {
+                ServiceError::TableOperationFailed(format!(
+                    "Failed to build rename SQL for table '{}': {}",
+                    source_table_name, error
+                ))
+            })?;
+
+        connection.execute(&sql, &[]).await.map_err(|error| {
+            ServiceError::TableOperationFailed(format!(
+                "Failed to rename table '{}' to '{}': {}",
+                source_table_name, target_table_name, error
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Generate SQL dump text for multiple tables.
+    ///
+    /// The service owns SQL generation details so app handlers can remain focused
+    /// on clipboard and notification orchestration.
+    pub async fn dump_tables_sql(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: DumpTablesSqlRequest,
+    ) -> DumpTablesSqlOutcome {
+        let DumpTablesSqlRequest {
+            table_names,
+            include_data,
+        } = request;
+
+        let mut outcome = DumpTablesSqlOutcome::default();
+        if table_names.is_empty() {
+            return outcome;
+        }
+
+        let mut dump_sections = Vec::with_capacity(table_names.len());
+        for table_name in table_names {
+            let mut table_sql_parts: Vec<String> = Vec::new();
+            table_sql_parts.push(format!("-- Table: {}", table_name));
+
+            if let Some(schema_introspection) = connection.as_schema_introspection() {
+                let db_object = DatabaseObject {
+                    object_type: ObjectType::Table,
+                    schema: None,
+                    name: table_name.clone(),
+                    signature: None,
+                };
+
+                match schema_introspection.generate_ddl(&db_object).await {
+                    Ok(create_sql) => {
+                        table_sql_parts.push(create_sql);
+                    }
+                    Err(error) => {
+                        outcome.errors.push(format!(
+                            "'{}': failed to generate DDL ({})",
+                            table_name, error
+                        ));
+                        table_sql_parts.push(format!("-- Error getting structure: {}", error));
+                    }
+                }
+            } else {
+                let error = "schema introspection not supported by this connection";
+                outcome.errors.push(format!("'{}': {}", table_name, error));
+                table_sql_parts.push(format!("-- Error getting structure: {}", error));
+            }
+
+            if include_data {
+                let quoted_table_name = connection.quote_identifier(&table_name);
+                let query = format!("SELECT * FROM {}", quoted_table_name);
+
+                match connection.query(&query, &[]).await {
+                    Ok(result) => {
+                        if !result.rows.is_empty() {
+                            table_sql_parts.push(String::new());
+                            let column_names: Vec<String> = result
+                                .columns
+                                .iter()
+                                .map(|column| column.name.clone())
+                                .collect();
+                            let quoted_columns = column_names
+                                .iter()
+                                .map(|column_name| connection.quote_identifier(column_name))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+
+                            for row in &result.rows {
+                                let values = row
+                                    .values
+                                    .iter()
+                                    .map(Self::value_to_sql_literal)
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+
+                                table_sql_parts.push(format!(
+                                    "INSERT INTO {} ({}) VALUES ({});",
+                                    quoted_table_name, quoted_columns, values
+                                ));
+                            }
+                        }
+                    }
+                    Err(error) => {
+                        outcome
+                            .errors
+                            .push(format!("'{}': failed to dump data ({})", table_name, error));
+                        table_sql_parts.push(format!("-- Error getting data: {}", error));
+                    }
+                }
+            }
+
+            outcome.processed_table_names.push(table_name);
+            dump_sections.push(table_sql_parts.join("\n"));
+        }
+
+        outcome.sql = dump_sections.join("\n\n");
+        outcome
+    }
+
+    /// Load distinct non-null values for one table column.
+    ///
+    /// This keeps SQL construction and execution in `zqlz-services` so app
+    /// event handlers can remain focused on UI orchestration.
+    pub async fn load_distinct_values(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: LoadDistinctValuesRequest,
+    ) -> ServiceResult<LoadDistinctValuesOutcome> {
+        let LoadDistinctValuesRequest {
+            table_name,
+            column_name,
+            limit,
+        } = request;
+
+        let table_object_name = parse_sql_object_name(&table_name);
+        let escaped_column = connection.quote_identifier(&column_name);
+        let where_clause = format!("{} IS NOT NULL", escaped_column);
+
+        let sql = connection
+            .select_distinct_rows_sql(
+                &table_object_name,
+                std::slice::from_ref(&column_name),
+                Some(&where_clause),
+                std::slice::from_ref(&column_name),
+                limit,
+            )
+            .map_err(|error| {
+                ServiceError::TableOperationFailed(format!(
+                    "Failed to build distinct-values SQL for {}.{}: {}",
+                    table_name, column_name, error
+                ))
+            })?;
+
+        let result = connection.query(&sql, &[]).await.map_err(|error| {
+            ServiceError::TableOperationFailed(format!(
+                "Failed to load distinct values for {}.{}: {}",
+                table_name, column_name, error
+            ))
+        })?;
+
+        let values = result
+            .rows
+            .iter()
+            .filter_map(|row| row.values.first().map(|value| value.to_string()))
+            .collect();
+
+        Ok(LoadDistinctValuesOutcome { values })
+    }
+
+    /// Load foreign-key candidate values from a referenced table.
+    ///
+    /// The service owns FK value SQL construction and label-column discovery so
+    /// app handlers can remain focused on caching and UI updates.
+    pub async fn load_foreign_key_values(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: LoadForeignKeyValuesRequest,
+    ) -> ServiceResult<LoadForeignKeyValuesOutcome> {
+        let LoadForeignKeyValuesRequest {
+            referenced_table,
+            referenced_schema,
+            referenced_columns,
+            query,
+            limit,
+        } = request;
+
+        let (effective_schema, effective_table_name) = resolve_table_reference(
+            &referenced_table,
+            referenced_schema
+                .as_deref()
+                .map(str::trim)
+                .filter(|schema| !schema.is_empty()),
+        );
+
+        let table_object_name = match effective_schema.as_deref() {
+            Some(schema_name) => SqlObjectName::with_namespace(schema_name, &effective_table_name),
+            None => SqlObjectName::new(&effective_table_name),
+        };
+
+        let label_column = self
+            .best_fk_label_column(
+                connection.as_ref(),
+                effective_schema.as_deref(),
+                &effective_table_name,
+                &referenced_columns,
+            )
+            .await;
+
+        let selected_columns = if referenced_columns.is_empty() {
+            match &label_column {
+                Some(label_column_name) => vec![label_column_name.clone()],
+                None => vec!["id".to_string()],
+            }
+        } else {
+            referenced_columns
+        };
+
+        let mut projected_columns = selected_columns.clone();
+        if let Some(label_column_name) = &label_column {
+            if !selected_columns
+                .iter()
+                .any(|column_name| column_name == label_column_name)
+            {
+                projected_columns.push(label_column_name.clone());
+            }
+        }
+
+        let mut where_parts = Vec::new();
+        if let Some(search_query) = query
+            .as_deref()
+            .map(str::trim)
+            .filter(|search_query| !search_query.is_empty())
+        {
+            let escaped_like = escape_sql_like_literal(search_query);
+
+            for column_name in &selected_columns {
+                let escaped_column = connection.quote_identifier(column_name);
+                let searchable_expr = connection.search_text_cast_expression(&escaped_column);
+                where_parts.push(format!(
+                    "LOWER({}) LIKE LOWER('%{}%') {}",
+                    searchable_expr,
+                    escaped_like,
+                    sql_like_escape_clause()
+                ));
+            }
+
+            if let Some(label_column_name) = &label_column {
+                if !selected_columns
+                    .iter()
+                    .any(|column_name| column_name == label_column_name)
+                {
+                    let escaped_column = connection.quote_identifier(label_column_name);
+                    let searchable_expr = connection.search_text_cast_expression(&escaped_column);
+                    where_parts.push(format!(
+                        "LOWER({}) LIKE LOWER('%{}%') {}",
+                        searchable_expr,
+                        escaped_like,
+                        sql_like_escape_clause()
+                    ));
+                }
+            }
+        }
+
+        let where_clause = if where_parts.is_empty() {
+            None
+        } else {
+            Some(where_parts.join(" OR "))
+        };
+
+        let mut order_columns = selected_columns.clone();
+        if let Some(label_column_name) = &label_column {
+            if !order_columns
+                .iter()
+                .any(|column_name| column_name == label_column_name)
+            {
+                order_columns.push(label_column_name.clone());
+            }
+        }
+
+        let sql = connection
+            .select_distinct_rows_sql(
+                &table_object_name,
+                &projected_columns,
+                where_clause.as_deref(),
+                &order_columns,
+                limit.clamp(1, 10) as u64,
+            )
+            .map_err(|error| {
+                ServiceError::TableOperationFailed(format!(
+                    "Failed to build foreign-key values SQL for {}: {}",
+                    referenced_table, error
+                ))
+            })?;
+
+        let result = connection.query(&sql, &[]).await.map_err(|error| {
+            ServiceError::TableOperationFailed(format!(
+                "Failed to load foreign-key values from {}: {}",
+                referenced_table, error
+            ))
+        })?;
+
+        let values = result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let value = row.values.first()?.to_string();
+                let label = if row.values.len() > 1 {
+                    let extra = row
+                        .values
+                        .get(1)
+                        .map(|value| value.to_string())
+                        .unwrap_or_default();
+                    format!("{} - {}", value, extra)
+                } else {
+                    value.clone()
+                };
+                Some(ForeignKeyValueOption { value, label })
+            })
+            .collect();
+
+        Ok(LoadForeignKeyValuesOutcome { values })
+    }
+
+    async fn best_fk_label_column(
+        &self,
+        connection: &dyn Connection,
+        schema_name: Option<&str>,
+        table_name: &str,
+        referenced_columns: &[String],
+    ) -> Option<String> {
+        let schema_introspection = connection.as_schema_introspection()?;
+        let columns = schema_introspection
+            .get_columns(schema_name, table_name)
+            .await
+            .ok()?;
+
+        let preferred_names = ["name", "title", "label", "description", "email", "username"];
+        for preferred_name in preferred_names {
+            if let Some(column) = columns.iter().find(|column| {
+                !referenced_columns
+                    .iter()
+                    .any(|fk_column| fk_column == &column.name)
+                    && column.name.eq_ignore_ascii_case(preferred_name)
+                    && is_string_like_type(&column.data_type)
+            }) {
+                return Some(column.name.clone());
+            }
+        }
+
+        columns
+            .iter()
+            .find(|column| {
+                !referenced_columns
+                    .iter()
+                    .any(|fk_column| fk_column == &column.name)
+                    && is_string_like_type(&column.data_type)
+            })
+            .map(|column| column.name.clone())
+    }
+
+    fn value_to_sql_literal(value: &Value) -> String {
+        match value {
+            Value::Null => "NULL".to_string(),
+            Value::String(text) => format!("'{}'", text.replace('\'', "''")),
+            Value::Bool(boolean_value) => {
+                if *boolean_value {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            }
+            Value::Bytes(bytes) => {
+                let hex_string: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+                format!("X'{}'", hex_string)
+            }
+            _ => value.to_string(),
+        }
+    }
+
+    fn value_to_change_sql_literal(value: &Value) -> String {
+        match value {
+            Value::Null => "NULL".to_string(),
+            Value::Bool(boolean_value) => {
+                if *boolean_value {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            }
+            Value::Int8(integer_value) => integer_value.to_string(),
+            Value::Int16(integer_value) => integer_value.to_string(),
+            Value::Int32(integer_value) => integer_value.to_string(),
+            Value::Int64(integer_value) => integer_value.to_string(),
+            Value::Float32(float_value) => float_value.to_string(),
+            Value::Float64(float_value) => float_value.to_string(),
+            Value::Decimal(decimal_value) => decimal_value.clone(),
+            Value::String(text) => format!("'{}'", text.replace('\'', "''")),
+            Value::Bytes(bytes) => {
+                let hex_string: String = bytes.iter().map(|byte| format!("{:02x}", byte)).collect();
+                format!("X'{}'", hex_string)
+            }
+            Value::Uuid(uuid_value) => format!("'{}'", uuid_value),
+            Value::Date(date_value) => format!("'{}'", date_value),
+            Value::Time(time_value) => format!("'{}'", time_value.format("%H:%M:%S%.f")),
+            Value::DateTime(datetime_value) => {
+                format!("'{}'", datetime_value.format("%Y-%m-%d %H:%M:%S%.f"))
+            }
+            Value::DateTimeUtc(datetime_value) => {
+                format!("'{}'", datetime_value.format("%Y-%m-%d %H:%M:%S%.f UTC"))
+            }
+            Value::Json(json_value) => format!("'{}'", json_value.to_string().replace('\'', "''")),
+            Value::Array(values) => {
+                let rendered_values: Vec<String> = values
+                    .iter()
+                    .map(Self::value_to_change_sql_literal)
+                    .collect();
+                format!("ARRAY[{}]", rendered_values.join(", "))
+            }
+        }
+    }
+}
+
+fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
+    if object_name.contains('.') {
+        let mut parts = object_name.splitn(2, '.');
+        match (parts.next(), parts.next()) {
+            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
+                SqlObjectName::with_namespace(namespace, name)
+            }
+            _ => SqlObjectName::new(object_name),
+        }
+    } else {
+        SqlObjectName::new(object_name)
+    }
+}
+
+fn resolve_table_reference(
+    table_name: &str,
+    schema_hint: Option<&str>,
+) -> (Option<String>, String) {
+    if let Some((namespace, relation_name)) =
+        table_name
+            .split_once('.')
+            .and_then(|(namespace, relation_name)| {
+                if namespace.is_empty() || relation_name.is_empty() {
+                    None
+                } else {
+                    Some((namespace, relation_name))
+                }
+            })
+    {
+        if relation_name.starts_with(&format!("{namespace}.")) {
+            let relation_name = relation_name
+                .strip_prefix(&format!("{namespace}."))
+                .unwrap_or(relation_name);
+            return (Some(namespace.to_string()), relation_name.to_string());
+        }
+        return (Some(namespace.to_string()), relation_name.to_string());
+    }
+
+    (
+        schema_hint
+            .map(str::trim)
+            .filter(|schema_name| !schema_name.is_empty())
+            .map(ToString::to_string),
+        table_name.to_string(),
+    )
+}
+
+fn relation_info_matches_name(catalog_name: &str, requested_name: &str) -> bool {
+    catalog_name == requested_name
+        || catalog_name
+            .split_once('.')
+            .map(|(_, relation_name)| relation_name == requested_name)
+            .unwrap_or(false)
+}
+
+fn relation_display_name(catalog_name: &str, requested_name: &str) -> String {
+    catalog_name
+        .split_once('.')
+        .map(|(_, relation_name)| relation_name.to_string())
+        .unwrap_or_else(|| requested_name.to_string())
+}
+
+fn is_string_like_type(data_type: &str) -> bool {
+    let normalized = data_type.to_ascii_lowercase();
+    normalized.contains("char")
+        || normalized.contains("text")
+        || normalized.contains("name")
+        || normalized.contains("json")
+        || normalized.contains("uuid")
+        || normalized.contains("enum")
+}
+
+fn escape_sql_like_literal(input: &str) -> String {
+    input
+        .replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+        .replace('\'', "''")
+}
+
+fn sql_like_escape_clause() -> &'static str {
+    "ESCAPE '\\'"
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::view_models::ColumnInfo;
+    use zqlz_core::TableType;
 
     #[test]
     fn test_escape_identifier_postgresql() {
@@ -1775,6 +3161,30 @@ mod tests {
         assert_eq!(
             service.parse_value("1111", Some("integer")).unwrap(),
             Value::Int32(1111)
+        );
+        assert_eq!(
+            service.parse_value("[\"1\"]", Some("TextArray")).unwrap(),
+            Value::Array(vec![Value::String("1".to_string())])
+        );
+        assert_eq!(
+            service.parse_value("[1, 2]", Some("int4[]")).unwrap(),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+        );
+        assert_eq!(
+            service
+                .parse_value("{\"enabled\":true}", Some("Jsonb"))
+                .unwrap(),
+            Value::Json(serde_json::json!({ "enabled": true }))
+        );
+        assert!(service.parse_value("{bad json", Some("jsonb")).is_err());
+        assert_eq!(
+            service
+                .parse_value("[\"read\",\"write\"]", Some("set"))
+                .unwrap(),
+            Value::Array(vec![
+                Value::String("read".to_string()),
+                Value::String("write".to_string())
+            ])
         );
     }
 
@@ -1886,5 +3296,178 @@ mod tests {
             TableService::reverse_order_by_clause("`booking_id` DESC"),
             "`booking_id` ASC"
         );
+    }
+
+    #[test]
+    fn build_open_viewer_schema_viewer_metadata_shapes_foreign_keys_and_column_metadata() {
+        let schema_load = OpenViewerSchemaLoad {
+            table_details: TableDetails {
+                name: "orders".to_string(),
+                table_type: TableType::Table,
+                columns: vec![ColumnInfo {
+                    name: "order_id".to_string(),
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                    is_primary_key: true,
+                    default_value: None,
+                    max_length: None,
+                    precision: None,
+                    scale: None,
+                    is_auto_increment: true,
+                    comment: None,
+                    enum_values: None,
+                }],
+                indexes: Vec::new(),
+                foreign_keys: vec![zqlz_core::ForeignKeyInfo {
+                    name: "fk_orders_customers".to_string(),
+                    columns: vec!["customer_id".to_string()],
+                    referenced_table: "customers".to_string(),
+                    referenced_schema: Some("public".to_string()),
+                    referenced_columns: vec!["id".to_string()],
+                    on_update: zqlz_core::ForeignKeyAction::Cascade,
+                    on_delete: zqlz_core::ForeignKeyAction::SetNull,
+                    is_deferrable: true,
+                    initially_deferred: true,
+                }],
+                constraints: Vec::new(),
+                triggers: Vec::new(),
+                primary_key_columns: vec!["order_id".to_string()],
+                row_count: Some(42),
+            },
+            create_statement: Some("CREATE TABLE orders (...)".to_string()),
+        };
+
+        let metadata = build_open_viewer_schema_viewer_metadata(&schema_load);
+
+        assert_eq!(metadata.schema_columns.len(), 1);
+        assert_eq!(metadata.schema_columns[0].name, "order_id");
+        assert_eq!(metadata.primary_key_columns, vec!["order_id".to_string()]);
+
+        assert_eq!(metadata.foreign_keys_for_viewer.len(), 1);
+        let foreign_key = &metadata.foreign_keys_for_viewer[0];
+        assert_eq!(foreign_key.name, "fk_orders_customers");
+        assert_eq!(foreign_key.columns, vec!["customer_id".to_string()]);
+        assert_eq!(foreign_key.referenced_table, "customers");
+        assert_eq!(foreign_key.referenced_schema.as_deref(), Some("public"));
+        assert_eq!(foreign_key.referenced_columns, vec!["id".to_string()]);
+        assert_eq!(foreign_key.on_update, zqlz_core::ForeignKeyAction::Cascade);
+        assert_eq!(foreign_key.on_delete, zqlz_core::ForeignKeyAction::SetNull);
+        assert!(!foreign_key.is_deferrable);
+        assert!(!foreign_key.initially_deferred);
+    }
+
+    #[test]
+    fn generate_table_changes_sql_builds_update_delete_and_insert_statements() {
+        let service = TableService::new(1000);
+        let sql = service.generate_table_changes_sql(GenerateTableChangesSqlRequest {
+            table_name: "users".to_string(),
+            column_names: vec!["id".to_string(), "name".to_string()],
+            modified_cells: vec![ModifiedCellSqlChange {
+                row_index: 0,
+                column_index: 1,
+                new_value: Value::String("Alice O'Connor".to_string()),
+            }],
+            deleted_row_indices: vec![1],
+            new_rows: vec![vec![Value::Int32(3), Value::String("Carol".to_string())]],
+            all_rows: vec![
+                vec![Value::Int32(1), Value::String("Alice".to_string())],
+                vec![Value::Int32(2), Value::Null],
+            ],
+        });
+
+        assert!(sql.contains("UPDATE \"users\" SET \"name\" = 'Alice O''Connor' WHERE \"id\" = 1 AND \"name\" = 'Alice';"));
+        assert!(sql.contains("DELETE FROM \"users\" WHERE \"id\" = 2 AND \"name\" IS NULL;"));
+        assert!(sql.contains("INSERT INTO \"users\" (\"id\", \"name\") VALUES (3, 'Carol');"));
+    }
+
+    #[test]
+    fn generate_table_changes_sql_ignores_invalid_row_or_column_indexes() {
+        let service = TableService::new(1000);
+        let sql = service.generate_table_changes_sql(GenerateTableChangesSqlRequest {
+            table_name: "users".to_string(),
+            column_names: vec!["id".to_string()],
+            modified_cells: vec![
+                ModifiedCellSqlChange {
+                    row_index: 4,
+                    column_index: 0,
+                    new_value: Value::Int32(9),
+                },
+                ModifiedCellSqlChange {
+                    row_index: 0,
+                    column_index: 3,
+                    new_value: Value::Int32(7),
+                },
+            ],
+            deleted_row_indices: vec![9],
+            new_rows: Vec::new(),
+            all_rows: vec![vec![Value::Int32(1)]],
+        });
+
+        assert!(sql.is_empty());
+    }
+
+    #[test]
+    fn parse_sql_object_name_parses_qualified_and_unqualified_names() {
+        let qualified = parse_sql_object_name("public.users");
+        assert_eq!(qualified.namespace, Some("public".to_string()));
+        assert_eq!(qualified.name, "users");
+
+        let unqualified = parse_sql_object_name("users");
+        assert_eq!(unqualified.namespace, None);
+        assert_eq!(unqualified.name, "users");
+
+        let invalid_qualified = parse_sql_object_name("public.");
+        assert_eq!(invalid_qualified.namespace, None);
+        assert_eq!(invalid_qualified.name, "public.");
+    }
+
+    #[test]
+    fn resolve_table_reference_prefers_embedded_namespace() {
+        let (schema_name, table_name) = resolve_table_reference("public.users", Some("ignored"));
+        assert_eq!(schema_name.as_deref(), Some("public"));
+        assert_eq!(table_name, "users");
+    }
+
+    #[test]
+    fn resolve_table_reference_deduplicates_repeated_embedded_namespace() {
+        let (schema_name, table_name) =
+            resolve_table_reference("analytics.analytics.dim_dates", None);
+        assert_eq!(schema_name.as_deref(), Some("analytics"));
+        assert_eq!(table_name, "dim_dates");
+    }
+
+    #[test]
+    fn resolve_table_reference_uses_schema_hint_for_unqualified_name() {
+        let (schema_name, table_name) = resolve_table_reference("users", Some("analytics"));
+        assert_eq!(schema_name.as_deref(), Some("analytics"));
+        assert_eq!(table_name, "users");
+    }
+
+    #[test]
+    fn relation_info_matches_qualified_catalog_name() {
+        assert!(relation_info_matches_name(
+            "public.active_customers",
+            "active_customers"
+        ));
+        assert!(relation_info_matches_name(
+            "active_customers",
+            "active_customers"
+        ));
+        assert!(!relation_info_matches_name(
+            "public.inactive_customers",
+            "active_customers"
+        ));
+    }
+
+    #[test]
+    fn escape_sql_like_literal_escapes_wildcards_and_quotes() {
+        let escaped = escape_sql_like_literal("50%_off\\today's");
+        assert_eq!(escaped, "50\\%\\_off\\\\today''s");
+    }
+
+    #[test]
+    fn sql_like_escape_clause_uses_single_backslash_escape() {
+        assert_eq!(sql_like_escape_clause(), "ESCAPE '\\'");
+        assert_ne!(sql_like_escape_clause(), "ESCAPE '\\\\'");
     }
 }

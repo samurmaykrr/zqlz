@@ -27,6 +27,15 @@ impl ConnectionSidebar {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let selected_connected_connection = self.selected_connection.and_then(|connection_id| {
+            self.connections
+                .iter()
+                .find(|connection| connection.id == connection_id && connection.is_connected)
+                .map(|_| connection_id)
+        });
+        let driver_toolbar_actions = selected_connected_connection
+            .map(|connection_id| (connection_id, self.driver_toolbar_actions(connection_id)));
+
         self.set_selected(None, cx);
 
         if self.sidebar_context_menu.is_none() {
@@ -42,7 +51,8 @@ impl ConnectionSidebar {
                 state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _window, _cx| {
-                    menu.action_context(action_context.clone())
+                    let menu = menu
+                        .action_context(action_context.clone())
                         .item(PopupMenuItem::new("New Connection").on_click({
                             let sidebar = sidebar_weak.clone();
                             move |_event, _window, cx| {
@@ -64,6 +74,28 @@ impl ConnectionSidebar {
                                 }),
                         )
                         .separator()
+                        .item(PopupMenuItem::new("Refresh").on_click({
+                            let sidebar = sidebar_weak.clone();
+                            move |_event, _window, cx| {
+                                _ = sidebar.update(cx, |_sidebar, cx| {
+                                    cx.emit(ConnectionSidebarEvent::RefreshConnections);
+                                });
+                            }
+                        }));
+
+                    let menu =
+                        if let Some((connection_id, actions)) = driver_toolbar_actions.clone() {
+                            Self::apply_driver_toolbar_actions_to_menu(
+                                menu,
+                                actions,
+                                connection_id,
+                                sidebar_weak.clone(),
+                            )
+                        } else {
+                            menu
+                        };
+
+                    menu.separator()
                         .item(PopupMenuItem::new("Refresh").on_click({
                             let sidebar = sidebar_weak.clone();
                             move |_event, _window, cx| {

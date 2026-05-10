@@ -624,6 +624,7 @@ pub async fn generate_ddl(
         object_type,
         schema: schema.map(String::from),
         name: object_name.to_string(),
+        signature: None,
     };
 
     introspection

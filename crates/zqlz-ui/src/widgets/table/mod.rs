@@ -1,7 +1,7 @@
 use crate::widgets::{ActiveTheme, Sizable, Size, actions::Cancel};
 use gpui::{
     App, Edges, Entity, Focusable, InteractiveElement, IntoElement, KeyBinding, ParentElement,
-    RenderOnce, Styled, Window, actions, div, prelude::FluentBuilder,
+    Pixels, RenderOnce, Styled, Window, actions, div, prelude::FluentBuilder,
 };
 
 mod column;
@@ -85,6 +85,8 @@ struct TableOptions {
     bordered: bool,
     /// The cell size of the table.
     size: Size,
+    /// The header height. Defaults to the row height for the selected size.
+    header_height: Option<Pixels>,
 }
 
 impl Default for TableOptions {
@@ -94,6 +96,7 @@ impl Default for TableOptions {
             stripe: false,
             bordered: true,
             size: Size::default(),
+            header_height: None,
         }
     }
 }
@@ -136,6 +139,12 @@ where
             bottom: horizontal,
             ..Default::default()
         };
+        self
+    }
+
+    /// Set table header height. Defaults to the row height for the selected size.
+    pub fn header_height(mut self, height: impl Into<Pixels>) -> Self {
+        self.options.header_height = Some(height.into());
         self
     }
 }
@@ -192,5 +201,29 @@ where
                     .border_color(cx.theme().border.opacity(0.25))
             })
             .child(self.state)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::px;
+
+    #[test]
+    fn table_header_height_defaults_to_row_height() {
+        let options = TableOptions::default();
+
+        assert_eq!(options.header_height, None);
+        assert_eq!(options.size.table_row_height(), px(32.0));
+    }
+
+    #[test]
+    fn table_options_can_store_header_height_override() {
+        let options = TableOptions {
+            header_height: Some(px(44.0)),
+            ..Default::default()
+        };
+
+        assert_eq!(options.header_height, Some(px(44.0)));
     }
 }

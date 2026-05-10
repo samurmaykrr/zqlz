@@ -322,6 +322,7 @@ fn parse_text_node(
 
     // Skip empty lines or non-plan lines
     if content.is_empty()
+        || content == "QUERY PLAN"
         || content.starts_with("Planning Time")
         || content.starts_with("Execution Time")
         || content.starts_with("Planning time")
@@ -349,6 +350,7 @@ fn parse_text_node(
 
         // Skip empty lines and timing info
         if next_content.is_empty()
+            || next_content == "QUERY PLAN"
             || next_content.starts_with("Planning")
             || next_content.starts_with("Execution")
         {

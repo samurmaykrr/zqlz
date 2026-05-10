@@ -11,6 +11,7 @@ mod standalone;
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
 use std::path::{Path, PathBuf};
+use tokio::process::Command as ProcessCommand;
 use uuid::Uuid;
 
 use crate::ipc::ConnectionSummary;
@@ -26,7 +27,11 @@ use crate::standalone::{SavedConnection, load_history_entry};
 /// Connects to a running ZQLZ GUI instance via IPC when available, otherwise
 /// operates standalone against the shared storage database.
 #[derive(Debug, Parser)]
-#[command(name = "zqlz", about = "ZQLZ database IDE — command-line interface")]
+#[command(
+    name = "zqlz",
+    about = "ZQLZ database IDE — command-line interface",
+    after_help = "Without a subcommand, zqlz opens the GUI and forwards optional targets.\n\nExamples:\n  zqlz\n  zqlz ./query.sql\n  zqlz connections list"
+)]
 struct Cli {
     /// Override the IPC endpoint path used to reach a running GUI instance.
     /// Defaults to `~/.config/zqlz/ipc.sock` on Unix and `\\.\pipe\...` on Windows.
@@ -37,8 +42,16 @@ struct Cli {
     #[arg(long, global = true)]
     standalone: bool,
 
+    /// Open in a new GUI process instead of forwarding to an existing one
+    #[arg(long, global = true)]
+    new: bool,
+
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
+
+    /// Files/URLs to open in the GUI when no subcommand is given
+    #[arg(value_name = "TARGET")]
+    open_targets: Vec<String>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -94,7 +107,7 @@ struct AddConnectionArgs {
     #[arg(long)]
     name: String,
 
-    /// Driver type: postgres, mysql, sqlite, mssql, duckdb, redis, mongodb, clickhouse
+    /// Driver type: postgres, mysql, sqlite, turso, mssql, duckdb, redis, mongodb, clickhouse
     #[arg(long)]
     driver: String,
 
@@ -421,10 +434,12 @@ enum OutputFormat {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let zqlz_warn_directive = "zqlz=warn"
+        .parse()
+        .context("parsing default zqlz tracing directive")?;
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::from_default_env()
-                .add_directive("zqlz=warn".parse().unwrap()),
+            tracing_subscriber::EnvFilter::from_default_env().add_directive(zqlz_warn_directive),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -438,13 +453,18 @@ async fn main() -> Result<()> {
 
     let use_ipc = !cli.standalone;
 
+    if cli.new && cli.command.is_some() {
+        bail!("--new is only supported when opening GUI targets (no subcommand)");
+    }
+
     match cli.command {
-        Command::Connections(args) => handle_connections(args, use_ipc, &socket_path).await,
-        Command::Connect(args) => handle_connect(args, use_ipc, &socket_path).await,
-        Command::Query(args) => handle_query(args, use_ipc, &socket_path).await,
-        Command::Schema(args) => handle_schema(args, use_ipc, &socket_path).await,
-        Command::History(args) => handle_history(args, use_ipc, &socket_path).await,
-        Command::Status => handle_status(&socket_path).await,
+        Some(Command::Connections(args)) => handle_connections(args, use_ipc, &socket_path).await,
+        Some(Command::Connect(args)) => handle_connect(args, use_ipc, &socket_path).await,
+        Some(Command::Query(args)) => handle_query(args, use_ipc, &socket_path).await,
+        Some(Command::Schema(args)) => handle_schema(args, use_ipc, &socket_path).await,
+        Some(Command::History(args)) => handle_history(args, use_ipc, &socket_path).await,
+        Some(Command::Status) => handle_status(&socket_path).await,
+        None => handle_open_targets(cli.open_targets, use_ipc, cli.new, &socket_path).await,
     }
 }
 
@@ -1085,6 +1105,97 @@ async fn handle_status(socket_path: &Path) -> Result<()> {
             e
         ),
     }
+    Ok(())
+}
+
+/// Open the GUI and optionally forward one or more startup targets.
+///
+/// When IPC is available, this forwards to the existing instance and exits.
+/// Otherwise it launches a new GUI process and passes the targets as argv.
+async fn handle_open_targets(
+    targets: Vec<String>,
+    use_ipc: bool,
+    force_new_window: bool,
+    socket_path: &Path,
+) -> Result<()> {
+    if use_ipc && !force_new_window {
+        let request = ipc::Request::OpenTargets {
+            targets: targets.clone(),
+        };
+        match ipc::send_request(socket_path, request).await {
+            Ok(ipc::Response::Ok) => {
+                return Ok(());
+            }
+            Ok(ipc::Response::Error(message)) => {
+                bail!("GUI IPC rejected open request: {}", message);
+            }
+            Ok(other) => {
+                bail!("unexpected IPC response: {:?}", other);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    %error,
+                    socket = %socket_path.display(),
+                    "IPC unavailable while opening targets; launching GUI process"
+                );
+            }
+        }
+    }
+
+    let gui_executable = locate_gui_executable()?;
+    launch_gui_process(&gui_executable, &targets)
+}
+
+/// Locate the bundled GUI executable relative to the CLI binary.
+///
+/// We keep this deterministic so packaging scripts can define a stable layout:
+/// - macOS app bundle: `Contents/MacOS/zqlz` (CLI) + `Contents/MacOS/zqlz-editor` (GUI)
+/// - Linux tarball: `bin/zqlz` (CLI) + `libexec/zqlz-editor` (GUI)
+/// - Windows installer: `zqlz.exe` (CLI) + `ZQLZ.exe` (GUI)
+fn locate_gui_executable() -> Result<PathBuf> {
+    if let Ok(override_path) = std::env::var("ZQLZ_EDITOR_PATH") {
+        let override_path = PathBuf::from(override_path);
+        if override_path.exists() {
+            return Ok(override_path);
+        }
+    }
+
+    let cli_executable = std::env::current_exe().context("resolving current executable path")?;
+    let cli_executable = cli_executable
+        .canonicalize()
+        .unwrap_or_else(|_| cli_executable.clone());
+
+    let executable_directory = cli_executable
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("current executable has no parent directory"))?;
+
+    let candidates = [
+        executable_directory.join("zqlz-editor"),
+        executable_directory.join("zqlz-editor.exe"),
+        executable_directory.join("ZQLZ.exe"),
+        executable_directory.join("../libexec/zqlz-editor"),
+        executable_directory.join("../libexec/zqlz-editor.exe"),
+    ];
+
+    if let Some(found) = candidates
+        .iter()
+        .find(|candidate| candidate.exists() && **candidate != cli_executable)
+    {
+        return Ok(found.clone());
+    }
+
+    bail!(
+        "Could not locate bundled GUI executable near '{}'. Set ZQLZ_EDITOR_PATH to override.",
+        cli_executable.display()
+    )
+}
+
+fn launch_gui_process(gui_executable: &Path, targets: &[String]) -> Result<()> {
+    let mut process = ProcessCommand::new(gui_executable);
+    process.args(targets);
+    process
+        .spawn()
+        .with_context(|| format!("launching GUI executable '{}'", gui_executable.display()))?;
     Ok(())
 }
 

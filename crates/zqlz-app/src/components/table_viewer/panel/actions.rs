@@ -138,6 +138,10 @@ impl TableViewerPanel {
         let Some(table_state) = &self.table_state else {
             return;
         };
+        if !table_state.read_with(cx, |table, _cx| table.delegate().can_insert_rows()) {
+            tracing::info!("Skipping row insert: table does not support row inserts");
+            return;
+        }
         let Some(table_name) = &self.table_name else {
             return;
         };
@@ -174,6 +178,10 @@ impl TableViewerPanel {
         let Some(table_state) = &self.table_state else {
             return;
         };
+        if !table_state.read_with(cx, |table, _cx| table.delegate().can_insert_rows()) {
+            tracing::info!("Skipping row form insert: table does not support row inserts");
+            return;
+        }
 
         let Some((row_values, column_meta, row_index)) = table_state.read_with(cx, |table, _cx| {
             let delegate = table.delegate();
@@ -224,6 +232,10 @@ impl TableViewerPanel {
         let Some(table_state) = &self.table_state else {
             return;
         };
+        if !table_state.read_with(cx, |table, _cx| table.delegate().can_insert_rows()) {
+            tracing::info!("Skipping row form insert: table does not support row inserts");
+            return;
+        }
         let Some(table_name) = &self.table_name else {
             return;
         };
@@ -273,6 +285,11 @@ impl TableViewerPanel {
         selected_rows.retain(|display_index| *display_index < displayed_row_count);
 
         if selected_rows.is_empty() {
+            return;
+        }
+
+        if !table_state.read_with(cx, |table, _cx| table.delegate().can_delete_rows()) {
+            tracing::info!("Skipping row delete: table has no stable row identity");
             return;
         }
 

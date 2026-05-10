@@ -17,6 +17,7 @@ use crate::widgets::IconNamed;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DatabaseLogo {
     SQLite,
+    Turso,
     PostgreSQL,
     MySQL,
     MariaDB,
@@ -32,6 +33,7 @@ impl DatabaseLogo {
     pub fn path(self) -> SharedString {
         match self {
             Self::SQLite => "icons/sqlite.png",
+            Self::Turso => "icons/turso.png",
             Self::PostgreSQL => "icons/postgresql.png",
             Self::MySQL => "icons/mysql.png",
             Self::MariaDB => "icons/mariadb.png",
@@ -109,6 +111,7 @@ pub enum ZqlzIcon {
 
     // Database logos (SVG versions - use DatabaseLogo for colored versions)
     SQLite,
+    Turso,
     PostgreSQL,
     MySQL,
     MariaDB,
@@ -210,6 +213,7 @@ impl IconNamed for ZqlzIcon {
 
             // Database logos
             Self::SQLite => "icons/sqlite.svg",
+            Self::Turso => "icons/turso.svg",
             Self::PostgreSQL => "icons/postgresql.svg",
             Self::MySQL => "icons/mysql.svg",
             Self::MariaDB => "icons/mariadb.svg",
@@ -294,5 +298,65 @@ impl IconNamed for ZqlzIcon {
             Self::TextIndent => "icons/text-indent.svg",
         }
         .into()
+    }
+}
+
+pub fn object_icon_from_key(icon_key: &str) -> ZqlzIcon {
+    match icon_key {
+        "view" | "materialized_view" => ZqlzIcon::Eye,
+        "function" | "procedure" => ZqlzIcon::Function,
+        "trigger" => ZqlzIcon::LightningBolt,
+        "event" => ZqlzIcon::Calendar,
+        "redis_database" => ZqlzIcon::Database,
+        "sequence" => ZqlzIcon::ListNumbers,
+        "type" => ZqlzIcon::BracketsCurly,
+        "index" | "policy" | "collation" => ZqlzIcon::Key,
+        "foreign_server" | "foreign_data_wrapper" => ZqlzIcon::Link,
+        "event_trigger" => ZqlzIcon::Lightning,
+        "language" => ZqlzIcon::Code,
+        "schema" | "extension" | "publication" | "subscription" | "tablespace" => ZqlzIcon::Stack,
+        _ => ZqlzIcon::Table,
+    }
+}
+
+pub fn action_icon_from_key(icon_key: &str) -> Option<ZqlzIcon> {
+    match icon_key {
+        "refresh" => Some(ZqlzIcon::ArrowsClockwise),
+        "create" | "add" | "plus" => Some(ZqlzIcon::Plus),
+        "import" => Some(ZqlzIcon::Import),
+        "export" => Some(ZqlzIcon::Export),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ZqlzIcon, action_icon_from_key, object_icon_from_key};
+
+    #[test]
+    fn object_icon_from_key_resolves_known_database_object_icons() {
+        assert_eq!(object_icon_from_key("view"), ZqlzIcon::Eye);
+        assert_eq!(object_icon_from_key("function"), ZqlzIcon::Function);
+        assert_eq!(object_icon_from_key("trigger"), ZqlzIcon::LightningBolt);
+        assert_eq!(object_icon_from_key("event"), ZqlzIcon::Calendar);
+        assert_eq!(object_icon_from_key("redis_database"), ZqlzIcon::Database);
+        assert_eq!(object_icon_from_key("sequence"), ZqlzIcon::ListNumbers);
+    }
+
+    #[test]
+    fn object_icon_from_key_degrades_unknown_keys_to_table_icon() {
+        assert_eq!(object_icon_from_key("driver_custom_kind"), ZqlzIcon::Table);
+    }
+
+    #[test]
+    fn action_icon_from_key_resolves_manifest_action_icons() {
+        assert_eq!(
+            action_icon_from_key("refresh"),
+            Some(ZqlzIcon::ArrowsClockwise)
+        );
+        assert_eq!(action_icon_from_key("create"), Some(ZqlzIcon::Plus));
+        assert_eq!(action_icon_from_key("import"), Some(ZqlzIcon::Import));
+        assert_eq!(action_icon_from_key("export"), Some(ZqlzIcon::Export));
+        assert_eq!(action_icon_from_key("driver_custom_action"), None);
     }
 }

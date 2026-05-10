@@ -2,7 +2,11 @@
 
 use async_trait::async_trait;
 use bson::{Bson, Document};
-use mongodb::{Client, options::ClientOptions};
+use futures::TryStreamExt;
+use mongodb::{
+    Client,
+    options::{ClientOptions, FindOptions},
+};
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -10,10 +14,14 @@ use std::time::Instant;
 use uuid::Uuid;
 use zqlz_core::{
     ColumnMeta, CommentStyles, Connection, ConnectionConfig, ConnectionField,
-    ConnectionFieldSchema, DataTypeCategory, DataTypeInfo, DatabaseDriver, DialectInfo,
-    DriverCapabilities, DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig,
-    ExplainParserKind, FunctionCategory, KeywordCategory, KeywordInfo, QueryResult, Result, Row,
-    SqlFunctionInfo, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo, DatabaseDriver,
+    DialectInfo, DocumentAggregateRequest, DocumentCellUpdateRequest, DocumentCollectionInfo,
+    DocumentDatabaseInfo, DocumentDeleteOutcome, DocumentDeleteRequest, DocumentInferredField,
+    DocumentQueryRequest, DocumentReplaceRequest, DocumentSaveRequest, DocumentSchemaSampleRequest,
+    DocumentStore, DriverCapabilities, DriverCategory, DropTableOptions, DropTriggerOptions,
+    DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory,
+    KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName,
+    StatementResult, Transaction, Value, ZqlzError,
 };
 
 /// MongoDB database driver
@@ -114,8 +122,9 @@ impl DatabaseDriver for MongoDbDriver {
             .map_err(|e| ZqlzError::Driver(format!("Failed to connect to MongoDB: {}", e)))?;
 
         let database = config
-            .database
-            .clone()
+            .get_string("database")
+            .or_else(|| config.database.clone())
+            .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "admin".to_string());
 
         Ok(Arc::new(MongoDbConnection::new(
@@ -135,14 +144,23 @@ impl DatabaseDriver for MongoDbDriver {
     }
 
     fn build_connection_string(&self, config: &ConnectionConfig) -> String {
+        let scheme = match config
+            .get_string("scheme")
+            .unwrap_or_else(|| "mongodb".to_string())
+            .as_str()
+        {
+            "mongodb+srv" => "mongodb+srv",
+            _ => "mongodb",
+        };
         let host = config
             .get_string("host")
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| "localhost".to_string());
         let port = if config.port > 0 { config.port } else { 27017 };
         let database = config
-            .database
-            .clone()
+            .get_string("database")
+            .or_else(|| config.database.clone())
+            .filter(|value| !value.is_empty())
             .unwrap_or_else(|| "admin".to_string());
         let username = config.username.clone().filter(|s| !s.is_empty());
         let password = config.password.clone().filter(|s| !s.is_empty());
@@ -157,9 +175,22 @@ impl DatabaseDriver for MongoDbDriver {
             .or_else(|| config.get_string("ssl"))
             .map(|s| s == "true" || s == "1")
             .unwrap_or(false);
+        let read_preference = config
+            .get_string("readPreference")
+            .filter(|value| !value.is_empty());
+        let direct_connection = config
+            .get_string("directConnection")
+            .map(|s| s == "true" || s == "1")
+            .unwrap_or(false);
+        let server_selection_timeout = config
+            .get_string("serverSelectionTimeoutMS")
+            .filter(|value| !value.is_empty());
+        let connect_timeout = config
+            .get_string("connectTimeoutMS")
+            .filter(|value| !value.is_empty());
 
         // Build connection string
-        let mut conn_str = String::from("mongodb://");
+        let mut conn_str = format!("{}://", scheme);
 
         // Add credentials if present
         if let (Some(user), Some(pass)) = (&username, &password) {
@@ -171,8 +202,10 @@ impl DatabaseDriver for MongoDbDriver {
 
         // Add host and port
         conn_str.push_str(&host);
-        conn_str.push(':');
-        conn_str.push_str(&port.to_string());
+        if scheme != "mongodb+srv" {
+            conn_str.push(':');
+            conn_str.push_str(&port.to_string());
+        }
 
         // Add database
         conn_str.push('/');
@@ -181,13 +214,28 @@ impl DatabaseDriver for MongoDbDriver {
         // Add options
         let mut options = Vec::new();
         if username.is_some() {
-            options.push(format!("authSource={}", auth_source));
+            options.push(format!("authSource={}", urlencoding::encode(&auth_source)));
         }
         if let Some(rs) = replica_set {
-            options.push(format!("replicaSet={}", rs));
+            options.push(format!("replicaSet={}", urlencoding::encode(&rs)));
         }
         if use_tls {
             options.push("tls=true".to_string());
+        }
+        if let Some(value) = read_preference {
+            options.push(format!("readPreference={}", urlencoding::encode(&value)));
+        }
+        if direct_connection {
+            options.push("directConnection=true".to_string());
+        }
+        if let Some(value) = server_selection_timeout {
+            options.push(format!(
+                "serverSelectionTimeoutMS={}",
+                urlencoding::encode(&value)
+            ));
+        }
+        if let Some(value) = connect_timeout {
+            options.push(format!("connectTimeoutMS={}", urlencoding::encode(&value)));
         }
 
         if !options.is_empty() {
@@ -207,9 +255,20 @@ impl DatabaseDriver for MongoDbDriver {
     }
 
     fn connection_field_schema(&self) -> ConnectionFieldSchema {
+        use zqlz_core::ConnectionFieldOption;
+
         ConnectionFieldSchema {
             title: Cow::Borrowed("MongoDB Connection"),
             fields: vec![
+                ConnectionField::select(
+                    "scheme",
+                    "Scheme",
+                    vec![
+                        ConnectionFieldOption::new("mongodb", "mongodb"),
+                        ConnectionFieldOption::new("mongodb+srv", "mongodb+srv"),
+                    ],
+                )
+                .default_value("mongodb"),
                 ConnectionField::text("host", "Host")
                     .placeholder("localhost")
                     .default_value("localhost")
@@ -242,6 +301,32 @@ impl DatabaseDriver for MongoDbDriver {
                     .help_text("Enable secure connection")
                     .width(0.5)
                     .row_group(3),
+                ConnectionField::text("replicaSet", "Replica Set")
+                    .placeholder("rs0")
+                    .tab("advanced"),
+                ConnectionField::select(
+                    "readPreference",
+                    "Read Preference",
+                    vec![
+                        ConnectionFieldOption::new("", "Server Default"),
+                        ConnectionFieldOption::new("primary", "primary"),
+                        ConnectionFieldOption::new("primaryPreferred", "primaryPreferred"),
+                        ConnectionFieldOption::new("secondary", "secondary"),
+                        ConnectionFieldOption::new("secondaryPreferred", "secondaryPreferred"),
+                        ConnectionFieldOption::new("nearest", "nearest"),
+                    ],
+                )
+                .default_value("")
+                .tab("advanced"),
+                ConnectionField::boolean("directConnection", "Direct Connection")
+                    .default_value("false")
+                    .tab("advanced"),
+                ConnectionField::number(
+                    "serverSelectionTimeoutMS",
+                    "Server Selection Timeout (ms)",
+                )
+                .tab("advanced"),
+                ConnectionField::number("connectTimeoutMS", "Connect Timeout (ms)").tab("advanced"),
             ],
         }
     }
@@ -342,6 +427,106 @@ impl MongoDbConnection {
             .await
             .map_err(|e| ZqlzError::Driver(format!("MongoDB command failed: {}", e)))
     }
+
+    fn parse_document_json(json: Option<&str>) -> Result<Document> {
+        match json.map(str::trim).filter(|value| !value.is_empty()) {
+            Some(value) => serde_json::from_str::<Document>(value).map_err(|error| {
+                ZqlzError::Driver(format!("Invalid MongoDB document JSON: {}", error))
+            }),
+            None => Ok(Document::new()),
+        }
+    }
+
+    fn parse_required_document_json(json: &str, context: &str) -> Result<Document> {
+        serde_json::from_str::<Document>(json).map_err(|error| {
+            ZqlzError::Driver(format!("Invalid MongoDB {} JSON: {}", context, error))
+        })
+    }
+
+    fn parse_pipeline_json(json: &str) -> Result<Vec<Document>> {
+        serde_json::from_str::<Vec<Document>>(json).map_err(|error| {
+            ZqlzError::Driver(format!(
+                "MongoDB aggregate pipeline must be a JSON array: {}",
+                error
+            ))
+        })
+    }
+
+    fn parse_id_json(json: &str) -> Result<Bson> {
+        if let Ok(object_id) = bson::oid::ObjectId::parse_str(json) {
+            return Ok(Bson::ObjectId(object_id));
+        }
+
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(json) {
+            if let serde_json::Value::String(value) = &value
+                && let Ok(object_id) = bson::oid::ObjectId::parse_str(value)
+            {
+                return Ok(Bson::ObjectId(object_id));
+            }
+
+            return bson::to_bson(&value).map_err(|error| {
+                ZqlzError::Driver(format!("Invalid MongoDB _id BSON: {}", error))
+            });
+        }
+
+        serde_json::from_str::<Bson>(json).or_else(|_| Ok(Bson::String(json.to_string())))
+    }
+
+    fn documents_to_query_result(documents: Vec<Document>, execution_time_ms: u64) -> QueryResult {
+        let mut column_names = Vec::<String>::new();
+        for document in &documents {
+            for key in document.keys() {
+                if !column_names.contains(key) {
+                    column_names.push(key.clone());
+                }
+            }
+        }
+
+        let columns = column_names
+            .iter()
+            .enumerate()
+            .map(|(ordinal, name)| ColumnMeta {
+                name: name.clone(),
+                data_type: "bson".to_string(),
+                nullable: true,
+                ordinal,
+                max_length: None,
+                precision: None,
+                scale: None,
+                auto_increment: false,
+                default_value: None,
+                comment: None,
+                enum_values: None,
+            })
+            .collect();
+
+        let rows = documents
+            .into_iter()
+            .map(|document| {
+                let values = column_names
+                    .iter()
+                    .map(|name| {
+                        document
+                            .get(name)
+                            .map(Self::bson_to_value)
+                            .unwrap_or(Value::Null)
+                    })
+                    .collect();
+                Row::new(column_names.clone(), values)
+            })
+            .collect::<Vec<_>>();
+
+        QueryResult {
+            id: Uuid::new_v4(),
+            columns,
+            total_rows: Some(rows.len() as u64),
+            rows,
+            is_estimated_total: false,
+            affected_rows: 0,
+            execution_time_ms,
+            warnings: Vec::new(),
+        }
+    }
 }
 
 /// URL encoding helper (simple implementation)
@@ -370,6 +555,37 @@ impl Connection for MongoDbConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("mongodb")
+    }
+
+    fn driver_category(&self) -> DriverCategory {
+        DriverCategory::Document
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                resolved.effective_database = Some(self.database.clone());
+            }
+            ConnectionScope::Database(database_name)
+            | ConnectionScope::Namespace(database_name) => {
+                let database_name = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                resolved.effective_database = Some(database_name);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        Ok(Some(self.database.clone()))
     }
 
     fn explain_parser_kind(&self) -> ExplainParserKind {
@@ -639,6 +855,267 @@ impl Connection for MongoDbConnection {
 
     fn is_closed(&self) -> bool {
         self.closed.load(Ordering::SeqCst)
+    }
+
+    fn as_document_store(&self) -> Option<&dyn DocumentStore> {
+        Some(self)
+    }
+}
+
+#[async_trait]
+impl DocumentStore for MongoDbConnection {
+    async fn list_document_databases(&self) -> Result<Vec<DocumentDatabaseInfo>> {
+        let databases = self.client.list_database_names().await.map_err(|error| {
+            ZqlzError::Driver(format!("Failed to list MongoDB databases: {}", error))
+        })?;
+
+        Ok(databases
+            .into_iter()
+            .map(|name| DocumentDatabaseInfo {
+                name,
+                size_bytes: None,
+                empty: false,
+            })
+            .collect())
+    }
+
+    async fn list_collections(&self, database: &str) -> Result<Vec<DocumentCollectionInfo>> {
+        let database_handle = self.client.database(database);
+        let names = database_handle
+            .list_collection_names()
+            .await
+            .map_err(|error| {
+                ZqlzError::Driver(format!("Failed to list MongoDB collections: {}", error))
+            })?;
+
+        let mut collections = Vec::with_capacity(names.len());
+        for name in names {
+            let stats = database_handle
+                .run_command(bson::doc! { "collStats": &name })
+                .await
+                .ok();
+            collections.push(DocumentCollectionInfo {
+                database: database.to_string(),
+                name,
+                collection_type: "collection".to_string(),
+                document_count: stats
+                    .as_ref()
+                    .and_then(|doc| doc.get_i64("count").ok())
+                    .map(|value| value as u64),
+                size_bytes: stats
+                    .as_ref()
+                    .and_then(|doc| doc.get_i64("size").ok())
+                    .map(|value| value as u64),
+                index_count: stats
+                    .as_ref()
+                    .and_then(|doc| doc.get_i32("nindexes").ok())
+                    .map(|value| value as u32),
+            });
+        }
+
+        Ok(collections)
+    }
+
+    async fn query_documents(&self, request: DocumentQueryRequest) -> Result<QueryResult> {
+        self.ensure_not_closed()?;
+        let start = Instant::now();
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let filter = Self::parse_document_json(request.filter_json.as_deref())?;
+        let mut options = FindOptions::default();
+        options.skip = Some(request.skip);
+        options.limit = Some(request.limit.min(i64::MAX as u64) as i64);
+        options.projection = Some(Self::parse_document_json(
+            request.projection_json.as_deref(),
+        )?)
+        .filter(|document| !document.is_empty());
+        options.sort = Some(Self::parse_document_json(request.sort_json.as_deref())?)
+            .filter(|document| !document.is_empty());
+
+        let cursor = collection
+            .find(filter)
+            .with_options(options)
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB find failed: {}", error)))?;
+        let documents = cursor
+            .try_collect::<Vec<Document>>()
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB cursor failed: {}", error)))?;
+        Ok(Self::documents_to_query_result(
+            documents,
+            start.elapsed().as_millis() as u64,
+        ))
+    }
+
+    async fn aggregate_documents(&self, request: DocumentAggregateRequest) -> Result<QueryResult> {
+        self.ensure_not_closed()?;
+        let start = Instant::now();
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let mut pipeline = Self::parse_pipeline_json(&request.pipeline_json)?;
+        if request.limit > 0 {
+            pipeline.push(bson::doc! { "$limit": request.limit.min(i64::MAX as u64) as i64 });
+        }
+        let cursor = collection
+            .aggregate(pipeline)
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB aggregate failed: {}", error)))?;
+        let documents = cursor
+            .try_collect::<Vec<Document>>()
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB cursor failed: {}", error)))?;
+        Ok(Self::documents_to_query_result(
+            documents,
+            start.elapsed().as_millis() as u64,
+        ))
+    }
+
+    async fn insert_document(&self, request: DocumentSaveRequest) -> Result<Value> {
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let document = Self::parse_required_document_json(&request.document_json, "document")?;
+        let result = collection
+            .insert_one(document)
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB insert failed: {}", error)))?;
+        Ok(Self::bson_to_value(&result.inserted_id))
+    }
+
+    async fn replace_document(&self, request: DocumentReplaceRequest) -> Result<()> {
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let id = Self::parse_id_json(&request.id_json)?;
+        let document = Self::parse_required_document_json(&request.document_json, "document")?;
+        let result = collection
+            .replace_one(bson::doc! { "_id": id }, document)
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB replace failed: {}", error)))?;
+        if result.matched_count == 0 {
+            return Err(ZqlzError::NotFound("MongoDB document _id".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn update_document_cell(&self, request: DocumentCellUpdateRequest) -> Result<()> {
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let id = Self::parse_id_json(&request.id_json)?;
+        let value = serde_json::to_value(&request.new_value)
+            .ok()
+            .and_then(|value| bson::to_bson(&value).ok())
+            .unwrap_or(Bson::Null);
+        let result = collection
+            .update_one(
+                bson::doc! { "_id": id },
+                bson::doc! { "$set": { request.field_path: value } },
+            )
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB update failed: {}", error)))?;
+        if result.matched_count == 0 {
+            return Err(ZqlzError::NotFound("MongoDB document _id".to_string()));
+        }
+        Ok(())
+    }
+
+    async fn delete_documents(
+        &self,
+        request: DocumentDeleteRequest,
+    ) -> Result<DocumentDeleteOutcome> {
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let mut outcome = DocumentDeleteOutcome::default();
+        for id_json in request.ids_json {
+            let id = match Self::parse_id_json(&id_json) {
+                Ok(id) => id,
+                Err(error) => {
+                    outcome.errors.push(format!("{}: {}", id_json, error));
+                    if !request.continue_on_error {
+                        return Ok(outcome);
+                    }
+                    continue;
+                }
+            };
+            match collection.delete_one(bson::doc! { "_id": id }).await {
+                Ok(result) if result.deleted_count > 0 => outcome.deleted_ids.push(id_json),
+                Ok(_) => outcome
+                    .errors
+                    .push(format!("{}: document not found", id_json)),
+                Err(error) => outcome.errors.push(format!("{}: {}", id_json, error)),
+            }
+            if !outcome.errors.is_empty() && !request.continue_on_error {
+                return Ok(outcome);
+            }
+        }
+        Ok(outcome)
+    }
+
+    async fn sample_schema(
+        &self,
+        request: DocumentSchemaSampleRequest,
+    ) -> Result<Vec<DocumentInferredField>> {
+        let collection = self
+            .client
+            .database(&request.database)
+            .collection::<Document>(&request.collection);
+        let cursor = collection
+            .aggregate(vec![bson::doc! {
+                "$sample": { "size": request.sample_size.min(i32::MAX as u64) as i32 }
+            }])
+            .await
+            .map_err(|error| {
+                ZqlzError::Driver(format!("MongoDB schema sample failed: {}", error))
+            })?;
+        let documents = cursor
+            .try_collect::<Vec<Document>>()
+            .await
+            .map_err(|error| ZqlzError::Driver(format!("MongoDB cursor failed: {}", error)))?;
+        let total = documents.len() as u64;
+        let mut fields = std::collections::BTreeMap::<String, (Vec<String>, u64)>::new();
+        for document in documents {
+            for (name, value) in document {
+                let type_name = match value {
+                    Bson::Double(_) => "double",
+                    Bson::String(_) => "string",
+                    Bson::Array(_) => "array",
+                    Bson::Document(_) => "document",
+                    Bson::Boolean(_) => "bool",
+                    Bson::DateTime(_) => "date",
+                    Bson::ObjectId(_) => "objectId",
+                    Bson::Int32(_) => "int",
+                    Bson::Int64(_) => "long",
+                    Bson::Decimal128(_) => "decimal",
+                    Bson::Null => "null",
+                    _ => "bson",
+                }
+                .to_string();
+                let entry = fields.entry(name).or_insert_with(|| (Vec::new(), 0));
+                if !entry.0.contains(&type_name) {
+                    entry.0.push(type_name);
+                }
+                entry.1 += 1;
+            }
+        }
+        Ok(fields
+            .into_iter()
+            .map(|(name, (types, occurrence_count))| DocumentInferredField {
+                name,
+                types,
+                occurrence_count,
+                is_required: total > 0 && occurrence_count == total,
+            })
+            .collect())
     }
 }
 
@@ -1007,5 +1484,81 @@ fn dtype(
         max_length: None,
         description: Some(Cow::Borrowed(description)),
         example: None,
+    }
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+    use zqlz_core::DatabaseDriver;
+
+    #[test]
+    fn mongodb_schema_exposes_common_options() {
+        let schema = MongoDbDriver::new().connection_field_schema();
+        let field = |id: &str| schema.fields.iter().find(|field| field.id == id).unwrap();
+
+        assert_eq!(field("scheme").default_value.as_deref(), Some("mongodb"));
+        assert_eq!(field("replicaSet").tab.as_deref(), Some("advanced"));
+        assert_eq!(field("readPreference").default_value.as_deref(), Some(""));
+        assert_eq!(
+            field("directConnection").default_value.as_deref(),
+            Some("false")
+        );
+        assert_eq!(
+            field("serverSelectionTimeoutMS").tab.as_deref(),
+            Some("advanced")
+        );
+        assert_eq!(field("connectTimeoutMS").tab.as_deref(), Some("advanced"));
+    }
+
+    #[test]
+    fn mongodb_connection_string_supports_srv_and_options() {
+        let driver = MongoDbDriver::new();
+        let mut config = ConnectionConfig::new("mongodb", "test");
+        config.host = "cluster.example.com".to_string();
+        config.database = Some("app".to_string());
+        config
+            .params
+            .insert("scheme".to_string(), "mongodb+srv".to_string());
+        config
+            .params
+            .insert("replicaSet".to_string(), "rs0".to_string());
+        config.params.insert(
+            "readPreference".to_string(),
+            "secondaryPreferred".to_string(),
+        );
+        config
+            .params
+            .insert("directConnection".to_string(), "true".to_string());
+        config
+            .params
+            .insert("serverSelectionTimeoutMS".to_string(), "5000".to_string());
+        config
+            .params
+            .insert("connectTimeoutMS".to_string(), "3000".to_string());
+
+        let connection_string = driver.build_connection_string(&config);
+
+        assert!(connection_string.starts_with("mongodb+srv://cluster.example.com/app?"));
+        assert!(!connection_string.contains(":27017"));
+        assert!(connection_string.contains("replicaSet=rs0"));
+        assert!(connection_string.contains("readPreference=secondaryPreferred"));
+        assert!(connection_string.contains("directConnection=true"));
+        assert!(connection_string.contains("serverSelectionTimeoutMS=5000"));
+        assert!(connection_string.contains("connectTimeoutMS=3000"));
+    }
+
+    #[test]
+    fn parse_id_json_recovers_object_id_from_viewer_hex_string() {
+        let id = "507f1f77bcf86cd799439011";
+
+        assert!(matches!(
+            MongoDbConnection::parse_id_json(id),
+            Ok(Bson::ObjectId(object_id)) if object_id.to_hex() == id
+        ));
+        assert!(matches!(
+            MongoDbConnection::parse_id_json("\"507f1f77bcf86cd799439011\""),
+            Ok(Bson::ObjectId(object_id)) if object_id.to_hex() == id
+        ));
     }
 }

@@ -4,9 +4,7 @@
 //! - Loading keys from Redis databases
 //! - Opening Redis databases and keys in the viewer
 //! - Deleting Redis keys
-//! - Copying key names to clipboard
 
-mod copy_names;
 mod database;
 mod delete;
 mod keys;

@@ -310,6 +310,13 @@ impl TableViewerPanel {
         } else {
             std::collections::HashMap::new()
         };
+        let preserved_horizontal_scroll_offset = if is_same_table {
+            self.table_state
+                .as_ref()
+                .map(|table_state| table_state.read(cx).horizontal_scroll_handle.offset())
+        } else {
+            None
+        };
 
         self.connection_id = Some(connection_id);
         self.connection_name = Some(connection_name);
@@ -346,6 +353,12 @@ impl TableViewerPanel {
                 .sortable(true)
                 .row_selectable(true)
         });
+
+        if let Some(offset) = preserved_horizontal_scroll_offset {
+            table_state.update(cx, |table, _cx| {
+                table.horizontal_scroll_handle.set_offset(offset);
+            });
+        }
 
         // Subscribe to table events...
         let table_state_weak = table_state.downgrade();
@@ -662,6 +675,7 @@ impl TableViewerPanel {
             .detach();
 
             self.column_visibility_state = Some(column_visibility_state);
+            self.apply_pending_session_state(window, cx);
 
             let pagination_state = cx.new(|cx| PaginationState::new(window, cx));
 

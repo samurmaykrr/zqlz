@@ -36,6 +36,9 @@ impl ConnectionSidebar {
 
         let supports_new_view = self.supports_sidebar_section(conn_id, "views");
         let supports_new_trigger = self.supports_sidebar_section(conn_id, "triggers");
+        let supports_new_function = self.supports_sidebar_section(conn_id, "functions");
+        let supports_new_procedure = self.supports_sidebar_section(conn_id, "procedures");
+        let supports_new_event = self.supports_sidebar_section(conn_id, "events");
 
         if self.section_context_menu.is_none() {
             self.section_context_menu = Some(ContextMenuState::new(window, cx));
@@ -84,6 +87,54 @@ impl ConnectionSidebar {
                                     _ = sidebar.update(cx, |_sidebar, cx| {
                                         cx.emit(ConnectionSidebarEvent::NewTrigger {
                                             connection_id: conn_id,
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "functions" if supports_new_function => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Function").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "function".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: None,
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "procedures" if supports_new_procedure => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Procedure").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "procedure".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: None,
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "events" if supports_new_event => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Event").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "event".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: None,
                                         });
                                     });
                                 }

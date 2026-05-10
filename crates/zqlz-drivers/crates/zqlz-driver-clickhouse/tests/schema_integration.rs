@@ -165,6 +165,7 @@ async fn test_generate_ddl() {
         object_type: zqlz_core::ObjectType::Table,
         schema: Some("default".to_string()),
         name: table_name.clone(),
+        signature: None,
     };
 
     let ddl = schema

@@ -9,13 +9,19 @@
 //! - `DialectInfo` - SQL dialect metadata (keywords, functions, types)
 //! - Common types like `Value`, `Row`, `Column`, etc.
 
+pub mod command;
 mod connection;
 mod connection_security;
 mod dialect;
 pub mod dialect_config;
 pub mod dialects;
 mod driver;
+mod driver_capabilities;
 mod error;
+mod feature_set;
+mod formatter;
+mod naming_validation;
+mod object_identity;
 pub mod paths;
 mod schema;
 pub mod security;
@@ -55,7 +61,12 @@ pub use dialects::{
     get_dialect_profile, get_sql_dialect, is_sql_driver,
 };
 pub use driver::*;
+pub use driver_capabilities::*;
 pub use error::*;
+pub use feature_set::*;
+pub use formatter::*;
+pub use naming_validation::*;
+pub use object_identity::*;
 pub use schema::*;
 pub use security::*;
 pub use transaction::*;

@@ -10,7 +10,8 @@
     "context": "MainView",
     "bindings": {
       "ctrl-n": "zqlz::NewQuery",
-      "ctrl-shift-n": "zqlz::NewConnection",
+      "ctrl-shift-n": "zqlz::NewWindow",
+      "ctrl-alt-n": "zqlz::NewConnection",
       "ctrl-enter": "zqlz::ExecuteQuery",
       "ctrl-b": "zqlz::ToggleLeftSidebar",
       "ctrl-shift-b": "zqlz::ToggleRightSidebar",
@@ -20,10 +21,28 @@
       "ctrl-3": "zqlz::FocusResults",
       "ctrl-shift-]": "tabs::ActivateNextTab",
       "ctrl-shift-[": "tabs::ActivatePrevTab",
+      "alt-left": "tabs::NavigateTabBack",
+      "alt-right": "tabs::NavigateTabForward",
       "ctrl-w": "tabs::CloseActiveTab",
       "ctrl-shift-w": "tabs::CloseOtherTabs",
+      "ctrl-k ctrl-o": "tabs::MoveTabToNewWindow",
       "ctrl-k ctrl-w": "tabs::CloseTabsToRight",
-      "ctrl-alt-w": "tabs::CloseAllTabs"
+      "ctrl-k ctrl-shift-w": "tabs::CloseTabsToLeft",
+      "ctrl-k ctrl-shift-p": "tabs::TogglePinActiveTab",
+      "ctrl-k ctrl-p": "tabs::MarkActiveTabAsPreview",
+      "ctrl-k ctrl-alt-p": "tabs::ClearActiveTabPreview",
+      "ctrl-k ctrl-alt-w": "tabs::CloseCleanTabs",
+      "ctrl-alt-w": "tabs::CloseAllTabs",
+      "ctrl-k 1": "tabs::ActivateTab1",
+      "ctrl-k 2": "tabs::ActivateTab2",
+      "ctrl-k 3": "tabs::ActivateTab3",
+      "ctrl-k 4": "tabs::ActivateTab4",
+      "ctrl-k 5": "tabs::ActivateTab5",
+      "ctrl-k 6": "tabs::ActivateTab6",
+      "ctrl-k 7": "tabs::ActivateTab7",
+      "ctrl-k 8": "tabs::ActivateTab8",
+      "ctrl-k 9": "tabs::ActivateTab9",
+      "ctrl-k 0": "tabs::ActivateLastTab"
     }
   },
   {
@@ -65,6 +84,15 @@
       "enter": "table_viewer::ToggleSelectedColumnVisibility",
       "backspace": "table_viewer::DeleteSelectedRows",
       "delete": "table_viewer::DeleteSelectedRows"
+    }
+  },
+  {
+    "context": "CellEditorPanel",
+    "bindings": {
+      "ctrl-s": "cell_editor::SaveCellEdit",
+      "escape": "cell_editor::CancelCellEdit",
+      "ctrl-shift-f": "cell_editor::FormatCellEdit",
+      "alt-z": "cell_editor::ToggleCellEditorWordWrap"
     }
   },
   {

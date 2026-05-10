@@ -9,7 +9,10 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SavedConnection};
 use zqlz_query::{HistoryPersistence, QueryHistory, QueryService};
-use zqlz_services::{ConnectionService, RefreshService, SchemaService, TableService};
+use zqlz_services::{
+    ConnectionService, DocumentService, KeyValueService, RefreshService, SchemaService,
+    TableDesignService, TableService,
+};
 use zqlz_versioning::VersionRepository;
 
 use crate::storage::LocalStorage;
@@ -47,6 +50,15 @@ pub struct AppState {
 
     /// Table operations service
     pub table_service: Arc<TableService>,
+
+    /// Key-value operations service
+    pub key_value_service: Arc<KeyValueService>,
+
+    /// Document operations service
+    pub document_service: Arc<DocumentService>,
+
+    /// Table design orchestration service
+    pub table_design_service: Arc<TableDesignService>,
 
     /// Refresh orchestration service
     pub refresh_service: Arc<RefreshService>,
@@ -103,13 +115,19 @@ impl AppState {
         let query_service = Arc::new(QueryService::with_shared_history(query_history.clone()));
         let schema_service = Arc::new(SchemaService::new());
         let table_service = Arc::new(TableService::new(default_query_limit));
+        let key_value_service = Arc::new(KeyValueService::new(default_query_limit));
+        let document_service = Arc::new(DocumentService::new());
+        let table_design_service = Arc::new(TableDesignService::new());
         let refresh_service = Arc::new(RefreshService::new(
             connections.clone(),
             schema_service.clone(),
+            key_value_service.clone(),
+            document_service.clone(),
         ));
         let connection_service = Arc::new(ConnectionService::new(
             connections.clone(),
             schema_service.clone(),
+            key_value_service.clone(),
         ));
 
         // Initialize version control repository
@@ -126,6 +144,9 @@ impl AppState {
             schema_service,
             connection_service,
             table_service,
+            key_value_service,
+            document_service,
+            table_design_service,
             refresh_service,
             version_repository,
             query_history,
@@ -146,27 +167,10 @@ impl AppState {
         recent.truncate(10);
     }
 
-    /// Get the connection manager
-    pub fn connection_manager(&self) -> &ConnectionManager {
-        &self.connections
-    }
-
     /// Save or update a connection
     pub fn save_connection(&self, saved: SavedConnection) {
-        // Check if connection with this ID already exists
-        let exists = self
-            .connections
-            .saved_connections()
-            .iter()
-            .any(|c| c.id == saved.id);
-
-        if exists {
-            // Update existing connection
-            self.connections.update_saved(saved.clone());
-        } else {
-            // Add new connection
-            self.connections.add_saved(saved.clone());
-        }
+        self.connection_service
+            .persist_saved_connection(saved.clone());
 
         // Persist to local storage
         if let Err(e) = self.storage.save_connection(&saved) {
@@ -176,7 +180,7 @@ impl AppState {
 
     /// Delete a connection
     pub fn delete_connection(&self, id: Uuid) {
-        self.connections.remove_saved(id);
+        self.connection_service.remove_saved_connection(id);
 
         // Remove from storage
         if let Err(e) = self.storage.delete_connection(id) {
@@ -186,12 +190,12 @@ impl AppState {
 
     /// Get all saved connections
     pub fn saved_connections(&self) -> Vec<SavedConnection> {
-        self.connections.saved_connections()
+        self.connection_service.list_saved_connections()
     }
 
     /// Check if a connection is active
     pub fn is_connected(&self, id: Uuid) -> bool {
-        self.connections.is_connected(id)
+        self.connection_service.is_connection_active(id)
     }
 
     /// Get query history entries

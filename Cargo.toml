@@ -10,11 +10,13 @@ members = [
     "crates/zqlz-drivers/crates/zqlz-driver-sqlite",
     "crates/zqlz-drivers/crates/zqlz-driver-mssql",
     "crates/zqlz-drivers/crates/zqlz-driver-duckdb",
+    "crates/zqlz-drivers/crates/zqlz-driver-turso",
     "crates/zqlz-drivers/crates/zqlz-driver-redis",
     "crates/zqlz-drivers/crates/zqlz-driver-mongodb",
     "crates/zqlz-drivers/crates/zqlz-driver-clickhouse",
     "crates/zqlz-connection",
     "crates/zqlz-query",
+    "crates/zqlz-explain-visual",
     "crates/zqlz-objects",
     "crates/zqlz-analyzer",
     "crates/zqlz-lsp",
@@ -23,8 +25,10 @@ members = [
     "crates/zqlz-versioning",
     "crates/zqlz-settings",
     "crates/zqlz-services",
+    "crates/zqlz-table-workflows",
     "crates/zqlz-table-designer",
     "crates/zqlz-trigger-designer",
+    "crates/zqlz-sequence-designer",
     "crates/zqlz-interchange",
     "crates/zqlz-text-editor",
     "crates/zqlz-ui",
@@ -40,7 +44,7 @@ default-members = ["crates/zqlz-app"]
 [workspace.package]
 version = "0.0.8"
 edition = "2024"
-license = "GPL-3.0-only"
+license = "GPL-3.0-or-later"
 repository = "https://github.com/yourorg/zqlz"
 publish = false
 
@@ -82,6 +86,7 @@ tiberius = { version = "0.12", default-features = false, features = ["rustls", "
 tokio-util = { version = "0.7", features = ["compat"] }
 duckdb = { version = "1.0", features = ["bundled"] }
 clickhouse = { version = "0.14", features = ["native-tls"] }
+libsql = { version = "0.9.30", default-features = false }
 
 # SSH/Security
 ssh2 = "0.9"
@@ -142,13 +147,11 @@ tree-sitter-md = { git = "https://github.com/tree-sitter-grammars/tree-sitter-ma
 # LSP support
 lsp-types = { version = "0.97.0", features = ["proposed"] }
 
-# GUI - GPUI - Use git version to match gpui-component's expected API
-# IMPORTANT: Must enable default features for text rendering to work!
-# Must use same revision as Zed crates for compatibility
-gpui = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22", features = ["runtime_shaders"] }
-gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
-gpui_tokio = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
-sum_tree = { git = "https://github.com/zed-industries/zed", rev = "571ea7cf22" }
+# GUI - GPUI. Keep Zed crates pinned to the same revision for compatibility.
+gpui = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622" }
+gpui_platform = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui_macros = { git = "https://github.com/zed-industries/zed", rev = "832c17e8192e2e1d472f0751e7cef2af84ded622" }
+sum_tree = { version = "0.2.0", package = "zed-sum-tree" }
 
 # Linkify URLs
 linkify = "0.10"
@@ -300,11 +303,13 @@ zqlz-driver-mysql = { path = "crates/zqlz-drivers/crates/zqlz-driver-mysql" }
 zqlz-driver-sqlite = { path = "crates/zqlz-drivers/crates/zqlz-driver-sqlite" }
 zqlz-driver-mssql = { path = "crates/zqlz-drivers/crates/zqlz-driver-mssql" }
 zqlz-driver-duckdb = { path = "crates/zqlz-drivers/crates/zqlz-driver-duckdb" }
+zqlz-driver-turso = { path = "crates/zqlz-drivers/crates/zqlz-driver-turso" }
 zqlz-driver-redis = { path = "crates/zqlz-drivers/crates/zqlz-driver-redis" }
 zqlz-driver-mongodb = { path = "crates/zqlz-drivers/crates/zqlz-driver-mongodb" }
 zqlz-driver-clickhouse = { path = "crates/zqlz-drivers/crates/zqlz-driver-clickhouse" }
 zqlz-connection = { path = "crates/zqlz-connection" }
 zqlz-query = { path = "crates/zqlz-query" }
+zqlz-explain-visual = { path = "crates/zqlz-explain-visual" }
 zqlz-objects = { path = "crates/zqlz-objects" }
 zqlz-analyzer = { path = "crates/zqlz-analyzer" }
 zqlz-lsp = { path = "crates/zqlz-lsp" }
@@ -313,8 +318,10 @@ zqlz-schema = { path = "crates/zqlz-schema" }
 zqlz-versioning = { path = "crates/zqlz-versioning" }
 zqlz-settings = { path = "crates/zqlz-settings" }
 zqlz-services = { path = "crates/zqlz-services" }
+zqlz-table-workflows = { path = "crates/zqlz-table-workflows" }
 zqlz-table-designer = { path = "crates/zqlz-table-designer" }
 zqlz-trigger-designer = { path = "crates/zqlz-trigger-designer" }
+zqlz-sequence-designer = { path = "crates/zqlz-sequence-designer" }
 zqlz-text-editor = { path = "crates/zqlz-text-editor" }
 zqlz-ui = { path = "crates/zqlz-ui" }
 zqlz-interchange = { path = "crates/zqlz-interchange" }

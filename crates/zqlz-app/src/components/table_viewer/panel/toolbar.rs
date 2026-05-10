@@ -7,6 +7,16 @@ impl TableViewerPanel {
         let connection_id = self.connection_id;
         let table_name = self.table_name.clone();
         let has_selection = self.has_any_selection(cx);
+        let can_insert_rows = self
+            .table_state
+            .as_ref()
+            .map(|state| state.read(cx).delegate().can_insert_rows())
+            .unwrap_or(false);
+        let can_delete_rows = self
+            .table_state
+            .as_ref()
+            .map(|state| state.read(cx).delegate().can_delete_rows())
+            .unwrap_or(false);
 
         h_flex()
             .w_full()
@@ -43,7 +53,7 @@ impl TableViewerPanel {
                     .ghost()
                     .small()
                     .tooltip("Add Row")
-                    .disabled(connection_id.is_none() || table_name.is_none())
+                    .disabled(connection_id.is_none() || table_name.is_none() || !can_insert_rows)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.emit_add_row(cx);
                     })),
@@ -54,7 +64,12 @@ impl TableViewerPanel {
                     .ghost()
                     .small()
                     .tooltip("Delete Selected Rows")
-                    .disabled(connection_id.is_none() || table_name.is_none() || !has_selection)
+                    .disabled(
+                        connection_id.is_none()
+                            || table_name.is_none()
+                            || !has_selection
+                            || !can_delete_rows,
+                    )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_delete_confirmation(window, cx);
                     })),

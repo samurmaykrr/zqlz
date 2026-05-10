@@ -32,15 +32,16 @@
 //! ```
 
 use gpui::*;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
-use zqlz_core::QueryCancelHandle;
+use zqlz_core::{ConnectionFeatureSet, QueryCancelHandle};
 use zqlz_text_editor::{DocumentContext, DocumentIdentity};
 
 /// Unique identifier for a query editor tab
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct EditorId(pub usize);
 
 impl std::fmt::Display for EditorId {
@@ -65,15 +66,111 @@ pub struct EditorState {
     pub document_identity: Option<DocumentIdentity>,
     /// Cached document context used for workspace-scoped metadata.
     pub document_context: Option<DocumentContext>,
+    /// Last known editor buffer text for session restore.
+    pub draft_text: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSession {
+    pub active_connection_id: Option<Uuid>,
+    pub active_database: Option<String>,
+    pub open_query_tabs: Vec<WorkspaceSessionQueryTab>,
+    pub open_viewer_tabs: Vec<WorkspaceSessionViewerTab>,
+    pub active_editor_id: Option<EditorId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionQueryTab {
+    pub id: EditorId,
+    pub display_name: String,
+    pub connection_id: Option<Uuid>,
+    pub document_path: Option<String>,
+    #[serde(default)]
+    pub draft_text: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionViewerTab {
+    pub connection_id: Uuid,
+    #[serde(flatten)]
+    pub kind: WorkspaceSessionViewerKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkspaceSessionViewerKind {
+    Table {
+        table_name: String,
+        database_name: Option<String>,
+        is_view: bool,
+        #[serde(default)]
+        viewer_state: Option<WorkspaceSessionTableViewerState>,
+    },
+    Collection {
+        database_name: String,
+        collection_name: String,
+        #[serde(default)]
+        viewer_state: Option<WorkspaceSessionTableViewerState>,
+    },
+    RedisDatabase {
+        database_index: u16,
+    },
+    RedisKey {
+        database_index: u16,
+        key_name: String,
+    },
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionTableViewerState {
+    #[serde(default)]
+    pub filters: Vec<WorkspaceSessionFilterCondition>,
+    #[serde(default)]
+    pub sorts: Vec<WorkspaceSessionSortCriterion>,
+    #[serde(default)]
+    pub visible_columns: Vec<String>,
+    #[serde(default)]
+    pub search_text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionFilterCondition {
+    pub id: usize,
+    pub enabled: bool,
+    pub column: Option<String>,
+    pub operator: String,
+    pub value: String,
+    pub value2: Option<String>,
+    pub custom_sql: Option<String>,
+    pub logical_operator: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceSessionSortCriterion {
+    pub id: usize,
+    pub column: String,
+    pub direction: String,
 }
 
 /// State of a running query
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
 pub struct QueryExecutionState {
+    pub execution_id: u64,
     pub started_at: Instant,
     pub sql: String,
     pub connection_id: Uuid,
+    pub status: QueryExecutionStatus,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryExecutionStatus {
+    Queued,
+    Running,
+    Cancelled,
+    Succeeded,
+    Failed,
 }
 
 /// A diagnostic message (error/warning) for an editor
@@ -449,6 +546,28 @@ pub enum WorkspaceStateEvent {
     // ===== Diagnostics Events =====
     /// Diagnostics changed for an editor
     DiagnosticsChanged(EditorId),
+    /// Persisted viewer tab descriptors changed.
+    ViewerTabsChanged,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryCancellationOutcome {
+    /// A tracked execution existed and was cancelled.
+    CancelledActiveExecution,
+    /// No execution was tracked, but a stale cancel handle was still present.
+    CancelledStaleHandle,
+    /// No execution and no cancel handle were tracked.
+    NoTrackedQuery,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QueryCompletionOutcome {
+    /// The completion owned the active execution and was applied.
+    CompletedActiveExecution,
+    /// No execution is tracked for the editor (for example, after cancellation).
+    SkippedNoTrackedQuery,
+    /// A different execution is active for this editor, so this completion is stale.
+    SkippedStaleExecution,
 }
 
 /// Central workspace state container
@@ -470,6 +589,8 @@ pub struct WorkspaceState {
     connected_ids: Vec<Uuid>,
     /// Set of connection IDs currently in the process of connecting
     connecting_ids: Vec<Uuid>,
+    /// Feature sets keyed by connection and optional database/scope.
+    connection_feature_sets: HashMap<(Uuid, Option<String>), ConnectionFeatureSet>,
 
     // ===== Editor State =====
     /// All open editors and their state
@@ -479,11 +600,21 @@ pub struct WorkspaceState {
     /// Counter for generating unique editor IDs
     next_editor_id: usize,
 
+    /// Monotonic identifier for query executions.
+    ///
+    /// This allows completion callbacks to ignore stale results from a previous
+    /// execution on the same editor.
+    next_query_execution_id: u64,
+
     // ===== Query Execution State =====
     /// Currently running queries (keyed by editor)
     running_queries: HashMap<EditorId, QueryExecutionState>,
     /// Cancel handles for running queries
     query_cancel_handles: HashMap<EditorId, Arc<dyn QueryCancelHandle>>,
+    /// Latest known query status for each editor, including terminal states.
+    query_statuses: HashMap<EditorId, QueryExecutionStatus>,
+    /// Lightweight descriptors for non-query center tabs that should reopen on restart.
+    open_viewer_tabs: Vec<WorkspaceSessionViewerTab>,
 
     // ===== Diagnostics =====
     /// Diagnostics per editor
@@ -517,13 +648,145 @@ impl WorkspaceState {
             active_database: None,
             connected_ids: Vec::new(),
             connecting_ids: Vec::new(),
+            connection_feature_sets: HashMap::new(),
             editors: HashMap::new(),
             active_editor_id: None,
             next_editor_id: 1,
+            next_query_execution_id: 1,
             running_queries: HashMap::new(),
             query_cancel_handles: HashMap::new(),
+            query_statuses: HashMap::new(),
+            open_viewer_tabs: Vec::new(),
             diagnostics: HashMap::new(),
         }
+    }
+
+    pub fn persisted_session(&self) -> WorkspaceSession {
+        let mut open_query_tabs = self
+            .editors
+            .iter()
+            .map(|(id, state)| WorkspaceSessionQueryTab {
+                id: *id,
+                display_name: state.display_name.clone(),
+                connection_id: state.connection_id,
+                document_path: state.file_path.clone(),
+                draft_text: state.draft_text.clone(),
+            })
+            .collect::<Vec<_>>();
+
+        open_query_tabs.sort_by_key(|tab| tab.id.0);
+
+        WorkspaceSession {
+            active_connection_id: self.active_connection_id,
+            active_database: self.active_database.clone(),
+            open_query_tabs,
+            open_viewer_tabs: self.open_viewer_tabs.clone(),
+            active_editor_id: self.active_editor_id,
+        }
+    }
+
+    pub fn from_persisted_session(session: WorkspaceSession) -> Self {
+        let next_editor_id = session
+            .open_query_tabs
+            .iter()
+            .map(|tab| tab.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+
+        let editors = session
+            .open_query_tabs
+            .into_iter()
+            .map(|tab| {
+                (
+                    tab.id,
+                    EditorState {
+                        connection_id: tab.connection_id,
+                        is_dirty: false,
+                        file_path: tab.document_path,
+                        display_name: tab.display_name,
+                        document_identity: None,
+                        document_context: None,
+                        draft_text: tab.draft_text,
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            active_connection_id: session.active_connection_id,
+            active_database: session.active_database,
+            connected_ids: Vec::new(),
+            connecting_ids: Vec::new(),
+            connection_feature_sets: HashMap::new(),
+            editors,
+            active_editor_id: session.active_editor_id,
+            next_editor_id,
+            next_query_execution_id: 1,
+            running_queries: HashMap::new(),
+            query_cancel_handles: HashMap::new(),
+            query_statuses: HashMap::new(),
+            open_viewer_tabs: session.open_viewer_tabs,
+            diagnostics: HashMap::new(),
+        }
+    }
+
+    pub fn record_open_viewer_tab(
+        &mut self,
+        viewer_tab: WorkspaceSessionViewerTab,
+        cx: &mut Context<Self>,
+    ) {
+        record_open_viewer_tab_in_order(&mut self.open_viewer_tabs, viewer_tab);
+        cx.emit(WorkspaceStateEvent::ViewerTabsChanged);
+        cx.notify();
+    }
+
+    pub fn update_table_viewer_state(
+        &mut self,
+        connection_id: Uuid,
+        table_name: &str,
+        database_name: Option<&str>,
+        viewer_state: WorkspaceSessionTableViewerState,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(tab) = self.open_viewer_tabs.iter_mut().find(|tab| {
+            tab.connection_id == connection_id
+                && matches!(
+                    &tab.kind,
+                    WorkspaceSessionViewerKind::Table {
+                        table_name: existing_table_name,
+                        database_name: existing_database_name,
+                        ..
+                    } if existing_table_name == table_name
+                        && existing_database_name.as_deref() == database_name
+                )
+        }) && let WorkspaceSessionViewerKind::Table {
+            viewer_state: state,
+            ..
+        } = &mut tab.kind
+        {
+            *state = Some(viewer_state);
+            cx.emit(WorkspaceStateEvent::ViewerTabsChanged);
+            cx.notify();
+        }
+    }
+
+    fn allocate_query_execution_id(&mut self) -> u64 {
+        let execution_id = self.next_query_execution_id;
+        self.next_query_execution_id = if execution_id == u64::MAX {
+            1
+        } else {
+            execution_id + 1
+        };
+
+        if execution_id == u64::MAX {
+            tracing::warn!(
+                "WorkspaceState: query execution id wrapped to 1 after reaching u64::MAX"
+            );
+        }
+
+        execution_id
     }
 
     // =========================================================================
@@ -588,6 +851,9 @@ impl WorkspaceState {
             if self.active_connection_id == Some(id) {
                 self.set_active_connection(None, cx);
             }
+
+            self.connection_feature_sets
+                .retain(|(connection_id, _), _| *connection_id != id);
         }
 
         if was_connected != connected {
@@ -612,6 +878,28 @@ impl WorkspaceState {
     #[allow(dead_code)]
     pub fn connected_ids(&self) -> &[Uuid] {
         &self.connected_ids
+    }
+
+    pub fn set_connection_feature_set(
+        &mut self,
+        connection_id: Uuid,
+        database: Option<String>,
+        feature_set: ConnectionFeatureSet,
+        cx: &mut Context<Self>,
+    ) {
+        self.connection_feature_sets
+            .insert((connection_id, database), feature_set);
+        cx.notify();
+    }
+
+    pub fn connection_feature_set(
+        &self,
+        connection_id: Uuid,
+        database: Option<&str>,
+    ) -> Option<&ConnectionFeatureSet> {
+        self.connection_feature_sets
+            .get(&(connection_id, database.map(ToOwned::to_owned)))
+            .or_else(|| self.connection_feature_sets.get(&(connection_id, None)))
     }
 
     /// Set a connection as currently connecting
@@ -657,6 +945,7 @@ impl WorkspaceState {
                 display_name,
                 document_identity: None,
                 document_context: None,
+                draft_text: None,
             },
         );
 
@@ -673,6 +962,7 @@ impl WorkspaceState {
             // Clean up associated state
             self.running_queries.remove(&id);
             self.query_cancel_handles.remove(&id);
+            self.query_statuses.remove(&id);
             self.diagnostics.remove(&id);
 
             // If this was the active editor, clear it
@@ -729,12 +1019,14 @@ impl WorkspaceState {
         document_context: DocumentContext,
         is_dirty: bool,
         display_name: String,
+        draft_text: Option<String>,
         cx: &mut Context<Self>,
     ) {
         self.update_editor(
             id,
             move |state| {
                 apply_document_metadata(state, &document_context, display_name, is_dirty);
+                state.draft_text = draft_text;
             },
             cx,
         );
@@ -810,16 +1102,36 @@ impl WorkspaceState {
         connection_id: Uuid,
         cancel_handle: Arc<dyn QueryCancelHandle>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> u64 {
+        let previous_execution = self.running_queries.get(&editor_id).cloned();
+        let previous_cancel_handle = self.query_cancel_handles.get(&editor_id).cloned();
+
+        if let Some(previous_state) = previous_execution.as_ref() {
+            tracing::warn!(
+                "WorkspaceState: start_query superseded active execution {} for editor {:?}; cancelling previous query handle before tracking new execution",
+                previous_state.execution_id,
+                editor_id
+            );
+        }
+
+        if let Some(handle) = previous_cancel_handle.as_ref() {
+            handle.cancel();
+        }
+
+        let execution_id = self.allocate_query_execution_id();
         self.running_queries.insert(
             editor_id,
             QueryExecutionState {
+                execution_id,
                 started_at: Instant::now(),
                 sql,
                 connection_id,
+                status: QueryExecutionStatus::Running,
             },
         );
         self.query_cancel_handles.insert(editor_id, cancel_handle);
+        self.query_statuses
+            .insert(editor_id, QueryExecutionStatus::Running);
 
         tracing::debug!(
             "WorkspaceState: query started for editor {:?} on connection {}",
@@ -831,12 +1143,49 @@ impl WorkspaceState {
             connection_id,
         });
         cx.notify();
+
+        execution_id
     }
 
-    /// Mark a query as completed
-    pub fn complete_query(&mut self, editor_id: EditorId, success: bool, cx: &mut Context<Self>) {
+    /// Mark a query as completed.
+    ///
+    /// Returns a typed completion outcome so callers can keep stale/no-tracked
+    /// completion handling explicit at UI boundaries.
+    pub fn complete_query(
+        &mut self,
+        editor_id: EditorId,
+        execution_id: u64,
+        success: bool,
+        cx: &mut Context<Self>,
+    ) -> QueryCompletionOutcome {
+        let Some(running_query_state) = self.running_queries.get(&editor_id) else {
+            tracing::debug!(
+                "WorkspaceState: ignoring completion for editor {:?} because no running query is tracked",
+                editor_id
+            );
+            return QueryCompletionOutcome::SkippedNoTrackedQuery;
+        };
+
+        if running_query_state.execution_id != execution_id {
+            tracing::debug!(
+                "WorkspaceState: ignoring stale completion for editor {:?} because execution id {} does not match active execution {}",
+                editor_id,
+                execution_id,
+                running_query_state.execution_id
+            );
+            return QueryCompletionOutcome::SkippedStaleExecution;
+        }
+
         self.running_queries.remove(&editor_id);
         self.query_cancel_handles.remove(&editor_id);
+        self.query_statuses.insert(
+            editor_id,
+            if success {
+                QueryExecutionStatus::Succeeded
+            } else {
+                QueryExecutionStatus::Failed
+            },
+        );
 
         tracing::debug!(
             "WorkspaceState: query completed for editor {:?}, success={}",
@@ -845,17 +1194,48 @@ impl WorkspaceState {
         );
         cx.emit(WorkspaceStateEvent::QueryCompleted { editor_id, success });
         cx.notify();
+        QueryCompletionOutcome::CompletedActiveExecution
     }
 
-    /// Cancel a running query
-    pub fn cancel_query(&mut self, editor_id: EditorId, cx: &mut Context<Self>) {
-        if let Some(handle) = self.query_cancel_handles.remove(&editor_id) {
+    /// Cancel a running query.
+    ///
+    /// Returns a typed outcome so callers can decide whether to apply UI side effects
+    /// (for example, cancellation notifications) only when an active execution was
+    /// actually cancelled.
+    pub fn cancel_query(
+        &mut self,
+        editor_id: EditorId,
+        cx: &mut Context<Self>,
+    ) -> QueryCancellationOutcome {
+        let cancel_handle = self.query_cancel_handles.remove(&editor_id);
+        let had_running_query = self.running_queries.remove(&editor_id).is_some();
+
+        if let Some(handle) = cancel_handle.as_ref() {
             handle.cancel();
-            self.running_queries.remove(&editor_id);
+        }
+
+        if had_running_query {
+            if cancel_handle.is_none() {
+                tracing::warn!(
+                    "WorkspaceState: cancelled query for editor {:?} without a cancel handle",
+                    editor_id
+                );
+            }
 
             tracing::debug!("WorkspaceState: query cancelled for editor {:?}", editor_id);
+            self.query_statuses
+                .insert(editor_id, QueryExecutionStatus::Cancelled);
             cx.emit(WorkspaceStateEvent::QueryCancelled(editor_id));
             cx.notify();
+            QueryCancellationOutcome::CancelledActiveExecution
+        } else if cancel_handle.is_some() {
+            tracing::warn!(
+                "WorkspaceState: cancelled stale handle for editor {:?} with no running query tracked",
+                editor_id
+            );
+            QueryCancellationOutcome::CancelledStaleHandle
+        } else {
+            QueryCancellationOutcome::NoTrackedQuery
         }
     }
 
@@ -874,10 +1254,28 @@ impl WorkspaceState {
         self.running_queries.get(&editor_id)
     }
 
+    /// Get the latest query status for an editor.
+    pub fn query_execution_status(&self, editor_id: EditorId) -> Option<QueryExecutionStatus> {
+        self.query_statuses.get(&editor_id).copied()
+    }
+
     /// Get the cancel handle for a running query
     pub fn query_cancel_handle(&self, editor_id: EditorId) -> Option<Arc<dyn QueryCancelHandle>> {
         self.query_cancel_handles.get(&editor_id).cloned()
     }
+}
+
+fn record_open_viewer_tab_in_order(
+    open_viewer_tabs: &mut Vec<WorkspaceSessionViewerTab>,
+    viewer_tab: WorkspaceSessionViewerTab,
+) {
+    if let Some(existing_index) = open_viewer_tabs
+        .iter()
+        .position(|existing| existing == &viewer_tab)
+    {
+        open_viewer_tabs.remove(existing_index);
+    }
+    open_viewer_tabs.push(viewer_tab);
 }
 
 impl Default for WorkspaceState {
@@ -888,9 +1286,19 @@ impl Default for WorkspaceState {
 
 #[cfg(test)]
 mod tests {
-    use super::{EditorState, RefreshScope, WorkspaceStateEvent, apply_document_metadata};
+    use super::{
+        DiagnosticSeverity, EditorDiagnostic, EditorId, EditorState, QueryExecutionState,
+        QueryExecutionStatus, RefreshScope, WorkspaceSession, WorkspaceSessionQueryTab,
+        WorkspaceSessionTableViewerState, WorkspaceSessionViewerKind, WorkspaceSessionViewerTab,
+        WorkspaceState, WorkspaceStateEvent, apply_document_metadata,
+        record_open_viewer_tab_in_order,
+    };
+    use std::time::Instant;
     use uuid::Uuid;
-    use zqlz_text_editor::{DocumentContext, DocumentIdentity, DocumentSettings};
+    use zqlz_text_editor::{
+        DocumentContext, DocumentIdentity, DocumentSettings, LineEnding,
+        document::{DocumentCapability, DocumentFileState},
+    };
 
     fn test_document_context(identity: DocumentIdentity, saved_revision: usize) -> DocumentContext {
         DocumentContext {
@@ -898,6 +1306,11 @@ mod tests {
             identity,
             settings: DocumentSettings::default(),
             saved_revision,
+            line_ending: LineEnding::Lf,
+            file_state: DocumentFileState::default(),
+            is_dirty: false,
+            capability: DocumentCapability::ReadWrite,
+            lifecycle_events: Vec::new(),
         }
     }
 
@@ -909,6 +1322,7 @@ mod tests {
             display_name: "Query 1".to_string(),
             document_identity: None,
             document_context: None,
+            draft_text: None,
         }
     }
 
@@ -961,5 +1375,163 @@ mod tests {
             event,
             WorkspaceStateEvent::RefreshRequested(RefreshScope::ConnectionsList)
         ));
+    }
+
+    #[test]
+    fn workspace_session_serde_roundtrips() {
+        let connection_id = Uuid::new_v4();
+        let session = WorkspaceSession {
+            active_connection_id: Some(connection_id),
+            active_database: Some("analytics".to_string()),
+            open_query_tabs: vec![WorkspaceSessionQueryTab {
+                id: EditorId(7),
+                display_name: "Revenue.sql".to_string(),
+                connection_id: Some(connection_id),
+                document_path: Some("/tmp/revenue.sql".to_string()),
+                draft_text: Some("select * from revenue".to_string()),
+            }],
+            open_viewer_tabs: vec![
+                WorkspaceSessionViewerTab {
+                    connection_id,
+                    kind: WorkspaceSessionViewerKind::Table {
+                        table_name: "revenue".to_string(),
+                        database_name: Some("analytics".to_string()),
+                        is_view: false,
+                        viewer_state: Some(WorkspaceSessionTableViewerState {
+                            visible_columns: vec!["id".to_string(), "amount".to_string()],
+                            search_text: "north".to_string(),
+                            ..WorkspaceSessionTableViewerState::default()
+                        }),
+                    },
+                },
+                WorkspaceSessionViewerTab {
+                    connection_id,
+                    kind: WorkspaceSessionViewerKind::Collection {
+                        database_name: "analytics".to_string(),
+                        collection_name: "events".to_string(),
+                        viewer_state: Some(WorkspaceSessionTableViewerState {
+                            visible_columns: vec!["_id".to_string(), "type".to_string()],
+                            ..WorkspaceSessionTableViewerState::default()
+                        }),
+                    },
+                },
+            ],
+            active_editor_id: Some(EditorId(7)),
+        };
+
+        let json = serde_json::to_string(&session).expect("serialize workspace session");
+        let restored: WorkspaceSession =
+            serde_json::from_str(&json).expect("deserialize workspace session");
+
+        assert_eq!(restored, session);
+    }
+
+    #[test]
+    fn workspace_session_deserializes_missing_fields_as_default() {
+        let session: WorkspaceSession =
+            serde_json::from_str("{}").expect("deserialize empty workspace session");
+
+        assert_eq!(session, WorkspaceSession::default());
+    }
+
+    #[test]
+    fn persisted_session_ignores_live_workspace_fields() {
+        let connection_id = Uuid::new_v4();
+        let mut workspace_state = WorkspaceState::from_persisted_session(WorkspaceSession {
+            active_connection_id: Some(connection_id),
+            active_database: Some("warehouse".to_string()),
+            open_query_tabs: vec![WorkspaceSessionQueryTab {
+                id: EditorId(3),
+                display_name: "Query 3".to_string(),
+                connection_id: Some(connection_id),
+                document_path: Some("/tmp/query-3.sql".to_string()),
+                draft_text: Some("select * from query_3".to_string()),
+            }],
+            open_viewer_tabs: vec![WorkspaceSessionViewerTab {
+                connection_id,
+                kind: WorkspaceSessionViewerKind::RedisDatabase { database_index: 2 },
+            }],
+            active_editor_id: Some(EditorId(3)),
+        });
+
+        let editor_state = workspace_state
+            .editors
+            .get_mut(&EditorId(3))
+            .expect("editor exists");
+        editor_state.is_dirty = true;
+        editor_state.document_identity =
+            Some(DocumentIdentity::internal().expect("internal document identity"));
+        workspace_state.connected_ids.push(connection_id);
+        workspace_state.running_queries.insert(
+            EditorId(3),
+            QueryExecutionState {
+                execution_id: 9,
+                started_at: Instant::now(),
+                sql: "select secret_live_buffer".to_string(),
+                connection_id,
+                status: QueryExecutionStatus::Running,
+            },
+        );
+        workspace_state.diagnostics.insert(
+            EditorId(3),
+            vec![EditorDiagnostic {
+                line: 1,
+                column: 1,
+                end_line: 1,
+                end_column: 2,
+                message: "live diagnostic".to_string(),
+                severity: DiagnosticSeverity::Warning,
+                source: Some("test".to_string()),
+            }],
+        );
+
+        let session = workspace_state.persisted_session();
+        let json = serde_json::to_string(&session).expect("serialize persisted session");
+
+        assert!(json.contains("Query 3"));
+        assert!(!json.contains("secret_live_buffer"));
+        assert!(!json.contains("live diagnostic"));
+        assert_eq!(
+            session.open_query_tabs,
+            vec![WorkspaceSessionQueryTab {
+                id: EditorId(3),
+                display_name: "Query 3".to_string(),
+                connection_id: Some(connection_id),
+                document_path: Some("/tmp/query-3.sql".to_string()),
+                draft_text: Some("select * from query_3".to_string()),
+            }]
+        );
+        assert_eq!(
+            session.open_viewer_tabs,
+            vec![WorkspaceSessionViewerTab {
+                connection_id,
+                kind: WorkspaceSessionViewerKind::RedisDatabase { database_index: 2 },
+            }]
+        );
+    }
+
+    #[test]
+    fn record_open_viewer_tab_dedupes_and_orders_by_recent_use() {
+        let connection_id = Uuid::new_v4();
+        let first = WorkspaceSessionViewerTab {
+            connection_id,
+            kind: WorkspaceSessionViewerKind::Table {
+                table_name: "users".to_string(),
+                database_name: None,
+                is_view: false,
+                viewer_state: None,
+            },
+        };
+        let second = WorkspaceSessionViewerTab {
+            connection_id,
+            kind: WorkspaceSessionViewerKind::RedisDatabase { database_index: 0 },
+        };
+
+        let mut open_viewer_tabs = Vec::new();
+        record_open_viewer_tab_in_order(&mut open_viewer_tabs, first.clone());
+        record_open_viewer_tab_in_order(&mut open_viewer_tabs, second.clone());
+        record_open_viewer_tab_in_order(&mut open_viewer_tabs, first.clone());
+
+        assert_eq!(open_viewer_tabs, vec![second, first]);
     }
 }

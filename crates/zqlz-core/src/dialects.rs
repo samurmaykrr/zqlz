@@ -45,9 +45,14 @@ pub enum SqlDialect {
 
 impl SqlDialect {
     /// Get the sqlparser dialect for this SQL variant
-    pub fn sqlparser_dialect(&self) -> sqlparser::dialect::GenericDialect {
-        // This is a placeholder - actual implementation would return appropriate dialect
-        sqlparser::dialect::GenericDialect {}
+    pub fn sqlparser_dialect(&self) -> Box<dyn sqlparser::dialect::Dialect> {
+        match self {
+            SqlDialect::PostgreSql => Box::new(sqlparser::dialect::PostgreSqlDialect {}),
+            SqlDialect::MySql => Box::new(sqlparser::dialect::MySqlDialect {}),
+            SqlDialect::Sqlite => Box::new(sqlparser::dialect::SQLiteDialect {}),
+            SqlDialect::ClickHouse => Box::new(sqlparser::dialect::ClickHouseDialect {}),
+            SqlDialect::Ansi => Box::new(sqlparser::dialect::GenericDialect {}),
+        }
     }
 
     /// Get display name for this SQL dialect
@@ -187,7 +192,7 @@ impl DialectProfile {
             parser: ParserCapability::Command,
             sql_dialect: None,
             custom_validator: None,
-            formatter: FormatterCapability::None,
+            formatter: FormatterCapability::Custom,
             folding: FoldingCapability::None,
             brackets: BracketCapability::Standard,
             bundle: None,
@@ -326,6 +331,7 @@ pub static DIALECT_REGISTRY: LazyLock<Arc<DialectRegistry>> = LazyLock::new(|| {
     registry.register(DialectProfile::sql("mysql", "MySQL", SqlDialect::MySql));
 
     registry.register(DialectProfile::sql("sqlite", "SQLite", SqlDialect::Sqlite));
+    registry.register(DialectProfile::sql("turso", "Turso", SqlDialect::Sqlite));
 
     registry.register(DialectProfile::sql(
         "clickhouse",
@@ -368,7 +374,7 @@ pub fn get_highlight_language(driver_id: &str) -> &'static str {
     match driver_id {
         "postgres" | "postgresql" => "postgresql",
         "mysql" | "mariadb" => "mysql",
-        "sqlite" => "sqlite",
+        "sqlite" | "turso" => "sqlite",
         "clickhouse" => "clickhouse",
         "redis" => "redis",
         "mongodb" | "mongo" => "mongodb",
@@ -433,6 +439,7 @@ mod tests {
         assert!(is_sql_driver("postgres"));
         assert!(is_sql_driver("mysql"));
         assert!(is_sql_driver("sqlite"));
+        assert!(is_sql_driver("turso"));
         assert!(is_sql_driver("clickhouse"));
         assert!(!is_sql_driver("redis"));
         assert!(!is_sql_driver("mongodb"));
@@ -443,9 +450,41 @@ mod tests {
         assert_eq!(get_sql_dialect("postgres"), Some(SqlDialect::PostgreSql));
         assert_eq!(get_sql_dialect("mysql"), Some(SqlDialect::MySql));
         assert_eq!(get_sql_dialect("sqlite"), Some(SqlDialect::Sqlite));
+        assert_eq!(get_sql_dialect("turso"), Some(SqlDialect::Sqlite));
         assert_eq!(get_sql_dialect("clickhouse"), Some(SqlDialect::ClickHouse));
         assert_eq!(get_sql_dialect("redis"), None);
         assert_eq!(get_sql_dialect("mongodb"), None);
+    }
+
+    #[test]
+    fn test_sqlparser_dialects_parse_dialect_specific_sql() {
+        use sqlparser::parser::Parser;
+
+        assert!(
+            Parser::parse_sql(&*SqlDialect::PostgreSql.sqlparser_dialect(), "SELECT $1").is_ok()
+        );
+        assert!(
+            Parser::parse_sql(
+                &*SqlDialect::MySql.sqlparser_dialect(),
+                "SELECT `users`.`id`"
+            )
+            .is_ok()
+        );
+        assert!(
+            Parser::parse_sql(
+                &*SqlDialect::Sqlite.sqlparser_dialect(),
+                "SELECT [users].[id]"
+            )
+            .is_ok()
+        );
+        assert!(
+            Parser::parse_sql(
+                &*SqlDialect::ClickHouse.sqlparser_dialect(),
+                "SELECT * FROM events LIMIT 1 BY user_id"
+            )
+            .is_ok()
+        );
+        assert!(Parser::parse_sql(&*SqlDialect::Ansi.sqlparser_dialect(), "SELECT 1").is_ok());
     }
 
     #[test]
@@ -454,6 +493,7 @@ mod tests {
         assert!(driver_ids.contains(&"postgres"));
         assert!(driver_ids.contains(&"mysql"));
         assert!(driver_ids.contains(&"sqlite"));
+        assert!(driver_ids.contains(&"turso"));
         assert!(driver_ids.contains(&"clickhouse"));
         assert!(driver_ids.contains(&"redis"));
         assert!(driver_ids.contains(&"mongodb"));
@@ -464,7 +504,7 @@ mod tests {
         let sql_count = DIALECT_REGISTRY.sql_profiles().count();
         let non_sql_count = DIALECT_REGISTRY.non_sql_profiles().count();
 
-        assert_eq!(sql_count, 4); // postgres, mysql, sqlite, clickhouse
+        assert_eq!(sql_count, 5); // postgres, mysql, sqlite, turso, clickhouse
         assert_eq!(non_sql_count, 2); // redis, mongodb
     }
 
@@ -476,6 +516,7 @@ mod tests {
         assert_eq!(get_highlight_language("mysql"), "mysql");
         assert_eq!(get_highlight_language("mariadb"), "mysql");
         assert_eq!(get_highlight_language("sqlite"), "sqlite");
+        assert_eq!(get_highlight_language("turso"), "sqlite");
         assert_eq!(get_highlight_language("clickhouse"), "clickhouse");
 
         // Non-SQL dialects

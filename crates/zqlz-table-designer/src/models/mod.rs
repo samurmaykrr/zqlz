@@ -34,7 +34,7 @@ impl DatabaseDialect {
     /// Create from driver name string
     pub fn from_driver_name(name: &str) -> Self {
         match name.to_lowercase().as_str() {
-            "sqlite" => DatabaseDialect::Sqlite,
+            "sqlite" | "turso" => DatabaseDialect::Sqlite,
             "postgres" | "postgresql" => DatabaseDialect::Postgres,
             "mysql" | "mariadb" => DatabaseDialect::Mysql,
             _ => DatabaseDialect::Sqlite,

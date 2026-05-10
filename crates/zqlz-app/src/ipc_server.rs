@@ -22,8 +22,9 @@ use tokio::net::{UnixListener, UnixStream};
 #[cfg(windows)]
 use tokio::time::{Duration, sleep};
 use uuid::Uuid;
-use zqlz_connection::{ConnectionManager, SavedConnection};
+use zqlz_connection::SavedConnection;
 use zqlz_query::{QueryHistory, QueryService};
+use zqlz_services::ConnectionService;
 
 use crate::storage::LocalStorage;
 
@@ -176,7 +177,7 @@ enum Response {
 /// moved into a background Tokio task without pulling in GPUI's `Global` bound.
 #[derive(Clone)]
 pub struct IpcServerHandle {
-    pub connections: Arc<ConnectionManager>,
+    pub connection_service: Arc<ConnectionService>,
     pub query_service: Arc<QueryService>,
     pub query_history: Arc<RwLock<QueryHistory>>,
     pub storage: Arc<LocalStorage>,
@@ -420,8 +421,8 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
     match request {
         Request::ListConnections => {
             let summaries = handle
-                .connections
-                .saved_connections()
+                .connection_service
+                .list_saved_connections()
                 .iter()
                 .map(ConnectionSummary::from_saved)
                 .collect();
@@ -429,7 +430,9 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         }
 
         Request::SaveConnection(saved) => {
-            handle.connections.add_saved(saved.clone());
+            handle
+                .connection_service
+                .persist_saved_connection(saved.clone());
             if let Err(e) = handle.storage.save_connection(&saved) {
                 tracing::error!("Failed to persist connection via IPC: {}", e);
             }
@@ -437,7 +440,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
         }
 
         Request::DeleteConnection(id) => {
-            handle.connections.remove_saved(id);
+            handle.connection_service.remove_saved_connection(id);
             if let Err(e) = handle.storage.delete_connection(id) {
                 tracing::error!("Failed to delete connection from storage via IPC: {}", e);
             }
@@ -446,9 +449,9 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
 
         Request::TestConnection(name_or_id) => match find_saved(handle, &name_or_id) {
             None => Response::Error(format!("no connection matching '{}'", name_or_id)),
-            Some(saved) => match handle.connections.connect(&saved).await {
+            Some(saved) => match handle.connection_service.connect_fast(&saved).await {
                 Ok(conn_id) => {
-                    let _ = handle.connections.disconnect(conn_id).await;
+                    let _ = handle.connection_service.disconnect(conn_id.id).await;
                     Response::Ok
                 }
                 Err(e) => Response::Error(e.to_string()),
@@ -470,8 +473,8 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                 patched.params.insert("database".to_string(), db);
             }
 
-            let conn = match handle.connections.connect(&patched).await {
-                Ok(id) => match handle.connections.get(id) {
+            let conn = match handle.connection_service.connect_fast(&patched).await {
+                Ok(info) => match handle.connection_service.get_connection(info.id) {
                     Some(c) => c,
                     None => return Response::Error("connection handle lost".to_string()),
                 },
@@ -483,7 +486,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                 .query_service
                 .execute_query(conn.clone(), connection_id, &sql)
                 .await;
-            if let Err(error) = handle.connections.disconnect(connection_id).await {
+            if let Err(error) = handle.connection_service.disconnect(connection_id).await {
                 tracing::warn!(
                     connection_id = %connection_id,
                     error = %error,
@@ -543,12 +546,12 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                 None => return Response::Error(format!("no connection matching '{}'", name_or_id)),
             };
 
-            match handle.connections.connect(&saved).await {
-                Ok(conn_id) => {
-                    let databases_result = handle.connections.list_databases(conn_id).await;
-                    if let Err(error) = handle.connections.disconnect(conn_id).await {
+            match handle.connection_service.connect_fast(&saved).await {
+                Ok(info) => {
+                    let databases_result = handle.connection_service.list_databases(info.id).await;
+                    if let Err(error) = handle.connection_service.disconnect(info.id).await {
                         tracing::warn!(
-                            connection_id = %conn_id,
+                            connection_id = %info.id,
                             error = %error,
                             "failed to disconnect IPC list-databases connection"
                         );
@@ -576,8 +579,8 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                 patched.params.insert("database".to_string(), db);
             }
 
-            let conn = match handle.connections.connect(&patched).await {
-                Ok(id) => match handle.connections.get(id) {
+            let conn = match handle.connection_service.connect_fast(&patched).await {
+                Ok(info) => match handle.connection_service.get_connection(info.id) {
                     Some(c) => c,
                     None => return Response::Error("connection handle lost".to_string()),
                 },
@@ -587,7 +590,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
                 None => {
-                    if let Err(error) = handle.connections.disconnect(patched.id).await {
+                    if let Err(error) = handle.connection_service.disconnect(patched.id).await {
                         tracing::warn!(
                             connection_id = %patched.id,
                             error = %error,
@@ -601,7 +604,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             };
 
             let tables_result = schema.list_tables(None).await;
-            if let Err(error) = handle.connections.disconnect(patched.id).await {
+            if let Err(error) = handle.connection_service.disconnect(patched.id).await {
                 tracing::warn!(
                     connection_id = %patched.id,
                     error = %error,
@@ -629,8 +632,8 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                 patched.params.insert("database".to_string(), db);
             }
 
-            let conn = match handle.connections.connect(&patched).await {
-                Ok(id) => match handle.connections.get(id) {
+            let conn = match handle.connection_service.connect_fast(&patched).await {
+                Ok(info) => match handle.connection_service.get_connection(info.id) {
                     Some(c) => c,
                     None => return Response::Error("connection handle lost".to_string()),
                 },
@@ -640,7 +643,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             let schema = match conn.as_schema_introspection() {
                 Some(s) => s,
                 None => {
-                    if let Err(error) = handle.connections.disconnect(patched.id).await {
+                    if let Err(error) = handle.connection_service.disconnect(patched.id).await {
                         tracing::warn!(
                             connection_id = %patched.id,
                             error = %error,
@@ -654,7 +657,7 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
             };
 
             let table_result = schema.get_table(None, &table).await;
-            if let Err(error) = handle.connections.disconnect(patched.id).await {
+            if let Err(error) = handle.connection_service.disconnect(patched.id).await {
                 tracing::warn!(
                     connection_id = %patched.id,
                     error = %error,
@@ -693,8 +696,8 @@ async fn dispatch(request: Request, handle: &IpcServerHandle) -> Response {
                     return Some(id);
                 }
                 handle
-                    .connections
-                    .saved_connections()
+                    .connection_service
+                    .list_saved_connections()
                     .iter()
                     .find(|c| c.name.eq_ignore_ascii_case(name_or_id))
                     .map(|c| c.id)
@@ -845,7 +848,7 @@ async fn connect_windows_client(socket_path: &Path) -> Result<Option<NamedPipeCl
 
 /// Find a saved connection by name (case-insensitive) or UUID.
 fn find_saved(handle: &IpcServerHandle, name_or_id: &str) -> Option<SavedConnection> {
-    let connections = handle.connections.saved_connections();
+    let connections = handle.connection_service.list_saved_connections();
     if let Ok(id) = Uuid::parse_str(name_or_id)
         && let Some(conn) = connections.iter().find(|c| c.id == id)
     {

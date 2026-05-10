@@ -11,6 +11,8 @@ pub mod keys;
 #[cfg(test)]
 mod keys_tests;
 mod schema;
+mod ssh;
 
 pub use driver::*;
 pub use keys::*;
+pub use ssh::{RedisSshTunnel, RedisSshTunnelError};

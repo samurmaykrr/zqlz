@@ -36,6 +36,10 @@ fn rows_result() -> zqlz_core::QueryResult {
     )
 }
 
+fn empty_count_result() -> zqlz_core::QueryResult {
+    mock_query_result(vec!["count"], Vec::new())
+}
+
 // ============ browse_table Tests ============
 
 #[tokio::test]
@@ -87,6 +91,36 @@ async fn browse_table_builds_correct_sql() {
         "should use default offset: {}",
         select_query
     );
+}
+
+#[tokio::test]
+async fn browse_table_rejects_key_value_and_document_connections() {
+    let service = TableService::new(100);
+
+    for driver in ["redis", "mongodb"] {
+        let conn = Arc::new(MockConnection::new("test_db").with_driver(driver));
+        let error = service
+            .browse_table(
+                conn.clone() as Arc<dyn Connection>,
+                "anything",
+                None,
+                None,
+                None,
+            )
+            .await
+            .expect_err("non-relational drivers should not use TableService");
+
+        assert!(
+            error
+                .to_string()
+                .contains("TableService only supports relational connections"),
+            "unexpected error for {driver}: {error}"
+        );
+        assert!(
+            conn.query_log().is_empty(),
+            "should reject {driver} before querying"
+        );
+    }
 }
 
 #[tokio::test]
@@ -660,6 +694,37 @@ async fn browse_table_estimated_count_for_postgres() {
 }
 
 #[tokio::test]
+async fn estimate_row_count_uses_embedded_schema_for_postgres() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("postgresql")
+            .with_query_response("pg_class", count_result(2_000_000)),
+    );
+    let service = TableService::new(100);
+
+    let (total, is_estimated) = service
+        .estimate_row_count(
+            conn.clone() as Arc<dyn Connection>,
+            "orders.cart_items",
+            None,
+        )
+        .await
+        .expect("should estimate count for qualified table")
+        .expect("metadata estimate should be available");
+
+    assert_eq!(total, 2_000_000);
+    assert!(is_estimated);
+
+    let log = conn.query_log();
+    assert!(
+        log.iter()
+            .any(|query| query.contains("pg_namespace.nspname")),
+        "qualified postgres estimate should filter by namespace: {:?}",
+        log
+    );
+}
+
+#[tokio::test]
 async fn browse_with_filters_skips_estimate_for_slow_drivers() {
     // When filters are active on a slow-count driver, metadata estimates
     // don't apply (they reflect the whole table, not the filtered subset).
@@ -820,7 +885,8 @@ async fn estimate_row_count_mysql_returns_estimated() {
     let (count, is_estimated) = service
         .estimate_row_count(conn as Arc<dyn Connection>, "booking", Some("hotel_db"))
         .await
-        .expect("should estimate row count");
+        .expect("should estimate row count")
+        .expect("metadata estimate should be available");
 
     assert_eq!(count, 54_305_000);
     assert!(
@@ -845,7 +911,8 @@ async fn estimate_row_count_postgres_returns_estimated() {
             Some("public"),
         )
         .await
-        .expect("should estimate row count");
+        .expect("should estimate row count")
+        .expect("metadata estimate should be available");
 
     assert_eq!(count, 2_000_000);
     assert!(
@@ -863,6 +930,23 @@ async fn estimate_row_count_postgres_returns_estimated() {
 }
 
 #[tokio::test]
+async fn estimate_row_count_postgres_returns_none_when_metadata_missing() {
+    let conn = Arc::new(
+        MockConnection::new("test_db")
+            .with_driver("postgresql")
+            .with_query_response("pg_class", empty_count_result()),
+    );
+    let service = TableService::new(100);
+
+    let count = service
+        .estimate_row_count(conn as Arc<dyn Connection>, "orders", Some("zqlz_lab"))
+        .await
+        .expect("metadata miss should not fail table load");
+
+    assert_eq!(count, None);
+}
+
+#[tokio::test]
 async fn estimate_row_count_sqlite_falls_back_to_exact_count() {
     let conn = Arc::new(
         MockConnection::new("test_db")
@@ -874,7 +958,8 @@ async fn estimate_row_count_sqlite_falls_back_to_exact_count() {
     let (count, is_estimated) = service
         .estimate_row_count(conn.clone() as Arc<dyn Connection>, "users", None)
         .await
-        .expect("should count rows exactly");
+        .expect("should count rows exactly")
+        .expect("exact count should be available");
 
     assert_eq!(count, 500);
     assert!(
@@ -902,7 +987,8 @@ async fn estimate_row_count_duckdb_falls_back_to_exact_count() {
     let (count, is_estimated) = service
         .estimate_row_count(conn as Arc<dyn Connection>, "measurements", None)
         .await
-        .expect("should count rows exactly");
+        .expect("should count rows exactly")
+        .expect("exact count should be available");
 
     assert_eq!(count, 12345);
     assert!(

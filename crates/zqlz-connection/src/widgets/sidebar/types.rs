@@ -1,9 +1,10 @@
 //! Type definitions for sidebar data structures
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use uuid::Uuid;
+use zqlz_core::ObjectsPanelManifest;
 use zqlz_drivers::DriverRegistry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -13,6 +14,67 @@ pub struct SidebarObjectCapabilities {
     pub supports_triggers: bool,
     pub supports_functions: bool,
     pub supports_procedures: bool,
+    pub supports_events: bool,
+    pub supports_sequences: bool,
+    pub supports_domains: bool,
+    pub supports_types: bool,
+    pub supports_extensions: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SidebarSection {
+    Tables,
+    Views,
+    MaterializedViews,
+    Triggers,
+    Functions,
+    Procedures,
+    Events,
+    Sequences,
+    Domains,
+    Types,
+    Extensions,
+    Queries,
+    RedisDatabases,
+}
+
+impl SidebarSection {
+    pub fn from_key(section: &str) -> Option<Self> {
+        match section {
+            "tables" => Some(Self::Tables),
+            "views" => Some(Self::Views),
+            "materialized_views" => Some(Self::MaterializedViews),
+            "triggers" => Some(Self::Triggers),
+            "functions" => Some(Self::Functions),
+            "procedures" => Some(Self::Procedures),
+            "events" => Some(Self::Events),
+            "sequences" => Some(Self::Sequences),
+            "domains" => Some(Self::Domains),
+            "types" => Some(Self::Types),
+            "extensions" => Some(Self::Extensions),
+            "queries" => Some(Self::Queries),
+            "redis_databases" => Some(Self::RedisDatabases),
+            _ => None,
+        }
+    }
+
+    pub fn as_key(self) -> &'static str {
+        match self {
+            Self::Tables => "tables",
+            Self::Views => "views",
+            Self::MaterializedViews => "materialized_views",
+            Self::Triggers => "triggers",
+            Self::Functions => "functions",
+            Self::Procedures => "procedures",
+            Self::Events => "events",
+            Self::Sequences => "sequences",
+            Self::Domains => "domains",
+            Self::Types => "types",
+            Self::Extensions => "extensions",
+            Self::Queries => "queries",
+            Self::RedisDatabases => "redis_databases",
+        }
+    }
 }
 
 impl SidebarObjectCapabilities {
@@ -40,6 +102,11 @@ impl SidebarObjectCapabilities {
             supports_procedures: driver_capabilities
                 .as_ref()
                 .is_some_and(|capabilities| capabilities.supports_stored_procedures),
+            supports_events: normalized_driver == "mysql",
+            supports_sequences: normalized_driver == "postgres",
+            supports_domains: normalized_driver == "postgres",
+            supports_types: normalized_driver == "postgres",
+            supports_extensions: normalized_driver == "postgres",
         }
     }
 
@@ -58,6 +125,24 @@ impl SidebarObjectCapabilities {
             other => other.to_string(),
         }
     }
+
+    pub fn supports_section(&self, section: SidebarSection) -> bool {
+        match section {
+            SidebarSection::Tables | SidebarSection::Queries | SidebarSection::RedisDatabases => {
+                true
+            }
+            SidebarSection::Views => self.supports_views,
+            SidebarSection::MaterializedViews => self.supports_materialized_views,
+            SidebarSection::Triggers => self.supports_triggers,
+            SidebarSection::Functions => self.supports_functions,
+            SidebarSection::Procedures => self.supports_procedures,
+            SidebarSection::Events => self.supports_events,
+            SidebarSection::Sequences => self.supports_sequences,
+            SidebarSection::Domains => self.supports_domains,
+            SidebarSection::Types => self.supports_types,
+            SidebarSection::Extensions => self.supports_extensions,
+        }
+    }
 }
 
 impl Default for SidebarObjectCapabilities {
@@ -68,6 +153,11 @@ impl Default for SidebarObjectCapabilities {
             supports_triggers: false,
             supports_functions: false,
             supports_procedures: false,
+            supports_events: false,
+            supports_sequences: false,
+            supports_domains: false,
+            supports_types: false,
+            supports_extensions: false,
         }
     }
 }
@@ -124,6 +214,10 @@ pub struct SidebarDatabaseInfo {
     pub is_loading: bool,
     /// Schema data loaded for this database (populated on demand)
     pub schema: Option<DatabaseSchemaData>,
+    /// Document collections loaded for document-store databases.
+    pub collections: Vec<String>,
+    pub collections_expanded: bool,
+    pub collections_loading: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -134,8 +228,32 @@ pub struct SchemaObjects {
     pub triggers: Vec<String>,
     pub functions: Vec<String>,
     pub procedures: Vec<String>,
+    pub events: Vec<String>,
+    pub sequences: Vec<String>,
+    pub domains: Vec<String>,
+    pub types: Vec<String>,
+    pub extensions: Vec<String>,
     pub schema_name: Option<String>,
     pub schema_names: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SidebarTableDetailsData {
+    pub fields: Vec<String>,
+    pub indexes: Vec<String>,
+    pub foreign_keys: Vec<String>,
+    pub uniques: Vec<String>,
+    pub checks: Vec<String>,
+    pub excludes: Vec<String>,
+    pub triggers: Vec<String>,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct SidebarTableKey {
+    pub conn_id: Uuid,
+    pub database_name: Option<String>,
+    pub schema_name: Option<String>,
+    pub table_name: String,
 }
 
 /// Schema objects for a single database, used in the sidebar tree
@@ -160,12 +278,21 @@ pub struct DatabaseSchemaData {
     pub triggers: Vec<String>,
     pub functions: Vec<String>,
     pub procedures: Vec<String>,
+    pub events: Vec<String>,
+    pub sequences: Vec<String>,
+    pub domains: Vec<String>,
+    pub types: Vec<String>,
+    pub extensions: Vec<String>,
+    pub table_details: HashMap<SidebarTableKey, SidebarTableDetailsData>,
+    pub expanded_table_keys: HashSet<SidebarTableKey>,
+    pub loading_table_keys: HashSet<SidebarTableKey>,
     pub tables_expanded: bool,
     pub views_expanded: bool,
     pub materialized_views_expanded: bool,
     pub triggers_expanded: bool,
     pub functions_expanded: bool,
     pub procedures_expanded: bool,
+    pub events_expanded: bool,
     /// Whether tables are currently being fetched from the server
     pub tables_loading: bool,
     /// Whether views are currently being fetched from the server
@@ -187,6 +314,7 @@ pub struct ConnectionEntry {
     pub name: String,
     pub db_type: String,
     pub object_capabilities: SidebarObjectCapabilities,
+    pub objects_panel_manifest: Option<ObjectsPanelManifest>,
     pub is_connected: bool,
     pub is_connecting: bool,
     pub is_expanded: bool,
@@ -196,6 +324,11 @@ pub struct ConnectionEntry {
     pub triggers: Vec<String>,
     pub functions: Vec<String>,
     pub procedures: Vec<String>,
+    pub events: Vec<String>,
+    pub sequences: Vec<String>,
+    pub domains: Vec<String>,
+    pub types: Vec<String>,
+    pub extensions: Vec<String>,
     pub queries: Vec<SavedQueryInfo>,
     pub tables_expanded: bool,
     pub views_expanded: bool,
@@ -203,6 +336,7 @@ pub struct ConnectionEntry {
     pub triggers_expanded: bool,
     pub functions_expanded: bool,
     pub procedures_expanded: bool,
+    pub events_expanded: bool,
     pub queries_expanded: bool,
     /// Whether tables are currently being fetched from the server
     pub tables_loading: bool,
@@ -248,6 +382,7 @@ impl ConnectionEntry {
             name,
             db_type,
             object_capabilities,
+            objects_panel_manifest: None,
             is_connected: false,
             is_connecting: false,
             is_expanded: false,
@@ -257,6 +392,11 @@ impl ConnectionEntry {
             triggers: Vec::new(),
             functions: Vec::new(),
             procedures: Vec::new(),
+            events: Vec::new(),
+            sequences: Vec::new(),
+            domains: Vec::new(),
+            types: Vec::new(),
+            extensions: Vec::new(),
             queries: Vec::new(),
             tables_expanded: false,
             views_expanded: false,
@@ -264,6 +404,7 @@ impl ConnectionEntry {
             triggers_expanded: false,
             functions_expanded: false,
             procedures_expanded: false,
+            events_expanded: false,
             queries_expanded: false,
             tables_loading: false,
             views_loading: false,
@@ -287,6 +428,10 @@ impl ConnectionEntry {
         self.db_type == "redis"
     }
 
+    pub fn is_document(&self) -> bool {
+        self.db_type == "mongodb"
+    }
+
     pub fn set_db_type(&mut self, db_type: String) {
         self.object_capabilities = SidebarObjectCapabilities::for_driver(&db_type);
         self.db_type = db_type;
@@ -295,7 +440,7 @@ impl ConnectionEntry {
 
 #[cfg(test)]
 mod tests {
-    use super::SidebarObjectCapabilities;
+    use super::{SidebarObjectCapabilities, SidebarSection};
 
     #[test]
     fn sqlite_hides_unsupported_sidebar_sections() {
@@ -317,6 +462,15 @@ mod tests {
         assert!(!capabilities.supports_triggers);
         assert!(capabilities.supports_functions);
         assert!(capabilities.supports_procedures);
+        assert!(!capabilities.supports_events);
+    }
+
+    #[test]
+    fn mysql_supports_event_sidebar_section() {
+        let capabilities = SidebarObjectCapabilities::for_driver("mysql");
+
+        assert!(capabilities.supports_events);
+        assert!(capabilities.supports_section(SidebarSection::Events));
     }
 
     #[test]
@@ -328,5 +482,21 @@ mod tests {
         assert!(!capabilities.supports_triggers);
         assert!(!capabilities.supports_functions);
         assert!(!capabilities.supports_procedures);
+        assert!(capabilities.supports_section(SidebarSection::Queries));
+        assert!(!capabilities.supports_section(SidebarSection::Views));
+    }
+
+    #[test]
+    fn parses_sidebar_sections_from_keys() {
+        assert_eq!(
+            SidebarSection::from_key("materialized_views"),
+            Some(SidebarSection::MaterializedViews)
+        );
+        assert_eq!(SidebarSection::from_key("unknown"), None);
+        assert_eq!(SidebarSection::Functions.as_key(), "functions");
+        assert_eq!(
+            SidebarSection::from_key("events"),
+            Some(SidebarSection::Events)
+        );
     }
 }

@@ -341,6 +341,31 @@ fn test_parse_nested_text() {
 }
 
 #[test]
+fn test_parse_text_table_with_properties_before_children() {
+    let text = r#"QUERY PLAN
+Sort  (cost=75.79..75.79 rows=1 width=104)
+  Sort Key: o.placed_at DESC
+  ->  Nested Loop  (cost=53.78..75.78 rows=1 width=104)
+        ->  Hash Join  (cost=53.63..75.54 rows=1 width=88)
+              Hash Cond: ((oi.order_id = o.order_id) AND (oi.order_placed_at = o.placed_at))
+              ->  Seq Scan on order_items oi  (cost=0.00..16.80 rows=680 width=52)
+              ->  Hash  (cost=53.47..53.47 rows=11 width=52)
+                    ->  Nested Loop  (cost=4.32..53.47 rows=11 width=52)
+                          ->  Index Scan using customers_email_per_tenant_unique on customers c  (cost=0.13..8.20 rows=1 width=24)
+                          ->  Append  (cost=4.17..45.18 rows=12 width=28)
+                                ->  Bitmap Heap Scan on orders_2025  (cost=4.20..11.28 rows=3 width=28)
+        ->  Index Scan using products_pkey on products p  (cost=0.13..0.23 rows=1 width=16)"#;
+
+    let plan = parse_postgres_explain(text).expect("parse failed");
+
+    assert_eq!(plan.root.node_type, NodeType::Sort);
+    assert_eq!(plan.root.children.len(), 1);
+    assert_eq!(plan.root.node_count(), 10);
+    assert_eq!(plan.root.children[0].node_type, NodeType::NestedLoop);
+    assert_eq!(plan.root.children[0].children.len(), 2);
+}
+
+#[test]
 fn test_parse_text_with_timing() {
     let text = r#"Seq Scan on test  (cost=0.00..10.00 rows=100 width=36)
 Planning Time: 0.156 ms

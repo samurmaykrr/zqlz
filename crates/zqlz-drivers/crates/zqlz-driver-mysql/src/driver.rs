@@ -6,9 +6,10 @@ use std::sync::Arc;
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
     DialectInfo, DriverCapabilities, Result, ZqlzError,
+    security::{SshAuthMethod, SshTunnelConfig, TlsConfig, TlsMode},
 };
 
-use crate::MySqlConnection;
+use crate::{MySqlConnectOptions, MySqlConnection, MysqlSshTunnel, MysqlTlsConnector};
 
 /// MySQL database driver
 pub struct MySqlDriver;
@@ -84,13 +85,26 @@ impl DatabaseDriver for MySqlDriver {
             .or_else(|| config.get_string("username"));
         let password = config.get_string("password");
 
-        let conn = MySqlConnection::connect(
-            &host,
-            port,
-            database.as_deref(),
-            user.as_deref(),
-            password.as_deref(),
-        )
+        let tls_config = build_tls_config(config)?;
+        let ssl_opts = MysqlTlsConnector::build(&tls_config).map_err(|error| {
+            ZqlzError::Connection(format!("Failed to configure MySQL TLS: {}", error))
+        })?;
+        let ssh_tunnel = build_ssh_tunnel(config, &host, port)?;
+        let (connect_host, connect_port) = if let Some(tunnel) = ssh_tunnel.as_ref() {
+            ("127.0.0.1".to_string(), tunnel.local_port())
+        } else {
+            (host.clone(), port)
+        };
+
+        let conn = MySqlConnection::connect(MySqlConnectOptions {
+            host: connect_host,
+            port: connect_port,
+            database: database.clone(),
+            user,
+            password,
+            ssl_opts,
+            ssh_tunnel,
+        })
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to connect to MySQL database");
@@ -145,6 +159,8 @@ impl DatabaseDriver for MySqlDriver {
     }
 
     fn connection_field_schema(&self) -> ConnectionFieldSchema {
+        use zqlz_core::ConnectionFieldOption;
+
         ConnectionFieldSchema {
             title: Cow::Borrowed("MySQL Connection"),
             fields: vec![
@@ -168,7 +184,254 @@ impl DatabaseDriver for MySqlDriver {
                 ConnectionField::password("password", "Password")
                     .width(0.5)
                     .row_group(2),
+                ConnectionField::select(
+                    "ssl_mode",
+                    "SSL Mode",
+                    vec![
+                        ConnectionFieldOption::new("DISABLED", "Disabled"),
+                        ConnectionFieldOption::new("PREFERRED", "Preferred"),
+                        ConnectionFieldOption::new("REQUIRED", "Required"),
+                        ConnectionFieldOption::new("VERIFY_CA", "Verify CA"),
+                        ConnectionFieldOption::new("VERIFY_IDENTITY", "Verify Identity"),
+                    ],
+                )
+                .default_value("DISABLED")
+                .tab("ssl"),
+                ConnectionField::file_path("ssl_ca_cert", "CA Certificate")
+                    .placeholder("/path/to/ca-cert.pem")
+                    .with_extensions(vec!["pem", "crt", "cer"])
+                    .tab("ssl"),
+                ConnectionField::boolean("ssh_enabled", "Use SSH Tunnel")
+                    .default_value("false")
+                    .tab("ssh"),
+                ConnectionField::text("ssh_host", "SSH Host")
+                    .placeholder("bastion.example.com")
+                    .width(0.7)
+                    .row_group(20)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_port", "SSH Port")
+                    .placeholder("22")
+                    .default_value("22")
+                    .width(0.3)
+                    .row_group(20)
+                    .tab("ssh"),
+                ConnectionField::text("ssh_username", "SSH Username")
+                    .width(0.5)
+                    .row_group(21)
+                    .tab("ssh"),
+                ConnectionField::select(
+                    "ssh_auth_method",
+                    "SSH Auth Method",
+                    vec![
+                        ConnectionFieldOption::new("password", "Password"),
+                        ConnectionFieldOption::new("private_key", "Private Key"),
+                        ConnectionFieldOption::new("agent", "Agent"),
+                    ],
+                )
+                .default_value("password")
+                .width(0.5)
+                .row_group(21)
+                .tab("ssh"),
+                ConnectionField::password("ssh_password", "SSH Password").tab("ssh"),
+                ConnectionField::file_path("ssh_private_key", "SSH Private Key")
+                    .placeholder("~/.ssh/id_rsa")
+                    .with_extensions(vec!["pem", "key"])
+                    .width(0.5)
+                    .row_group(22)
+                    .tab("ssh"),
+                ConnectionField::password("ssh_private_key_passphrase", "SSH Key Passphrase")
+                    .width(0.5)
+                    .row_group(22)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_timeout_seconds", "SSH Timeout (seconds)")
+                    .default_value("30")
+                    .width(0.5)
+                    .row_group(23)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_keepalive_seconds", "SSH Keepalive (seconds)")
+                    .default_value("0")
+                    .width(0.5)
+                    .row_group(23)
+                    .tab("ssh"),
             ],
         }
+    }
+}
+
+fn build_tls_config(config: &ConnectionConfig) -> Result<TlsConfig> {
+    let mode = match config
+        .get_string("ssl_mode")
+        .unwrap_or_else(|| "DISABLED".to_string())
+        .to_ascii_uppercase()
+        .as_str()
+    {
+        "DISABLED" => TlsMode::Disable,
+        "PREFERRED" => TlsMode::Prefer,
+        "REQUIRED" => TlsMode::Require,
+        "VERIFY_CA" => TlsMode::VerifyCa,
+        "VERIFY_IDENTITY" => TlsMode::VerifyFull,
+        value => {
+            return Err(ZqlzError::Configuration(format!(
+                "Invalid MySQL SSL mode: {}",
+                value
+            )));
+        }
+    };
+
+    let mut tls_config = TlsConfig::new(mode);
+    if matches!(mode, TlsMode::Require | TlsMode::Prefer) {
+        tls_config = tls_config.verify_server(false);
+    }
+    if let Some(ca_cert) = config
+        .get_string("ssl_ca_cert")
+        .filter(|value| !value.is_empty())
+    {
+        tls_config = tls_config.ca_cert(ca_cert);
+    }
+    tls_config.validate()?;
+    Ok(tls_config)
+}
+
+fn build_ssh_tunnel(
+    config: &ConnectionConfig,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<Option<MysqlSshTunnel>> {
+    if !parse_bool(config, "ssh_enabled", false) {
+        return Ok(None);
+    }
+
+    let ssh_config = build_ssh_config(config)?;
+    MysqlSshTunnel::new(&ssh_config, remote_host, remote_port)
+        .map(Some)
+        .map_err(|error| {
+            ZqlzError::Connection(format!("Failed to establish SSH tunnel: {}", error))
+        })
+}
+
+fn build_ssh_config(config: &ConnectionConfig) -> Result<SshTunnelConfig> {
+    let host = required_param(config, "ssh_host")?;
+    let username = required_param(config, "ssh_username")?;
+    let port = parse_optional_u16(config, "ssh_port")?.unwrap_or(22);
+    let timeout_seconds = parse_optional_u64(config, "ssh_timeout_seconds")?.unwrap_or(30) as u32;
+    let keepalive_seconds =
+        parse_optional_u64(config, "ssh_keepalive_seconds")?.unwrap_or(0) as u32;
+
+    let auth = match config
+        .get_string("ssh_auth_method")
+        .unwrap_or_else(|| "password".to_string())
+        .as_str()
+    {
+        "password" => SshAuthMethod::password(required_param(config, "ssh_password")?),
+        "private_key" => {
+            let key = required_param(config, "ssh_private_key")?;
+            let passphrase = config
+                .get_string("ssh_private_key_passphrase")
+                .filter(|value| !value.is_empty());
+            SshAuthMethod::PrivateKey {
+                path: key.into(),
+                passphrase,
+            }
+        }
+        "agent" => SshAuthMethod::agent(),
+        value => {
+            return Err(ZqlzError::Configuration(format!(
+                "Invalid SSH auth method: {}",
+                value
+            )));
+        }
+    };
+
+    let ssh_config = SshTunnelConfig {
+        host,
+        port,
+        username,
+        auth,
+        timeout_seconds,
+        keepalive_seconds,
+    };
+    ssh_config.validate()?;
+    Ok(ssh_config)
+}
+
+fn required_param(config: &ConnectionConfig, key: &str) -> Result<String> {
+    config
+        .get_string(key)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ZqlzError::Configuration(format!("{} is required", key)))
+}
+
+fn parse_bool(config: &ConnectionConfig, key: &str, default: bool) -> bool {
+    config
+        .get_string(key)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn parse_optional_u16(config: &ConnectionConfig, key: &str) -> Result<Option<u16>> {
+    config
+        .get_string(key)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .map_err(|_| ZqlzError::Configuration(format!("{} must be a whole number", key)))
+        })
+        .transpose()
+}
+
+fn parse_optional_u64(config: &ConnectionConfig, key: &str) -> Result<Option<u64>> {
+    config
+        .get_string(key)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| ZqlzError::Configuration(format!("{} must be a whole number", key)))
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zqlz_core::DatabaseDriver;
+
+    #[test]
+    fn mysql_schema_has_ssl_and_ssh_fields() {
+        let schema = MySqlDriver::new().connection_field_schema();
+        let field = |id: &str| schema.fields.iter().find(|field| field.id == id).unwrap();
+
+        assert_eq!(field("ssl_mode").tab.as_deref(), Some("ssl"));
+        assert_eq!(field("ssl_mode").default_value.as_deref(), Some("DISABLED"));
+        assert_eq!(field("ssl_ca_cert").tab.as_deref(), Some("ssl"));
+        assert_eq!(field("ssh_enabled").tab.as_deref(), Some("ssh"));
+        assert_eq!(
+            field("ssh_auth_method").default_value.as_deref(),
+            Some("password")
+        );
+    }
+
+    #[test]
+    fn mysql_verify_ca_requires_ca() {
+        let config = ConnectionConfig::new("mysql", "test").with_param("ssl_mode", "VERIFY_CA");
+
+        let error = build_tls_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("CA certificate"));
+    }
+
+    #[test]
+    fn mysql_ssh_enabled_requires_host_and_user() {
+        let config = ConnectionConfig::new("mysql", "test").with_param("ssh_enabled", "true");
+
+        let error = build_ssh_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("ssh_host is required"));
     }
 }

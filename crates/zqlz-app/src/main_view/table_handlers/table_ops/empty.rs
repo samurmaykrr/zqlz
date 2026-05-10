@@ -2,7 +2,8 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
-use zqlz_core::SqlObjectName;
+use zqlz_services::EmptyTablesRequest;
+use zqlz_table_workflows::EmptyTablesDecision;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, checkbox::Checkbox,
     dialog::DialogButtonProps, v_flex,
@@ -26,23 +27,57 @@ impl MainView {
             connection_id
         );
 
+        let Some(decision) =
+            self.decide_empty_tables_workflow(connection_id, vec![table_name], window, cx)
+        else {
+            return;
+        };
+
+        let single_decision = match decision {
+            EmptyTablesDecision::Single(single_decision) => single_decision,
+            EmptyTablesDecision::Batch(_) => {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    "Single-table empty request produced a batch decision"
+                );
+                return;
+            }
+        };
+
+        self.open_empty_table_dialog(
+            single_decision.connection_id,
+            single_decision.table_name,
+            window,
+            cx,
+        );
+    }
+
+    fn open_empty_table_dialog(
+        &mut self,
+        connection_id: Uuid,
+        table_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let Some(app_state) = cx.try_global::<AppState>() else {
             tracing::error!("No AppState available");
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let connection = connection.clone();
+        let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
         let table_name_for_dialog = table_name.clone();
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
+            let table_service = table_service.clone();
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_name = table_name_for_dialog.clone();
@@ -74,43 +109,61 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
+                    let table_service = table_service.clone();
                     let main_view = main_view.clone();
                     let table_name = table_name.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = match connection.truncate_table_sql(&SqlObjectName::new(&table_name)) {
-                            Ok(sql) => sql,
-                            Err(error) => {
-                                tracing::error!(
-                                    table = %table_name,
-                                    %error,
-                                    "Failed to build truncate table SQL"
-                                );
-                                return;
-                            }
-                        };
-                        match connection.execute(&sql, &[]).await {
-                            Ok(result) => {
-                                let rows_deleted = result.affected_rows;
-                                tracing::info!(
-                                    "Table '{}' emptied successfully ({} rows deleted)",
-                                    table_name,
-                                    rows_deleted
-                                );
+                        let outcome = table_service
+                            .empty_tables(
+                                connection,
+                                EmptyTablesRequest {
+                                    table_names: vec![table_name.clone()],
+                                    continue_on_error: false,
+                                },
+                            )
+                            .await;
 
-                                let _ = cx.update_window(window_handle, |_, _window, cx| {
-                                    let _ = main_view.update(cx, |main_view, cx| {
-                                        main_view.request_refresh(
-                                            RefreshScope::ConnectionSurfaces(connection_id),
-                                            cx,
-                                        );
-                                    });
-                                })
-;
+                        if !outcome.errors.is_empty() {
+                            tracing::error!(
+                                table = %table_name,
+                                errors = %outcome.errors.join("; "),
+                                "Failed to empty table"
+                            );
+                            return;
+                        }
+
+                        if outcome.emptied_table_names.is_empty() {
+                            tracing::warn!(
+                                table = %table_name,
+                                "Empty-table workflow completed without emptying a table"
+                            );
+                            return;
+                        }
+
+                        tracing::info!(
+                            "Table '{}' emptied successfully ({} rows deleted)",
+                            table_name,
+                            outcome.total_rows_deleted
+                        );
+
+                        if let Err(error) = cx.update_window(window_handle, |_, _window, cx| {
+                            if let Err(update_error) = main_view.update(cx, |main_view, cx| {
+                                main_view.request_refresh(
+                                    RefreshScope::ConnectionSurfaces(connection_id),
+                                    cx,
+                                );
+                            }) {
+                                tracing::warn!(
+                                    %update_error,
+                                    "MainView no longer available while refreshing after empty"
+                                );
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to empty table: {}", e);
-                            }
+                        }) {
+                            tracing::warn!(
+                                %error,
+                                "Window no longer available while refreshing after empty"
+                            );
                         }
                     })
                     .detach();
@@ -128,23 +181,28 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if table_names.is_empty() {
+        let Some(decision) =
+            self.decide_empty_tables_workflow(connection_id, table_names, window, cx)
+        else {
             return;
-        }
+        };
 
-        let count = table_names.len();
-        let is_multi = count > 1;
-
-        // For single table, use the existing handler
-        if !is_multi {
-            let Some(table_name) = table_names.into_iter().next() else {
-                tracing::error!("Single-table empty requested without a table name");
+        let batch_decision = match decision {
+            EmptyTablesDecision::Single(single_decision) => {
+                self.open_empty_table_dialog(
+                    single_decision.connection_id,
+                    single_decision.table_name,
+                    window,
+                    cx,
+                );
                 return;
-            };
+            }
+            EmptyTablesDecision::Batch(batch_decision) => batch_decision,
+        };
 
-            self.empty_table(connection_id, table_name, window, cx);
-            return;
-        }
+        let connection_id = batch_decision.connection_id;
+        let table_names = batch_decision.table_names;
+        let count = table_names.len();
 
         tracing::info!(
             "Empty {} tables: {:?} on connection {}",
@@ -158,18 +216,20 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let connection = connection.clone();
+        let table_service = app_state.table_service.clone();
         let window_handle = window.window_handle();
         let main_view = cx.entity().downgrade();
-        let continue_on_error = Rc::new(RefCell::new(false));
+        let continue_on_error = Rc::new(RefCell::new(batch_decision.continue_on_error_default));
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
+            let table_service = table_service.clone();
             let window_handle = window_handle;
             let main_view = main_view.clone();
             let table_names = table_names.clone();
@@ -202,7 +262,7 @@ impl MainView {
                             let continue_on_error = continue_on_error.clone();
                             Checkbox::new("continue-on-error")
                                 .label("Continue on error")
-                                .checked(false)
+                                .checked(batch_decision.continue_on_error_default)
                                 .on_click(move |checked, _window, _cx| {
                                     *continue_on_error.borrow_mut() = *checked;
                                 })
@@ -217,81 +277,57 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
+                    let table_service = table_service.clone();
                     let main_view = main_view.clone();
                     let table_names = table_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |cx| {
-                        let mut errors: Vec<String> = Vec::new();
-                        let mut emptied_tables: Vec<String> = Vec::new();
-                        let mut total_rows = 0u64;
-
-                        for table_name in &table_names {
-                            let sql = match connection.truncate_table_sql(&SqlObjectName::new(table_name)) {
-                                Ok(sql) => sql,
-                                Err(error) => {
-                                    let error_msg = format!(
-                                        "'{}': failed to build truncate SQL ({})",
-                                        table_name, error
-                                    );
-                                    tracing::error!("{}", error_msg);
-                                    if continue_on_error {
-                                        errors.push(error_msg);
-                                        continue;
-                                    }
-                                    return;
-                                }
-                            };
-                            match connection.execute(&sql, &[]).await {
-                                Ok(result) => {
-                                    let rows_deleted = result.affected_rows;
-                                    total_rows += rows_deleted;
-                                    tracing::info!(
-                                        "Table '{}' emptied successfully ({} rows deleted)",
-                                        table_name,
-                                        rows_deleted
-                                    );
-                                    emptied_tables.push(table_name.clone());
-                                }
-                                Err(e) => {
-                                    let error_msg = format!("'{}': {}", table_name, e);
-                                    tracing::error!("Failed to empty table {}", error_msg);
-
-                                    if continue_on_error {
-                                        errors.push(error_msg);
-                                    } else {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
+                        let outcome = table_service
+                            .empty_tables(
+                                connection,
+                                EmptyTablesRequest {
+                                    table_names: table_names.clone(),
+                                    continue_on_error,
+                                },
+                            )
+                            .await;
 
                         // Refresh objects panel after any successful emptying (row counts changed)
-                        if !emptied_tables.is_empty() {
-                            let _ = cx.update_window(window_handle, |_, _window, cx| {
-                                let _ = main_view.update(cx, |main_view, cx| {
+                        if !outcome.emptied_table_names.is_empty()
+                            && let Err(error) = cx.update_window(window_handle, |_, _window, cx| {
+                                if let Err(update_error) = main_view.update(cx, |main_view, cx| {
                                     main_view.request_refresh(
                                         RefreshScope::ConnectionSurfaces(connection_id),
                                         cx,
                                     );
-                                });
+                                }) {
+                                    tracing::warn!(
+                                        %update_error,
+                                        "MainView no longer available while refreshing after empty"
+                                    );
+                                }
                             })
-;
+                        {
+                            tracing::warn!(
+                                %error,
+                                "Window no longer available while refreshing after empty"
+                            );
                         }
 
                         // Log result
-                        if errors.is_empty() {
+                        if outcome.errors.is_empty() {
                             tracing::info!(
                                 "Emptied {} table(s), {} rows deleted",
-                                emptied_tables.len(),
-                                total_rows
+                                outcome.emptied_table_names.len(),
+                                outcome.total_rows_deleted
                             );
                         } else {
                             tracing::warn!(
                                 "Emptied {} of {} tables. Errors: {}",
-                                emptied_tables.len(),
+                                outcome.emptied_table_names.len(),
                                 table_names.len(),
-                                errors.join("; ")
+                                outcome.errors.join("; ")
                             );
                         }
                     })

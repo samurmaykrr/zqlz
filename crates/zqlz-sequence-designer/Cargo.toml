@@ -1,0 +1,17 @@
+[package]
+name = "zqlz-sequence-designer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Visual sequence designer panel for ZQLZ database IDE"
+
+[lib]
+path = "src/sequence_designer.rs"
+
+[dependencies]
+zqlz-core = { workspace = true }
+zqlz-ui = { workspace = true }
+gpui = { workspace = true }
+uuid = { workspace = true }
+tracing = { workspace = true }
+

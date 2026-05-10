@@ -1,5 +1,4 @@
 use super::*;
-use zqlz_ui::widgets::PixelsExt;
 
 impl TableViewerDelegate {
     pub fn freeze_column(&mut self, col_ix: usize) {
@@ -61,19 +60,57 @@ impl TableViewerDelegate {
         }
 
         let header_width = Self::estimate_text_width(header_label, 8.8) + header_chrome_width;
+        let type_width = self
+            .column_meta
+            .get(data_col_ix)
+            .map(|metadata| {
+                let presentation = Self::type_presentation_for_meta(metadata);
+                Self::estimate_text_width(&presentation.label, 7.2) + horizontal_padding + 22.0
+            })
+            .unwrap_or(0.0);
 
-        let sample_size = self.rows.len().min(100);
+        let content_width = Self::sample_content_width(&self.rows, data_col_ix, horizontal_padding);
+
+        let optimal = header_width.max(type_width).max(content_width);
+        optimal.clamp(80.0, 900.0)
+    }
+
+    pub(in crate::components::table_viewer) fn calculate_initial_column_width(
+        data_col_ix: usize,
+        metadata: &ColumnMeta,
+        rows: &[Vec<Value>],
+    ) -> f32 {
+        let horizontal_padding = 18.0;
+        let header_width =
+            Self::estimate_text_width(&metadata.name, 8.8) + horizontal_padding + 30.0;
+        let presentation = Self::type_presentation_for_meta(metadata);
+        let type_width =
+            Self::estimate_text_width(&presentation.label, 7.2) + horizontal_padding + 22.0;
+        let content_width = Self::sample_content_width(rows, data_col_ix, horizontal_padding);
+
+        header_width
+            .max(type_width)
+            .max(content_width)
+            .clamp(80.0, 900.0)
+    }
+
+    fn sample_content_width(
+        rows: &[Vec<Value>],
+        data_col_ix: usize,
+        horizontal_padding: f32,
+    ) -> f32 {
+        let sample_size = rows.len().min(100);
         let mut content_widths: Vec<f32> = Vec::with_capacity(sample_size);
 
-        let step = if self.rows.len() > sample_size {
-            self.rows.len() / sample_size
+        let step = if rows.len() > sample_size {
+            rows.len() / sample_size
         } else {
             1
         };
 
         let mut index = 0;
-        while index < self.rows.len() && content_widths.len() < sample_size {
-            if let Some(value) = self.rows[index].get(data_col_ix) {
+        while index < rows.len() && content_widths.len() < sample_size {
+            if let Some(value) = rows[index].get(data_col_ix) {
                 let display = value.display_for_table();
                 let first_line = display.lines().next().unwrap_or(&display);
                 let measured = if first_line.chars().count() > 60 {
@@ -87,20 +124,17 @@ impl TableViewerDelegate {
             index += step;
         }
 
-        let content_width = if content_widths.is_empty() {
-            0.0
-        } else {
-            content_widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
-            let p90_index = ((content_widths.len() as f32 * 0.9) as usize)
-                .min(content_widths.len().saturating_sub(1));
-            content_widths[p90_index]
-        };
+        if content_widths.is_empty() {
+            return 0.0;
+        }
 
-        let optimal = header_width.max(content_width);
-        optimal.clamp(80.0, 900.0)
+        content_widths.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        let p90_index = ((content_widths.len() as f32 * 0.9) as usize)
+            .min(content_widths.len().saturating_sub(1));
+        content_widths[p90_index]
     }
 
-    fn estimate_text_width(text: &str, base_width: f32) -> f32 {
+    pub(super) fn estimate_text_width(text: &str, base_width: f32) -> f32 {
         text.chars()
             .map(|c| match c {
                 'i' | 'l' | 'j' | '!' | '|' | '.' | ',' | ':' | ';' | '\'' | '1' => {
@@ -130,5 +164,55 @@ impl TableViewerDelegate {
 
     pub fn columns_mut(&mut self) -> &mut Vec<Column> {
         &mut self.columns
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn metadata(name: &str, data_type: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: name.to_string(),
+            data_type: data_type.to_string(),
+            nullable: true,
+            ordinal: 0,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn initial_width_expands_for_long_column_name() {
+        let width = TableViewerDelegate::calculate_initial_column_width(
+            0,
+            &metadata("very_long_customer_reference_identifier", "uuid"),
+            &[],
+        );
+
+        assert!(width > 150.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn initial_width_accounts_for_type_label() {
+        let mut column = metadata("amount", "numeric");
+        column.precision = Some(18);
+        column.scale = Some(4);
+
+        let width = TableViewerDelegate::calculate_initial_column_width(0, &column, &[]);
+        let name_only = TableViewerDelegate::estimate_text_width("amount", 8.8) + 48.0;
+
+        assert!(width > name_only);
+    }
+
+    #[::core::prelude::v1::test]
+    fn row_number_width_unchanged() {
+        assert_eq!(TableViewerDelegate::row_number_column_width(0), 52.0);
+        assert_eq!(TableViewerDelegate::row_number_column_width(999), 68.0);
     }
 }

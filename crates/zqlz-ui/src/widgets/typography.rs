@@ -5,7 +5,7 @@
 //!
 //! # Usage
 //!
-//! ```rust
+//! ```rust,ignore
 //! use zqlz_ui::widgets::{Text, TextVariant, h1, body, muted};
 //!
 //! // Quick semantic helpers

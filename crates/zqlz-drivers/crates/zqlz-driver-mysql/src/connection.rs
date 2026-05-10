@@ -2,18 +2,21 @@
 
 use async_trait::async_trait;
 use mysql_async::{
-    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row as MySqlRow, consts::ColumnType,
+    Conn, Opts, OptsBuilder, Pool, PoolConstraints, PoolOpts, Row as MySqlRow, SslOpts,
+    consts::{ColumnFlags, ColumnType},
     prelude::*,
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
 use zqlz_core::{
     BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnMeta, Connection,
-    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
-    ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault, QueryCancelHandle,
-    QueryResult, Result, Row, RowIdentifier, SchemaIntrospection, SqlObjectName, StatementResult,
-    Transaction, Value, ZqlzError,
+    ConnectionScope, DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig,
+    ExplainParserKind, ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault,
+    QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row, RowIdentifier,
+    SchemaIntrospection, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
 };
+
+use crate::MysqlSshTunnel;
 
 fn strip_pg_casts(expr: &str) -> String {
     let mut result = expr.to_owned();
@@ -56,6 +59,81 @@ fn get_mysql_runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+fn mysql_column_type_display(
+    column_type: ColumnType,
+    column_length: Option<u32>,
+    decimals: Option<u8>,
+    flags: Option<ColumnFlags>,
+) -> String {
+    let unsigned = flags.is_some_and(|flags| flags.contains(ColumnFlags::UNSIGNED_FLAG));
+    let with_unsigned = |base: &str| {
+        if unsigned {
+            format!("{} unsigned", base)
+        } else {
+            base.to_string()
+        }
+    };
+
+    match column_type {
+        ColumnType::MYSQL_TYPE_DECIMAL | ColumnType::MYSQL_TYPE_NEWDECIMAL => {
+            match (column_length, decimals) {
+                (Some(length), Some(decimals)) if decimals != 0 && decimals != 0x1f => {
+                    with_unsigned(&format!("decimal({},{})", length, decimals))
+                }
+                (Some(length), _) if length > 0 => with_unsigned(&format!("decimal({})", length)),
+                _ => with_unsigned("decimal"),
+            }
+        }
+        ColumnType::MYSQL_TYPE_TINY => with_unsigned("tinyint"),
+        ColumnType::MYSQL_TYPE_SHORT => with_unsigned("smallint"),
+        ColumnType::MYSQL_TYPE_LONG => with_unsigned("int"),
+        ColumnType::MYSQL_TYPE_LONGLONG => with_unsigned("bigint"),
+        ColumnType::MYSQL_TYPE_INT24 => with_unsigned("mediumint"),
+        ColumnType::MYSQL_TYPE_FLOAT => with_unsigned("float"),
+        ColumnType::MYSQL_TYPE_DOUBLE => with_unsigned("double"),
+        ColumnType::MYSQL_TYPE_NULL => "null".to_string(),
+        ColumnType::MYSQL_TYPE_TIMESTAMP | ColumnType::MYSQL_TYPE_TIMESTAMP2 => {
+            "timestamp".to_string()
+        }
+        ColumnType::MYSQL_TYPE_DATE | ColumnType::MYSQL_TYPE_NEWDATE => "date".to_string(),
+        ColumnType::MYSQL_TYPE_TIME | ColumnType::MYSQL_TYPE_TIME2 => "time".to_string(),
+        ColumnType::MYSQL_TYPE_DATETIME | ColumnType::MYSQL_TYPE_DATETIME2 => {
+            "datetime".to_string()
+        }
+        ColumnType::MYSQL_TYPE_YEAR => "year".to_string(),
+        ColumnType::MYSQL_TYPE_VARCHAR | ColumnType::MYSQL_TYPE_VAR_STRING => match column_length {
+            Some(length) if length > 0 => format!("varchar({})", length),
+            _ => "varchar".to_string(),
+        },
+        ColumnType::MYSQL_TYPE_STRING => {
+            if flags.is_some_and(|flags| {
+                flags.contains(ColumnFlags::BINARY_FLAG)
+                    && !flags.contains(ColumnFlags::ENUM_FLAG)
+                    && !flags.contains(ColumnFlags::SET_FLAG)
+            }) {
+                match column_length {
+                    Some(length) if length > 0 => format!("binary({})", length),
+                    _ => "binary".to_string(),
+                }
+            } else {
+                "char".to_string()
+            }
+        }
+        ColumnType::MYSQL_TYPE_BIT => "bit".to_string(),
+        ColumnType::MYSQL_TYPE_TYPED_ARRAY => "array".to_string(),
+        ColumnType::MYSQL_TYPE_VECTOR => "vector".to_string(),
+        ColumnType::MYSQL_TYPE_UNKNOWN => "unknown".to_string(),
+        ColumnType::MYSQL_TYPE_JSON => "json".to_string(),
+        ColumnType::MYSQL_TYPE_ENUM => "enum".to_string(),
+        ColumnType::MYSQL_TYPE_SET => "set".to_string(),
+        ColumnType::MYSQL_TYPE_TINY_BLOB => "tinyblob".to_string(),
+        ColumnType::MYSQL_TYPE_MEDIUM_BLOB => "mediumblob".to_string(),
+        ColumnType::MYSQL_TYPE_LONG_BLOB => "longblob".to_string(),
+        ColumnType::MYSQL_TYPE_BLOB => "blob".to_string(),
+        ColumnType::MYSQL_TYPE_GEOMETRY => "geometry".to_string(),
+    }
+}
+
 /// Cancel handle for MySQL queries.
 ///
 /// MySQL doesn't have native query cancellation like PostgreSQL,
@@ -80,31 +158,40 @@ pub struct MySqlConnection {
     /// `DATABASE()` which returns NULL when no database was selected.
     database_name: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
+    _ssh_tunnel: Option<MysqlSshTunnel>,
+}
+
+#[derive(Debug)]
+pub struct MySqlConnectOptions {
+    pub host: String,
+    pub port: u16,
+    pub database: Option<String>,
+    pub user: Option<String>,
+    pub password: Option<String>,
+    pub ssl_opts: Option<SslOpts>,
+    pub ssh_tunnel: Option<MysqlSshTunnel>,
 }
 
 impl MySqlConnection {
     /// Connect to a MySQL database
-    pub async fn connect(
-        host: &str,
-        port: u16,
-        database: Option<&str>,
-        user: Option<&str>,
-        password: Option<&str>,
-    ) -> Result<Self> {
-        tracing::info!(host = %host, port = %port, database = ?database, "connecting to MySQL database");
+    pub async fn connect(options: MySqlConnectOptions) -> Result<Self> {
+        tracing::info!(host = %options.host, port = %options.port, database = ?options.database, "connecting to MySQL database");
 
         let mut opts_builder = OptsBuilder::from_opts(Opts::default())
-            .ip_or_hostname(host)
-            .tcp_port(port);
+            .ip_or_hostname(options.host.as_str())
+            .tcp_port(options.port);
 
-        if let Some(db) = database {
+        if let Some(db) = options.database.as_deref() {
             opts_builder = opts_builder.db_name(Some(db));
         }
-        if let Some(u) = user {
+        if let Some(u) = options.user.as_deref() {
             opts_builder = opts_builder.user(Some(u));
         }
-        if let Some(p) = password {
+        if let Some(p) = options.password.as_deref() {
             opts_builder = opts_builder.pass(Some(p));
+        }
+        if options.ssl_opts.is_some() {
+            opts_builder = opts_builder.ssl_opts(options.ssl_opts);
         }
 
         let constraints = PoolConstraints::new(1, 1).ok_or_else(|| {
@@ -137,7 +224,7 @@ impl MySqlConnection {
 
         // Resolve the active database name so schema introspection can use a
         // concrete value instead of relying on DATABASE() at query time.
-        let database_name = if let Some(db) = database {
+        let database_name = if let Some(db) = options.database.as_deref() {
             Some(db.to_string())
         } else {
             let pool_clone = pool.clone();
@@ -160,11 +247,12 @@ impl MySqlConnection {
                 .unwrap_or(None)
         };
 
-        tracing::info!(host = %host, port = %port, database = ?database_name, "MySQL connection established");
+        tracing::info!(host = %options.host, port = %options.port, database = ?database_name, "MySQL connection established");
         Ok(Self {
             pool,
             database_name,
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            _ssh_tunnel: options.ssh_tunnel,
         })
     }
 
@@ -196,8 +284,8 @@ impl MySqlConnection {
 }
 
 /// Escape a value for SQL literal inclusion (for MySQL)
-fn value_to_mysql_literal(value: &Value) -> String {
-    match value {
+fn value_to_mysql_literal(value: &Value) -> Result<String> {
+    Ok(match value {
         Value::Null => "NULL".to_string(),
         Value::Bool(v) => if *v { "TRUE" } else { "FALSE" }.to_string(),
         Value::Int8(v) => v.to_string(),
@@ -224,26 +312,98 @@ fn value_to_mysql_literal(value: &Value) -> String {
         Value::Decimal(v) => v.to_string(),
         Value::Array(arr) => {
             // MySQL doesn't have native array support, convert to JSON
-            let json = serde_json::to_string(arr).unwrap_or_else(|_| "[]".to_string());
+            let json = serde_json::to_string(&serde_json::Value::Array(
+                arr.iter().map(Value::to_json_value).collect(),
+            ))
+            .map_err(|error| ZqlzError::Query(format!("Failed to serialize array: {}", error)))?;
             format!("'{}'", json.replace("'", "''"))
         }
+    })
+}
+
+fn render_mysql_sql_with_params(sql: &str, params: &[Value]) -> Result<String> {
+    if params.is_empty() {
+        return Ok(sql.to_string());
     }
+
+    let uses_numbered_params = params
+        .iter()
+        .enumerate()
+        .any(|(index, _)| sql.contains(&format!("${}", index + 1)));
+
+    let mut result = sql.to_string();
+    if uses_numbered_params {
+        for (index, param) in params.iter().enumerate() {
+            let placeholder = format!("${}", index + 1);
+            let value_str = value_to_mysql_literal(param)?;
+            result = result.replacen(&placeholder, &value_str, 1);
+        }
+    } else {
+        for param in params {
+            let value_str = value_to_mysql_literal(param)?;
+            result = result.replacen("?", &value_str, 1);
+        }
+    }
+
+    Ok(result)
+}
+
+fn value_to_mysql_literal_for_type(value: &Value, column_type: Option<&str>) -> Result<String> {
+    if column_type.map(Value::normalize_data_type).as_deref() == Some("set")
+        && let Value::Array(values) = value
+    {
+        let rendered_values = values
+            .iter()
+            .map(|value| match value {
+                Value::String(value) => value.clone(),
+                other => other.display_for_editor(),
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        return Ok(format!(
+            "'{}'",
+            rendered_values.replace("'", "''").replace("\\", "\\\\")
+        ));
+    }
+
+    value_to_mysql_literal(value)
 }
 
 /// Convert mysql_async Value to our Value type, using column type metadata
 /// to correctly interpret byte strings from the text protocol.
-fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value {
+fn mysql_value_to_value(
+    val: mysql_async::Value,
+    col_type: ColumnType,
+    flags: Option<ColumnFlags>,
+) -> Value {
     match val {
         mysql_async::Value::NULL => Value::Null,
         mysql_async::Value::Bytes(bytes) => {
+            if col_type == ColumnType::MYSQL_TYPE_BIT {
+                return Value::String(format_mysql_bit_value(&bytes));
+            }
+
+            if col_type == ColumnType::MYSQL_TYPE_GEOMETRY {
+                return Value::String(format_mysql_geometry_value(&bytes));
+            }
+
             if matches!(
                 col_type,
                 ColumnType::MYSQL_TYPE_BLOB
                     | ColumnType::MYSQL_TYPE_TINY_BLOB
                     | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
                     | ColumnType::MYSQL_TYPE_LONG_BLOB
-                    | ColumnType::MYSQL_TYPE_BIT
             ) {
+                return Value::Bytes(bytes);
+            }
+
+            if col_type == ColumnType::MYSQL_TYPE_STRING
+                && flags.is_some_and(|flags| {
+                    flags.contains(ColumnFlags::BINARY_FLAG)
+                        && !flags.contains(ColumnFlags::ENUM_FLAG)
+                        && !flags.contains(ColumnFlags::SET_FLAG)
+                })
+            {
                 return Value::Bytes(bytes);
             }
 
@@ -262,12 +422,13 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
                         .parse::<f32>()
                         .map(Value::Float32)
                         .unwrap_or(Value::String(s)),
-                    ColumnType::MYSQL_TYPE_DOUBLE
-                    | ColumnType::MYSQL_TYPE_DECIMAL
-                    | ColumnType::MYSQL_TYPE_NEWDECIMAL => s
+                    ColumnType::MYSQL_TYPE_DOUBLE => s
                         .parse::<f64>()
                         .map(Value::Float64)
                         .unwrap_or(Value::String(s)),
+                    ColumnType::MYSQL_TYPE_DECIMAL | ColumnType::MYSQL_TYPE_NEWDECIMAL => {
+                        Value::Decimal(s)
+                    }
                     ColumnType::MYSQL_TYPE_JSON => serde_json::from_str::<serde_json::Value>(&s)
                         .map(Value::Json)
                         .unwrap_or(Value::String(s)),
@@ -324,6 +485,197 @@ fn mysql_value_to_value(val: mysql_async::Value, col_type: ColumnType) -> Value 
     }
 }
 
+fn format_mysql_bit_value(bytes: &[u8]) -> String {
+    if bytes.is_empty() {
+        return String::new();
+    }
+
+    let mut output = String::with_capacity(bytes.len() * 8);
+    for byte in bytes {
+        output.push_str(&format!("{byte:08b}"));
+    }
+
+    output
+}
+
+fn format_mysql_geometry_value(bytes: &[u8]) -> String {
+    match parse_mysql_geometry_value(bytes) {
+        Ok(value) => value,
+        Err(_) => {
+            let hex = bytes
+                .iter()
+                .map(|byte| format!("{byte:02X}"))
+                .collect::<String>();
+            format!("0x{hex}")
+        }
+    }
+}
+
+fn parse_mysql_geometry_value(
+    bytes: &[u8],
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    if bytes.len() < 5 {
+        return Err("invalid MySQL geometry payload: too short".into());
+    }
+
+    parse_wkb_geometry(&bytes[4..])
+}
+
+fn parse_wkb_geometry(
+    bytes: &[u8],
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let mut offset = 0;
+    parse_wkb_geometry_at(bytes, &mut offset)
+}
+
+fn parse_wkb_geometry_at(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let byte_order = read_u8(bytes, offset)?;
+    let little_endian = match byte_order {
+        0 => false,
+        1 => true,
+        _ => return Err("invalid WKB byte order".into()),
+    };
+    let geometry_type = read_u32(bytes, offset, little_endian)?;
+
+    match geometry_type {
+        1 => parse_wkb_point(bytes, offset, little_endian),
+        2 => parse_wkb_linestring(bytes, offset, little_endian),
+        3 => parse_wkb_polygon(bytes, offset, little_endian),
+        4 => parse_wkb_geometry_collection("MULTIPOINT", bytes, offset, little_endian),
+        5 => parse_wkb_geometry_collection("MULTILINESTRING", bytes, offset, little_endian),
+        6 => parse_wkb_geometry_collection("MULTIPOLYGON", bytes, offset, little_endian),
+        7 => parse_wkb_geometry_collection("GEOMETRYCOLLECTION", bytes, offset, little_endian),
+        _ => Err("unsupported WKB geometry type".into()),
+    }
+}
+
+fn parse_wkb_point(
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let x = read_f64(bytes, offset, little_endian)?;
+    let y = read_f64(bytes, offset, little_endian)?;
+    Ok(format!(
+        "POINT({} {})",
+        format_mysql_float(x),
+        format_mysql_float(y)
+    ))
+}
+
+fn parse_wkb_linestring(
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let point_count = read_u32(bytes, offset, little_endian)? as usize;
+    let mut points = Vec::with_capacity(point_count);
+    for _ in 0..point_count {
+        let x = read_f64(bytes, offset, little_endian)?;
+        let y = read_f64(bytes, offset, little_endian)?;
+        points.push(format!(
+            "{} {}",
+            format_mysql_float(x),
+            format_mysql_float(y)
+        ));
+    }
+    Ok(format!("LINESTRING({})", points.join(",")))
+}
+
+fn parse_wkb_polygon(
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let ring_count = read_u32(bytes, offset, little_endian)? as usize;
+    let mut rings = Vec::with_capacity(ring_count);
+    for _ in 0..ring_count {
+        let point_count = read_u32(bytes, offset, little_endian)? as usize;
+        let mut points = Vec::with_capacity(point_count);
+        for _ in 0..point_count {
+            let x = read_f64(bytes, offset, little_endian)?;
+            let y = read_f64(bytes, offset, little_endian)?;
+            points.push(format!(
+                "{} {}",
+                format_mysql_float(x),
+                format_mysql_float(y)
+            ));
+        }
+        rings.push(format!("({})", points.join(",")));
+    }
+    Ok(format!("POLYGON({})", rings.join(",")))
+}
+
+fn parse_wkb_geometry_collection(
+    name: &str,
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let geometry_count = read_u32(bytes, offset, little_endian)? as usize;
+    let mut geometries = Vec::with_capacity(geometry_count);
+    for _ in 0..geometry_count {
+        geometries.push(parse_wkb_geometry_at(bytes, offset)?);
+    }
+    Ok(format!("{name}({})", geometries.join(",")))
+}
+
+fn read_u8(
+    bytes: &[u8],
+    offset: &mut usize,
+) -> std::result::Result<u8, Box<dyn std::error::Error + Send + Sync>> {
+    let value = *bytes
+        .get(*offset)
+        .ok_or("invalid WKB payload: missing byte")?;
+    *offset += 1;
+    Ok(value)
+}
+
+fn read_u32(
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<u32, Box<dyn std::error::Error + Send + Sync>> {
+    let raw: [u8; 4] = bytes
+        .get(*offset..*offset + 4)
+        .ok_or("invalid WKB payload: truncated u32")?
+        .try_into()?;
+    *offset += 4;
+    Ok(if little_endian {
+        u32::from_le_bytes(raw)
+    } else {
+        u32::from_be_bytes(raw)
+    })
+}
+
+fn read_f64(
+    bytes: &[u8],
+    offset: &mut usize,
+    little_endian: bool,
+) -> std::result::Result<f64, Box<dyn std::error::Error + Send + Sync>> {
+    let raw: [u8; 8] = bytes
+        .get(*offset..*offset + 8)
+        .ok_or("invalid WKB payload: truncated f64")?
+        .try_into()?;
+    *offset += 8;
+    Ok(if little_endian {
+        f64::from_le_bytes(raw)
+    } else {
+        f64::from_be_bytes(raw)
+    })
+}
+
+fn format_mysql_float(value: f64) -> String {
+    if value.fract() == 0.0 {
+        format!("{value:.0}")
+    } else {
+        value.to_string()
+    }
+}
+
 #[async_trait]
 impl Connection for MySqlConnection {
     fn driver_name(&self) -> &str {
@@ -332,6 +684,34 @@ impl Connection for MySqlConnection {
 
     fn dialect_id(&self) -> Option<&'static str> {
         Some("mysql")
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                let database_name = self.current_database_name().await?;
+                resolved.effective_database = database_name.clone();
+                resolved.effective_namespace = database_name.clone();
+                resolved.introspection_scope = database_name;
+            }
+            ConnectionScope::Database(database_name)
+            | ConnectionScope::Namespace(database_name) => {
+                let database_name = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                resolved.effective_database = Some(database_name.clone());
+                resolved.effective_namespace = Some(database_name.clone());
+                resolved.introspection_scope = Some(database_name);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
     }
 
     fn explain_config(&self) -> ExplainConfig {
@@ -352,6 +732,10 @@ impl Connection for MySqlConnection {
 
     fn max_bind_parameters(&self) -> usize {
         65_535
+    }
+
+    fn limited_select_sql(&self, base_sql: &str, limit: u64) -> String {
+        format!("{} LIMIT {}", base_sql, limit)
     }
 
     fn search_text_cast_expression(&self, expression_sql: &str) -> String {
@@ -624,11 +1008,14 @@ impl Connection for MySqlConnection {
         table_name: &str,
         _column_name: &str,
     ) -> Result<Option<i64>> {
-        let sql = format!(
-            "SELECT AUTO_INCREMENT FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = '{}'",
-            table_name.replace('\'', "''")
-        );
-        let result = self.query(&sql, &[]).await?;
+        let result = self
+            .query(
+                "SELECT AUTO_INCREMENT
+                 FROM information_schema.TABLES
+                 WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = ?",
+                &[Value::String(table_name.to_string())],
+            )
+            .await?;
         let Some(next_value) = result
             .rows
             .first()
@@ -664,6 +1051,10 @@ impl Connection for MySqlConnection {
             .and_then(|value| value.as_str())
             .map(ToString::to_string)
             .or_else(|| self.default_database().map(ToString::to_string)))
+    }
+
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        self.resolve_session_namespace().await
     }
 
     fn supports_fast_exact_count(&self) -> bool {
@@ -715,21 +1106,7 @@ impl Connection for MySqlConnection {
 
         let mut conn = self.get_conn().await?;
 
-        let final_sql = if params.is_empty() {
-            sql.to_string()
-        } else {
-            let mut result = sql.to_string();
-            for (i, param) in params.iter().enumerate() {
-                let placeholder = format!("${}", i + 1);
-                let value_str = value_to_mysql_literal(param);
-                result = result.replacen(&placeholder, &value_str, 1);
-            }
-            for param in params.iter() {
-                let value_str = value_to_mysql_literal(param);
-                result = result.replacen("?", &value_str, 1);
-            }
-            result
-        };
+        let final_sql = render_mysql_sql_with_params(sql, params)?;
 
         let affected_rows = get_mysql_runtime()
             .spawn(async move {
@@ -757,21 +1134,7 @@ impl Connection for MySqlConnection {
 
         let mut conn = self.get_conn().await?;
 
-        let final_sql = if params.is_empty() {
-            sql.to_string()
-        } else {
-            let mut result = sql.to_string();
-            for (i, param) in params.iter().enumerate() {
-                let placeholder = format!("${}", i + 1);
-                let value_str = value_to_mysql_literal(param);
-                result = result.replacen(&placeholder, &value_str, 1);
-            }
-            for param in params.iter() {
-                let value_str = value_to_mysql_literal(param);
-                result = result.replacen("?", &value_str, 1);
-            }
-            result
-        };
+        let final_sql = render_mysql_sql_with_params(sql, params)?;
 
         let cancelled = self.cancelled.clone();
         let (columns, _column_names, rows) = get_mysql_runtime()
@@ -784,16 +1147,24 @@ impl Connection for MySqlConnection {
                 let mut columns = Vec::new();
                 let mut column_names = Vec::new();
                 let mut column_types = Vec::new();
+                let mut column_flags = Vec::new();
 
                 if let Some(first_row) = mysql_rows.first() {
                     for (idx, col) in first_row.columns_ref().iter().enumerate() {
                         let name = col.name_str().to_string();
                         column_names.push(name.clone());
                         column_types.push(col.column_type());
+                        column_flags.push(col.flags());
+                        let data_type = mysql_column_type_display(
+                            col.column_type(),
+                            Some(col.column_length()),
+                            Some(col.decimals()),
+                            Some(col.flags()),
+                        );
 
                         columns.push(ColumnMeta {
                             name,
-                            data_type: format!("{:?}", col.column_type()),
+                            data_type,
                             nullable: true,
                             ordinal: idx,
                             max_length: Some(col.column_length() as i64),
@@ -822,7 +1193,11 @@ impl Connection for MySqlConnection {
                             .get(idx)
                             .copied()
                             .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
-                        let value = mysql_value_to_value(mysql_val, col_type);
+                        let value = mysql_value_to_value(
+                            mysql_val,
+                            col_type,
+                            column_flags.get(idx).copied(),
+                        );
                         values.push(value);
                     }
                     rows.push(Row::new(column_names.clone(), values));
@@ -934,33 +1309,33 @@ impl Connection for MySqlConnection {
             RowIdentifier::PrimaryKey(pk_values) => pk_values
                 .iter()
                 .map(|(col, val)| {
-                    format!(
+                    Ok(format!(
                         "{} = {}",
                         escape_identifier_mysql(col),
-                        value_to_mysql_literal(val)
-                    )
+                        value_to_mysql_literal(val)?
+                    ))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()?
                 .join(" AND "),
             RowIdentifier::FullRow(row_values) => row_values
                 .iter()
                 .map(|(col, val)| {
                     if val == &Value::Null {
-                        format!("{} IS NULL", escape_identifier_mysql(col))
+                        Ok(format!("{} IS NULL", escape_identifier_mysql(col)))
                     } else {
-                        format!(
+                        Ok(format!(
                             "{} = {}",
                             escape_identifier_mysql(col),
-                            value_to_mysql_literal(val)
-                        )
+                            value_to_mysql_literal(val)?
+                        ))
                     }
                 })
-                .collect::<Vec<_>>()
+                .collect::<Result<Vec<_>>>()?
                 .join(" AND "),
         };
 
         let set_value = match &request.new_value {
-            Some(val) => value_to_mysql_literal(val),
+            Some(val) => value_to_mysql_literal_for_type(val, request.column_type.as_deref())?,
             None => "NULL".to_string(),
         };
 
@@ -1101,14 +1476,8 @@ impl Transaction for MySqlTransaction {
 
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing statement in transaction");
 
-        if !params.is_empty() {
-            return Err(ZqlzError::NotSupported(
-                "Parameterized queries not yet supported for MySQL transactions. Use SQL literals instead.".to_string(),
-            ));
-        }
-
         let conn_mutex = self.conn.clone();
-        let sql = sql.to_string();
+        let sql = render_mysql_sql_with_params(sql, params)?;
 
         let rows_affected = get_mysql_runtime()
             .spawn(async move {
@@ -1153,55 +1522,75 @@ impl Transaction for MySqlTransaction {
 
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing query in transaction");
 
-        if !params.is_empty() {
-            return Err(ZqlzError::NotSupported(
-                "Parameterized queries not yet supported for MySQL transactions. Use SQL literals instead.".to_string(),
-            ));
-        }
-
         let conn_mutex = self.conn.clone();
-        let sql = sql.to_string();
+        let sql = render_mysql_sql_with_params(sql, params)?;
         let start_time = std::time::Instant::now();
 
-        let (rows_data, column_names, column_types) = get_mysql_runtime()
-            .spawn(async move {
-                let mut guard = conn_mutex.lock().await;
-                if let Some(ref mut conn) = *guard {
-                    let rows: Vec<MySqlRow> = conn
-                        .query(&sql)
-                        .await
-                        .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
+        let (rows_data, column_names, column_types, column_flags, column_type_names) =
+            get_mysql_runtime()
+                .spawn(async move {
+                    let mut guard = conn_mutex.lock().await;
+                    if let Some(ref mut conn) = *guard {
+                        let rows: Vec<MySqlRow> = conn.query(&sql).await.map_err(|e| {
+                            ZqlzError::Query(format!("Failed to execute query: {}", e))
+                        })?;
 
-                    let mut column_names = Vec::new();
-                    let mut column_types = Vec::new();
+                        let mut column_names = Vec::new();
+                        let mut column_types = Vec::new();
+                        let mut column_flags = Vec::new();
+                        let mut column_type_names = Vec::new();
 
-                    if let Some(first_row) = rows.first() {
-                        for col in first_row.columns_ref().iter() {
-                            column_names.push(col.name_str().to_string());
-                            column_types.push(col.column_type());
+                        if let Some(first_row) = rows.first() {
+                            for col in first_row.columns_ref().iter() {
+                                column_names.push(col.name_str().to_string());
+                                column_types.push(col.column_type());
+                                column_flags.push(col.flags());
+                                column_type_names.push(mysql_column_type_display(
+                                    col.column_type(),
+                                    Some(col.column_length()),
+                                    Some(col.decimals()),
+                                    Some(col.flags()),
+                                ));
+                            }
                         }
-                    }
 
-                    Ok::<(Vec<MySqlRow>, Vec<String>, Vec<ColumnType>), ZqlzError>((
-                        rows,
-                        column_names,
-                        column_types,
-                    ))
-                } else {
-                    Err(ZqlzError::Query(
-                        "Transaction connection no longer available".into(),
-                    ))
-                }
-            })
-            .await
-            .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
+                        Ok::<
+                            (
+                                Vec<MySqlRow>,
+                                Vec<String>,
+                                Vec<ColumnType>,
+                                Vec<ColumnFlags>,
+                                Vec<String>,
+                            ),
+                            ZqlzError,
+                        >((
+                            rows,
+                            column_names,
+                            column_types,
+                            column_flags,
+                            column_type_names,
+                        ))
+                    } else {
+                        Err(ZqlzError::Query(
+                            "Transaction connection no longer available".into(),
+                        ))
+                    }
+                })
+                .await
+                .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
 
         // Convert MySQL rows to ZQLZ rows
         let mut columns = Vec::new();
         for (idx, name) in column_names.iter().enumerate() {
             columns.push(ColumnMeta {
                 name: name.clone(),
-                data_type: format!("{:?}", column_types.get(idx)),
+                data_type: column_type_names.get(idx).cloned().unwrap_or_else(|| {
+                    column_types
+                        .get(idx)
+                        .copied()
+                        .map(|column_type| mysql_column_type_display(column_type, None, None, None))
+                        .unwrap_or_else(|| "unknown".to_string())
+                }),
                 nullable: true,
                 ordinal: idx,
                 max_length: None,
@@ -1224,7 +1613,8 @@ impl Transaction for MySqlTransaction {
                     .get(idx)
                     .copied()
                     .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
-                let value = mysql_value_to_value(mysql_val, col_type);
+                let value =
+                    mysql_value_to_value(mysql_val, col_type, column_flags.get(idx).copied());
                 values.push(value);
             }
             rows.push(Row::new(column_names.clone(), values));
@@ -1270,5 +1660,207 @@ impl Drop for MySqlTransaction {
                 });
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mysql_column_type_display_uses_sql_type_names() {
+        assert_eq!(
+            mysql_column_type_display(ColumnType::MYSQL_TYPE_VAR_STRING, Some(255), Some(0), None,),
+            "varchar(255)"
+        );
+        assert_eq!(
+            mysql_column_type_display(ColumnType::MYSQL_TYPE_NEWDECIMAL, Some(18), Some(4), None,),
+            "decimal(18,4)"
+        );
+        assert_eq!(
+            mysql_column_type_display(
+                ColumnType::MYSQL_TYPE_LONGLONG,
+                None,
+                None,
+                Some(ColumnFlags::UNSIGNED_FLAG),
+            ),
+            "bigint unsigned"
+        );
+        assert_eq!(
+            mysql_column_type_display(ColumnType::MYSQL_TYPE_JSON, None, None, None),
+            "json"
+        );
+        assert_eq!(
+            mysql_column_type_display(ColumnType::MYSQL_TYPE_DATETIME2, None, None, None),
+            "datetime"
+        );
+        assert_eq!(
+            mysql_column_type_display(
+                ColumnType::MYSQL_TYPE_STRING,
+                Some(16),
+                None,
+                Some(ColumnFlags::BINARY_FLAG),
+            ),
+            "binary(16)"
+        );
+        assert_eq!(
+            mysql_column_type_display(
+                ColumnType::MYSQL_TYPE_STRING,
+                Some(16),
+                None,
+                Some(ColumnFlags::BINARY_FLAG | ColumnFlags::ENUM_FLAG),
+            ),
+            "char"
+        );
+    }
+
+    #[test]
+    fn mysql_value_conversion_preserves_decimal_and_text_types() {
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(b"1234567890.123456".to_vec()),
+                ColumnType::MYSQL_TYPE_NEWDECIMAL,
+                None,
+            ),
+            Value::Decimal("1234567890.123456".to_string())
+        );
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(br#"{"enabled":true}"#.to_vec()),
+                ColumnType::MYSQL_TYPE_JSON,
+                None,
+            ),
+            Value::Json(serde_json::json!({ "enabled": true }))
+        );
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(b"active".to_vec()),
+                ColumnType::MYSQL_TYPE_STRING,
+                Some(ColumnFlags::ENUM_FLAG),
+            ),
+            Value::String("active".to_string())
+        );
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(vec![0xff, 0x00]),
+                ColumnType::MYSQL_TYPE_STRING,
+                Some(ColumnFlags::BINARY_FLAG),
+            ),
+            Value::Bytes(vec![0xff, 0x00])
+        );
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(vec![0xff, 0x00]),
+                ColumnType::MYSQL_TYPE_VAR_STRING,
+                None,
+            ),
+            Value::Bytes(vec![0xff, 0x00])
+        );
+    }
+
+    #[test]
+    fn mysql_bit_value_renders_binary_text() {
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(vec![0b0000_1010]),
+                ColumnType::MYSQL_TYPE_BIT,
+                None,
+            ),
+            Value::String("00001010".to_string())
+        );
+    }
+
+    #[test]
+    fn mysql_geometry_value_renders_wkt_or_hex_fallback() {
+        let mut point = Vec::new();
+        point.extend_from_slice(&4326_u32.to_le_bytes());
+        point.push(1);
+        point.extend_from_slice(&1_u32.to_le_bytes());
+        point.extend_from_slice(&26.0_f64.to_le_bytes());
+        point.extend_from_slice(&42.0_f64.to_le_bytes());
+
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(point),
+                ColumnType::MYSQL_TYPE_GEOMETRY,
+                None,
+            ),
+            Value::String("POINT(26 42)".to_string())
+        );
+
+        let mut linestring = Vec::new();
+        linestring.extend_from_slice(&0_u32.to_le_bytes());
+        linestring.push(1);
+        linestring.extend_from_slice(&2_u32.to_le_bytes());
+        linestring.extend_from_slice(&2_u32.to_le_bytes());
+        for value in [0.0_f64, 0.0, 2.0, 2.0] {
+            linestring.extend_from_slice(&value.to_le_bytes());
+        }
+
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(linestring),
+                ColumnType::MYSQL_TYPE_GEOMETRY,
+                None,
+            ),
+            Value::String("LINESTRING(0 0,2 2)".to_string())
+        );
+
+        assert_eq!(
+            mysql_value_to_value(
+                mysql_async::Value::Bytes(vec![1, 2, 3]),
+                ColumnType::MYSQL_TYPE_GEOMETRY,
+                None,
+            ),
+            Value::String("0x010203".to_string())
+        );
+    }
+
+    #[test]
+    fn mysql_array_literal_uses_json_text() {
+        let literal = value_to_mysql_literal(&Value::Array(vec![
+            Value::String("one".to_string()),
+            Value::Int32(2),
+            Value::Null,
+        ]))
+        .expect("array serializes");
+
+        assert_eq!(literal, "'[\"one\",2,null]'");
+    }
+
+    #[test]
+    fn mysql_params_render_question_mark_placeholders() {
+        let sql = render_mysql_sql_with_params(
+            "SELECT ? AS name, ? AS active",
+            &[Value::String("O'Reilly".to_string()), Value::Bool(true)],
+        )
+        .expect("params render");
+
+        assert_eq!(sql, "SELECT 'O''Reilly' AS name, TRUE AS active");
+    }
+
+    #[test]
+    fn mysql_params_render_numbered_placeholders() {
+        let sql = render_mysql_sql_with_params(
+            "SELECT $2 AS second, $1 AS first",
+            &[Value::Int32(10), Value::Int32(20)],
+        )
+        .expect("params render");
+
+        assert_eq!(sql, "SELECT 20 AS second, 10 AS first");
+    }
+
+    #[test]
+    fn mysql_set_literal_uses_comma_separated_text() {
+        let literal = value_to_mysql_literal_for_type(
+            &Value::Array(vec![
+                Value::String("read".to_string()),
+                Value::String("write".to_string()),
+            ]),
+            Some("set"),
+        )
+        .expect("set serializes");
+
+        assert_eq!(literal, "'read,write'");
     }
 }

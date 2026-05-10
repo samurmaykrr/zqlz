@@ -5,8 +5,8 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 use uuid::Uuid;
 use zqlz_core::{
-    ColumnInfo, FunctionInfo, IndexInfo, ObjectsPanelData, ProcedureInfo, TableInfo, TriggerInfo,
-    ViewInfo,
+    ColumnInfo, FunctionInfo, IndexInfo, ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelRow,
+    ProcedureInfo, TableInfo, TriggerInfo, ViewInfo,
 };
 
 /// Cached schema information
@@ -20,12 +20,21 @@ pub struct CachedSchema {
     pub functions: Vec<FunctionInfo>,
     pub procedures: Vec<ProcedureInfo>,
     pub objects_panel_data: Option<ObjectsPanelData>,
+    pub objects_panel_manifest: Option<ObjectsPanelManifest>,
+    /// Whether cached manifest came from driver or fallback derivation.
+    ///
+    /// Cache-hit telemetry needs this provenance so it can keep reporting DMC
+    /// without re-introspecting database state.
+    pub objects_panel_manifest_has_driver_manifest: Option<bool>,
+    pub objects_panel_rows_by_kind: HashMap<String, Vec<ObjectsPanelRow>>,
     pub cached_at: Instant,
     /// Resolved database name (e.g. `mydb`). Cached so callers avoid repeated
     /// `SELECT DATABASE()` / `SELECT current_database()` round-trips.
     pub database_name: Option<String>,
     /// Resolved schema name (e.g. `public`). Cached for the same reason.
     pub schema_name: Option<String>,
+    /// Real schema labels exposed by the driver for editor schema selector.
+    pub schema_names: Vec<String>,
 }
 
 impl CachedSchema {
@@ -40,9 +49,13 @@ impl CachedSchema {
             functions: Vec::new(),
             procedures: Vec::new(),
             objects_panel_data: None,
+            objects_panel_manifest: None,
+            objects_panel_manifest_has_driver_manifest: None,
+            objects_panel_rows_by_kind: HashMap::new(),
             cached_at: Instant::now(),
             database_name: None,
             schema_name: None,
+            schema_names: Vec::new(),
         }
     }
 }
@@ -157,6 +170,14 @@ impl SchemaCache {
             .and_then(|c| c.schema_name.clone())
     }
 
+    /// Get cached schema labels for a connection, if any.
+    pub fn get_schema_names(&self, connection_id: Uuid) -> Option<Vec<String>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.schema_names.clone())
+    }
+
     /// Store resolved database and schema names. Creates the cache entry if it
     /// does not yet exist so this can be called before `set_tables`.
     pub fn set_connection_names(
@@ -171,6 +192,15 @@ impl SchemaCache {
             .or_insert_with(CachedSchema::empty);
         entry.database_name = database_name;
         entry.schema_name = schema_name;
+    }
+
+    /// Store schema selector labels. Creates cache entry if needed.
+    pub fn set_schema_names(&self, connection_id: Uuid, schema_names: Vec<String>) {
+        let mut cache = self.cache.write();
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.schema_names = schema_names;
     }
 
     /// Store tables in cache. Creates the entry if it does not yet exist.
@@ -216,45 +246,50 @@ impl SchemaCache {
     pub fn set_views(&self, connection_id: Uuid, views: Vec<ViewInfo>) {
         tracing::debug!(connection_id = %connection_id, view_count = views.len(), "caching views");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.views = views;
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.views = views;
     }
 
     /// Store materialized views in cache
     pub fn set_materialized_views(&self, connection_id: Uuid, views: Vec<ViewInfo>) {
         tracing::debug!(connection_id = %connection_id, view_count = views.len(), "caching materialized views");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.materialized_views = views;
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.materialized_views = views;
     }
 
     /// Store triggers in cache
     pub fn set_triggers(&self, connection_id: Uuid, triggers: Vec<TriggerInfo>) {
         tracing::debug!(connection_id = %connection_id, trigger_count = triggers.len(), "caching triggers");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.triggers = triggers;
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.triggers = triggers;
     }
 
     /// Store functions in cache
     pub fn set_functions(&self, connection_id: Uuid, functions: Vec<FunctionInfo>) {
         tracing::debug!(connection_id = %connection_id, function_count = functions.len(), "caching functions");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.functions = functions;
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.functions = functions;
     }
 
     /// Store procedures in cache
     pub fn set_procedures(&self, connection_id: Uuid, procedures: Vec<ProcedureInfo>) {
         tracing::debug!(connection_id = %connection_id, procedure_count = procedures.len(), "caching procedures");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.procedures = procedures;
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.procedures = procedures;
     }
 
     /// Get cached objects panel data
@@ -265,13 +300,78 @@ impl SchemaCache {
             .and_then(|c| c.objects_panel_data.clone())
     }
 
+    /// Get cached objects panel manifest
+    pub fn get_objects_panel_manifest(&self, connection_id: Uuid) -> Option<ObjectsPanelManifest> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .and_then(|c| c.objects_panel_manifest.clone())
+    }
+
+    /// Get cached objects panel manifest provenance.
+    pub fn get_objects_panel_manifest_has_driver_manifest(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<bool> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .and_then(|c| c.objects_panel_manifest_has_driver_manifest)
+    }
+
     /// Store objects panel data in cache
     pub fn set_objects_panel_data(&self, connection_id: Uuid, data: ObjectsPanelData) {
         tracing::debug!(connection_id = %connection_id, "caching objects panel data");
         let mut cache = self.cache.write();
-        if let Some(entry) = cache.get_mut(&connection_id) {
-            entry.objects_panel_data = Some(data);
-        }
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.objects_panel_data = Some(data);
+    }
+
+    /// Store objects panel manifest in cache
+    pub fn set_objects_panel_manifest(
+        &self,
+        connection_id: Uuid,
+        manifest: ObjectsPanelManifest,
+        has_driver_manifest: bool,
+    ) {
+        tracing::debug!(connection_id = %connection_id, "caching objects panel manifest");
+        let mut cache = self.cache.write();
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.objects_panel_manifest = Some(manifest);
+        entry.objects_panel_manifest_has_driver_manifest = Some(has_driver_manifest);
+    }
+
+    /// Get cached rows grouped by object kind for kind-scoped rendering.
+    pub fn get_objects_panel_rows_by_kind(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<HashMap<String, Vec<ObjectsPanelRow>>> {
+        self.cache
+            .read()
+            .get(&connection_id)
+            .map(|c| c.objects_panel_rows_by_kind.clone())
+    }
+
+    /// Store objects panel rows grouped by kind.
+    pub fn set_objects_panel_rows_by_kind(
+        &self,
+        connection_id: Uuid,
+        rows_by_kind: HashMap<String, Vec<ObjectsPanelRow>>,
+    ) {
+        tracing::debug!(
+            connection_id = %connection_id,
+            kind_count = rows_by_kind.len(),
+            "caching objects panel rows grouped by kind"
+        );
+        let mut cache = self.cache.write();
+        let entry = cache
+            .entry(connection_id)
+            .or_insert_with(CachedSchema::empty);
+        entry.objects_panel_rows_by_kind = rows_by_kind;
     }
 
     /// Invalidate cache for a connection
@@ -291,5 +391,28 @@ impl SchemaCache {
 impl Default for SchemaCache {
     fn default() -> Self {
         Self::new(Duration::from_secs(300)) // 5 minute TTL
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SchemaCache;
+    use std::time::Duration;
+    use uuid::Uuid;
+
+    #[test]
+    fn schema_names_round_trip_through_cache() {
+        let cache = SchemaCache::new(Duration::from_secs(300));
+        let connection_id = Uuid::new_v4();
+
+        cache.set_schema_names(
+            connection_id,
+            vec!["public".to_string(), "zqlz_audit".to_string()],
+        );
+
+        assert_eq!(
+            cache.get_schema_names(connection_id),
+            Some(vec!["public".to_string(), "zqlz_audit".to_string()])
+        );
     }
 }

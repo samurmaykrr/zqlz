@@ -16,7 +16,7 @@ async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["sync"] }
-rusqlite.workspace = true
+rusqlite = { workspace = true, features = ["load_extension"] }
 chrono.workspace = true
 uuid.workspace = true
 serde_json.workspace = true

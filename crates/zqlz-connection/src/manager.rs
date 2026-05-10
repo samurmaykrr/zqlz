@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, Result, ZqlzError};
+use zqlz_core::{Connection, ConnectionScope, Result, ZqlzError};
 use zqlz_drivers::DriverRegistry;
 
 use crate::SavedConnection;
@@ -151,12 +151,17 @@ impl ConnectionManager {
             .get(id)
             .ok_or_else(|| ZqlzError::NotFound("Connection not found".into()))?;
 
-        // Drivers that support cross-database queries don't need separate connections
-        if !main_conn.requires_database_scoped_connection() {
+        let resolved_scope = main_conn
+            .resolve_scope(ConnectionScope::Database(database_name.to_string()))
+            .await?;
+
+        if !resolved_scope.requires_dedicated_connection {
             return Ok(main_conn);
         }
 
-        let normalized_database_name = main_conn.normalize_database_scope_name(database_name);
+        let normalized_database_name = resolved_scope
+            .physical_database_key
+            .ok_or_else(|| ZqlzError::Driver("Missing database scope key".to_string()))?;
         let key = (id, normalized_database_name.clone());
 
         // Check cache first
@@ -222,9 +227,9 @@ impl ConnectionManager {
                 tracing::warn!(
                     connection_id = %id,
                     database = %normalized_database_name,
-                    "database-specific connection not yet cached, falling back to main connection"
+                    "database-specific connection not yet cached"
                 );
-                Some(main_conn)
+                None
             }
         }
     }
@@ -357,5 +362,258 @@ impl ConnectionManager {
 impl Default for ConnectionManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use zqlz_core::{
+        DropTableOptions, DropTriggerOptions, DropViewOptions, QueryResult, SqlObjectName,
+        StatementResult, Transaction, Value,
+    };
+
+    struct MockConnection {
+        driver_name: &'static str,
+        requires_scoped_connection: bool,
+        closed: AtomicBool,
+    }
+
+    impl MockConnection {
+        fn new(driver_name: &'static str, requires_scoped_connection: bool) -> Self {
+            Self {
+                driver_name,
+                requires_scoped_connection,
+                closed: AtomicBool::new(false),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl Connection for MockConnection {
+        fn driver_name(&self) -> &str {
+            self.driver_name
+        }
+
+        fn requires_database_scoped_connection(&self) -> bool {
+            self.requires_scoped_connection
+        }
+
+        fn normalize_database_scope_name(&self, database_name: &str) -> String {
+            database_name
+                .strip_prefix("db")
+                .unwrap_or(database_name)
+                .to_string()
+        }
+
+        async fn execute(&self, _sql: &str, _params: &[Value]) -> Result<StatementResult> {
+            Ok(StatementResult {
+                is_query: false,
+                result: None,
+                affected_rows: 0,
+                error: None,
+            })
+        }
+
+        async fn query(&self, _sql: &str, _params: &[Value]) -> Result<QueryResult> {
+            Ok(QueryResult::empty())
+        }
+
+        fn rename_table_sql(
+            &self,
+            table_name: &SqlObjectName,
+            new_table_name: &str,
+        ) -> Result<String> {
+            Ok(format!(
+                "ALTER TABLE {} RENAME TO {}",
+                self.render_qualified_name(table_name),
+                self.quote_identifier(new_table_name)
+            ))
+        }
+
+        fn drop_table_sql(
+            &self,
+            table_name: &SqlObjectName,
+            _options: DropTableOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn drop_view_sql(
+            &self,
+            view_name: &SqlObjectName,
+            _options: DropViewOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP VIEW {}",
+                self.render_qualified_name(view_name)
+            ))
+        }
+
+        fn drop_trigger_sql(
+            &self,
+            trigger_name: &SqlObjectName,
+            _table_name: Option<&SqlObjectName>,
+            _options: DropTriggerOptions,
+        ) -> Result<String> {
+            Ok(format!(
+                "DROP TRIGGER {}",
+                self.render_qualified_name(trigger_name)
+            ))
+        }
+
+        fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "TRUNCATE TABLE {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn duplicate_table_sql(
+            &self,
+            source_table_name: &SqlObjectName,
+            new_table_name: &SqlObjectName,
+        ) -> Result<String> {
+            Ok(format!(
+                "CREATE TABLE {} AS SELECT * FROM {}",
+                self.render_qualified_name(new_table_name),
+                self.render_qualified_name(source_table_name)
+            ))
+        }
+
+        fn clear_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "DELETE FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn table_has_rows_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+            Ok(format!(
+                "SELECT 1 FROM {} LIMIT 1",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_rows_sql(
+            &self,
+            table_name: &SqlObjectName,
+            _projected_columns: &[String],
+            _where_clause_sql: Option<&str>,
+        ) -> Result<String> {
+            Ok(format!(
+                "SELECT * FROM {}",
+                self.render_qualified_name(table_name)
+            ))
+        }
+
+        fn select_distinct_rows_sql(
+            &self,
+            table_name: &SqlObjectName,
+            projected_columns: &[String],
+            _where_clause_sql: Option<&str>,
+            _order_by_columns: &[String],
+            limit: u64,
+        ) -> Result<String> {
+            let columns = projected_columns.join(", ");
+            Ok(format!(
+                "SELECT DISTINCT {} FROM {} LIMIT {}",
+                columns,
+                self.render_qualified_name(table_name),
+                limit
+            ))
+        }
+
+        fn insert_row_sql(
+            &self,
+            table_name: &SqlObjectName,
+            column_names: &[String],
+            value_count: usize,
+        ) -> Result<String> {
+            let placeholders = vec!["?"; value_count].join(", ");
+            Ok(format!(
+                "INSERT INTO {} ({}) VALUES ({})",
+                self.render_qualified_name(table_name),
+                column_names.join(", "),
+                placeholders
+            ))
+        }
+
+        fn performance_metrics_query_sql(&self) -> Result<String> {
+            Ok("SELECT 0 AS total_queries".to_string())
+        }
+
+        async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
+            Err(ZqlzError::NotSupported(
+                "Transactions not supported in mock".into(),
+            ))
+        }
+
+        async fn close(&self) -> Result<()> {
+            self.closed.store(true, Ordering::SeqCst);
+            Ok(())
+        }
+
+        fn is_closed(&self) -> bool {
+            self.closed.load(Ordering::SeqCst)
+        }
+    }
+
+    #[test]
+    fn cached_scoped_lookup_does_not_fallback_to_main_connection() {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        manager.active.write().insert(
+            connection_id,
+            Arc::new(MockConnection::new("postgresql", true)),
+        );
+
+        assert!(
+            manager
+                .get_for_database_cached(connection_id, Some("erp_lab"))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_scoped_lookup_reuses_main_for_unscoped_driver() {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        manager
+            .active
+            .write()
+            .insert(connection_id, Arc::new(MockConnection::new("mysql", false)));
+
+        assert!(
+            manager
+                .get_for_database_cached(connection_id, Some("analytics"))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn cached_scoped_lookup_normalizes_redis_database_labels() {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        let scoped_connection: Arc<dyn Connection> = Arc::new(MockConnection::new("redis", true));
+        manager
+            .active
+            .write()
+            .insert(connection_id, Arc::new(MockConnection::new("redis", true)));
+        manager
+            .database_connections
+            .write()
+            .insert((connection_id, "3".to_string()), scoped_connection);
+
+        assert!(
+            manager
+                .get_for_database_cached(connection_id, Some("db3"))
+                .is_some()
+        );
     }
 }

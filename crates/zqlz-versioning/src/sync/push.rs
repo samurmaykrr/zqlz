@@ -177,6 +177,9 @@ pub fn generate_push_sql(version: &VersionEntry, options: &PushOptions) -> Strin
             // Triggers are complex - content should include full definition
             content.clone()
         }
+        DatabaseObjectType::Event => {
+            format!("{} EVENT {} {}", create_keyword, qualified_name, content)
+        }
         _ => content.clone(),
     }
 }
@@ -480,6 +483,32 @@ mod tests {
 
             let sql = generate_push_sql(&version, &opts);
             assert!(sql.starts_with("CREATE MATERIALIZED VIEW public.test_object AS"));
+        }
+
+        #[test]
+        fn test_event_sql_generation() {
+            let version = create_test_version(
+                DatabaseObjectType::Event,
+                "ON SCHEDULE EVERY 1 DAY DO CALL rotate_partitions()",
+            );
+            let opts = PushOptions::new();
+
+            let sql = generate_push_sql(&version, &opts);
+            assert!(sql.starts_with("CREATE EVENT public.test_object"));
+            assert!(sql.contains("ON SCHEDULE EVERY 1 DAY"));
+        }
+
+        #[test]
+        fn test_event_full_create_sql_passthrough() {
+            let version = create_test_version(
+                DatabaseObjectType::Event,
+                "CREATE EVENT cleanup ON SCHEDULE EVERY 1 DAY DO DELETE FROM sessions",
+            );
+            let opts = PushOptions::new();
+
+            let sql = generate_push_sql(&version, &opts);
+            assert!(sql.starts_with("CREATE EVENT cleanup"));
+            assert!(!sql.contains("public.test_object"));
         }
     }
 

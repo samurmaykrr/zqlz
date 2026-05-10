@@ -9,18 +9,35 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::{
-    ColumnInfo as SchemaColumnInfo, Connection, DatabaseObject, FunctionInfo, ObjectType,
-    ObjectsPanelData, ProcedureInfo, SchemaIntrospection, TableInfo, TableType, TriggerInfo,
-    ViewInfo,
+    connection_is_postgres, ColumnInfo as SchemaColumnInfo, Connection, ConnectionScope,
+    DatabaseObject, FunctionInfo, ObjectFormDdlRequest, ObjectFormSpec, ObjectFormSpecRequest,
+    ObjectType, ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelRow, ProcedureInfo,
+    SchemaIntrospection, TableInfo, TableType, TriggerInfo, TypeKind, ViewInfo,
 };
 use zqlz_schema::SchemaCache;
 
 use crate::error::{ServiceError, ServiceResult};
 use crate::view_models::{ColumnInfo, DatabaseSchema, TableDetails};
 
+#[derive(Clone, Debug)]
+pub enum SidebarSectionLoadData {
+    Views(Vec<String>),
+    MaterializedViews(Vec<String>),
+    Functions(Vec<String>),
+    Procedures(Vec<String>),
+    Triggers(Vec<String>),
+    Events(Vec<String>),
+    Sequences(Vec<String>),
+    Domains(Vec<String>),
+    Types(Vec<String>),
+    Extensions(Vec<String>),
+}
+
 type ScopedObjectCacheKey = (Uuid, String, Option<String>);
 type TableDetailsCacheMap = HashMap<ScopedObjectCacheKey, TableDetails>;
 type DdlCacheMap = HashMap<ScopedObjectCacheKey, String>;
+type ObjectsPanelKindCacheKey = (Uuid, Option<String>, String, Option<String>);
+type ObjectsPanelKindCacheMap = HashMap<ObjectsPanelKindCacheKey, ObjectsPanelData>;
 
 /// Batch size for prefetching table details. Small enough to avoid saturating
 /// remote connection poolers (e.g. Neon PgBouncer) while still providing
@@ -52,9 +69,94 @@ pub struct SchemaService {
     /// Shares the same TTL domain as
     /// `table_details_cache` — cleared together on invalidation.
     ddl_cache: RwLock<DdlCacheMap>,
+    objects_panel_kind_cache: RwLock<ObjectsPanelKindCacheMap>,
 }
 
 impl SchemaService {
+    fn emit_objects_panel_manifest_coverage_telemetry(
+        connection_id: Uuid,
+        has_driver_manifest: bool,
+    ) {
+        let manifest_source = if has_driver_manifest {
+            "driver_manifest"
+        } else {
+            "fallback_manifest"
+        };
+
+        tracing::info!(
+            target: "objects_panel.telemetry",
+            metric = "objects_panel_driver_manifest_coverage",
+            connection_id = %connection_id,
+            has_driver_manifest,
+            manifest_source,
+            "Objects panel driver-manifest coverage telemetry"
+        );
+    }
+
+    fn build_objects_panel_rows_by_kind(
+        rows: &[ObjectsPanelRow],
+    ) -> HashMap<String, Vec<ObjectsPanelRow>> {
+        let mut rows_by_kind: HashMap<String, Vec<ObjectsPanelRow>> = HashMap::new();
+        for row in rows {
+            rows_by_kind
+                .entry(row.object_kind_id().to_string())
+                .or_default()
+                .push(row.clone());
+        }
+        rows_by_kind
+    }
+
+    fn object_names_by_kind(objects_panel_data: &ObjectsPanelData, kind: &str) -> Vec<String> {
+        objects_panel_data
+            .rows
+            .iter()
+            .filter(|row| row.object_kind_id() == kind)
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    fn sidebar_type_names(
+        objects_panel_data: &ObjectsPanelData,
+        include_domains: bool,
+    ) -> Vec<String> {
+        objects_panel_data
+            .rows
+            .iter()
+            .filter(|row| row.object_kind_id() == "type")
+            .filter(|row| {
+                let is_domain = row
+                    .values
+                    .get("data_type")
+                    .or_else(|| row.values.get("table_type"))
+                    .is_some_and(|value| value == "Domain");
+                is_domain == include_domains
+            })
+            .map(|row| row.name.clone())
+            .collect()
+    }
+
+    fn sidebar_introspection_scope(
+        connection: &dyn Connection,
+        introspection_schema: Option<String>,
+    ) -> Option<String> {
+        if connection_is_postgres(connection) {
+            None
+        } else {
+            introspection_schema
+        }
+    }
+
+    async fn get_sidebar_introspection_schema_cached(
+        &self,
+        connection: &Arc<dyn Connection>,
+        connection_id: Uuid,
+    ) -> Option<String> {
+        let introspection_schema = self
+            .get_introspection_schema_cached(connection, connection_id)
+            .await;
+        Self::sidebar_introspection_scope(connection.as_ref(), introspection_schema)
+    }
+
     fn normalize_scope(scope: Option<&str>) -> Option<String> {
         scope
             .map(str::trim)
@@ -62,36 +164,10 @@ impl SchemaService {
             .map(ToOwned::to_owned)
     }
 
-    fn uses_unscoped_introspection(connection: &dyn Connection) -> bool {
-        matches!(
-            connection.dialect_id(),
-            Some("postgres") | Some("postgresql")
-        )
-    }
-
     async fn resolve_database_name_for_connection(
         connection: &Arc<dyn Connection>,
     ) -> Option<String> {
-        if Self::uses_unscoped_introspection(connection.as_ref()) {
-            return connection
-                .query("SELECT current_database()", &[])
-                .await
-                .ok()
-                .and_then(|result| {
-                    result
-                        .rows
-                        .first()
-                        .and_then(|row| row.get(0))
-                        .and_then(|value| value.as_str())
-                        .map(ToString::to_string)
-                });
-        }
-
-        if connection.has_session_namespace() {
-            return connection.resolve_session_namespace().await.ok().flatten();
-        }
-
-        None
+        connection.current_database_name().await.ok().flatten()
     }
 
     /// Create a new schema service
@@ -100,6 +176,7 @@ impl SchemaService {
             cache: Arc::new(SchemaCache::new(std::time::Duration::from_secs(300))), // 5 minutes
             table_details_cache: RwLock::new(HashMap::new()),
             ddl_cache: RwLock::new(HashMap::new()),
+            objects_panel_kind_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -109,6 +186,7 @@ impl SchemaService {
             cache,
             table_details_cache: RwLock::new(HashMap::new()),
             ddl_cache: RwLock::new(HashMap::new()),
+            objects_panel_kind_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -148,6 +226,28 @@ impl SchemaService {
         connection_id: Uuid,
         target_database: Option<&str>,
     ) -> ServiceResult<DatabaseSchema> {
+        self.load_database_schema_for_database_and_schema(
+            connection,
+            connection_id,
+            target_database,
+            None,
+        )
+        .await
+    }
+
+    /// Load full database schema with optional explicit database and schema targets.
+    ///
+    /// `target_schema` is used by editor-local schema switching. Targeted loads
+    /// bypass the connection-wide cache so one selected schema cannot poison
+    /// completions for another selected schema.
+    #[tracing::instrument(skip(self, connection), fields(connection_id = %connection_id, target_database = ?target_database, target_schema = ?target_schema))]
+    pub async fn load_database_schema_for_database_and_schema(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        target_database: Option<&str>,
+        target_schema: Option<&str>,
+    ) -> ServiceResult<DatabaseSchema> {
         let schema = connection
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
@@ -156,20 +256,37 @@ impl SchemaService {
             .map(str::trim)
             .filter(|name| !name.is_empty())
             .map(ToOwned::to_owned);
-        let effective_target_database = if Self::uses_unscoped_introspection(connection.as_ref()) {
-            None
-        } else {
-            target_database
-        };
-        let bypass_cache = effective_target_database.is_some();
+        let target_schema = target_schema
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(ToOwned::to_owned);
+        let bypass_cache = target_database.is_some() || target_schema.is_some();
+
+        if bypass_cache {
+            // Targeted database switches only need to replace the connection-
+            // wide schema snapshot. Per-object detail caches are already scoped
+            // by schema and object identity, so keeping them warm avoids
+            // unnecessary reload churn when the active database changes.
+            self.invalidate_schema_snapshot(connection_id);
+        }
 
         // Check cache validity
         if !bypass_cache && self.cache.is_valid(connection_id) {
             if let Some(cached_tables) = self.cache.get_tables(connection_id) {
                 tracing::debug!("Schema cache hit for connection {}", connection_id);
 
+                let has_driver_manifest = self
+                    .cache
+                    .get_objects_panel_manifest_has_driver_manifest(connection_id)
+                    .unwrap_or(false);
+                Self::emit_objects_panel_manifest_coverage_telemetry(
+                    connection_id,
+                    has_driver_manifest,
+                );
+
                 let tables: Vec<String> = cached_tables.iter().map(|t| t.name.clone()).collect();
                 let objects_panel_data = self.cache.get_objects_panel_data(connection_id);
+                let objects_panel_manifest = self.cache.get_objects_panel_manifest(connection_id);
                 let views = self.cache.get_views(connection_id).unwrap_or_default();
                 let materialized_views = self
                     .cache
@@ -184,10 +301,35 @@ impl SchemaService {
                     .unwrap_or_default();
                 let database_name = self.cache.get_database_name(connection_id);
                 let schema_name = self.cache.get_schema_name(connection_id);
+                let schema_names = self
+                    .cache
+                    .get_schema_names(connection_id)
+                    .unwrap_or_default();
 
                 return Ok(DatabaseSchema {
                     table_infos: cached_tables,
+                    events: objects_panel_data
+                        .as_ref()
+                        .map(|data| Self::object_names_by_kind(data, "event"))
+                        .unwrap_or_default(),
+                    sequences: objects_panel_data
+                        .as_ref()
+                        .map(|data| Self::object_names_by_kind(data, "sequence"))
+                        .unwrap_or_default(),
+                    domains: objects_panel_data
+                        .as_ref()
+                        .map(|data| Self::sidebar_type_names(data, true))
+                        .unwrap_or_default(),
+                    types: objects_panel_data
+                        .as_ref()
+                        .map(|data| Self::sidebar_type_names(data, false))
+                        .unwrap_or_default(),
+                    extensions: objects_panel_data
+                        .as_ref()
+                        .map(|data| Self::object_names_by_kind(data, "extension"))
+                        .unwrap_or_default(),
                     objects_panel_data,
+                    objects_panel_manifest,
                     tables,
                     views: views.into_iter().map(|v| v.name).collect(),
                     materialized_views: materialized_views.into_iter().map(|v| v.name).collect(),
@@ -197,62 +339,114 @@ impl SchemaService {
                     table_indexes,
                     database_name,
                     schema_name,
-                    schema_names: Vec::new(),
+                    schema_names,
                 });
             }
         }
 
         tracing::debug!("Schema cache miss, loading from database");
 
-        // Resolve current namespace from the active connection.
-        let resolved_namespace = if connection.has_session_namespace() {
-            connection.resolve_session_namespace().await.ok().flatten()
-        } else {
-            None
-        };
-        let resolved_database_name = Self::resolve_database_name_for_connection(&connection).await;
-        let database_name = effective_target_database.clone().or(resolved_database_name);
-        let schema_name = effective_target_database.clone().or(resolved_namespace);
+        let requested_scope = target_database
+            .as_ref()
+            .map(|database_name| ConnectionScope::Database(database_name.clone()))
+            .unwrap_or(ConnectionScope::Default);
+        let resolved_scope = connection
+            .resolve_scope(requested_scope)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+
+        let database_name = resolved_scope
+            .effective_database
+            .clone()
+            .or_else(|| target_database.clone());
+        let schema_name = target_schema
+            .clone()
+            .or_else(|| resolved_scope.effective_namespace.clone());
         let schema_names = schema
             .list_schemas()
             .await
             .map(|schemas| schemas.into_iter().map(|schema| schema.name).collect())
             .unwrap_or_else(|_| Vec::new());
 
-        let introspection_schema = if Self::uses_unscoped_introspection(connection.as_ref()) {
-            None
-        } else {
-            effective_target_database
-                .as_deref()
-                .or(schema_name.as_deref())
-        };
+        let introspection_schema = Self::sidebar_introspection_scope(
+            connection.as_ref(),
+            target_schema
+                .clone()
+                .or_else(|| resolved_scope.introspection_scope.clone())
+                .or_else(|| schema_name.clone()),
+        );
 
         // Load all schema objects (handle partial failures gracefully)
-        let tables_result = schema.list_tables(introspection_schema).await;
-        let extended_result = schema.list_tables_extended(introspection_schema).await;
-        let views_result = schema.list_views(introspection_schema).await;
+        let tables_result = schema.list_tables(introspection_schema.as_deref()).await;
+        let views_result = schema.list_views(introspection_schema.as_deref()).await;
         let materialized_views_result = if connection.supports_materialized_views() {
-            schema.list_materialized_views(introspection_schema).await
+            schema
+                .list_materialized_views(introspection_schema.as_deref())
+                .await
         } else {
             Ok(Vec::new())
         };
         let triggers_result = if connection.supports_top_level_triggers() {
-            schema.list_triggers(introspection_schema, None).await
+            schema
+                .list_triggers(introspection_schema.as_deref(), None)
+                .await
         } else {
             Ok(Vec::new())
         };
-        let functions_result = schema.list_functions(introspection_schema).await;
-        let procedures_result = schema.list_procedures(introspection_schema).await;
+        let functions_result = schema.list_functions(introspection_schema.as_deref()).await;
+        let procedures_result = schema
+            .list_procedures(introspection_schema.as_deref())
+            .await;
 
         let tables = tables_result.unwrap_or_else(|e| {
             tracing::warn!("Failed to load tables: {}", e);
             Vec::new()
         });
 
-        let objects_panel_data = extended_result.unwrap_or_else(|e| {
-            tracing::warn!("Failed to load extended objects panel data: {}", e);
-            ObjectsPanelData::from_table_infos(tables.clone())
-        });
+        let objects_panel_data = schema
+            .list_tables_extended(introspection_schema.as_deref())
+            .await
+            .unwrap_or_else(|error| {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    %error,
+                    "Failed to load extended objects panel data, falling back to table metadata"
+                );
+                ObjectsPanelData::from_table_infos(tables.clone())
+            });
+        let objects_panel_rows_by_kind =
+            Self::build_objects_panel_rows_by_kind(&objects_panel_data.rows);
+        let (objects_panel_manifest, has_driver_manifest) = match schema
+            .list_objects_panel_manifest(introspection_schema.as_deref())
+            .await
+        {
+            Ok(manifest) => {
+                manifest.validate().map_err(|error| {
+                    ServiceError::SchemaLoadFailed(format!(
+                        "Driver returned invalid objects panel manifest: {}",
+                        error
+                    ))
+                })?;
+                (manifest, true)
+            }
+            Err(error) => {
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    %error,
+                    "Failed to load objects panel manifest, deriving fallback from data"
+                );
+                let fallback_manifest = ObjectsPanelManifest::from_data(&objects_panel_data);
+                fallback_manifest.validate().map_err(|validation_error| {
+                    ServiceError::SchemaLoadFailed(format!(
+                        "Derived fallback objects panel manifest is invalid: {}",
+                        validation_error
+                    ))
+                })?;
+                (fallback_manifest, false)
+            }
+        };
+
+        Self::emit_objects_panel_manifest_coverage_telemetry(connection_id, has_driver_manifest);
 
         let views = views_result.unwrap_or_else(|e| {
             tracing::warn!("Failed to load views: {}", e);
@@ -282,7 +476,10 @@ impl SchemaService {
         // Load indexes for each table (best effort)
         let mut table_indexes = std::collections::HashMap::new();
         for table in &tables {
-            if let Ok(indexes) = schema.get_indexes(introspection_schema, &table.name).await {
+            if let Ok(indexes) = schema
+                .get_indexes(introspection_schema.as_deref(), &table.name)
+                .await
+            {
                 table_indexes.insert(table.name.clone(), indexes);
             }
         }
@@ -296,7 +493,16 @@ impl SchemaService {
                 schema_name.clone(),
             );
             self.cache
+                .set_schema_names(connection_id, schema_names.clone());
+            self.cache
                 .set_objects_panel_data(connection_id, objects_panel_data.clone());
+            self.cache
+                .set_objects_panel_rows_by_kind(connection_id, objects_panel_rows_by_kind);
+            self.cache.set_objects_panel_manifest(
+                connection_id,
+                objects_panel_manifest.clone(),
+                has_driver_manifest,
+            );
             self.cache.set_views(connection_id, views.clone());
             self.cache
                 .set_materialized_views(connection_id, materialized_views.clone());
@@ -310,15 +516,26 @@ impl SchemaService {
         let table_names: Vec<String> = tables.iter().map(|t| t.name.clone()).collect();
         let materialized_view_names: Vec<String> =
             materialized_views.into_iter().map(|v| v.name).collect();
+        let sequences = Self::object_names_by_kind(&objects_panel_data, "sequence");
+        let events = Self::object_names_by_kind(&objects_panel_data, "event");
+        let domains = Self::sidebar_type_names(&objects_panel_data, true);
+        let types = Self::sidebar_type_names(&objects_panel_data, false);
+        let extensions = Self::object_names_by_kind(&objects_panel_data, "extension");
         let db_schema = DatabaseSchema {
             table_infos: tables,
             objects_panel_data: Some(objects_panel_data),
+            objects_panel_manifest: Some(objects_panel_manifest),
             tables: table_names,
             views: views.into_iter().map(|v| v.name).collect(),
             materialized_views: materialized_view_names,
             triggers: triggers.into_iter().map(|t| t.name).collect(),
             functions: functions.into_iter().map(|f| f.name).collect(),
             procedures: procedures.into_iter().map(|p| p.name).collect(),
+            events,
+            sequences,
+            domains,
+            types,
+            extensions,
             table_indexes,
             database_name,
             schema_name,
@@ -342,6 +559,90 @@ impl SchemaService {
         Ok(db_schema)
     }
 
+    /// Load Objects Panel rows for one kind while preserving the schema cache.
+    ///
+    /// This is the service-layer contract for kind-first callers: it returns the
+    /// current snapshot filtered to the requested object kind and optional scope,
+    /// but it still reuses the same cached schema load underneath so callers do not
+    /// need to reimplement filtering or duplicate cache reads.
+    #[tracing::instrument(
+        skip(self, connection),
+        fields(connection_id = %connection_id, target_database = ?target_database, kind_id = %kind_id, scope = ?scope)
+    )]
+    pub async fn load_objects_panel_data_for_kind(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        target_database: Option<&str>,
+        kind_id: &str,
+        scope: Option<&str>,
+    ) -> ServiceResult<ObjectsPanelData> {
+        let cache_key = (
+            connection_id,
+            target_database.map(ToOwned::to_owned),
+            kind_id.to_string(),
+            scope.map(ToOwned::to_owned),
+        );
+        if self.cache.is_valid(connection_id) {
+            if let Some(data) = self
+                .objects_panel_kind_cache
+                .read()
+                .get(&cache_key)
+                .cloned()
+            {
+                return Ok(data);
+            }
+        }
+
+        let schema = connection
+            .as_schema_introspection()
+            .ok_or(ServiceError::SchemaNotSupported)?;
+        let introspection_schema = self
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
+            .await;
+        let objects_panel_data = schema
+            .list_objects_panel_data_for_kind(introspection_schema.as_deref(), kind_id)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?
+            .for_kind_and_scope(kind_id, scope);
+
+        self.objects_panel_kind_cache
+            .write()
+            .insert(cache_key, objects_panel_data.clone());
+
+        Ok(objects_panel_data)
+    }
+
+    pub async fn object_form_spec(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: &ObjectFormSpecRequest,
+    ) -> ServiceResult<Option<ObjectFormSpec>> {
+        let schema = connection
+            .as_schema_introspection()
+            .ok_or(ServiceError::SchemaNotSupported)?;
+
+        schema
+            .object_form_spec(request)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))
+    }
+
+    pub async fn generate_object_form_ddl(
+        &self,
+        connection: Arc<dyn Connection>,
+        request: &ObjectFormDdlRequest,
+    ) -> ServiceResult<Vec<String>> {
+        let schema = connection
+            .as_schema_introspection()
+            .ok_or(ServiceError::SchemaNotSupported)?;
+
+        schema
+            .generate_object_form_ddl(request)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))
+    }
+
     /// Load just the table names quickly (first priority)
     ///
     /// This is the fastest schema query and should be done first to populate
@@ -357,7 +658,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let tables = schema
@@ -397,7 +698,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let views = schema
@@ -428,7 +729,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let views = schema
@@ -455,7 +756,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let functions = schema
@@ -482,7 +783,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let procedures = schema
@@ -513,7 +814,7 @@ impl SchemaService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         let introspection_schema = self
-            .get_introspection_schema_cached(&connection, connection_id)
+            .get_sidebar_introspection_schema_cached(&connection, connection_id)
             .await;
 
         let triggers = schema
@@ -526,6 +827,113 @@ impl SchemaService {
 
         tracing::info!("Loaded {} triggers", triggers.len());
         Ok(triggers)
+    }
+
+    /// Load sidebar section content for lazy section expansion paths.
+    pub async fn load_sidebar_section_data(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        section: zqlz_connection::SidebarSection,
+    ) -> ServiceResult<Option<SidebarSectionLoadData>> {
+        match section {
+            zqlz_connection::SidebarSection::Views => {
+                let names = self
+                    .load_views(connection, connection_id)
+                    .await?
+                    .into_iter()
+                    .map(|view| view.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::Views(names)))
+            }
+            zqlz_connection::SidebarSection::MaterializedViews => {
+                let names = self
+                    .load_materialized_views(connection, connection_id)
+                    .await?
+                    .into_iter()
+                    .map(|view| view.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::MaterializedViews(names)))
+            }
+            zqlz_connection::SidebarSection::Functions => {
+                let names = self
+                    .load_functions(connection, connection_id)
+                    .await?
+                    .into_iter()
+                    .map(|function| function.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::Functions(names)))
+            }
+            zqlz_connection::SidebarSection::Procedures => {
+                let names = self
+                    .load_procedures(connection, connection_id)
+                    .await?
+                    .into_iter()
+                    .map(|procedure| procedure.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::Procedures(names)))
+            }
+            zqlz_connection::SidebarSection::Triggers => {
+                let names = self
+                    .load_triggers(connection, connection_id)
+                    .await?
+                    .into_iter()
+                    .map(|trigger| trigger.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::Triggers(names)))
+            }
+            zqlz_connection::SidebarSection::Events => {
+                let schema = self.load_database_schema(connection, connection_id).await?;
+                Ok(Some(SidebarSectionLoadData::Events(schema.events)))
+            }
+            zqlz_connection::SidebarSection::Sequences => {
+                let schema = connection
+                    .as_schema_introspection()
+                    .ok_or(ServiceError::SchemaNotSupported)?;
+                let introspection_schema = self
+                    .get_sidebar_introspection_schema_cached(&connection, connection_id)
+                    .await;
+                let names = schema
+                    .list_sequences(introspection_schema.as_deref())
+                    .await
+                    .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?
+                    .into_iter()
+                    .map(|sequence| sequence.name)
+                    .collect();
+                Ok(Some(SidebarSectionLoadData::Sequences(names)))
+            }
+            zqlz_connection::SidebarSection::Domains | zqlz_connection::SidebarSection::Types => {
+                let schema = connection
+                    .as_schema_introspection()
+                    .ok_or(ServiceError::SchemaNotSupported)?;
+                let introspection_schema = self
+                    .get_sidebar_introspection_schema_cached(&connection, connection_id)
+                    .await;
+                let include_domains = matches!(section, zqlz_connection::SidebarSection::Domains);
+                let names = schema
+                    .list_types(introspection_schema.as_deref())
+                    .await
+                    .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?
+                    .into_iter()
+                    .filter(|data_type| {
+                        matches!(data_type.type_kind, TypeKind::Domain) == include_domains
+                    })
+                    .map(|data_type| data_type.name)
+                    .collect();
+                Ok(Some(if include_domains {
+                    SidebarSectionLoadData::Domains(names)
+                } else {
+                    SidebarSectionLoadData::Types(names)
+                }))
+            }
+            zqlz_connection::SidebarSection::Extensions => {
+                let schema = self.load_database_schema(connection, connection_id).await?;
+                Ok(Some(SidebarSectionLoadData::Extensions(schema.extensions)))
+            }
+            zqlz_connection::SidebarSection::Tables
+            | zqlz_connection::SidebarSection::Queries
+            | zqlz_connection::SidebarSection::RedisDatabases => Ok(None),
+        }
     }
 
     /// Helper to get the introspection schema parameter.
@@ -618,28 +1026,23 @@ impl SchemaService {
         connection: &Arc<dyn Connection>,
         connection_id: Option<Uuid>,
     ) -> Option<String> {
-        if !connection.has_session_namespace() {
-            return None;
-        }
-
-        let should_return_namespace_scope = !Self::uses_unscoped_introspection(connection.as_ref());
-
         // Check cache first to avoid redundant queries
         if let Some(conn_id) = connection_id {
             if self.cache.is_valid(conn_id) {
                 let cached_db = self.cache.get_database_name(conn_id);
                 let cached_schema = self.cache.get_schema_name(conn_id);
                 if cached_db.is_some() || cached_schema.is_some() {
-                    return if should_return_namespace_scope {
-                        cached_schema
-                    } else {
-                        None
-                    };
+                    return cached_schema;
                 }
             }
         }
 
-        let schema_name = connection.resolve_session_namespace().await.ok().flatten();
+        let resolved_scope = connection
+            .resolve_scope(ConnectionScope::Default)
+            .await
+            .ok()
+            .unwrap_or_else(zqlz_core::ResolvedConnectionScope::default_scope);
+        let schema_name = resolved_scope.effective_namespace;
         let database_name = Self::resolve_database_name_for_connection(connection).await;
 
         if let Some(conn_id) = connection_id {
@@ -647,11 +1050,7 @@ impl SchemaService {
                 .set_connection_names(conn_id, database_name.clone(), schema_name.clone());
         }
 
-        if should_return_namespace_scope {
-            schema_name
-        } else {
-            None
-        }
+        resolved_scope.introspection_scope.or(schema_name)
     }
 
     /// Get detailed table information
@@ -749,6 +1148,20 @@ impl SchemaService {
                 .ok()
                 .flatten()
         };
+        let constraints = schema_introspection
+            .get_constraints(schema, table_name)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load constraints for {}: {}", table_name, e);
+                Vec::new()
+            });
+        let triggers = schema_introspection
+            .list_triggers(schema, Some(table_name))
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!("Failed to load triggers for {}: {}", table_name, e);
+                Vec::new()
+            });
 
         // Extract primary key column names
         let pk_columns: Vec<String> = primary_key
@@ -783,6 +1196,8 @@ impl SchemaService {
             columns: column_infos,
             indexes,
             foreign_keys,
+            constraints,
+            triggers,
             primary_key_columns: pk_columns,
             row_count: None,
         };
@@ -831,6 +1246,7 @@ impl SchemaService {
             object_type,
             schema,
             name: name.clone(),
+            signature: None,
         };
 
         let ddl = schema_introspection
@@ -852,13 +1268,28 @@ impl SchemaService {
     /// * `connection_id` - UUID of the connection whose cache should be invalidated
     pub fn invalidate_connection_cache(&self, connection_id: Uuid) {
         tracing::info!("Invalidating schema cache for connection {}", connection_id);
-        self.cache.invalidate(connection_id);
+        self.invalidate_schema_snapshot(connection_id);
         self.table_details_cache
             .write()
             .retain(|(conn_id, _, _), _| *conn_id != connection_id);
         self.ddl_cache
             .write()
             .retain(|(conn_id, _, _), _| *conn_id != connection_id);
+        self.objects_panel_kind_cache
+            .write()
+            .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
+    }
+
+    /// Invalidate only the connection-wide schema snapshot.
+    ///
+    /// Targeted database loads need a fresh manifest and row set, but the
+    /// schema-scoped table-details and generated-DDL caches can survive that
+    /// switch because their keys already carry the object scope.
+    fn invalidate_schema_snapshot(&self, connection_id: Uuid) {
+        self.cache.invalidate(connection_id);
+        self.objects_panel_kind_cache
+            .write()
+            .retain(|(conn_id, _, _, _), _| *conn_id != connection_id);
     }
 
     /// Invalidate cached TableDetails for a specific table on a connection.
@@ -940,6 +1371,7 @@ impl SchemaService {
             object_type,
             schema: schema.map(ToOwned::to_owned),
             name: object_name.to_string(),
+            signature: None,
         };
 
         match schema_introspection.generate_ddl(&db_object).await {
@@ -1071,6 +1503,32 @@ impl SchemaService {
         } else {
             None
         }
+    }
+
+    /// Get cached objects panel rows grouped by kind for a connection.
+    ///
+    /// Returns `None` when the schema cache is stale.
+    pub fn get_cached_objects_panel_rows_by_kind(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<HashMap<String, Vec<ObjectsPanelRow>>> {
+        if self.cache.is_valid(connection_id) {
+            self.cache.get_objects_panel_rows_by_kind(connection_id)
+        } else {
+            None
+        }
+    }
+
+    /// Get cached objects panel rows for a specific object kind.
+    ///
+    /// Returns `None` when the schema cache is stale or the kind is not present.
+    pub fn get_cached_objects_panel_rows_for_kind(
+        &self,
+        connection_id: Uuid,
+        kind_id: &str,
+    ) -> Option<Vec<ObjectsPanelRow>> {
+        self.get_cached_objects_panel_rows_by_kind(connection_id)
+            .and_then(|rows_by_kind| rows_by_kind.get(kind_id).cloned())
     }
 }
 
@@ -1234,8 +1692,7 @@ impl SchemaService {
                 Ok(columns)
             }
             Err(error)
-                if connection.driver_name() == "sqlite"
-                    && matches!(table_type, TableType::VirtualTable) =>
+                if connection.should_use_ddl_column_fallback(table_type, &error.to_string()) =>
             {
                 tracing::warn!(
                     table_name = %table_name,
@@ -1264,6 +1721,7 @@ impl SchemaService {
                 object_type: ObjectType::Table,
                 schema: None,
                 name: table_name.to_string(),
+                signature: None,
             })
             .await
             .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
@@ -1427,6 +1885,32 @@ impl Default for SchemaService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zqlz_core::ObjectsPanelObjectRef;
+
+    fn make_row(kind_id: &str, name: &str) -> ObjectsPanelRow {
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("name".to_string(), name.to_string());
+
+        ObjectsPanelRow {
+            name: name.to_string(),
+            schema: Some("public".to_string()),
+            object_type: kind_id.to_string(),
+            object_ref: Some(
+                ObjectsPanelObjectRef::new(kind_id, name)
+                    .with_schema_option(Some("public".to_string())),
+            ),
+            values,
+            redis_database_index: None,
+            key_value_info: None,
+        }
+    }
+
+    fn make_type_row(name: &str, type_kind: &str) -> ObjectsPanelRow {
+        let mut row = make_row("type", name);
+        row.values
+            .insert("data_type".to_string(), type_kind.to_string());
+        row
+    }
 
     #[test]
     fn test_schema_service_creation() {
@@ -1439,5 +1923,77 @@ mod tests {
         let cache = Arc::new(SchemaCache::new(std::time::Duration::from_secs(300)));
         let service = SchemaService::with_cache(cache.clone());
         assert!(Arc::ptr_eq(&service.cache, &cache));
+    }
+
+    #[test]
+    fn groups_objects_panel_rows_by_kind() {
+        let rows = vec![
+            make_row("table", "users"),
+            make_row("view", "active_users"),
+            make_row("table", "orders"),
+        ];
+
+        let rows_by_kind = SchemaService::build_objects_panel_rows_by_kind(&rows);
+
+        assert_eq!(rows_by_kind.get("table").map(Vec::len), Some(2));
+        assert_eq!(rows_by_kind.get("view").map(Vec::len), Some(1));
+        assert!(!rows_by_kind.contains_key("function"));
+    }
+
+    #[test]
+    fn sidebar_metadata_names_split_domains_from_types() {
+        let objects_panel_data = ObjectsPanelData {
+            columns: Vec::new(),
+            rows: vec![
+                make_row("sequence", "public.invoice_id_seq"),
+                make_type_row("public.status", "Enum"),
+                make_type_row("public.email_address", "Domain"),
+                make_type_row("public.price_range", "Range"),
+                make_row("extension", "postgis"),
+            ],
+        };
+
+        assert_eq!(
+            SchemaService::object_names_by_kind(&objects_panel_data, "sequence"),
+            vec!["public.invoice_id_seq".to_string()]
+        );
+        assert_eq!(
+            SchemaService::sidebar_type_names(&objects_panel_data, true),
+            vec!["public.email_address".to_string()]
+        );
+        assert_eq!(
+            SchemaService::sidebar_type_names(&objects_panel_data, false),
+            vec![
+                "public.status".to_string(),
+                "public.price_range".to_string()
+            ]
+        );
+        assert_eq!(
+            SchemaService::object_names_by_kind(&objects_panel_data, "extension"),
+            vec!["postgis".to_string()]
+        );
+    }
+
+    #[test]
+    fn cached_objects_panel_rows_for_kind_respect_cache_validity() {
+        let connection_id = Uuid::new_v4();
+        let cache = Arc::new(SchemaCache::new(std::time::Duration::from_secs(300)));
+        let service = SchemaService::with_cache(cache.clone());
+
+        cache.set_tables(connection_id, Vec::new());
+        cache.set_objects_panel_rows_by_kind(
+            connection_id,
+            HashMap::from([
+                ("table".to_string(), vec![make_row("table", "users")]),
+                ("view".to_string(), vec![make_row("view", "active_users")]),
+            ]),
+        );
+
+        let table_rows = service.get_cached_objects_panel_rows_for_kind(connection_id, "table");
+        assert_eq!(table_rows.map(|rows| rows.len()), Some(1));
+
+        cache.invalidate(connection_id);
+        let stale = service.get_cached_objects_panel_rows_for_kind(connection_id, "table");
+        assert!(stale.is_none());
     }
 }

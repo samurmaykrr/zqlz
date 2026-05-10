@@ -1592,7 +1592,7 @@ impl KeyValueEditorPanel {
             new_ttl,
         });
 
-        self.is_modified = false;
+        self.validation_error = None;
         cx.notify();
     }
 
@@ -1679,12 +1679,87 @@ impl KeyValueEditorPanel {
                 database_name: data.database_name.clone(),
             });
         }
+    }
+
+    pub(crate) fn mark_redis_save_succeeded(
+        &mut self,
+        original_key: &str,
+        new_key: String,
+        value_type: RedisValueType,
+        serialized_value: String,
+        ttl_seconds: Option<u64>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = &mut self.data else {
+            return;
+        };
+
+        if data.key != original_key && data.key != new_key {
+            return;
+        }
+
+        data.key = new_key;
+        data.value_type = value_type;
+        data.value = Some(serialized_value);
+        data.ttl = ttl_seconds.map(|ttl| ttl as i64).unwrap_or(-1);
+        data.is_new = false;
+        self.is_modified = false;
+        self.validation_error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn mark_redis_save_failed(
+        &mut self,
+        original_key: &str,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = &self.data else {
+            return;
+        };
+
+        if data.key != original_key {
+            return;
+        }
+
+        self.is_modified = true;
+        self.validation_error = Some(error);
+        cx.notify();
+    }
+
+    pub(crate) fn mark_redis_delete_succeeded(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(data) = &self.data else {
+            return;
+        };
+
+        if data.key != key {
+            return;
+        }
 
         self.data = None;
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
         self.is_modified = false;
+        self.validation_error = None;
+        cx.notify();
+    }
+
+    pub(crate) fn mark_redis_delete_failed(
+        &mut self,
+        key: &str,
+        error: String,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(data) = &self.data else {
+            return;
+        };
+
+        if data.key != key {
+            return;
+        }
+
+        self.validation_error = Some(error);
         cx.notify();
     }
 

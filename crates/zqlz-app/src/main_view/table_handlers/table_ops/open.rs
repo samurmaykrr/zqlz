@@ -16,12 +16,23 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for table_name in table_names {
+        let Some(decision) = self.decide_open_tables_workflow(
+            connection_id,
+            table_names,
+            database_name,
+            is_view,
+            window,
+            cx,
+        ) else {
+            return;
+        };
+
+        for request in decision.requests {
             self.open_table_viewer(
-                connection_id,
-                table_name,
-                database_name.clone(),
-                is_view,
+                request.connection_id,
+                request.table_name,
+                request.database_name,
+                request.is_view,
                 window,
                 cx,
             );

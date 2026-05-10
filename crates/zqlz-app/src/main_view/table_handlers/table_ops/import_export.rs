@@ -6,28 +6,13 @@ use zqlz_core::DriverCategory;
 use zqlz_interchange::widgets::{
     ExportWizard, ExportWizardState, ImportWizard, ImportWizardState, TableExportConfig,
 };
+use zqlz_services::DumpTablesSqlRequest;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
 use crate::app::AppState;
 use crate::main_view::MainView;
-use crate::main_view::table_handlers_utils::conversion::driver_name_to_category;
 
 impl MainView {
-    /// Exports data from the given tables, or all tables if the list is empty.
-    ///
-    /// Delegates directly to `export_data` so that every call site — toolbar
-    /// button, context menu (single or multi), connection sidebar — goes through
-    /// the same code path.
-    pub(in crate::main_view) fn export_tables(
-        &mut self,
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.export_data(connection_id, table_names, window, cx);
-    }
-
     /// Dumps SQL for multiple tables (CREATE + optional INSERT statements)
     pub(in crate::main_view) fn dump_tables_sql(
         &mut self,
@@ -53,126 +38,37 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let connection = connection.clone();
+        let table_service = app_state.table_service.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            let mut all_sql: Vec<String> = Vec::new();
+            let outcome = table_service
+                .dump_tables_sql(
+                    connection,
+                    DumpTablesSqlRequest {
+                        table_names,
+                        include_data,
+                    },
+                )
+                .await;
 
-            for table_name in &table_names {
-                let mut table_sql_parts: Vec<String> = Vec::new();
-
-                // Add comment header for this table
-                table_sql_parts.push(format!("-- Table: {}", table_name));
-                table_sql_parts.push(format!(
-                    "-- Generated: {}",
-                    chrono::Utc::now().format("%Y-%m-%d %H:%M:%S UTC")
-                ));
-                table_sql_parts.push(String::new());
-
-                // Get table structure
-                if let Some(schema_introspection) = connection.as_schema_introspection() {
-                    match schema_introspection.get_columns(None, table_name).await {
-                        Ok(columns) => {
-                            let column_defs: Vec<String> = columns
-                                .iter()
-                                .map(|col| {
-                                    let nullable = if col.nullable { "" } else { " NOT NULL" };
-                                    let default = col
-                                        .default_value
-                                        .as_ref()
-                                        .map(|d| format!(" DEFAULT {}", d))
-                                        .unwrap_or_default();
-                                    format!(
-                                        "    \"{}\" {}{}{}",
-                                        col.name, col.data_type, nullable, default
-                                    )
-                                })
-                                .collect();
-
-                            let create_table = format!(
-                                "CREATE TABLE \"{}\" (\n{}\n);",
-                                table_name,
-                                column_defs.join(",\n")
-                            );
-                            table_sql_parts.push(create_table);
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to get columns for {}: {}", table_name, e);
-                            table_sql_parts.push(format!("-- Error getting structure: {}", e));
-                        }
-                    }
-                }
-
-                // Get data if requested
-                if include_data {
-                    let query = format!("SELECT * FROM \"{}\"", table_name);
-                    match connection.query(&query, &[]).await {
-                        Ok(result) => {
-                            if !result.rows.is_empty() {
-                                table_sql_parts.push(String::new());
-                                let column_names: Vec<String> =
-                                    result.columns.iter().map(|c| c.name.clone()).collect();
-
-                                for row in &result.rows {
-                                    let values: Vec<String> = row
-                                        .values
-                                        .iter()
-                                        .map(|v| match v {
-                                            zqlz_core::Value::Null => "NULL".to_string(),
-                                            zqlz_core::Value::String(s) => {
-                                                format!("'{}'", s.replace("'", "''"))
-                                            }
-                                            zqlz_core::Value::Int64(n) => n.to_string(),
-                                            zqlz_core::Value::Float64(n) => n.to_string(),
-                                            zqlz_core::Value::Bool(b) => {
-                                                if *b { "TRUE" } else { "FALSE" }.to_string()
-                                            }
-                                            zqlz_core::Value::Bytes(b) => {
-                                                // Hex encode bytes without external crate
-                                                let hex_str: String = b
-                                                    .iter()
-                                                    .map(|byte| format!("{:02x}", byte))
-                                                    .collect();
-                                                format!("X'{}'", hex_str)
-                                            }
-                                            _ => v.to_string(),
-                                        })
-                                        .collect();
-
-                                    let insert_sql = format!(
-                                        "INSERT INTO \"{}\" ({}) VALUES ({});",
-                                        table_name,
-                                        column_names
-                                            .iter()
-                                            .map(|n| format!("\"{}\"", n))
-                                            .collect::<Vec<_>>()
-                                            .join(", "),
-                                        values.join(", ")
-                                    );
-                                    table_sql_parts.push(insert_sql);
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            tracing::error!("Failed to get data for {}: {}", table_name, e);
-                            table_sql_parts.push(format!("-- Error getting data: {}", e));
-                        }
-                    }
-                }
-
-                all_sql.push(table_sql_parts.join("\n"));
-            }
-
-            let full_sql = all_sql.join("\n\n");
-            let table_count = table_names.len();
+            let table_count = outcome.processed_table_names.len();
 
             cx.update(|window, cx| {
-                cx.write_to_clipboard(gpui::ClipboardItem::new_string(full_sql));
+                if outcome.sql.is_empty() {
+                    window.push_notification(
+                        Notification::warning("Could not generate SQL for selected table(s)"),
+                        cx,
+                    );
+                    return;
+                }
+
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(outcome.sql));
                 window.push_notification(
                     Notification::success(format!(
                         "SQL for {} table(s) copied to clipboard",
@@ -180,6 +76,13 @@ impl MainView {
                     )),
                     cx,
                 );
+
+                if !outcome.errors.is_empty() {
+                    tracing::warn!(
+                        errors = %outcome.errors.join("; "),
+                        "Table SQL dump completed with partial failures"
+                    );
+                }
             })?;
 
             anyhow::Ok(())
@@ -206,7 +109,7 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -307,7 +210,7 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -315,12 +218,31 @@ impl MainView {
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let export_all_tables = table_names.is_empty();
-        let driver_category = driver_name_to_category(connection.driver_name());
+        let driver_category = connection.driver_category();
 
         cx.spawn_in(window, async move |_this, cx| {
+            let connection_for_wizard = connection.clone();
+            let table_names_for_placeholders = table_names.clone();
+            let wizard_task = cx.update(|_window, cx| {
+                let mut state = ExportWizardState::new();
+
+                if let Some(docs_dir) = dirs::document_dir() {
+                    state.output_folder = docs_dir;
+                }
+
+                state.tables_loading = true;
+
+                for table_name in table_names_for_placeholders {
+                    state.add_table(TableExportConfig::new(table_name, Vec::new()));
+                }
+
+                ExportWizard::open(state, Some(connection_for_wizard), cx)
+            })?;
+
+            let wizard_handle = wizard_task.await?;
             let mut table_configs: Vec<TableExportConfig> = Vec::new();
 
-            if export_all_tables {
+            let load_result: anyhow::Result<()> = if export_all_tables {
                 // Fetch all items from the database — behaviour varies by driver category.
                 if let Some(schema_introspection) = connection.as_schema_introspection() {
                     match driver_category {
@@ -339,10 +261,12 @@ impl MainView {
                                         );
                                         table_configs.push(config);
                                     }
+                                    Ok(())
                                 }
-                                Err(e) => {
-                                    tracing::error!("Could not list databases for export: {}", e);
-                                }
+                                Err(e) => Err(anyhow::anyhow!(
+                                    "Could not list databases for export: {}",
+                                    e
+                                )),
                             }
                         }
                         _ => match schema_introspection.list_tables(None).await {
@@ -374,12 +298,17 @@ impl MainView {
                                     table_configs
                                         .push(TableExportConfig::new(table_info.name, columns));
                                 }
+                                Ok(())
                             }
                             Err(e) => {
-                                tracing::error!("Could not list tables for export: {}", e);
+                                Err(anyhow::anyhow!("Could not list tables for export: {}", e))
                             }
                         },
                     }
+                } else {
+                    Err(anyhow::anyhow!(
+                        "Schema introspection is not supported by this connection"
+                    ))
                 }
             } else {
                 // Fetch only the requested tables.
@@ -400,23 +329,28 @@ impl MainView {
                     };
                     table_configs.push(TableExportConfig::new(table_name.clone(), columns));
                 }
+                Ok(())
+            };
+
+            match load_result {
+                Ok(()) => {
+                    let wizard = wizard_handle.wizard.clone();
+                    wizard_handle.window.update(cx, |_, window, cx| {
+                        wizard.update(cx, |this, cx| {
+                            this.set_tables(table_configs, window, cx);
+                        });
+                    })?;
+                }
+                Err(error) => {
+                    tracing::error!("{}", error);
+                    let wizard = wizard_handle.wizard.clone();
+                    wizard_handle.window.update(cx, |_, _window, cx| {
+                        wizard.update(cx, |this, cx| {
+                            this.set_tables_load_error(error.to_string(), cx);
+                        });
+                    })?;
+                }
             }
-
-            let connection_for_wizard = connection.clone();
-
-            cx.update(|_window, cx| {
-                let mut state = ExportWizardState::new();
-
-                if let Some(docs_dir) = dirs::document_dir() {
-                    state.output_folder = docs_dir;
-                }
-
-                for config in table_configs {
-                    state.add_table(config);
-                }
-
-                ExportWizard::open(state, Some(connection_for_wizard), cx);
-            })?;
 
             anyhow::Ok(())
         })
@@ -444,7 +378,7 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -453,70 +387,17 @@ impl MainView {
         let table_service = app_state.table_service.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            let mut sql_parts: Vec<String> = Vec::new();
+            let outcome = table_service
+                .dump_tables_sql(
+                    connection,
+                    DumpTablesSqlRequest {
+                        table_names: vec![table_name.clone()],
+                        include_data,
+                    },
+                )
+                .await;
 
-            // Get the CREATE statement
-            if let Some(schema_introspection) = connection.as_schema_introspection() {
-                use zqlz_core::{DatabaseObject, ObjectType};
-                let db_object = DatabaseObject {
-                    object_type: ObjectType::Table,
-                    schema: None,
-                    name: table_name.clone(),
-                };
-                if let Ok(create_sql) = schema_introspection.generate_ddl(&db_object).await {
-                    sql_parts.push(create_sql);
-                }
-            }
-
-            // Get INSERT statements if including data
-            if include_data {
-                match table_service
-                    .browse_table(connection.clone(), &table_name, None, None, None)
-                    .await
-                {
-                    Ok(result) => {
-                        if !result.rows.is_empty() {
-                            sql_parts.push(String::new()); // Empty line separator
-                            sql_parts.push(format!("-- Data for table: {}", table_name));
-
-                            let column_names: Vec<&str> =
-                                result.columns.iter().map(|c| c.name.as_str()).collect();
-
-                            for row in &result.rows {
-                                let values: Vec<String> = row
-                                    .values
-                                    .iter()
-                                    .map(|v| {
-                                        if v.is_null() {
-                                            "NULL".to_string()
-                                        } else {
-                                            let s = v.to_string();
-                                            format!("'{}'", s.replace("'", "''"))
-                                        }
-                                    })
-                                    .collect();
-
-                                let insert_sql = format!(
-                                    "INSERT INTO \"{}\" ({}) VALUES ({});",
-                                    table_name,
-                                    column_names
-                                        .iter()
-                                        .map(|n| format!("\"{}\"", n))
-                                        .collect::<Vec<_>>()
-                                        .join(", "),
-                                    values.join(", ")
-                                );
-                                sql_parts.push(insert_sql);
-                            }
-                        }
-                    }
-                    Err(e) => {
-                        tracing::error!("Failed to fetch table data for dump: {}", e);
-                    }
-                }
-            }
-
-            let full_sql = sql_parts.join("\n");
+            let full_sql = outcome.sql;
 
             if full_sql.is_empty() {
                 tracing::warn!("Could not generate SQL for table");
@@ -527,6 +408,14 @@ impl MainView {
             cx.update(|_window, cx| {
                 cx.write_to_clipboard(gpui::ClipboardItem::new_string(full_sql.clone()));
             })?;
+
+            if !outcome.errors.is_empty() {
+                tracing::warn!(
+                    errors = %outcome.errors.join("; "),
+                    table_name = %table_name,
+                    "Single-table SQL dump completed with partial failures"
+                );
+            }
 
             let msg = if include_data {
                 format!(

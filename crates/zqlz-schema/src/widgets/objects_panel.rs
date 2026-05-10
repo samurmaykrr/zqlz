@@ -5,16 +5,17 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_connection::SidebarObjectCapabilities;
 use zqlz_core::{
-    DriverCategory, ObjectsPanelColumn, ObjectsPanelColumnAlignment, ObjectsPanelData,
-    ObjectsPanelRow,
+    ObjectsPanelAction, ObjectsPanelColumn, ObjectsPanelColumnAlignment, ObjectsPanelData,
+    ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow,
 };
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon,
+    ActiveTheme, Icon, IconName, Sizable, Size, ZqlzIcon, action_icon_from_key,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
-    menu::{PopupMenu, PopupMenuItem},
+    menu::{DropdownMenu, PopupMenu, PopupMenuItem},
+    object_icon_from_key,
     table::{Column, ColumnSort, Table, TableDelegate, TableEvent, TableState},
     typography::body_small,
     v_flex,
@@ -26,132 +27,141 @@ actions!(objects_panel, [OpenSelected, DeleteSelected, NewObject]);
 /// Events emitted by the objects panel
 #[derive(Clone, Debug)]
 pub enum ObjectsPanelEvent {
-    /// User wants to open table(s) (view data)
-    OpenTables {
+    /// User wants to invoke a generic action on one or more objects.
+    InvokeAction {
         connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
+        action_id: String,
+        object_refs: Vec<ObjectsPanelObjectRef>,
     },
-    /// User wants to design/edit table structure(s)
-    DesignTables {
+    ActiveKindChanged {
         connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
+        kind_id: String,
+        scope_id: Option<String>,
     },
-    /// User wants to create a new table
-    NewTable {
-        connection_id: Uuid,
-        database_name: Option<String>,
-    },
-    /// User wants to delete table(s)
-    DeleteTables {
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to empty table(s) (DELETE FROM)
-    EmptyTables {
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to duplicate table(s)
-    DuplicateTables {
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to import data (single table only)
-    ImportData {
-        connection_id: Uuid,
-        table_name: String,
-        database_name: Option<String>,
-    },
-    /// User wants to export data from table(s)
-    ExportTables {
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to dump table SQL (structure and optionally data)
-    DumpTablesSql {
-        connection_id: Uuid,
-        table_names: Vec<String>,
-        include_data: bool,
-        database_name: Option<String>,
-    },
-    /// User wants to copy table name(s) to clipboard
-    CopyTableNames { table_names: Vec<String> },
-    /// User wants to rename a table (single table only)
-    RenameTable {
-        connection_id: Uuid,
-        table_name: String,
-        database_name: Option<String>,
-    },
-    /// User wants to refresh the objects list
-    Refresh,
-    // ============================================
-    // Redis-related events
-    // ============================================
-    /// User wants to open a Redis database to view all keys in table viewer
-    OpenRedisDatabase {
-        connection_id: Uuid,
-        database_index: u16,
-    },
-    /// User wants to delete Redis key(s)
-    DeleteKeys {
-        connection_id: Uuid,
-        key_names: Vec<String>,
-    },
-    /// User wants to copy Redis key name(s) to clipboard
-    CopyKeyNames { key_names: Vec<String> },
-    // ============================================
-    // View-related events
-    // ============================================
-    /// User wants to open view(s) (execute the view's query)
-    OpenViews {
-        connection_id: Uuid,
-        view_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to edit view DDL(s)
-    DesignViews {
-        connection_id: Uuid,
-        view_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to create a new view
-    NewView {
-        connection_id: Uuid,
-        database_name: Option<String>,
-    },
-    /// User wants to delete view(s)
-    DeleteViews {
-        connection_id: Uuid,
-        view_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to duplicate view(s)
-    DuplicateViews {
-        connection_id: Uuid,
-        view_names: Vec<String>,
-        database_name: Option<String>,
-    },
-    /// User wants to copy view name(s) to clipboard
-    CopyViewNames { view_names: Vec<String> },
-    /// User wants to rename a view (single view only)
-    RenameView {
-        connection_id: Uuid,
-        view_name: String,
-        database_name: Option<String>,
-    },
-    /// User wants to view version history for a database object (single object only)
-    ViewHistory {
-        connection_id: Uuid,
-        object_name: String,
-        object_schema: Option<String>,
-        object_type: String, // "table", "view", "function", "procedure", "trigger"
-    },
+}
+
+#[derive(Clone)]
+struct ObjectsPanelKindMenuEntry {
+    kind_id: String,
+    label: String,
+}
+
+#[derive(Clone)]
+struct ObjectsPanelScopeMenuEntry {
+    scope_id: Option<String>,
+    label: String,
+}
+
+#[derive(Clone)]
+struct ObjectsPanelToolbarActionEntry {
+    id: String,
+    label: String,
+    icon_key: Option<String>,
+    group: Option<String>,
+}
+
+fn object_ref_from_row(row: &ObjectsPanelRow) -> ObjectsPanelObjectRef {
+    row.object_ref.clone().unwrap_or_else(|| {
+        ObjectsPanelObjectRef::new(row.object_kind_id(), row.object_name())
+            .with_schema_option(row.object_schema().map(ToString::to_string))
+    })
+}
+
+fn resolve_primary_row_action_id(manifest: &ObjectsPanelManifest, row: &ObjectsPanelRow) -> String {
+    let Some(kind) = manifest
+        .object_kinds
+        .iter()
+        .find(|kind| kind.id == row.object_kind_id())
+    else {
+        return "open".to_string();
+    };
+
+    let Some(default_action_id) = kind.default_row_action_id.as_deref() else {
+        return "open".to_string();
+    };
+
+    if default_action_id.is_empty() {
+        return "open".to_string();
+    }
+
+    if kind
+        .row_actions
+        .iter()
+        .any(|action| action.id == default_action_id)
+    {
+        return default_action_id.to_string();
+    }
+
+    tracing::warn!(
+        kind_id = %kind.id,
+        default_row_action_id = default_action_id,
+        "Objects panel kind has unknown default_row_action_id; falling back to open"
+    );
+    "open".to_string()
+}
+
+fn resolve_destructive_row_action_id(
+    manifest: &ObjectsPanelManifest,
+    row: &ObjectsPanelRow,
+) -> Option<String> {
+    manifest
+        .object_kinds
+        .iter()
+        .find(|kind| kind.id == row.object_kind_id())
+        .and_then(|kind| {
+            kind.row_actions
+                .iter()
+                .find(|action| action.destructive)
+                .map(|action| action.id.clone())
+        })
+}
+
+fn resolve_create_action_id(
+    active_kind_id: Option<&str>,
+    toolbar_actions: &[ObjectsPanelAction],
+) -> Option<String> {
+    let mut seen_create_actions = std::collections::BTreeSet::new();
+    let mut create_actions: Vec<&ObjectsPanelAction> = toolbar_actions
+        .iter()
+        .filter(|action| {
+            action.create_object_kind_id.is_some() && seen_create_actions.insert(action.id.as_str())
+        })
+        .collect();
+
+    if let Some(action) = active_kind_id.and_then(|active_kind_id| {
+        create_actions
+            .iter()
+            .find(|action| action.create_object_kind_id.as_deref() == Some(active_kind_id))
+    }) {
+        return Some(action.id.clone());
+    }
+
+    create_actions
+        .drain(..)
+        .next()
+        .map(|action| action.id.clone())
+}
+
+fn resolve_refresh_action_id(toolbar_actions: &[ObjectsPanelAction]) -> Option<String> {
+    toolbar_actions
+        .iter()
+        .find(|action| action.refreshes_objects_panel)
+        .map(|action| action.id.clone())
+}
+
+/// Keeps the empty-state copy aligned with the manifest-driven kind model so
+/// the panel does not imply a tables/views-only surface.
+fn empty_state_copy(active_kind_label: Option<&str>) -> (String, String) {
+    match active_kind_label {
+        Some(kind_label) => (
+            format!("No {} found", kind_label.to_lowercase()),
+            "Try changing the kind, scope, or search.".to_string(),
+        ),
+        None => (
+            "No objects found".to_string(),
+            "Try changing the kind, scope, or search.".to_string(),
+        ),
+    }
 }
 
 /// Delegate for the objects table
@@ -162,6 +172,8 @@ pub struct ObjectsTableDelegate {
     column_ids: Vec<String>,
     /// All objects (unfiltered)
     objects: Vec<ObjectsPanelRow>,
+    /// Default columns from the latest loaded data payload.
+    default_columns: Vec<ObjectsPanelColumn>,
     /// Filtered objects (after search)
     filtered_objects: Vec<ObjectsPanelRow>,
     /// UI size (reserved for future use)
@@ -175,10 +187,16 @@ pub struct ObjectsTableDelegate {
     panel: WeakEntity<ObjectsPanel>,
     /// Whether we're loading
     is_loading: bool,
-    /// Current driver category (determines context menu behavior)
-    driver_category: DriverCategory,
     /// Effective object capabilities for the active connection.
     object_capabilities: SidebarObjectCapabilities,
+    /// Declarative object/action behavior for generic panel rendering.
+    manifest: ObjectsPanelManifest,
+    /// Currently active object kind.
+    active_kind_id: Option<String>,
+    /// Currently active scope within the active kind.
+    active_scope_id: Option<String>,
+    /// Current search query applied to the active kind.
+    search_text: String,
     /// Cached selected row indices for context menu (populated when context menu opens)
     context_menu_selected_rows: Vec<usize>,
 }
@@ -193,16 +211,211 @@ impl ObjectsTableDelegate {
             columns,
             column_ids,
             objects: Vec::new(),
+            default_columns: default_data.columns,
             filtered_objects: Vec::new(),
             size: Size::Small,
             connection_id: None,
             database_name: None,
             panel,
             is_loading: false,
-            driver_category: DriverCategory::Relational,
             object_capabilities: SidebarObjectCapabilities::default(),
+            manifest: ObjectsPanelManifest::default(),
+            active_kind_id: None,
+            active_scope_id: None,
+            search_text: String::new(),
             context_menu_selected_rows: Vec::new(),
         }
+    }
+
+    fn resolve_active_kind_id(&self) -> Option<String> {
+        if let Some(active_kind_id) = self.active_kind_id.as_deref()
+            && self
+                .manifest
+                .object_kinds
+                .iter()
+                .any(|kind| kind.id == active_kind_id)
+        {
+            return Some(active_kind_id.to_string());
+        }
+
+        self.manifest
+            .object_kinds
+            .iter()
+            .find(|kind| {
+                self.objects
+                    .iter()
+                    .any(|row| row.object_kind_id() == kind.id.as_str())
+            })
+            .map(|kind| kind.id.clone())
+            .or_else(|| {
+                self.manifest
+                    .object_kinds
+                    .first()
+                    .map(|kind| kind.id.clone())
+            })
+            .or_else(|| {
+                self.objects
+                    .first()
+                    .map(|row| row.object_kind_id().to_string())
+            })
+    }
+
+    fn columns_for_active_kind(&self) -> &[ObjectsPanelColumn] {
+        if let Some(active_kind_id) = self.active_kind_id.as_deref()
+            && let Some(kind) = self
+                .manifest
+                .object_kinds
+                .iter()
+                .find(|kind| kind.id == active_kind_id)
+            && !kind.columns.is_empty()
+        {
+            return &kind.columns;
+        }
+
+        &self.default_columns
+    }
+
+    fn available_scope_ids_for_active_kind(&self) -> Vec<String> {
+        let mut scope_ids = std::collections::BTreeSet::new();
+        let active_kind_id = self.active_kind_id.as_deref();
+
+        for row in &self.objects {
+            if !active_kind_id
+                .map(|kind_id| row.object_kind_id() == kind_id)
+                .unwrap_or(true)
+            {
+                continue;
+            }
+
+            if let Some(scope_id) = row.object_schema().map(str::to_string) {
+                scope_ids.insert(scope_id);
+            }
+        }
+
+        scope_ids.into_iter().collect()
+    }
+
+    fn resolve_active_scope_id(&self) -> Option<String> {
+        let available_scopes = self.available_scope_ids_for_active_kind();
+        if let Some(active_scope_id) = self.active_scope_id.as_deref()
+            && available_scopes
+                .iter()
+                .any(|scope_id| scope_id == active_scope_id)
+        {
+            return Some(active_scope_id.to_string());
+        }
+
+        None
+    }
+
+    fn rebuild_filtered_objects(&mut self) {
+        let active_kind_id = self.active_kind_id.as_deref();
+        let search_lower = self.search_text.to_lowercase();
+        let has_search = !search_lower.is_empty();
+
+        self.filtered_objects = self
+            .objects
+            .iter()
+            .filter(|row| {
+                active_kind_id
+                    .map(|kind_id| row.object_kind_id() == kind_id)
+                    .unwrap_or(true)
+            })
+            .filter(|row| {
+                self.active_scope_id
+                    .as_deref()
+                    .map(|scope_id| row.object_schema() == Some(scope_id))
+                    .unwrap_or(true)
+            })
+            .filter(|row| {
+                if !has_search {
+                    return true;
+                }
+
+                row.object_name().to_lowercase().contains(&search_lower)
+            })
+            .cloned()
+            .collect();
+    }
+
+    fn rebuild_active_kind_projection(&mut self) {
+        self.active_kind_id = self.resolve_active_kind_id();
+        self.active_scope_id = self.resolve_active_scope_id();
+        let (columns, column_ids) = Self::build_ui_columns(self.columns_for_active_kind());
+        self.columns = columns;
+        self.column_ids = column_ids;
+        self.rebuild_filtered_objects();
+    }
+
+    fn row_identity_key(row: &ObjectsPanelRow) -> String {
+        row.object_ref
+            .as_ref()
+            .map(|object_ref| object_ref.identity_key.clone())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}:{}:{}",
+                    row.object_kind_id(),
+                    row.object_schema().unwrap_or(""),
+                    row.object_name()
+                )
+            })
+    }
+
+    fn merge_rows(existing: ObjectsPanelRow, mut incoming: ObjectsPanelRow) -> ObjectsPanelRow {
+        for (key, value) in existing.values {
+            incoming.values.entry(key).or_insert(value);
+        }
+
+        incoming
+    }
+
+    fn merge_kind_rows(
+        objects: &mut Vec<ObjectsPanelRow>,
+        kind_id: &str,
+        incoming_rows: Vec<ObjectsPanelRow>,
+    ) {
+        let existing_count = objects
+            .iter()
+            .filter(|row| row.object_kind_id() == kind_id)
+            .count();
+
+        if incoming_rows.is_empty() && existing_count > 0 {
+            tracing::warn!(
+                kind_id,
+                existing_count,
+                "Skipping empty objects panel kind refresh to preserve visible inventory rows"
+            );
+            return;
+        }
+
+        let mut incoming_rows: Vec<Option<ObjectsPanelRow>> =
+            incoming_rows.into_iter().map(Some).collect();
+        let mut merged_rows = Vec::with_capacity(objects.len() + incoming_rows.len());
+
+        for existing in objects.drain(..) {
+            if existing.object_kind_id() != kind_id {
+                merged_rows.push(existing);
+                continue;
+            }
+
+            let existing_key = Self::row_identity_key(&existing);
+            let incoming_index = incoming_rows.iter().position(|row| {
+                row.as_ref()
+                    .map(|row| Self::row_identity_key(row) == existing_key)
+                    .unwrap_or(false)
+            });
+
+            if let Some(incoming_index) = incoming_index {
+                if let Some(incoming) = incoming_rows[incoming_index].take() {
+                    merged_rows.push(Self::merge_rows(existing, incoming));
+                }
+            } else {
+                merged_rows.push(existing);
+            }
+        }
+
+        merged_rows.extend(incoming_rows.into_iter().flatten());
+        *objects = merged_rows;
     }
 
     /// Convert driver-provided column definitions to UI table columns
@@ -234,21 +447,113 @@ impl ObjectsTableDelegate {
     /// Load extended data directly from the driver
     pub fn set_extended_data(&mut self, connection_id: Uuid, data: ObjectsPanelData) {
         self.connection_id = Some(connection_id);
-        let (columns, column_ids) = Self::build_ui_columns(&data.columns);
-        self.columns = columns;
-        self.column_ids = column_ids;
+        self.default_columns = data.columns;
         self.objects = data.rows;
-        self.filtered_objects = self.objects.clone();
-    }
-
-    /// Set the driver category (determines context menu behavior)
-    pub fn set_driver_category(&mut self, category: DriverCategory) {
-        self.driver_category = category;
+        self.rebuild_active_kind_projection();
     }
 
     /// Set the effective object capabilities for the active connection.
     pub fn set_object_capabilities(&mut self, object_capabilities: SidebarObjectCapabilities) {
         self.object_capabilities = object_capabilities;
+    }
+
+    pub fn set_manifest(&mut self, manifest: ObjectsPanelManifest) {
+        self.manifest = manifest;
+        self.rebuild_active_kind_projection();
+    }
+
+    fn current_manifest(&self) -> &ObjectsPanelManifest {
+        &self.manifest
+    }
+
+    pub fn set_active_kind(&mut self, kind_id: Option<&str>) {
+        self.active_kind_id = kind_id.map(ToString::to_string);
+        self.rebuild_active_kind_projection();
+    }
+
+    pub fn set_active_scope(&mut self, scope_id: Option<&str>) {
+        self.active_scope_id = scope_id.map(ToString::to_string);
+        self.active_scope_id = self.resolve_active_scope_id();
+        self.rebuild_filtered_objects();
+    }
+
+    pub fn replace_kind_objects(&mut self, kind_id: &str, data: ObjectsPanelData) {
+        Self::merge_kind_rows(&mut self.objects, kind_id, data.rows);
+        self.rebuild_active_kind_projection();
+    }
+
+    fn active_kind_label(&self) -> Option<String> {
+        self.active_kind_id.as_deref().and_then(|active_kind_id| {
+            self.manifest
+                .object_kinds
+                .iter()
+                .find(|kind| kind.id == active_kind_id)
+                .map(|kind| kind.label_plural.clone())
+        })
+    }
+
+    fn active_kind_id(&self) -> Option<&str> {
+        self.active_kind_id.as_deref()
+    }
+
+    fn active_scope_label(&self) -> String {
+        self.active_scope_id
+            .clone()
+            .unwrap_or_else(|| "All Scopes".to_string())
+    }
+
+    fn active_scope_id(&self) -> Option<&str> {
+        self.active_scope_id.as_deref()
+    }
+
+    fn kind_menu_entries(&self) -> Vec<ObjectsPanelKindMenuEntry> {
+        self.manifest
+            .object_kinds
+            .iter()
+            .map(|kind| ObjectsPanelKindMenuEntry {
+                kind_id: kind.id.clone(),
+                label: kind.label_plural.clone(),
+            })
+            .collect()
+    }
+
+    fn scope_menu_entries(&self) -> Vec<ObjectsPanelScopeMenuEntry> {
+        let mut entries = vec![ObjectsPanelScopeMenuEntry {
+            scope_id: None,
+            label: "All Scopes".to_string(),
+        }];
+
+        entries.extend(
+            self.available_scope_ids_for_active_kind()
+                .into_iter()
+                .map(|scope_id| ObjectsPanelScopeMenuEntry {
+                    scope_id: Some(scope_id.clone()),
+                    label: scope_id,
+                }),
+        );
+
+        entries
+    }
+
+    fn selected_object_refs(&self, right_clicked_row_ix: usize) -> Vec<ObjectsPanelObjectRef> {
+        let mut refs: Vec<ObjectsPanelObjectRef> = self
+            .context_menu_selected_rows
+            .iter()
+            .filter_map(|&row_ix| self.filtered_objects.get(row_ix))
+            .map(object_ref_from_row)
+            .collect();
+
+        if let Some(row) = self.filtered_objects.get(right_clicked_row_ix) {
+            let object_ref = object_ref_from_row(row);
+            if !refs
+                .iter()
+                .any(|existing| existing.identity_key == object_ref.identity_key)
+            {
+                refs.push(object_ref);
+            }
+        }
+
+        refs
     }
 
     /// Set the database name for multi-database browsing (MySQL)
@@ -261,54 +566,24 @@ impl ObjectsTableDelegate {
         self.database_name.clone()
     }
 
-    /// Get the current driver category
-    pub fn driver_category(&self) -> DriverCategory {
-        self.driver_category
-    }
-
-    /// Set key-value columns for Redis databases listing
-    pub fn set_key_value_columns(&mut self) {
-        let panel_columns = vec![
-            ObjectsPanelColumn::new("name", "Database")
-                .width(300.0)
-                .min_width(150.0)
-                .resizable(true)
-                .sortable(),
-            ObjectsPanelColumn::new("key_count", "Keys")
-                .width(100.0)
-                .min_width(60.0)
-                .resizable(false)
-                .sortable()
-                .text_right(),
-        ];
-        let (columns, column_ids) = Self::build_ui_columns(&panel_columns);
-        self.columns = columns;
-        self.column_ids = column_ids;
-    }
-
     /// Filter objects by search text
     pub fn filter(&mut self, search_text: &str) {
-        if search_text.is_empty() {
-            self.filtered_objects = self.objects.clone();
-        } else {
-            let search_lower = search_text.to_lowercase();
-            self.filtered_objects = self
-                .objects
-                .iter()
-                .filter(|obj| obj.name.to_lowercase().contains(&search_lower))
-                .cloned()
-                .collect();
-        }
+        self.search_text = search_text.to_string();
+        self.rebuild_filtered_objects();
     }
 
     /// Clear all objects
     pub fn clear(&mut self) {
+        let default_data = ObjectsPanelData::from_table_infos(Vec::new());
         self.connection_id = None;
         self.objects.clear();
+        self.default_columns = default_data.columns.clone();
         self.filtered_objects.clear();
-        self.driver_category = DriverCategory::Relational;
         self.object_capabilities = SidebarObjectCapabilities::default();
-        let default_data = ObjectsPanelData::from_table_infos(Vec::new());
+        self.manifest = ObjectsPanelManifest::default();
+        self.active_kind_id = None;
+        self.active_scope_id = None;
+        self.search_text.clear();
         let (columns, column_ids) = Self::build_ui_columns(&default_data.columns);
         self.columns = columns;
         self.column_ids = column_ids;
@@ -323,61 +598,6 @@ impl ObjectsTableDelegate {
     /// Get the filtered objects (for external access)
     pub fn filtered_objects(&self) -> &[ObjectsPanelRow] {
         &self.filtered_objects
-    }
-
-    /// Get names of selected tables (including right-clicked if not in selection).
-    fn get_selected_table_names(&self, right_clicked_name: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .context_menu_selected_rows
-            .iter()
-            .filter_map(|&row_ix| self.filtered_objects.get(row_ix))
-            .filter(|obj| obj.object_type == "table")
-            .map(|obj| obj.name.clone())
-            .collect();
-
-        if !names.contains(&right_clicked_name.to_string()) {
-            names.push(right_clicked_name.to_string());
-        }
-        names
-    }
-
-    /// Get names of selected views (including right-clicked if not in selection).
-    fn get_selected_view_names(&self, right_clicked_name: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .context_menu_selected_rows
-            .iter()
-            .filter_map(|&row_ix| self.filtered_objects.get(row_ix))
-            .filter(|obj| obj.object_type == "view")
-            .map(|obj| obj.name.clone())
-            .collect();
-
-        if !names.contains(&right_clicked_name.to_string()) {
-            names.push(right_clicked_name.to_string());
-        }
-        names
-    }
-
-    fn schema_for_object(&self, object_name: &str, object_type: &str) -> Option<String> {
-        self.objects
-            .iter()
-            .find(|object| object.name == object_name && object.object_type == object_type)
-            .and_then(|object| object.schema.clone())
-    }
-
-    /// Get names of selected keys (for Redis, including right-clicked if not in selection).
-    fn get_selected_key_names(&self, right_clicked_name: &str) -> Vec<String> {
-        let mut names: Vec<String> = self
-            .context_menu_selected_rows
-            .iter()
-            .filter_map(|&row_ix| self.filtered_objects.get(row_ix))
-            .filter(|obj| obj.object_type == "key")
-            .map(|obj| obj.name.clone())
-            .collect();
-
-        if !names.contains(&right_clicked_name.to_string()) {
-            names.push(right_clicked_name.to_string());
-        }
-        names
     }
 }
 
@@ -398,7 +618,7 @@ impl TableDelegate for ObjectsTableDelegate {
     }
 
     fn loading(&self, _cx: &App) -> bool {
-        self.is_loading
+        self.is_loading && self.filtered_objects.is_empty()
     }
 
     fn perform_sort(
@@ -460,11 +680,14 @@ impl TableDelegate for ObjectsTableDelegate {
 
         // The "name" column (always first) gets an icon prefix
         if col_id == "name" {
-            let icon = match obj.object_type.as_str() {
-                "view" => ZqlzIcon::Eye,
-                "redis_database" => ZqlzIcon::Database,
-                _ => ZqlzIcon::Table,
-            };
+            let icon = self
+                .manifest
+                .object_kinds
+                .iter()
+                .find(|kind| kind.id == obj.object_kind_id())
+                .and_then(|kind| kind.icon_key.as_deref())
+                .map(object_icon_from_key)
+                .unwrap_or(ZqlzIcon::Table);
 
             let name = obj
                 .values
@@ -488,11 +711,13 @@ impl TableDelegate for ObjectsTableDelegate {
         }
 
         // All other columns: render the value string from the row's BTreeMap
-        let text = obj
-            .values
-            .get(col_id)
-            .cloned()
-            .unwrap_or_else(|| "-".to_string());
+        let text = obj.values.get(col_id).cloned().unwrap_or_else(|| {
+            if self.is_loading {
+                "...".to_string()
+            } else {
+                "-".to_string()
+            }
+        });
 
         div()
             .h_full()
@@ -517,62 +742,60 @@ impl TableDelegate for ObjectsTableDelegate {
             return menu;
         };
 
-        let Some(connection_id) = self.connection_id else {
-            return menu;
-        };
-
-        let object_name = obj.name.clone();
-        let object_type = obj.object_type.clone();
+        let object_kind_id = obj.object_kind_id().to_string();
         let menu_entity = cx.entity();
         let panel = self.panel.clone();
 
-        // Show different menu based on driver category and object type
-        match self.driver_category {
-            DriverCategory::KeyValue => {
-                // For Redis databases, show a database-specific menu
-                if object_type == "redis_database" {
-                    self.build_redis_database_context_menu(
-                        menu,
-                        connection_id,
-                        obj,
-                        menu_entity,
-                        panel,
-                        window,
-                    )
-                } else {
-                    self.build_key_context_menu(
-                        menu,
-                        connection_id,
-                        object_name,
-                        menu_entity,
-                        panel,
-                        window,
-                    )
+        if let Some(connection_id) = self.connection_id {
+            let selected_object_refs = self.selected_object_refs(row_ix);
+            if let Some(kind) = self
+                .manifest
+                .object_kinds
+                .iter()
+                .find(|kind| kind.id == object_kind_id)
+            {
+                let mut generic_menu = menu;
+                let ordered_actions = ObjectsPanel::ordered_action_entries(
+                    &kind.row_actions,
+                    selected_object_refs.len() > 1,
+                );
+
+                let mut last_group: Option<String> = None;
+                for action in &ordered_actions {
+                    if let Some(group) = action.group.as_deref()
+                        && last_group.as_deref().is_some()
+                        && last_group.as_deref() != Some(group)
+                    {
+                        generic_menu = generic_menu.separator();
+                    }
+
+                    generic_menu = generic_menu.item({
+                        let panel = panel.clone();
+                        let menu_entity = menu_entity.clone();
+                        let action_id = action.id.clone();
+                        let object_refs = selected_object_refs.clone();
+                        PopupMenuItem::new(action.label.clone()).on_click(window.listener_for(
+                            &menu_entity,
+                            move |_this, _, _, cx| {
+                                _ = panel.update(cx, |_panel, cx| {
+                                    cx.emit(ObjectsPanelEvent::InvokeAction {
+                                        connection_id,
+                                        action_id: action_id.clone(),
+                                        object_refs: object_refs.clone(),
+                                    });
+                                });
+                            },
+                        ))
+                    });
+
+                    last_group = action.group.clone();
                 }
-            }
-            _ => {
-                // Relational database menu
-                if object_type == "view" {
-                    self.build_view_context_menu(
-                        menu,
-                        connection_id,
-                        object_name,
-                        menu_entity,
-                        panel,
-                        window,
-                    )
-                } else {
-                    self.build_table_context_menu(
-                        menu,
-                        connection_id,
-                        object_name,
-                        menu_entity,
-                        panel,
-                        window,
-                    )
-                }
+
+                return generic_menu;
             }
         }
+
+        menu
     }
 
     fn set_context_menu_selection(&mut self, selected_rows: Vec<usize>) {
@@ -581,710 +804,6 @@ impl TableDelegate for ObjectsTableDelegate {
 }
 
 impl ObjectsTableDelegate {
-    /// Build context menu for tables
-    fn build_table_context_menu(
-        &self,
-        menu: PopupMenu,
-        connection_id: Uuid,
-        table_name: String,
-        menu_entity: Entity<TableState<Self>>,
-        panel: WeakEntity<ObjectsPanel>,
-        window: &mut Window,
-    ) -> PopupMenu {
-        // Get all selected tables (including the right-clicked one)
-        let selected_tables = self.get_selected_table_names(&table_name);
-        let count = selected_tables.len();
-        let is_multi = count > 1;
-        let database_name = self.database_name.clone();
-
-        menu
-            // Open Table(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Open {} Tables", count)
-                } else {
-                    "Open Table".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::OpenTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Design Table(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Design {} Tables", count)
-                } else {
-                    "Design Table".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DesignTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // New Table (always single)
-            .item({
-                let panel = panel.clone();
-                let database_name = database_name.clone();
-                PopupMenuItem::new("New Table").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::NewTable {
-                                connection_id,
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Delete Table(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Delete {} Tables", count)
-                } else {
-                    "Delete Table".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DeleteTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Empty Table(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Empty {} Tables", count)
-                } else {
-                    "Empty Table".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::EmptyTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Duplicate Table(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Duplicate {} Tables", count)
-                } else {
-                    "Duplicate Table".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DuplicateTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Import Wizard (single table only - use right-clicked table)
-            .item({
-                let panel = panel.clone();
-                let table_name = table_name.clone();
-                let database_name = database_name.clone();
-                PopupMenuItem::new("Import Wizard...").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::ImportData {
-                                connection_id,
-                                table_name: table_name.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Export Wizard
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Export {} Tables...", count)
-                } else {
-                    "Export Wizard...".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::ExportTables {
-                                connection_id,
-                                table_names: tables.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Dump SQL (Structure + Data)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Dump SQL {} Tables (Structure + Data)", count)
-                } else {
-                    "Dump SQL (Structure + Data)".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DumpTablesSql {
-                                connection_id,
-                                table_names: tables.clone(),
-                                include_data: true,
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Dump SQL (Structure Only)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Dump SQL {} Tables (Structure Only)", count)
-                } else {
-                    "Dump SQL (Structure Only)".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DumpTablesSql {
-                                connection_id,
-                                table_names: tables.clone(),
-                                include_data: false,
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Copy Table Name(s)
-            .item({
-                let panel = panel.clone();
-                let tables = selected_tables.clone();
-                let label = if is_multi {
-                    format!("Copy {} Table Names", count)
-                } else {
-                    "Copy Table Name".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::CopyTableNames {
-                                table_names: tables.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            .when(!is_multi, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let table_name = table_name.clone();
-                    let object_schema = self.schema_for_object(&table_name, "table");
-                    PopupMenuItem::new("View History").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::ViewHistory {
-                                    connection_id,
-                                    object_name: table_name.clone(),
-                                    object_schema: object_schema.clone(),
-                                    object_type: "table".to_string(),
-                                });
-                            });
-                        },
-                    ))
-                })
-                .separator()
-            })
-            // Rename (single table only - show only when single selection)
-            .when(!is_multi, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let table_name = table_name.clone();
-                    let database_name = database_name.clone();
-                    PopupMenuItem::new("Rename").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::RenameTable {
-                                    connection_id,
-                                    table_name: table_name.clone(),
-                                    database_name: database_name.clone(),
-                                });
-                            });
-                        },
-                    ))
-                })
-            })
-            // Refresh
-            .item({
-                let panel = panel.clone();
-                PopupMenuItem::new("Refresh").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::Refresh);
-                        });
-                    },
-                ))
-            })
-    }
-
-    /// Build context menu for views
-    fn build_view_context_menu(
-        &self,
-        menu: PopupMenu,
-        connection_id: Uuid,
-        view_name: String,
-        menu_entity: Entity<TableState<Self>>,
-        panel: WeakEntity<ObjectsPanel>,
-        window: &mut Window,
-    ) -> PopupMenu {
-        // Get all selected views (including the right-clicked one)
-        let selected_views = self.get_selected_view_names(&view_name);
-        let count = selected_views.len();
-        let is_multi = count > 1;
-        let database_name = self.database_name.clone();
-
-        menu
-            // Open View(s)
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Open {} Views", count)
-                } else {
-                    "Open View".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::OpenViews {
-                                connection_id,
-                                view_names: views.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Edit DDL
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Edit DDL {} Views", count)
-                } else {
-                    "Edit DDL".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DesignViews {
-                                connection_id,
-                                view_names: views.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .when(self.object_capabilities.supports_views, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let database_name = database_name.clone();
-                    PopupMenuItem::new("New View").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::NewView {
-                                    connection_id,
-                                    database_name: database_name.clone(),
-                                });
-                            });
-                        },
-                    ))
-                })
-            })
-            // Delete View(s)
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Delete {} Views", count)
-                } else {
-                    "Delete View".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DeleteViews {
-                                connection_id,
-                                view_names: views.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            // Duplicate View(s)
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Duplicate {} Views", count)
-                } else {
-                    "Duplicate View".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DuplicateViews {
-                                connection_id,
-                                view_names: views.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Export View Data
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let database_name = database_name.clone();
-                let label = if is_multi {
-                    format!("Export {} Views...", count)
-                } else {
-                    "Export View Data...".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::ExportTables {
-                                connection_id,
-                                table_names: views.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Copy View Name(s)
-            .item({
-                let panel = panel.clone();
-                let views = selected_views.clone();
-                let label = if is_multi {
-                    format!("Copy {} View Names", count)
-                } else {
-                    "Copy View Name".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::CopyViewNames {
-                                view_names: views.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // View History (single view only)
-            .when(!is_multi, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let view_name = view_name.clone();
-                    let object_schema = self.schema_for_object(&view_name, "view");
-                    PopupMenuItem::new("View History").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::ViewHistory {
-                                    connection_id,
-                                    object_name: view_name.clone(),
-                                    object_schema: object_schema.clone(),
-                                    object_type: "view".to_string(),
-                                });
-                            });
-                        },
-                    ))
-                })
-                .separator()
-            })
-            // Rename View (single view only)
-            .when(!is_multi, |menu| {
-                menu.item({
-                    let panel = panel.clone();
-                    let view_name = view_name.clone();
-                    let database_name = database_name.clone();
-                    PopupMenuItem::new("Rename").on_click(window.listener_for(
-                        &menu_entity,
-                        move |_this, _, _, cx| {
-                            _ = panel.update(cx, |_panel, cx| {
-                                cx.emit(ObjectsPanelEvent::RenameView {
-                                    connection_id,
-                                    view_name: view_name.clone(),
-                                    database_name: database_name.clone(),
-                                });
-                            });
-                        },
-                    ))
-                })
-            })
-            // Refresh
-            .item({
-                let panel = panel.clone();
-                PopupMenuItem::new("Refresh").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::Refresh);
-                        });
-                    },
-                ))
-            })
-    }
-
-    /// Build context menu for key-value store keys (Redis, Memcached, Valkey, etc.)
-    fn build_key_context_menu(
-        &self,
-        menu: PopupMenu,
-        connection_id: Uuid,
-        key_name: String,
-        menu_entity: Entity<TableState<Self>>,
-        panel: WeakEntity<ObjectsPanel>,
-        window: &mut Window,
-    ) -> PopupMenu {
-        // Get all selected keys (including the right-clicked one)
-        let selected_keys = self.get_selected_key_names(&key_name);
-        let count = selected_keys.len();
-        let is_multi = count > 1;
-        let database_name = self.database_name.clone();
-
-        menu
-            // Open Key(s)
-            .item({
-                let panel = panel.clone();
-                let keys = selected_keys.clone();
-                let label = if is_multi {
-                    format!("Open {} Keys", count)
-                } else {
-                    "Open Key".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::OpenTables {
-                                connection_id,
-                                table_names: keys.clone(),
-                                database_name: database_name.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Delete Key(s)
-            .item({
-                let panel = panel.clone();
-                let keys = selected_keys.clone();
-                let label = if is_multi {
-                    format!("Delete {} Keys", count)
-                } else {
-                    "Delete Key".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::DeleteKeys {
-                                connection_id,
-                                key_names: keys.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Copy Key Name(s)
-            .item({
-                let panel = panel.clone();
-                let keys = selected_keys.clone();
-                let label = if is_multi {
-                    format!("Copy {} Key Names", count)
-                } else {
-                    "Copy Key Name".to_string()
-                };
-                PopupMenuItem::new(label).on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::CopyKeyNames {
-                                key_names: keys.clone(),
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Refresh
-            .item({
-                let panel = panel.clone();
-                PopupMenuItem::new("Refresh").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::Refresh);
-                        });
-                    },
-                ))
-            })
-    }
-
-    /// Build context menu for Redis databases
-    fn build_redis_database_context_menu(
-        &self,
-        menu: PopupMenu,
-        connection_id: Uuid,
-        obj: &ObjectsPanelRow,
-        menu_entity: Entity<TableState<Self>>,
-        panel: WeakEntity<ObjectsPanel>,
-        window: &mut Window,
-    ) -> PopupMenu {
-        let Some(database_index) = obj.redis_database_index else {
-            return menu;
-        };
-
-        menu
-            // Open Database (view all keys in table viewer)
-            .item({
-                let panel = panel.clone();
-                PopupMenuItem::new("Open Database").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
-                                connection_id,
-                                database_index,
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Copy Database Name
-            .item({
-                let panel = panel.clone();
-                let db_name = obj.name.clone();
-                PopupMenuItem::new("Copy Database Name").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::CopyTableNames {
-                                table_names: vec![db_name.clone()],
-                            });
-                        });
-                    },
-                ))
-            })
-            .separator()
-            // Refresh
-            .item({
-                let panel = panel.clone();
-                PopupMenuItem::new("Refresh").on_click(window.listener_for(
-                    &menu_entity,
-                    move |_this, _, _, cx| {
-                        _ = panel.update(cx, |_panel, cx| {
-                            cx.emit(ObjectsPanelEvent::Refresh);
-                        });
-                    },
-                ))
-            })
-    }
-
     #[allow(dead_code)]
     fn render_empty(
         &mut self,
@@ -1292,6 +811,8 @@ impl ObjectsTableDelegate {
         cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let active_kind_label = self.active_kind_label();
+        let (empty_title, empty_message) = empty_state_copy(active_kind_label.as_deref());
 
         v_flex()
             .size_full()
@@ -1303,8 +824,8 @@ impl ObjectsTableDelegate {
                     .size(px(48.))
                     .text_color(theme.muted_foreground),
             )
-            .child(body_small("No objects found").color(theme.muted_foreground))
-            .child(body_small("This database has no tables or views").color(theme.muted_foreground))
+            .child(body_small(empty_title).color(theme.muted_foreground))
+            .child(body_small(empty_message).color(theme.muted_foreground))
             .into_any_element()
     }
 }
@@ -1338,6 +859,188 @@ pub struct ObjectsPanel {
 }
 
 impl ObjectsPanel {
+    pub fn current_manifest(&self, cx: &App) -> ObjectsPanelManifest {
+        self.table_state
+            .read(cx)
+            .delegate()
+            .current_manifest()
+            .clone()
+    }
+
+    /// Convert manifest toolbar actions into deduplicated UI entries while
+    /// preserving driver-provided ordering and grouping.
+    fn normalized_toolbar_action_entries(
+        toolbar_actions: &[ObjectsPanelAction],
+    ) -> Vec<ObjectsPanelToolbarActionEntry> {
+        let mut entries = Vec::new();
+        let mut seen_ids = std::collections::BTreeSet::new();
+
+        for action in toolbar_actions {
+            if action.create_object_kind_id.is_some() {
+                continue;
+            }
+
+            if !seen_ids.insert(action.id.as_str()) {
+                continue;
+            }
+
+            entries.push(ObjectsPanelToolbarActionEntry {
+                id: action.id.clone(),
+                label: action.label.clone(),
+                icon_key: action.icon_key.clone(),
+                group: action.group.clone(),
+            });
+        }
+
+        entries
+    }
+
+    fn normalized_action_entries_for_empty_area(
+        toolbar_actions: &[ObjectsPanelAction],
+    ) -> Vec<ObjectsPanelToolbarActionEntry> {
+        // Keep the empty-area context menu aligned with visible toolbar actions.
+        Self::normalized_toolbar_action_entries(toolbar_actions)
+    }
+
+    fn ordered_action_entries(
+        actions: &[ObjectsPanelAction],
+        is_multi: bool,
+    ) -> Vec<ObjectsPanelAction> {
+        actions
+            .iter()
+            .filter(|action| !(action.requires_single_selection && is_multi))
+            .cloned()
+            .collect()
+    }
+
+    fn build_toolbar_buttons(
+        &self,
+        actions: &[ObjectsPanelToolbarActionEntry],
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let mut buttons = Vec::new();
+
+        for action in actions {
+            let action_id = action.id.clone();
+            let tooltip = action.label.clone();
+            let button_id = format!("objects-toolbar-{}", action.id);
+            let button = match action.icon_key.as_deref().and_then(action_icon_from_key) {
+                Some(icon) => Button::new(button_id)
+                    .ghost()
+                    .xsmall()
+                    .icon(icon)
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.emit_toolbar_action(&action_id, cx);
+                    }))
+                    .into_any_element(),
+                None => Button::new(button_id)
+                    .ghost()
+                    .xsmall()
+                    .label(action.label.clone())
+                    .tooltip(tooltip)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.emit_toolbar_action(&action_id, cx);
+                    }))
+                    .into_any_element(),
+            };
+
+            buttons.push(button);
+        }
+
+        buttons
+    }
+
+    fn emit_toolbar_action(&self, action_id: &str, cx: &mut Context<Self>) {
+        let Some(connection_id) = self.selected_connection_id else {
+            return;
+        };
+
+        cx.emit(ObjectsPanelEvent::InvokeAction {
+            connection_id,
+            action_id: action_id.to_string(),
+            object_refs: Vec::new(),
+        });
+    }
+
+    fn set_active_kind(&mut self, kind_id: Option<&str>, cx: &mut Context<Self>) {
+        self.table_state.update(cx, |state, cx| {
+            state.delegate_mut().set_active_kind(kind_id);
+            state.clear_selection(cx);
+            state.refresh(cx);
+        });
+        if let (Some(connection_id), Some(kind_id)) = (self.selected_connection_id, kind_id) {
+            let scope_id = self
+                .table_state
+                .read(cx)
+                .delegate()
+                .active_scope_id()
+                .map(ToString::to_string);
+            cx.emit(ObjectsPanelEvent::ActiveKindChanged {
+                connection_id,
+                kind_id: kind_id.to_string(),
+                scope_id,
+            });
+        }
+        cx.notify();
+    }
+
+    fn set_active_scope(&mut self, scope_id: Option<&str>, cx: &mut Context<Self>) {
+        self.table_state.update(cx, |state, cx| {
+            state.delegate_mut().set_active_scope(scope_id);
+            state.clear_selection(cx);
+            state.refresh(cx);
+        });
+        let active_kind_id = self
+            .table_state
+            .read(cx)
+            .delegate()
+            .active_kind_id()
+            .map(ToString::to_string);
+        if let (Some(connection_id), Some(kind_id)) = (self.selected_connection_id, active_kind_id)
+        {
+            cx.emit(ObjectsPanelEvent::ActiveKindChanged {
+                connection_id,
+                kind_id,
+                scope_id: scope_id.map(ToString::to_string),
+            });
+        }
+        cx.notify();
+    }
+
+    pub fn replace_kind_objects(
+        &mut self,
+        kind_id: &str,
+        data: ObjectsPanelData,
+        cx: &mut Context<Self>,
+    ) {
+        self.table_state.update(cx, |state, cx| {
+            state.delegate_mut().replace_kind_objects(kind_id, data);
+            if !self.search_text.is_empty() {
+                state.delegate_mut().filter(&self.search_text);
+            }
+            state.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    pub fn set_loading(&mut self, is_loading: bool, cx: &mut Context<Self>) {
+        self.table_state.update(cx, |state, cx| {
+            state.delegate_mut().set_loading(is_loading);
+            state.refresh(cx);
+        });
+        cx.notify();
+    }
+
+    fn resolve_new_object_action_id(&self, cx: &App) -> Option<String> {
+        let table_state = self.table_state.read(cx);
+        let table_delegate = table_state.delegate();
+        resolve_create_action_id(
+            table_delegate.active_kind_id(),
+            &table_delegate.manifest.toolbar_actions,
+        )
+    }
+
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let search_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Search objects..."));
@@ -1368,32 +1071,18 @@ impl ObjectsPanel {
         // Subscribe to table events to handle double-click -> open table/view/database
         cx.subscribe(&table_state, |panel, _table, event: &TableEvent, cx| {
             if let TableEvent::DoubleClickedRow(row_ix) = event {
-                // Open the table/view/database on double-click
+                // Prefer manifest default action for double-click.
                 let table_state = panel.table_state.read(cx);
                 if let Some(obj) = table_state.delegate().filtered_objects().get(*row_ix)
                     && let Some(connection_id) = panel.selected_connection_id
                 {
-                    let database_name = panel.database_name.clone();
-                    if obj.object_type == "redis_database" {
-                        if let Some(db_index) = obj.redis_database_index {
-                            cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
-                                connection_id,
-                                database_index: db_index,
-                            });
-                        }
-                    } else if obj.object_type == "view" {
-                        cx.emit(ObjectsPanelEvent::OpenViews {
-                            connection_id,
-                            view_names: vec![obj.name.clone()],
-                            database_name,
-                        });
-                    } else {
-                        cx.emit(ObjectsPanelEvent::OpenTables {
-                            connection_id,
-                            table_names: vec![obj.name.clone()],
-                            database_name,
-                        });
-                    }
+                    let action_id =
+                        resolve_primary_row_action_id(&table_state.delegate().manifest, obj);
+                    cx.emit(ObjectsPanelEvent::InvokeAction {
+                        connection_id,
+                        action_id,
+                        object_refs: vec![object_ref_from_row(obj)],
+                    });
                 }
             }
         })
@@ -1424,7 +1113,7 @@ impl ObjectsPanel {
         connection_name: String,
         database_name: Option<String>,
         data: ObjectsPanelData,
-        driver_category: DriverCategory,
+        manifest: ObjectsPanelManifest,
         object_capabilities: SidebarObjectCapabilities,
         cx: &mut Context<Self>,
     ) {
@@ -1435,68 +1124,12 @@ impl ObjectsPanel {
         self.object_capabilities = object_capabilities;
 
         self.table_state.update(cx, |state, cx| {
-            state.delegate_mut().set_driver_category(driver_category);
             state
                 .delegate_mut()
                 .set_object_capabilities(object_capabilities);
+            state.delegate_mut().set_manifest(manifest);
             state.delegate_mut().set_database_name(database_name);
             state.delegate_mut().set_extended_data(connection_id, data);
-            if !self.search_text.is_empty() {
-                state.delegate_mut().filter(&self.search_text);
-            }
-            state.refresh(cx);
-        });
-
-        cx.notify();
-    }
-
-    /// Load Redis databases into the objects panel
-    pub fn load_redis_databases(
-        &mut self,
-        connection_id: Uuid,
-        connection_name: String,
-        databases: Vec<(u16, Option<i64>)>, // (index, key_count)
-        cx: &mut Context<Self>,
-    ) {
-        self.selected_connection_id = Some(connection_id);
-        self.connection_name = Some(connection_name);
-        self.has_connection = true;
-        self.object_capabilities = SidebarObjectCapabilities::for_driver("redis");
-
-        let objects: Vec<ObjectsPanelRow> = databases
-            .into_iter()
-            .map(|(index, key_count)| {
-                let mut values = std::collections::BTreeMap::new();
-                values.insert("name".to_string(), format!("db{}", index));
-                values.insert(
-                    "key_count".to_string(),
-                    key_count
-                        .map(|c| c.to_string())
-                        .unwrap_or_else(|| "-".to_string()),
-                );
-
-                ObjectsPanelRow {
-                    name: format!("db{}", index),
-                    schema: None,
-                    object_type: "redis_database".to_string(),
-                    values,
-                    redis_database_index: Some(index),
-                    key_value_info: None,
-                }
-            })
-            .collect();
-
-        self.table_state.update(cx, |state, cx| {
-            state
-                .delegate_mut()
-                .set_driver_category(DriverCategory::KeyValue);
-            state
-                .delegate_mut()
-                .set_object_capabilities(self.object_capabilities);
-            state.delegate_mut().set_key_value_columns();
-            state.delegate_mut().connection_id = Some(connection_id);
-            state.delegate_mut().objects = objects.clone();
-            state.delegate_mut().filtered_objects = objects;
             if !self.search_text.is_empty() {
                 state.delegate_mut().filter(&self.search_text);
             }
@@ -1542,12 +1175,21 @@ impl ObjectsPanel {
         cx.notify();
     }
 
-    /// Emit a refresh event to reload the objects list
+    /// Reuse the manifest action path for refresh so the panel stays on the
+    /// single generic event model used by other actions.
     ///
     /// This is called by MainView when the user presses Cmd+R while the panel is focused.
     pub fn refresh(&self, cx: &mut Context<Self>) {
         tracing::info!("ObjectsPanel: Refreshing objects list");
-        cx.emit(ObjectsPanelEvent::Refresh);
+        let table_state = self.table_state.read(cx);
+        let Some(action_id) =
+            resolve_refresh_action_id(&table_state.delegate().manifest.toolbar_actions)
+        else {
+            tracing::warn!("Objects panel has no manifest refresh action for keyboard refresh");
+            return;
+        };
+
+        self.emit_toolbar_action(&action_id, cx);
     }
 
     /// Open the currently selected row (Enter key handler)
@@ -1563,27 +1205,13 @@ impl ObjectsPanel {
         let Some(obj) = delegate.filtered_objects().get(row_ix) else {
             return;
         };
-        let database_name = self.database_name.clone();
-        if obj.object_type == "redis_database" {
-            if let Some(db_index) = obj.redis_database_index {
-                cx.emit(ObjectsPanelEvent::OpenRedisDatabase {
-                    connection_id,
-                    database_index: db_index,
-                });
-            }
-        } else if obj.object_type == "view" {
-            cx.emit(ObjectsPanelEvent::OpenViews {
-                connection_id,
-                view_names: vec![obj.name.clone()],
-                database_name,
-            });
-        } else {
-            cx.emit(ObjectsPanelEvent::OpenTables {
-                connection_id,
-                table_names: vec![obj.name.clone()],
-                database_name,
-            });
-        }
+
+        let action_id = resolve_primary_row_action_id(&delegate.manifest, obj);
+        cx.emit(ObjectsPanelEvent::InvokeAction {
+            connection_id,
+            action_id,
+            object_refs: vec![object_ref_from_row(obj)],
+        });
     }
 
     /// Delete the currently selected object(s) (Delete/Backspace key handler)
@@ -1599,57 +1227,38 @@ impl ObjectsPanel {
         let Some(obj) = delegate.filtered_objects().get(row_ix) else {
             return;
         };
-        let database_name = self.database_name.clone();
-        if obj.object_type == "view" {
-            cx.emit(ObjectsPanelEvent::DeleteViews {
-                connection_id,
-                view_names: vec![obj.name.clone()],
-                database_name,
-            });
-        } else if obj.object_type == "key" {
-            cx.emit(ObjectsPanelEvent::DeleteKeys {
-                connection_id,
-                key_names: vec![obj.name.clone()],
-            });
-        } else if obj.object_type == "table" {
-            cx.emit(ObjectsPanelEvent::DeleteTables {
-                connection_id,
-                table_names: vec![obj.name.clone()],
-                database_name,
-            });
-        }
+
+        let Some(action_id) = resolve_destructive_row_action_id(&delegate.manifest, obj) else {
+            tracing::warn!(
+                object_kind_id = obj.object_kind_id(),
+                "Objects panel has no manifest destructive action for keyboard DeleteSelected"
+            );
+            return;
+        };
+
+        cx.emit(ObjectsPanelEvent::InvokeAction {
+            connection_id,
+            action_id,
+            object_refs: vec![
+                obj.object_ref
+                    .clone()
+                    .unwrap_or_else(|| object_ref_from_row(obj)),
+            ],
+        });
     }
 
     /// Create a new table (Cmd+N handler)
     fn new_object(&mut self, cx: &mut Context<Self>) {
-        let Some(connection_id) = self.selected_connection_id else {
-            return;
-        };
-        let selected_object_type = {
-            let table_state = self.table_state.read(cx);
-            table_state.selected_row().and_then(|row_index| {
-                table_state
-                    .delegate()
-                    .filtered_objects()
-                    .get(row_index)
-                    .map(|object| object.object_type.clone())
-            })
-        };
-
-        if selected_object_type.as_deref() == Some("view")
-            && self.object_capabilities.supports_views
-        {
-            cx.emit(ObjectsPanelEvent::NewView {
-                connection_id,
-                database_name: self.database_name.clone(),
-            });
+        if self.selected_connection_id.is_none() {
             return;
         }
 
-        cx.emit(ObjectsPanelEvent::NewTable {
-            connection_id,
-            database_name: self.database_name.clone(),
-        });
+        let Some(action_id) = self.resolve_new_object_action_id(cx) else {
+            tracing::warn!("Objects panel has no manifest create action for keyboard NewObject");
+            return;
+        };
+
+        self.emit_toolbar_action(&action_id, cx);
     }
 
     /// Show the empty-area context menu (right-click on empty space)
@@ -1659,73 +1268,56 @@ impl ObjectsPanel {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(connection_id) = self.selected_connection_id else {
+        if self.selected_connection_id.is_none() {
             return;
-        };
+        }
 
-        let driver_category = self.table_state.read(cx).delegate().driver_category();
-        let is_relational = driver_category == DriverCategory::Relational;
-        let supports_views = self.object_capabilities.supports_views;
-        let database_name = self.database_name.clone();
+        let toolbar_actions = self
+            .table_state
+            .read(cx)
+            .delegate()
+            .manifest
+            .toolbar_actions
+            .clone();
+        let empty_area_actions =
+            ObjectsPanel::normalized_action_entries_for_empty_area(&toolbar_actions);
+
         let panel_weak = cx.entity().downgrade();
         let action_context = self.focus_handle.clone();
 
-        let menu = PopupMenu::build(window, cx, |menu, _, _| {
+        let menu = PopupMenu::build(window, cx, move |menu, _, _| {
             let menu = menu.action_context(action_context.clone());
-            let menu = if is_relational {
-                menu.item(PopupMenuItem::new("New Table").on_click({
-                    let panel = panel_weak.clone();
-                    let db = database_name.clone();
-                    move |_, _, cx| {
-                        _ = panel.update(cx, |_, cx| {
-                            cx.emit(ObjectsPanelEvent::NewTable {
-                                connection_id,
-                                database_name: db.clone(),
-                            });
-                        });
-                    }
-                }))
-                .when(supports_views, |menu| {
-                    menu.item(PopupMenuItem::new("New View").on_click({
-                        let panel = panel_weak.clone();
-                        let db = database_name.clone();
-                        move |_, _, cx| {
-                            _ = panel.update(cx, |_, cx| {
-                                cx.emit(ObjectsPanelEvent::NewView {
-                                    connection_id,
-                                    database_name: db.clone(),
-                                });
-                            });
-                        }
-                    }))
-                })
-                .separator()
-            } else {
-                menu
-            };
+            let mut menu = menu;
+            let mut last_group: Option<String> = None;
 
-            menu.item(PopupMenuItem::new("Import Wizard...").on_click({
-                let panel = panel_weak.clone();
-                let db = database_name.clone();
-                move |_, _, cx| {
-                    _ = panel.update(cx, |_, cx| {
-                        cx.emit(ObjectsPanelEvent::ImportData {
-                            connection_id,
-                            table_name: String::new(),
-                            database_name: db.clone(),
-                        });
-                    });
+            for action in &empty_area_actions {
+                if let Some(group) = action.group.as_deref()
+                    && last_group.as_deref().is_some()
+                    && last_group.as_deref() != Some(group)
+                {
+                    menu = menu.separator();
                 }
-            }))
-            .separator()
-            .item(PopupMenuItem::new("Refresh").on_click({
+
+                let action_id = action.id.clone();
                 let panel = panel_weak.clone();
-                move |_, _, cx| {
-                    _ = panel.update(cx, |_, cx| {
-                        cx.emit(ObjectsPanelEvent::Refresh);
-                    });
-                }
-            }))
+                menu = menu.item(PopupMenuItem::new(action.label.clone()).on_click(
+                    move |_, _, cx| {
+                        if let Err(error) = panel.update(cx, |panel, cx| {
+                            panel.emit_toolbar_action(&action_id, cx);
+                        }) {
+                            tracing::warn!(
+                                %error,
+                                action_id,
+                                "Failed to invoke empty-area action"
+                            );
+                        }
+                    },
+                ));
+
+                last_group = action.group.clone();
+            }
+
+            menu
         });
 
         self._empty_area_menu_subscription =
@@ -1747,58 +1339,109 @@ impl ObjectsPanel {
 
 impl Render for ObjectsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (
+            active_kind_label,
+            active_kind_id,
+            kind_menu_entries,
+            active_scope_label,
+            active_scope_id,
+            scope_menu_entries,
+            toolbar_actions,
+        ) = {
+            let table_state = self.table_state.read(cx);
+            let table_delegate = table_state.delegate();
+
+            (
+                table_delegate
+                    .active_kind_label()
+                    .unwrap_or_else(|| "Objects".to_string()),
+                table_delegate.active_kind_id().map(ToString::to_string),
+                table_delegate.kind_menu_entries(),
+                table_delegate.active_scope_label(),
+                table_delegate.active_scope_id().map(ToString::to_string),
+                table_delegate.scope_menu_entries(),
+                table_delegate.manifest.toolbar_actions.clone(),
+            )
+        };
+
+        let show_kind_switcher = self.has_connection && !kind_menu_entries.is_empty();
+        let show_scope_switcher = self.has_connection && scope_menu_entries.len() > 1;
+
+        let normalized_toolbar_actions = Self::normalized_toolbar_action_entries(&toolbar_actions);
+        let toolbar_buttons = self.build_toolbar_buttons(&normalized_toolbar_actions, cx);
+
+        let panel_entity = cx.entity().downgrade();
+        let kind_switcher = Button::new("objects-kind-switcher")
+            .ghost()
+            .xsmall()
+            .label(format!("Kind: {}", active_kind_label))
+            .icon(IconName::ChevronDown)
+            .dropdown_menu({
+                let kind_menu_entries = kind_menu_entries.clone();
+                let active_kind_id = active_kind_id.clone();
+                let panel_entity = panel_entity.clone();
+                move |menu, _window, _cx| {
+                    let mut menu = menu.scrollable(true).max_h(px(420.));
+                    for entry in &kind_menu_entries {
+                        let kind_id = entry.kind_id.clone();
+                        let panel = panel_entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(entry.label.clone())
+                                .checked(active_kind_id.as_deref() == Some(kind_id.as_str()))
+                                .on_click(move |_, _window, cx| {
+                                    if let Err(error) = panel.update(cx, |panel, cx| {
+                                        panel.set_active_kind(Some(kind_id.as_str()), cx);
+                                    }) {
+                                        tracing::warn!(
+                                            %error,
+                                            kind_id,
+                                            "Failed to switch objects panel kind"
+                                        );
+                                    }
+                                }),
+                        );
+                    }
+
+                    menu
+                }
+            });
+
+        let scope_switcher = Button::new("objects-scope-switcher")
+            .ghost()
+            .xsmall()
+            .label(format!("Scope: {}", active_scope_label))
+            .icon(IconName::ChevronDown)
+            .dropdown_menu({
+                let scope_menu_entries = scope_menu_entries.clone();
+                let active_scope_id = active_scope_id.clone();
+                let panel_entity = panel_entity.clone();
+                move |menu, _window, _cx| {
+                    let mut menu = menu;
+                    for entry in &scope_menu_entries {
+                        let scope_id = entry.scope_id.clone();
+                        let panel = panel_entity.clone();
+                        menu = menu.item(
+                            PopupMenuItem::new(entry.label.clone())
+                                .checked(active_scope_id == scope_id)
+                                .on_click(move |_, _window, cx| {
+                                    if let Err(error) = panel.update(cx, |panel, cx| {
+                                        panel.set_active_scope(scope_id.as_deref(), cx);
+                                    }) {
+                                        tracing::warn!(
+                                            %error,
+                                            scope_id = ?scope_id,
+                                            "Failed to switch objects panel scope"
+                                        );
+                                    }
+                                }),
+                        );
+                    }
+
+                    menu
+                }
+            });
+
         let theme = cx.theme();
-
-        // Get driver category to conditionally show/hide buttons
-        let driver_category = self.table_state.read(cx).delegate().driver_category();
-        let is_relational = driver_category == DriverCategory::Relational;
-        let supports_views = self.object_capabilities.supports_views;
-
-        let refresh_handler = cx.listener(|_this, _, _, cx| {
-            cx.emit(ObjectsPanelEvent::Refresh);
-        });
-
-        let new_table_handler = cx.listener(|this, _, _, cx| {
-            if let Some(conn_id) = this.selected_connection_id {
-                cx.emit(ObjectsPanelEvent::NewTable {
-                    connection_id: conn_id,
-                    database_name: this.database_name.clone(),
-                });
-            }
-        });
-
-        let new_view_handler = cx.listener(|this, _, _, cx| {
-            if let Some(conn_id) = this.selected_connection_id
-                && this.object_capabilities.supports_views
-            {
-                cx.emit(ObjectsPanelEvent::NewView {
-                    connection_id: conn_id,
-                    database_name: this.database_name.clone(),
-                });
-            }
-        });
-
-        let import_handler = cx.listener(|this, _, _, cx| {
-            if let Some(conn_id) = this.selected_connection_id {
-                // For toolbar button, import to a new/unspecified table
-                cx.emit(ObjectsPanelEvent::ImportData {
-                    connection_id: conn_id,
-                    table_name: String::new(),
-                    database_name: this.database_name.clone(),
-                });
-            }
-        });
-
-        let export_handler = cx.listener(|this, _, _, cx| {
-            if let Some(conn_id) = this.selected_connection_id {
-                // For toolbar button, export all tables (empty means all)
-                cx.emit(ObjectsPanelEvent::ExportTables {
-                    connection_id: conn_id,
-                    table_names: vec![],
-                    database_name: this.database_name.clone(),
-                });
-            }
-        });
 
         v_flex()
             .id("objects-panel")
@@ -1824,51 +1467,9 @@ impl Render for ObjectsPanel {
                     .gap_2()
                     .border_b_1()
                     .border_color(theme.border)
-                    .child(
-                        Button::new("refresh-objects")
-                            .ghost()
-                            .xsmall()
-                            .icon(ZqlzIcon::ArrowsClockwise)
-                            .tooltip("Refresh")
-                            .on_click(refresh_handler),
-                    )
-                    // Only show "New Table" for relational databases (not for Redis/KeyValue)
-                    .when(is_relational, |this| {
-                        this.child(
-                            Button::new("add-object")
-                                .ghost()
-                                .xsmall()
-                                .icon(ZqlzIcon::Plus)
-                                .tooltip("New Table")
-                                .on_click(new_table_handler),
-                        )
-                    })
-                    .when(is_relational && supports_views, |this| {
-                        this.child(
-                            Button::new("add-view")
-                                .ghost()
-                                .xsmall()
-                                .icon(IconName::Eye)
-                                .tooltip("New View")
-                                .on_click(new_view_handler),
-                        )
-                    })
-                    .child(
-                        Button::new("import-data")
-                            .ghost()
-                            .xsmall()
-                            .icon(ZqlzIcon::Import)
-                            .tooltip("Import Wizard...")
-                            .on_click(import_handler),
-                    )
-                    .child(
-                        Button::new("export-data")
-                            .ghost()
-                            .xsmall()
-                            .icon(ZqlzIcon::Export)
-                            .tooltip("Export Wizard...")
-                            .on_click(export_handler),
-                    )
+                    .when(show_kind_switcher, |this| this.child(kind_switcher))
+                    .when(show_scope_switcher, |this| this.child(scope_switcher))
+                    .children(toolbar_buttons)
                     .child(div().flex_1())
                     .child(
                         div().w(px(200.)).child(
@@ -1930,7 +1531,7 @@ impl Render for ObjectsPanel {
                         deferred(
                             anchored()
                                 .snap_to_window_with_margin(px(8.))
-                                .anchor(Corner::TopLeft)
+                                .anchor(Anchor::TopLeft)
                                 .position(self.empty_area_menu_position)
                                 .child(div().occlude().cursor_default().child(menu)),
                         )
@@ -1969,5 +1570,259 @@ impl Panel for ObjectsPanel {
 
     fn closable(&self, _cx: &App) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        ObjectsPanel, ObjectsTableDelegate, empty_state_copy, resolve_create_action_id,
+        resolve_destructive_row_action_id, resolve_primary_row_action_id,
+        resolve_refresh_action_id,
+    };
+    use zqlz_core::{
+        ObjectsPanelAction, ObjectsPanelManifest, ObjectsPanelObjectKind, ObjectsPanelObjectRef,
+        ObjectsPanelRow,
+    };
+
+    fn row(kind_id: &str, name: &str) -> ObjectsPanelRow {
+        ObjectsPanelRow {
+            name: name.to_string(),
+            schema: None,
+            object_type: kind_id.to_string(),
+            object_ref: Some(ObjectsPanelObjectRef::new(kind_id, name)),
+            values: std::collections::BTreeMap::new(),
+            redis_database_index: None,
+            key_value_info: None,
+        }
+    }
+
+    fn row_with_values(kind_id: &str, name: &str, values: &[(&str, &str)]) -> ObjectsPanelRow {
+        let mut row = row(kind_id, name);
+        row.values = values
+            .iter()
+            .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+            .collect();
+        row
+    }
+
+    fn manifest_with_kind_default(
+        kind_id: &str,
+        default_action_id: Option<&str>,
+        row_action_ids: &[&str],
+    ) -> ObjectsPanelManifest {
+        let row_actions = row_action_ids
+            .iter()
+            .map(|action_id| ObjectsPanelAction::new(*action_id, action_id.to_uppercase()))
+            .collect();
+
+        let mut kind =
+            ObjectsPanelObjectKind::new(kind_id, "Kind", "Kinds").row_actions(row_actions);
+        if let Some(default_action_id) = default_action_id {
+            kind = kind.default_row_action(default_action_id);
+        }
+
+        ObjectsPanelManifest {
+            object_kinds: vec![kind],
+            toolbar_actions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resolve_primary_row_action_prefers_valid_manifest_default() {
+        let manifest = manifest_with_kind_default("table", Some("design"), &["open", "design"]);
+        let row = row("table", "users");
+
+        let action_id = resolve_primary_row_action_id(&manifest, &row);
+
+        assert_eq!(action_id, "design");
+    }
+
+    #[test]
+    fn resolve_primary_row_action_falls_back_to_open_for_unknown_default() {
+        let manifest = manifest_with_kind_default("table", Some("rename"), &["open", "design"]);
+        let row = row("table", "users");
+
+        let action_id = resolve_primary_row_action_id(&manifest, &row);
+
+        assert_eq!(action_id, "open");
+    }
+
+    #[test]
+    fn resolve_primary_row_action_falls_back_to_open_without_kind_default() {
+        let manifest = manifest_with_kind_default("table", None, &["open", "design"]);
+        let row = row("table", "users");
+
+        let action_id = resolve_primary_row_action_id(&manifest, &row);
+
+        assert_eq!(action_id, "open");
+    }
+
+    #[test]
+    fn resolve_create_action_prefers_active_kind_action() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("refresh", "Refresh"),
+            ObjectsPanelAction::new("make_table", "New Table").create_object_kind("table"),
+            ObjectsPanelAction::new("make_view", "New View").create_object_kind("view"),
+        ];
+
+        let action_id = resolve_create_action_id(Some("view"), &toolbar_actions);
+
+        assert_eq!(action_id, Some("make_view".to_string()));
+    }
+
+    #[test]
+    fn resolve_create_action_uses_first_create_action_when_active_kind_missing() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("refresh", "Refresh"),
+            ObjectsPanelAction::new("make_table", "New Table").create_object_kind("table"),
+            ObjectsPanelAction::new("make_view", "New View").create_object_kind("view"),
+        ];
+
+        let action_id = resolve_create_action_id(Some("function"), &toolbar_actions);
+
+        assert_eq!(action_id, Some("make_table".to_string()));
+    }
+
+    #[test]
+    fn resolve_create_action_returns_none_without_create_actions() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("refresh", "Refresh"),
+            ObjectsPanelAction::new("import", "Import"),
+        ];
+
+        let action_id = resolve_create_action_id(Some("table"), &toolbar_actions);
+
+        assert_eq!(action_id, None);
+    }
+
+    #[test]
+    fn resolve_create_action_ignores_action_id_naming_without_create_metadata() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("new_table", "New Table"),
+            ObjectsPanelAction::new("create_view", "New View"),
+        ];
+
+        let action_id = resolve_create_action_id(Some("table"), &toolbar_actions);
+
+        assert_eq!(action_id, None);
+    }
+
+    #[test]
+    fn resolve_refresh_action_uses_manifest_metadata() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("reload_catalog", "Reload")
+                .icon_key("refresh")
+                .refreshes_objects_panel(),
+            ObjectsPanelAction::new("refresh", "Legacy Refresh"),
+        ];
+
+        let action_id = resolve_refresh_action_id(&toolbar_actions);
+
+        assert_eq!(action_id, Some("reload_catalog".to_string()));
+    }
+
+    #[test]
+    fn resolve_destructive_row_action_uses_manifest_metadata() {
+        let manifest = ObjectsPanelManifest {
+            object_kinds: vec![
+                ObjectsPanelObjectKind::new("table", "Table", "Tables").row_actions(vec![
+                    ObjectsPanelAction::new("open", "Open"),
+                    ObjectsPanelAction::new("drop_relation", "Drop").destructive(),
+                ]),
+            ],
+            toolbar_actions: Vec::new(),
+        };
+        let row = row("table", "users");
+
+        let action_id = resolve_destructive_row_action_id(&manifest, &row);
+
+        assert_eq!(action_id, Some("drop_relation".to_string()));
+    }
+
+    #[test]
+    fn empty_state_copy_uses_active_kind_label() {
+        let (title, message) = empty_state_copy(Some("Materialized Views"));
+
+        assert_eq!(title, "No materialized views found");
+        assert_eq!(message, "Try changing the kind, scope, or search.");
+    }
+
+    #[test]
+    fn empty_state_copy_falls_back_to_generic_message() {
+        let (title, message) = empty_state_copy(None);
+
+        assert_eq!(title, "No objects found");
+        assert_eq!(message, "Try changing the kind, scope, or search.");
+    }
+
+    #[test]
+    fn merge_kind_rows_preserves_visible_inventory_when_enrichment_is_empty() {
+        let mut rows = vec![row_with_values("table", "orders", &[("name", "orders")])];
+
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", Vec::new());
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].object_name(), "orders");
+        assert_eq!(
+            rows[0].values.get("name").map(String::as_str),
+            Some("orders")
+        );
+    }
+
+    #[test]
+    fn merge_kind_rows_hydrates_existing_inventory_rows_by_identity() {
+        let mut rows = vec![row_with_values("table", "orders", &[("name", "orders")])];
+        let incoming = vec![row_with_values(
+            "table",
+            "orders",
+            &[("name", "orders"), ("owner", "postgres"), ("oid", "123")],
+        )];
+
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming);
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].values.get("name").map(String::as_str),
+            Some("orders")
+        );
+        assert_eq!(
+            rows[0].values.get("owner").map(String::as_str),
+            Some("postgres")
+        );
+        assert_eq!(rows[0].values.get("oid").map(String::as_str), Some("123"));
+    }
+
+    #[test]
+    fn merge_kind_rows_preserves_unmatched_inventory_rows_and_appends_new_rows() {
+        let mut rows = vec![row_with_values("table", "orders", &[("name", "orders")])];
+        let incoming = vec![row_with_values(
+            "table",
+            "refunds",
+            &[("name", "refunds"), ("owner", "postgres")],
+        )];
+
+        ObjectsTableDelegate::merge_kind_rows(&mut rows, "table", incoming);
+
+        let names = rows.iter().map(|row| row.object_name()).collect::<Vec<_>>();
+        assert_eq!(names, vec!["orders", "refunds"]);
+    }
+
+    #[test]
+    fn normalized_action_entries_for_empty_area_retains_manifest_actions() {
+        let toolbar_actions = vec![
+            ObjectsPanelAction::new("refresh", "Refresh"),
+            ObjectsPanelAction::new("make_table", "New Table").create_object_kind("table"),
+            ObjectsPanelAction::new("import", "Import"),
+            ObjectsPanelAction::new("export", "Export"),
+        ];
+
+        let entry_ids: Vec<String> =
+            ObjectsPanel::normalized_action_entries_for_empty_area(&toolbar_actions)
+                .into_iter()
+                .map(|entry| entry.id)
+                .collect();
+
+        assert_eq!(entry_ids, vec!["refresh", "import", "export"]);
     }
 }

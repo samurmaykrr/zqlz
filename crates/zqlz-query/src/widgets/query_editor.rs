@@ -10,42 +10,53 @@
 //! - Functions: CREATE/ALTER FUNCTION definitions
 //! - Triggers: CREATE/ALTER TRIGGER definitions
 
-use crate::ai_completion::{AiProviderFactory, CompletionRequest};
 use crate::batch::split_statements;
+use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use lsp_types::DiagnosticSeverity;
 use parking_lot::RwLock;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, Value};
+use zqlz_core::{
+    Connection, DriverCategory, FormatRequest, Value, driver_category_from_driver_name,
+    formatter_provider_for_driver,
+};
 use zqlz_lsp::SqlLsp;
-use zqlz_services::SchemaService;
+use zqlz_services::{DatabaseSchema, SchemaService};
 use zqlz_settings::{
-    CursorBlink, CursorShape, EditorSettings, InlineSuggestionProvider, ScrollBeyondLastLine,
+    CursorBlink, CursorShape, EditorSettings as AppEditorSettings, ScrollBeyondLastLine,
     SearchWrap, ZqlzSettings,
 };
 use zqlz_templates::TemplateEngine;
-use zqlz_text_editor::{DocumentIdentity, TextDocument, TextEditor, TextEditorEvent};
+use zqlz_text_editor::{
+    CompletionSettings, CursorSettings, DocumentIdentity, DocumentSettings, EditorAppearance,
+    EditorLanguageProviders, EditorSettings as TextEditorSettings, FormatProvider, GutterSettings,
+    ScrollSettings, SearchSettings, SoftWrapMode, TextDocument, TextEditor, TextEditorEvent,
+};
 use zqlz_ui::widgets::{
-    ActiveTheme, Disableable, RopeExt, Selectable, Sizable, StyledExt, Theme, ZqlzIcon,
-    button::{Button, ButtonVariants},
+    ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
+    button::{Button, ButtonVariants, DropdownButton},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
-    kbd::Kbd,
     menu::DropdownMenu,
     scroll::ScrollableElement,
     v_flex,
 };
 
 use super::actions::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, CancelCompletionMenu,
-    ConfirmCompletion, DismissInlineSuggestion, FormatQuery, NextCompletion, NextProblem,
-    PreviousCompletion, PreviousProblem, SaveQuery, ShowCodeActions, ShowHover, TriggerCompletion,
+    FormatQuery, NextProblem, PreviousProblem, SaveQuery, ShowCodeActions, ShowHover,
     TriggerParameterHints,
 };
-use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryDocumentSymbol {
+    pub label: String,
+    pub line: usize,
+    pub column: usize,
+}
 
 /// Convert serde_json::Value to minijinja::Value
 fn json_to_minijinja_value(value: serde_json::Value) -> minijinja::Value {
@@ -85,11 +96,167 @@ fn driver_type_to_highlight_language(driver_type: Option<&str>) -> &'static str 
         .unwrap_or("sql")
 }
 
-fn driver_type_to_sqlformat_dialect(driver_type: Option<&str>) -> sqlformat::Dialect {
-    match driver_type.map(str::to_ascii_lowercase).as_deref() {
-        Some("postgres") | Some("postgresql") => sqlformat::Dialect::PostgreSql,
-        _ => sqlformat::Dialect::Generic,
+fn query_document_symbols(sql: &str) -> Vec<QueryDocumentSymbol> {
+    let mut symbols = Vec::new();
+    let mut current = String::new();
+    let mut start_line = 0usize;
+    let mut start_column = 0usize;
+    let mut line = 0usize;
+    let mut column = 0usize;
+    let mut in_string = false;
+    let mut string_char = '\0';
+    let mut in_line_comment = false;
+    let mut in_block_comment = false;
+    let mut statement_started = false;
+    let mut chars = sql.chars().peekable();
+
+    while let Some(character) = chars.next() {
+        let next = chars.peek().copied();
+
+        if !statement_started && !character.is_whitespace() {
+            start_line = line;
+            start_column = column;
+            statement_started = true;
+        }
+
+        if !in_string && !in_block_comment && character == '-' && next == Some('-') {
+            in_line_comment = true;
+            current.push(character);
+            advance_position(character, &mut line, &mut column);
+            continue;
+        }
+
+        if in_line_comment {
+            current.push(character);
+            if character == '\n' {
+                in_line_comment = false;
+            }
+            advance_position(character, &mut line, &mut column);
+            continue;
+        }
+
+        if !in_string && !in_line_comment && character == '/' && next == Some('*') {
+            in_block_comment = true;
+            current.push(character);
+            advance_position(character, &mut line, &mut column);
+            continue;
+        }
+
+        if in_block_comment {
+            current.push(character);
+            advance_position(character, &mut line, &mut column);
+            if character == '*' && next == Some('/') {
+                current.push('/');
+                chars.next();
+                in_block_comment = false;
+                advance_position('/', &mut line, &mut column);
+            }
+            continue;
+        }
+
+        if !in_string && (character == '\'' || character == '"') {
+            in_string = true;
+            string_char = character;
+            current.push(character);
+            advance_position(character, &mut line, &mut column);
+            continue;
+        }
+
+        if in_string {
+            current.push(character);
+            advance_position(character, &mut line, &mut column);
+            if character == string_char {
+                if next == Some(string_char) {
+                    current.push(string_char);
+                    chars.next();
+                    advance_position(string_char, &mut line, &mut column);
+                    continue;
+                }
+                in_string = false;
+            }
+            continue;
+        }
+
+        if character == ';' {
+            if let Some(label) = query_document_symbol_label(&current) {
+                symbols.push(QueryDocumentSymbol {
+                    label,
+                    line: start_line,
+                    column: start_column,
+                });
+            }
+            current.clear();
+            statement_started = false;
+            advance_position(character, &mut line, &mut column);
+            continue;
+        }
+
+        current.push(character);
+        advance_position(character, &mut line, &mut column);
     }
+
+    if let Some(label) = query_document_symbol_label(&current) {
+        symbols.push(QueryDocumentSymbol {
+            label,
+            line: start_line,
+            column: start_column,
+        });
+    }
+
+    symbols
+}
+
+fn advance_position(character: char, line: &mut usize, column: &mut usize) {
+    if character == '\n' {
+        *line += 1;
+        *column = 0;
+    } else {
+        *column += 1;
+    }
+}
+
+fn query_document_symbol_label(statement: &str) -> Option<String> {
+    let statement = statement.trim();
+    if statement.is_empty() {
+        return None;
+    }
+
+    let words: Vec<&str> = statement
+        .split_whitespace()
+        .filter(|word| !word.starts_with("--"))
+        .take(4)
+        .collect();
+    let first = words
+        .first()?
+        .trim_matches(|ch: char| !ch.is_alphanumeric());
+    if first.is_empty() {
+        return None;
+    }
+
+    let action = first.to_uppercase();
+    let label = match action.as_str() {
+        "SELECT" | "WITH" => "Query".to_string(),
+        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "ALTER" | "DROP" | "TRUNCATE" => {
+            let target = words
+                .iter()
+                .skip(1)
+                .find(|word| {
+                    !matches!(
+                        word.to_ascii_uppercase().as_str(),
+                        "INTO" | "TABLE" | "VIEW" | "INDEX" | "FUNCTION" | "PROCEDURE" | "TRIGGER"
+                    )
+                })
+                .map(|word| word.trim_matches(|ch: char| ch == '"' || ch == '`' || ch == ','));
+            if let Some(target) = target.filter(|target| !target.is_empty()) {
+                format!("{action} {target}")
+            } else {
+                action
+            }
+        }
+        _ => action,
+    };
+
+    Some(label)
 }
 
 /// Adapter that implements HoverProvider for SqlLsp
@@ -115,10 +282,84 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
         _cx: &App,
     ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
         let text_string = text.to_string();
+        let schema_hover = {
+            let lsp = self.sql_lsp.read();
+            let db_schema = lsp.get_schema_for_metadata();
+            if db_schema.tables.is_empty() {
+                None
+            } else {
+                let schema_metadata = SchemaMetadata::new(db_schema);
+                schema_metadata
+                    .find_symbol_at_offset(&text_string, offset)
+                    .map(|symbol| {
+                        let documentation = schema_symbol_hover_documentation(&symbol);
+                        lsp_types::Hover {
+                            contents: lsp_types::HoverContents::Markup(lsp_types::MarkupContent {
+                                kind: lsp_types::MarkupKind::Markdown,
+                                value: documentation,
+                            }),
+                            range: None,
+                        }
+                    })
+            }
+        };
+        if schema_hover.is_some() {
+            return Task::ready(Ok(schema_hover));
+        }
+
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         let result = self.sql_lsp.read().get_hover(&ui_rope, offset);
         Task::ready(Ok(result))
     }
+}
+
+fn schema_symbol_hover_documentation(symbol_info: &SchemaSymbolInfo) -> String {
+    let mut content = String::new();
+
+    content.push_str(&format!(
+        "**{}**: `{}`\n\n",
+        symbol_info.symbol_type_name(),
+        symbol_info.name
+    ));
+
+    if let Some(details) = &symbol_info.details {
+        if let Some(columns) = &details.columns {
+            content.push_str("**Columns**:\n");
+            for col in columns.iter().take(10) {
+                let pk_marker = if col.is_primary_key { " PK" } else { "" };
+                content.push_str(&format!(
+                    "- `{}`: {}{}\n",
+                    col.name, col.data_type, pk_marker
+                ));
+            }
+            if columns.len() > 10 {
+                content.push_str(&format!("... and {} more\n", columns.len() - 10));
+            }
+        }
+
+        if let Some(table_name) = &details.table_name {
+            content.push_str(&format!("**Table**: `{}`\n", table_name));
+        }
+        if let Some(data_type) = &details.data_type {
+            content.push_str(&format!("**Type**: {}\n", data_type));
+        }
+        if let Some(nullable) = details.nullable {
+            content.push_str(&format!(
+                "**Nullable**: {}\n",
+                if nullable { "Yes" } else { "No" }
+            ));
+        }
+        if let Some(is_pk) = details.is_primary_key
+            && is_pk
+        {
+            content.push_str("**Primary Key**: Yes\n");
+        }
+        if let Some(row_count) = details.row_count {
+            content.push_str(&format!("**Rows**: ~{}\n", row_count));
+        }
+    }
+
+    content
 }
 
 fn byte_offset_for_lsp_position(
@@ -276,6 +517,29 @@ impl zqlz_text_editor::CodeActionProvider for SqlLspCodeActionAdapter {
             .into_iter()
             .map(lsp_types::CodeActionOrCommand::CodeAction)
             .collect()
+    }
+}
+
+struct SqlLspDiagnosticAdapter {
+    sql_lsp: Arc<RwLock<SqlLsp>>,
+}
+
+impl SqlLspDiagnosticAdapter {
+    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
+        Self { sql_lsp }
+    }
+}
+
+impl zqlz_text_editor::DiagnosticProvider for SqlLspDiagnosticAdapter {
+    fn diagnostics(
+        &self,
+        text: &ropey::Rope,
+        _document: &zqlz_text_editor::DocumentContext,
+    ) -> Task<anyhow::Result<Vec<lsp_types::Diagnostic>>> {
+        let text_string = text.to_string();
+        let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
+        let diagnostics = self.sql_lsp.write().validate_sql(&ui_rope);
+        Task::ready(Ok(diagnostics))
     }
 }
 
@@ -529,23 +793,27 @@ pub enum QueryEditorEvent {
     ExecuteQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         params: Option<QueryExecutionParams>,
     },
     /// User requested to execute selected text or current statement
     ExecuteSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         params: Option<QueryExecutionParams>,
     },
     /// User requested to explain the current query
     ExplainQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
     },
     /// User requested to explain selected text or current statement
     ExplainSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
     },
     /// User requested to cancel the currently executing query
     CancelQuery,
@@ -615,6 +883,9 @@ pub struct QueryEditor {
     /// Whether a query is currently executing
     is_executing: bool,
 
+    /// Whether the active connection exposes a real query cancel handle.
+    can_cancel_execution: bool,
+
     /// Current editor mode (SQL or Template)
     editor_mode: EditorMode,
 
@@ -646,17 +917,11 @@ pub struct QueryEditor {
     /// Available databases (for database switcher dropdown)
     available_databases: Vec<String>,
 
-    /// Debounce task for auto-triggering completions
-    _completion_debounce: Option<gpui::Task<()>>,
+    /// Currently selected schema label for the local query console context.
+    current_schema: Option<String>,
 
-    /// Current hover popover content (shown when ShowHover action is triggered)
-    hover_content: Option<String>,
-
-    /// Current inline suggestion (ghost text shown while typing)
-    inline_suggestion: Option<InlineSuggestionState>,
-
-    /// Debounce timer for inline suggestions
-    _inline_suggestion_debounce: Option<gpui::Task<()>>,
+    /// Real schema labels derived from loaded metadata. Empty means hide selector.
+    available_schemas: Vec<String>,
 
     /// Debounce timer for diagnostics (triggers after typing stops)
     _diagnostics_debounce: Option<gpui::Task<()>>,
@@ -664,42 +929,67 @@ pub struct QueryEditor {
     /// Last text content (used to detect changes for diagnostics)
     _last_diagnostics_text: Option<String>,
 
-    /// Cached diagnostics from the last explicit validation pass.
-    cached_diagnostics: Vec<lsp_types::Diagnostic>,
-
-    /// Monotonic generation used to ignore stale async inline suggestions.
-    inline_suggestion_generation: u64,
-
-    /// Schema metadata provider for hover overlay (created on demand)
-    schema_metadata: Option<SchemaMetadata>,
-
-    /// Current schema symbol info (for metadata overlay)
-    schema_symbol_info: Option<SchemaSymbolInfo>,
-
     /// Subscriptions to keep alive
     _subscriptions: Vec<Subscription>,
 }
 
-/// Represents the current inline suggestion state
-#[derive(Debug, Clone)]
-pub struct InlineSuggestionState {
-    /// The suggested text to insert
-    pub suggestion: String,
-    /// Start position of the suggestion (byte offset)
-    pub start_offset: usize,
-    /// End position of the suggestion (byte offset)
-    pub end_offset: usize,
-    /// Source of the suggestion (LSP or AI)
-    pub source: InlineSuggestionSource,
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
+struct QueryEditorStatusLabels {
+    cursor: String,
+    selection: Option<String>,
+    mode: String,
+    connection: String,
+    database: String,
+    diagnostics: String,
+    execution: Option<String>,
 }
 
-/// Source of an inline suggestion
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InlineSuggestionSource {
-    /// Suggestion from LSP completion
-    Lsp,
-    /// Suggestion from AI provider
-    Ai,
+#[cfg(test)]
+struct QueryEditorStatusInput<'a> {
+    cursor_line: usize,
+    cursor_column: usize,
+    selection_chars: Option<usize>,
+    mode: EditorMode,
+    connection_name: Option<&'a str>,
+    has_connection: bool,
+    database: Option<&'a str>,
+    diagnostics: (usize, usize, usize),
+    is_executing: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryEditorRunMenuAction {
+    Run,
+    RunCurrentStatement,
+    ContinueOnError,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueryEditorRunMenuEntry {
+    label: &'static str,
+    action: QueryEditorRunMenuAction,
+    checked: bool,
+    disabled: bool,
+    separator_before: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct QueryEditorRunTargetPreview {
+    label: String,
+    detail: String,
+    preview: String,
+    is_selection: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[cfg(test)]
+struct QueryEditorHeaderVisibility {
+    show_mode_segment: bool,
+    show_problems_badge: bool,
+    show_template_error: bool,
+    show_keymap_hints: bool,
+    show_repeated_connection_label: bool,
 }
 
 impl QueryEditor {
@@ -785,31 +1075,306 @@ impl QueryEditor {
             .collect()
     }
 
-    fn ui_diagnostics_from_lsp_diagnostics(
-        diagnostics: &[lsp_types::Diagnostic],
-    ) -> Vec<zqlz_ui::widgets::highlighter::Diagnostic> {
-        diagnostics.iter().cloned().map(Into::into).collect()
+    fn run_menu_entries() -> Vec<QueryEditorRunMenuEntry> {
+        vec![
+            QueryEditorRunMenuEntry {
+                label: "Run",
+                action: QueryEditorRunMenuAction::Run,
+                checked: false,
+                disabled: false,
+                separator_before: false,
+            },
+            QueryEditorRunMenuEntry {
+                label: "Run Current Statement",
+                action: QueryEditorRunMenuAction::RunCurrentStatement,
+                checked: false,
+                disabled: false,
+                separator_before: false,
+            },
+            QueryEditorRunMenuEntry {
+                label: "Continue on Error",
+                action: QueryEditorRunMenuAction::ContinueOnError,
+                checked: true,
+                disabled: true,
+                separator_before: true,
+            },
+        ]
     }
 
-    fn diagnostic_counts_from_lsp_diagnostics(
-        diagnostics: &[lsp_types::Diagnostic],
-    ) -> (usize, usize, usize) {
-        let mut errors = 0;
-        let mut warnings = 0;
-        let mut hints_infos = 0;
+    fn compact_sql_preview(sql: &str, max_chars: usize) -> String {
+        let compact = sql.split_whitespace().collect::<Vec<_>>().join(" ");
+        if compact.is_empty() {
+            return "Empty SQL".to_string();
+        }
 
-        for diagnostic in diagnostics {
-            match diagnostic.severity {
-                Some(DiagnosticSeverity::ERROR) => errors += 1,
-                Some(DiagnosticSeverity::WARNING) => warnings += 1,
-                Some(DiagnosticSeverity::INFORMATION) | Some(DiagnosticSeverity::HINT) => {
-                    hints_infos += 1
+        let char_count = compact.chars().count();
+        if char_count <= max_chars {
+            return compact;
+        }
+
+        let keep_chars = max_chars.saturating_sub(3);
+        let mut preview: String = compact.chars().take(keep_chars).collect();
+        preview.push_str("...");
+        preview
+    }
+
+    fn sql_line_count(sql: &str) -> usize {
+        sql.lines().count().max(1)
+    }
+
+    fn line_count_label(line_count: usize) -> String {
+        format!(
+            "{} line{}",
+            line_count,
+            if line_count == 1 { "" } else { "s" }
+        )
+    }
+
+    fn line_range_label_for_byte_range(text: &str, start: usize, end: usize) -> String {
+        let start = start.min(text.len());
+        let end = end.min(text.len());
+        let start_line = text[..start].bytes().filter(|byte| *byte == b'\n').count() + 1;
+        let end_line = text[..end].bytes().filter(|byte| *byte == b'\n').count() + 1;
+
+        if start_line == end_line {
+            format!("Ln {start_line}")
+        } else {
+            format!("Ln {start_line}-{end_line}")
+        }
+    }
+
+    fn current_statement_for_preview(
+        full_sql: &str,
+        cursor_offset: usize,
+    ) -> (String, Option<(usize, usize)>) {
+        let statements = split_statements(full_sql);
+        if statements.len() <= 1 {
+            return (full_sql.to_string(), Some((0, full_sql.len())));
+        }
+
+        let cursor_offset = cursor_offset.min(full_sql.len());
+        let mut search_start = 0;
+        for statement in statements {
+            if let Some(relative_start) = full_sql[search_start..].find(&statement) {
+                let statement_start = search_start + relative_start;
+                let statement_end = statement_start + statement.len();
+
+                if cursor_offset >= statement_start && cursor_offset <= statement_end {
+                    return (statement, Some((statement_start, statement_end)));
                 }
-                _ => errors += 1,
+
+                search_start = statement_end;
             }
         }
 
-        (errors, warnings, hints_infos)
+        (full_sql.to_string(), Some((0, full_sql.len())))
+    }
+
+    fn run_target_preview_from_parts(
+        executable_sql: &str,
+        selected_sql: Option<&str>,
+        cursor_offset: usize,
+        mode: EditorMode,
+    ) -> QueryEditorRunTargetPreview {
+        if let Some(selected_sql) = selected_sql.map(str::trim).filter(|sql| !sql.is_empty()) {
+            return QueryEditorRunTargetPreview {
+                label: "Run Selection".to_string(),
+                detail: Self::line_count_label(Self::sql_line_count(selected_sql)),
+                preview: Self::compact_sql_preview(selected_sql, 96),
+                is_selection: true,
+            };
+        }
+
+        if mode == EditorMode::Template {
+            return QueryEditorRunTargetPreview {
+                label: "Run Rendered Template".to_string(),
+                detail: Self::line_count_label(Self::sql_line_count(executable_sql)),
+                preview: Self::compact_sql_preview(executable_sql, 96),
+                is_selection: false,
+            };
+        }
+
+        let (statement, range) = Self::current_statement_for_preview(executable_sql, cursor_offset);
+        let range_label = range
+            .map(|(start, end)| Self::line_range_label_for_byte_range(executable_sql, start, end))
+            .unwrap_or_else(|| "Current".to_string());
+
+        QueryEditorRunTargetPreview {
+            label: "Run Current Statement".to_string(),
+            detail: range_label,
+            preview: Self::compact_sql_preview(&statement, 96),
+            is_selection: false,
+        }
+    }
+
+    fn run_target_preview(&self, cx: &App) -> QueryEditorRunTargetPreview {
+        let selected_sql = self
+            .editor
+            .read(cx)
+            .get_selected_text(cx)
+            .map(|text| text.to_string());
+        let executable_sql = self.get_executable_sql(cx);
+        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
+
+        Self::run_target_preview_from_parts(
+            &executable_sql,
+            selected_sql.as_deref(),
+            cursor_offset,
+            self.editor_mode,
+        )
+    }
+
+    #[cfg(test)]
+    fn header_visibility() -> QueryEditorHeaderVisibility {
+        QueryEditorHeaderVisibility {
+            show_mode_segment: false,
+            show_problems_badge: false,
+            show_template_error: false,
+            show_keymap_hints: false,
+            show_repeated_connection_label: false,
+        }
+    }
+
+    fn unique_non_empty_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+        let mut seen = HashSet::new();
+        values
+            .into_iter()
+            .filter_map(|value| {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                let value = trimmed.to_string();
+                if seen.insert(value.clone()) {
+                    Some(value)
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    fn schema_labels_from_parts(
+        schema_names: impl IntoIterator<Item = String>,
+        table_schemas: impl IntoIterator<Item = Option<String>>,
+    ) -> Vec<String> {
+        let schemas = Self::unique_non_empty_strings(schema_names);
+        if !schemas.is_empty() {
+            return schemas;
+        }
+
+        Self::unique_non_empty_strings(table_schemas.into_iter().flatten())
+    }
+
+    fn schema_labels_from_metadata(schema: &DatabaseSchema) -> Vec<String> {
+        Self::schema_labels_from_parts(
+            schema.schema_names.clone(),
+            schema.table_infos.iter().map(|table| table.schema.clone()),
+        )
+    }
+
+    fn reconcile_current_schema(&mut self) {
+        if self.available_schemas.is_empty() {
+            self.current_schema = None;
+            return;
+        }
+
+        if let Some(current_schema) = &self.current_schema
+            && self
+                .available_schemas
+                .iter()
+                .any(|schema| schema == current_schema)
+        {
+            return;
+        }
+
+        self.current_schema = self.available_schemas.first().cloned();
+    }
+
+    fn clear_schema_dependent_ui_state(&mut self) {
+        // Schema-bound editor UI is owned by provider-backed TextEditor state.
+    }
+
+    fn update_schema_selector_from_lsp(&mut self, cx: &mut Context<Self>) {
+        let previous_schema = self.current_schema.clone();
+        let schema = self.sql_lsp.read().get_schema_for_metadata();
+        self.available_schemas = Self::schema_labels_from_metadata(&schema);
+        if self.current_schema.is_none()
+            && let Some(resolved_schema) = schema
+                .schema_name
+                .map(|schema_name| schema_name.trim().to_string())
+                .filter(|schema_name| !schema_name.is_empty())
+            && self
+                .available_schemas
+                .iter()
+                .any(|schema_name| schema_name == &resolved_schema)
+        {
+            self.current_schema = Some(resolved_schema);
+        }
+        self.reconcile_current_schema();
+        if self.current_schema != previous_schema {
+            self.clear_schema_dependent_ui_state();
+        }
+        cx.notify();
+    }
+
+    fn selector_label(label: impl Into<SharedString>) -> impl IntoElement {
+        div()
+            .min_w_0()
+            .flex_grow()
+            .truncate()
+            .line_height(relative(1.0))
+            .child(label.into())
+    }
+
+    #[cfg(test)]
+    fn status_labels_from_parts(input: QueryEditorStatusInput<'_>) -> QueryEditorStatusLabels {
+        let (errors, warnings, infos) = input.diagnostics;
+        let diagnostics = if errors > 0 {
+            format!("{} error{}", errors, if errors == 1 { "" } else { "s" })
+        } else if warnings > 0 {
+            format!(
+                "{} warning{}",
+                warnings,
+                if warnings == 1 { "" } else { "s" }
+            )
+        } else if infos > 0 {
+            format!("{} info", infos)
+        } else {
+            "No Problems".to_string()
+        };
+
+        QueryEditorStatusLabels {
+            cursor: format!(
+                "Ln {}, Col {}",
+                input.cursor_line + 1,
+                input.cursor_column + 1
+            ),
+            selection: input
+                .selection_chars
+                .filter(|chars| *chars > 0)
+                .map(|chars| format!("{chars} selected")),
+            mode: match input.mode {
+                EditorMode::Sql => "SQL".to_string(),
+                EditorMode::Template => "Template".to_string(),
+            },
+            connection: input
+                .connection_name
+                .map(ToString::to_string)
+                .unwrap_or_else(|| {
+                    if input.has_connection {
+                        "Connected".to_string()
+                    } else {
+                        "No Connection".to_string()
+                    }
+                }),
+            database: input
+                .database
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "No Database".to_string()),
+            diagnostics,
+            execution: input.is_executing.then(|| "Running".to_string()),
+        }
     }
 
     fn internal_text_document(text: impl AsRef<str>) -> TextDocument {
@@ -821,7 +1386,7 @@ impl QueryEditor {
 
     fn build_primary_editor(
         document: TextDocument,
-        editor_settings: &EditorSettings,
+        editor_settings: &AppEditorSettings,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Entity<TextEditor> {
@@ -829,6 +1394,7 @@ impl QueryEditor {
 
         editor.update(cx, |text_editor, cx| {
             Self::apply_editor_settings(text_editor, editor_settings, cx);
+            text_editor.set_appearance(EditorAppearance::QueryConsole, cx);
             text_editor.set_autofocus_on_open(true);
         });
 
@@ -837,30 +1403,14 @@ impl QueryEditor {
 
     fn apply_editor_settings(
         text_editor: &mut TextEditor,
-        settings: &EditorSettings,
+        settings: &AppEditorSettings,
         cx: &mut Context<TextEditor>,
     ) {
-        text_editor.set_indent_settings(settings.tab_size as usize, settings.insert_spaces, cx);
-        text_editor.set_show_line_numbers(settings.show_line_numbers, cx);
-        text_editor.set_soft_wrap_enabled(settings.word_wrap, cx);
-        text_editor.set_highlight_current_line(settings.highlight_current_line, cx);
-        text_editor.set_show_inline_diagnostics(settings.show_inline_diagnostics, cx);
-        text_editor.set_show_folding(settings.show_folding, cx);
+        let text_editor_settings = Self::text_editor_settings_from_app(settings);
+        text_editor.apply_editor_settings(&text_editor_settings, cx);
         text_editor.set_highlight_enabled(settings.highlight_enabled, cx);
         text_editor.set_bracket_matching_enabled(settings.bracket_matching, cx);
-        text_editor.set_relative_line_numbers(settings.relative_line_numbers, cx);
         text_editor.set_show_gutter_diagnostics(settings.show_gutter_diagnostics, cx);
-        text_editor.set_cursor_shape(
-            match settings.cursor_shape {
-                CursorShape::Block => zqlz_text_editor::CursorShapeStyle::Block,
-                CursorShape::Line => zqlz_text_editor::CursorShapeStyle::Line,
-                CursorShape::Underline => zqlz_text_editor::CursorShapeStyle::Underline,
-            },
-            cx,
-        );
-        text_editor
-            .set_cursor_blink_enabled(!matches!(settings.cursor_blink, CursorBlink::Off), cx);
-        text_editor.set_selection_highlight_enabled(settings.selection_highlight, cx);
         text_editor.set_rounded_selection(settings.rounded_selection, cx);
         text_editor.set_search_wrap_enabled(!matches!(
             settings.search_wrap,
@@ -868,13 +1418,6 @@ impl QueryEditor {
         ));
         text_editor.set_smartcase_search_enabled(settings.use_smartcase_search);
         text_editor.set_autoscroll_on_clicks(settings.autoscroll_on_clicks);
-        text_editor.set_vertical_scroll_margin(settings.vertical_scroll_margin as usize);
-        text_editor.set_horizontal_scroll_margin(settings.horizontal_scroll_margin as usize);
-        text_editor.set_scroll_sensitivity(settings.scroll_sensitivity);
-        text_editor.set_scroll_beyond_last_line(!matches!(
-            settings.scroll_beyond_last_line,
-            ScrollBeyondLastLine::Disabled
-        ));
         text_editor.set_auto_indent_enabled(settings.auto_indent, cx);
         text_editor.set_large_file_thresholds(
             settings.large_file_line_threshold as usize,
@@ -882,50 +1425,136 @@ impl QueryEditor {
         );
     }
 
+    fn text_editor_settings_from_app(settings: &AppEditorSettings) -> TextEditorSettings {
+        TextEditorSettings {
+            cursor: CursorSettings {
+                blink: !matches!(settings.cursor_blink, CursorBlink::Off),
+                shape: match settings.cursor_shape {
+                    CursorShape::Block => zqlz_text_editor::CursorShape::Block,
+                    CursorShape::Line => zqlz_text_editor::CursorShape::Bar,
+                    CursorShape::Underline => zqlz_text_editor::CursorShape::Underline,
+                },
+            },
+            highlight_current_line: false,
+            highlight_selection_matches: settings.selection_highlight,
+            gutter: GutterSettings {
+                show_line_numbers: true,
+                show_relative_line_numbers: settings.relative_line_numbers,
+                show_gutter: true,
+                show_fold_controls: settings.show_folding,
+            },
+            show_diagnostics: settings.show_inline_diagnostics || settings.show_gutter_diagnostics,
+            show_folding: settings.show_folding,
+            soft_wrap: if settings.word_wrap {
+                SoftWrapMode::EditorWidth
+            } else {
+                SoftWrapMode::None
+            },
+            document: DocumentSettings {
+                indent_size: settings.tab_size.max(1) as usize,
+                use_tabs: !settings.insert_spaces,
+            },
+            search: SearchSettings {
+                case_sensitive: false,
+                whole_word: false,
+                use_regex: false,
+                search_in_selection: false,
+            },
+            hover_delay: std::time::Duration::from_millis(settings.hover_delay_ms as u64),
+            completion: CompletionSettings {
+                automatically_show: settings.lsp_enabled && settings.lsp_completions_enabled,
+                accept_on_enter: true,
+                commit_characters: true,
+            },
+            scroll: ScrollSettings {
+                vertical_margin_lines: settings.vertical_scroll_margin as usize,
+                horizontal_margin_columns: settings.horizontal_scroll_margin as usize,
+                sensitivity: (settings.scroll_sensitivity.max(0.1) * 100.0).round() as u16,
+                scroll_beyond_last_line: !matches!(
+                    settings.scroll_beyond_last_line,
+                    ScrollBeyondLastLine::Disabled
+                ),
+            },
+        }
+    }
+
+    fn format_provider_for_current_context(&self) -> Option<FormatProvider> {
+        let driver_type = self.driver_type.clone()?;
+        formatter_provider_for_driver(&driver_type)?;
+
+        let object_type = self.object_type.display_name().to_string();
+        Some(Rc::new(move |source| {
+            let formatter = formatter_provider_for_driver(&driver_type)?;
+            let request = FormatRequest::new(source.to_string(), driver_type.clone())
+                .with_object_type(object_type.clone());
+            formatter
+                .format(&request)
+                .ok()
+                .map(|outcome| outcome.source)
+        }))
+    }
+
+    fn apply_format_provider_to_editor(&self, cx: &mut Context<Self>) {
+        let settings = ZqlzSettings::global(cx).editor.clone();
+        let language_providers = self.language_providers_for_current_context(&settings);
+        self.editor.update(cx, |editor, cx| {
+            editor.set_language_providers(language_providers, cx);
+        });
+    }
+
+    fn language_providers_for_current_context(
+        &self,
+        settings: &AppEditorSettings,
+    ) -> EditorLanguageProviders {
+        let supports_sql_lsp = self
+            .driver_type
+            .as_deref()
+            .map(driver_category_from_driver_name)
+            .is_none_or(|category| matches!(category, DriverCategory::Relational));
+
+        if !supports_sql_lsp || !settings.lsp_enabled {
+            return EditorLanguageProviders {
+                format: self.format_provider_for_current_context(),
+                ..EditorLanguageProviders::default()
+            };
+        }
+
+        EditorLanguageProviders {
+            completion: settings.lsp_completions_enabled.then(|| {
+                Rc::new(SqlLspCompletionAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::CompletionProvider>
+            }),
+            hover: settings.lsp_hover_enabled.then(|| {
+                Rc::new(SqlLspHoverAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::HoverProvider>
+            }),
+            definition: Some(Rc::new(SqlLspDefinitionAdapter::new(self.sql_lsp.clone()))
+                as Rc<dyn zqlz_text_editor::DefinitionProvider>),
+            references: Some(Rc::new(SqlLspReferencesAdapter::new(self.sql_lsp.clone()))
+                as Rc<dyn zqlz_text_editor::ReferencesProvider>),
+            rename: settings.lsp_rename_enabled.then(|| {
+                Rc::new(SqlLspRenameAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::RenameProvider>
+            }),
+            code_actions: settings.lsp_code_actions_enabled.then(|| {
+                Rc::new(SqlLspCodeActionAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::CodeActionProvider>
+            }),
+            diagnostics: settings.lsp_diagnostics_enabled.then(|| {
+                Rc::new(SqlLspDiagnosticAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::DiagnosticProvider>
+            }),
+            format: self.format_provider_for_current_context(),
+        }
+    }
+
     fn sync_lsp_settings(&mut self, cx: &mut Context<Self>) {
         let settings = ZqlzSettings::global(cx).editor.clone();
+        let language_providers = self.language_providers_for_current_context(&settings);
 
         self.editor.update(cx, |text_editor, cx| {
             Self::apply_editor_settings(text_editor, &settings, cx);
-
-            if settings.lsp_enabled && settings.lsp_completions_enabled {
-                text_editor.set_completion_provider(std::rc::Rc::new(
-                    SqlLspCompletionAdapter::new(self.sql_lsp.clone()),
-                ));
-            } else {
-                text_editor.clear_completion_provider();
-            }
-
-            if settings.lsp_enabled && settings.lsp_hover_enabled {
-                text_editor.set_hover_provider(std::rc::Rc::new(SqlLspHoverAdapter::new(
-                    self.sql_lsp.clone(),
-                )));
-            } else {
-                text_editor.clear_hover_provider();
-            }
-
-            text_editor.set_definition_provider(std::rc::Rc::new(SqlLspDefinitionAdapter::new(
-                self.sql_lsp.clone(),
-            )));
-            text_editor.set_references_provider(std::rc::Rc::new(SqlLspReferencesAdapter::new(
-                self.sql_lsp.clone(),
-            )));
-
-            if settings.lsp_enabled && settings.lsp_rename_enabled {
-                text_editor.set_rename_provider(std::rc::Rc::new(SqlLspRenameAdapter::new(
-                    self.sql_lsp.clone(),
-                )));
-            } else {
-                text_editor.clear_rename_provider();
-            }
-
-            if settings.lsp_enabled && settings.lsp_code_actions_enabled {
-                text_editor.set_code_action_provider(std::rc::Rc::new(
-                    SqlLspCodeActionAdapter::new(self.sql_lsp.clone()),
-                ));
-            } else {
-                text_editor.clear_code_action_provider();
-            }
+            text_editor.set_language_providers(language_providers, cx);
         });
 
         self.template_params.update(cx, |text_editor, cx| {
@@ -934,7 +1563,7 @@ impl QueryEditor {
 
         if !settings.lsp_enabled || !settings.lsp_diagnostics_enabled {
             self.editor.update(cx, |editor, cx| {
-                editor.set_diagnostics(Vec::new(), cx);
+                editor.set_lsp_diagnostics(Vec::new(), cx);
             });
         }
     }
@@ -1021,6 +1650,7 @@ impl QueryEditor {
             sql_lsp,
             driver_type: None,
             is_executing: false,
+            can_cancel_execution: false,
             editor_mode: EditorMode::Sql,
             object_type: EditorObjectType::Query,
             template_engine: TemplateEngine::new(),
@@ -1031,19 +1661,14 @@ impl QueryEditor {
             current_database: None,
             available_connections: Vec::new(),
             available_databases: Vec::new(),
-            hover_content: None,
-            inline_suggestion: None,
-            _inline_suggestion_debounce: None,
-            _completion_debounce: None,
+            current_schema: None,
+            available_schemas: Vec::new(),
             _diagnostics_debounce: None,
             _last_diagnostics_text: Some(initial_text.to_string()),
-            cached_diagnostics: Vec::new(),
-            inline_suggestion_generation: 0,
-            schema_metadata: None,
-            schema_symbol_info: None,
             _subscriptions,
         };
 
+        query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
     }
@@ -1109,6 +1734,7 @@ impl QueryEditor {
             sql_lsp,
             driver_type: None,
             is_executing: false,
+            can_cancel_execution: false,
             editor_mode: EditorMode::Sql,
             object_type: EditorObjectType::Query,
             template_engine: TemplateEngine::new(),
@@ -1119,19 +1745,14 @@ impl QueryEditor {
             current_database: None,
             available_connections: Vec::new(),
             available_databases: Vec::new(),
-            hover_content: None,
-            inline_suggestion: None,
-            _inline_suggestion_debounce: None,
-            _completion_debounce: None,
+            current_schema: None,
+            available_schemas: Vec::new(),
             _diagnostics_debounce: None,
             _last_diagnostics_text: Some(initial_text.to_string()),
-            cached_diagnostics: Vec::new(),
-            inline_suggestion_generation: 0,
-            schema_metadata: None,
-            schema_symbol_info: None,
             _subscriptions,
         };
 
+        query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
     }
@@ -1185,6 +1806,7 @@ impl QueryEditor {
             sql_lsp,
             driver_type: None,
             is_executing: false,
+            can_cancel_execution: false,
             editor_mode: EditorMode::Sql,
             object_type,
             template_engine: TemplateEngine::new(),
@@ -1195,19 +1817,14 @@ impl QueryEditor {
             current_database: None,
             available_connections: Vec::new(),
             available_databases: Vec::new(),
-            hover_content: None,
-            inline_suggestion: None,
-            _inline_suggestion_debounce: None,
-            _completion_debounce: None,
+            current_schema: None,
+            available_schemas: Vec::new(),
             _diagnostics_debounce: None,
             _last_diagnostics_text: Some(initial_text.to_string()),
-            cached_diagnostics: Vec::new(),
-            inline_suggestion_generation: 0,
-            schema_metadata: None,
-            schema_symbol_info: None,
             _subscriptions,
         };
 
+        query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
     }
@@ -1225,33 +1842,40 @@ impl QueryEditor {
         self.connection_id = connection_id;
         self.connection_name = connection_name;
         self.driver_type = driver_type.clone();
-        self.schema_metadata = None;
-        self.schema_symbol_info = None;
-        self.hover_content = None;
+        self.can_cancel_execution = connection
+            .as_ref()
+            .is_some_and(|connection| connection.cancel_handle().is_some());
+        self.apply_format_provider_to_editor(cx);
+        self.clear_schema_dependent_ui_state();
+        self.current_schema = None;
+        self.available_schemas.clear();
+        let dialect_language = driver_type_to_highlight_language(driver_type.as_deref());
         self.editor.update(cx, |editor, cx| {
+            editor.set_syntax_language_profile(dialect_language, cx);
             editor.clear_code_actions(cx);
         });
-
-        // Dialect determines syntax highlighting language; currently unused since
-        // the TextEditor's tree-sitter highlighter handles generic SQL.
-        let _dialect_language = driver_type_to_highlight_language(driver_type.as_deref());
 
         // Update SQL LSP with new connection and driver type
         {
             let mut lsp = self.sql_lsp.write();
             lsp.set_connection(connection_id, connection.clone(), driver_type.clone());
             lsp.set_active_database(self.current_database.clone());
+            lsp.set_active_schema(self.current_schema.clone());
 
             // If a cache was persisted from the last session, apply it immediately so
             // completions work from the first keystroke.  The background refresh below
             // always runs regardless (stale-while-revalidate).
-            if let Some(conn_id) = connection_id
-                && let Some(cached) =
-                    load_schema_cache_from_disk(conn_id, self.current_database.as_deref())
-            {
-                lsp.apply_schema_cache(cached);
+            if let Some(conn_id) = connection_id {
+                let scope = schema_cache_scope(
+                    self.current_database.as_deref(),
+                    self.current_schema.as_deref(),
+                );
+                if let Some(cached) = load_schema_cache_from_disk(conn_id, scope.as_deref()) {
+                    lsp.apply_schema_cache(cached);
+                }
             }
         }
+        self.update_schema_selector_from_lsp(cx);
 
         // Refresh schema in background, then re-validate diagnostics once loaded.
         //
@@ -1274,7 +1898,10 @@ impl QueryEditor {
                 )
             };
 
-            let active_database_for_refresh = lsp.read().active_database();
+            let (active_database_for_refresh, active_schema_for_refresh) = {
+                let guard = lsp.read();
+                (guard.active_database(), guard.active_schema())
+            };
 
             if let (Some(connection_for_refresh), Some(connection_id_for_refresh)) =
                 (connection_for_refresh, connection_id_for_refresh)
@@ -1287,6 +1914,7 @@ impl QueryEditor {
 
                     let result = loop {
                         let active_database = active_database_for_refresh.clone();
+                        let active_schema = active_schema_for_refresh.clone();
                         let fetch_result = cx
                             .background_spawn({
                                 let schema_service: Arc<SchemaService> = schema_service.clone();
@@ -1296,6 +1924,7 @@ impl QueryEditor {
                                         conn,
                                         connection_id_for_refresh,
                                         active_database,
+                                        active_schema,
                                         &schema_service,
                                     )
                                     .await
@@ -1327,14 +1956,19 @@ impl QueryEditor {
 
                     match result {
                         Ok(cache) => {
+                            let disk_scope = schema_cache_scope(
+                                active_database_for_refresh.as_deref(),
+                                active_schema_for_refresh.as_deref(),
+                            );
                             save_schema_cache_to_disk(
                                 connection_id_for_refresh,
-                                active_database_for_refresh.as_deref(),
+                                disk_scope.as_deref(),
                                 &cache,
                             );
                             lsp.write().apply_schema_cache_if_current(cache, epoch);
                             tracing::debug!("SQL schema refreshed successfully");
                 _ = this.update(cx, |editor, cx| {
+                    editor.update_schema_selector_from_lsp(cx);
                     editor.update_diagnostics(cx);
                 });
                         }
@@ -1350,6 +1984,12 @@ impl QueryEditor {
             tracing::debug!("No connection provided, skipping schema refresh");
         }
 
+        cx.notify();
+    }
+
+    /// Refresh editor and provider behavior from current app settings.
+    pub fn refresh_settings(&mut self, cx: &mut Context<Self>) {
+        self.sync_lsp_settings(cx);
         cx.notify();
     }
 
@@ -1375,12 +2015,15 @@ impl QueryEditor {
         if !crate::QueryEngine::new().is_schema_modifying(sql) {
             return;
         }
-        self.schema_metadata = None;
-        self.schema_symbol_info = None;
-        if let Some(conn_id) = self.connection_id
-            && let Some(path) = schema_cache_path(conn_id, self.current_database.as_deref())
-        {
-            std::fs::remove_file(path).ok();
+        self.clear_schema_dependent_ui_state();
+        if let Some(conn_id) = self.connection_id {
+            let scope = schema_cache_scope(
+                self.current_database.as_deref(),
+                self.current_schema.as_deref(),
+            );
+            if let Some(path) = schema_cache_path(conn_id, scope.as_deref()) {
+                std::fs::remove_file(path).ok();
+            }
         }
         // Mark schema as loading so completions don't surface stale objects
         // (e.g. a just-dropped table) during the background re-fetch window.
@@ -1391,16 +2034,17 @@ impl QueryEditor {
     /// Re-fetches the full schema cache in the background and applies the result without
     /// interrupting existing completions (does NOT set `schema_loading = true`).
     ///
-    /// Called after `prefetch_all_table_details` completes so that column data already
-    /// warmed into `SchemaService`'s per-table cache is picked up by the LSP immediately.
+    /// Applies a silent schema refresh after DDL so the LSP stops using stale objects.
+    /// Table details already present in `SchemaService` are reused without DB prefetch.
     pub fn trigger_lsp_schema_refresh(&mut self, cx: &mut Context<Self>) {
-        let (connection, connection_id, schema_service, active_database) = {
+        let (connection, connection_id, schema_service, active_database, active_schema) = {
             let guard = self.sql_lsp.read();
             (
                 guard.connection(),
                 guard.connection_id(),
                 guard.schema_service(),
                 guard.active_database(),
+                guard.active_schema(),
             )
         };
 
@@ -1411,6 +2055,7 @@ impl QueryEditor {
         let lsp = self.sql_lsp.clone();
         let epoch = lsp.write().next_fetch_epoch();
         let active_database_for_disk = active_database.clone();
+        let active_schema_for_disk = active_schema.clone();
         cx.spawn(async move |_this, cx| {
             let result = cx
                 .background_spawn({
@@ -1421,6 +2066,7 @@ impl QueryEditor {
                             connection,
                             connection_id,
                             active_database.clone(),
+                            active_schema.clone(),
                             &schema_service,
                         )
                         .await
@@ -1430,14 +2076,15 @@ impl QueryEditor {
 
             match result {
                 Ok(cache) => {
-                    save_schema_cache_to_disk(
-                        connection_id,
+                    let disk_scope = schema_cache_scope(
                         active_database_for_disk.as_deref(),
-                        &cache,
+                        active_schema_for_disk.as_deref(),
                     );
+                    save_schema_cache_to_disk(connection_id, disk_scope.as_deref(), &cache);
                     lsp.write().apply_schema_cache_if_current(cache, epoch);
                     tracing::debug!("Schema cache refreshed after prefetch completion");
                     _ = _this.update(cx, |this, cx| {
+                        this.update_schema_selector_from_lsp(cx);
                         this.update_diagnostics(cx);
                     });
                 }
@@ -1468,16 +2115,52 @@ impl QueryEditor {
     /// Set the current database name
     pub fn set_current_database(&mut self, database: Option<String>, cx: &mut Context<Self>) {
         self.current_database = database;
-        self.sql_lsp
-            .write()
-            .set_active_database(self.current_database.clone());
+        self.current_schema = None;
+        self.clear_schema_dependent_ui_state();
+        {
+            let mut lsp = self.sql_lsp.write();
+            lsp.set_active_database(self.current_database.clone());
+            lsp.set_active_schema(None);
+            lsp.schema_loading = true;
+        }
+        self.update_schema_selector_from_lsp(cx);
+        self.trigger_lsp_schema_refresh(cx);
         cx.notify();
+    }
+
+    /// Start a database switch while caller resolves the physical connection.
+    pub fn begin_current_database_switch(
+        &mut self,
+        database: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.current_database = database;
+        self.current_schema = None;
+        self.clear_schema_dependent_ui_state();
+        self.available_schemas.clear();
+        {
+            let mut lsp = self.sql_lsp.write();
+            lsp.set_active_database(self.current_database.clone());
+            lsp.set_active_schema(None);
+            lsp.schema_loading = true;
+        }
+        cx.notify();
+    }
+
+    pub fn set_schema_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
+        self.sql_lsp.write().schema_loading = loading;
+        cx.notify();
+    }
+
+    /// Get the selected database label for stale async result guards.
+    pub fn current_database(&self) -> Option<String> {
+        self.current_database.clone()
     }
 
     /// Set the SQL content
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_inline_suggestion(cx);
         self.editor.update(cx, |editor, cx| {
+            editor.clear_inline_suggestion(cx);
             editor.set_text(content.clone(), window, cx);
         });
         self._last_diagnostics_text = Some(content);
@@ -1509,9 +2192,8 @@ impl QueryEditor {
         if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
             self._diagnostics_debounce = None;
             self._last_diagnostics_text = Some(new_text);
-            self.cached_diagnostics.clear();
             self.editor.update(cx, |editor, cx| {
-                editor.set_diagnostics(Vec::new(), cx);
+                editor.set_lsp_diagnostics(Vec::new(), cx);
             });
             cx.emit(QueryEditorEvent::DiagnosticsChanged {
                 diagnostics: Vec::new(),
@@ -1523,9 +2205,8 @@ impl QueryEditor {
         if !self.editor.read(cx).diagnostics_enabled() {
             self._diagnostics_debounce = None;
             self._last_diagnostics_text = Some(new_text);
-            self.cached_diagnostics.clear();
             self.editor.update(cx, |editor, cx| {
-                editor.set_diagnostics(Vec::new(), cx);
+                editor.set_lsp_diagnostics(Vec::new(), cx);
             });
             cx.emit(QueryEditorEvent::DiagnosticsChanged {
                 diagnostics: Vec::new(),
@@ -1534,85 +2215,31 @@ impl QueryEditor {
             return;
         }
 
-        // Cancel any existing debounce task
         self._diagnostics_debounce = None;
 
-        // Spawn a new debounced task
-        let editor = self.editor.clone();
-        let sql_lsp = self.sql_lsp.clone();
-
         self._diagnostics_debounce = Some(cx.spawn_in(window, async move |this, cx| {
-            // Wait for typing to stop (300ms debounce)
             cx.background_executor()
                 .timer(std::time::Duration::from_millis(300))
                 .await;
 
-            // Update diagnostics after debounce
+            let Some((text_content, diagnostics_task)) = this
+                .update_in(cx, |this, _window, cx| {
+                    let text_content = this.editor.read(cx).get_text(cx).to_string();
+                    let diagnostics_task = this.editor.read(cx).request_lsp_diagnostics(cx)?;
+                    Some((text_content, diagnostics_task))
+                })
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+
+            let Ok(lsp_diagnostics) = diagnostics_task.await else {
+                return;
+            };
+
             let _ = this.update_in(cx, |this, _window, cx| {
-                // Get fresh text (in case it changed during debounce)
-                let text_content = editor.read(cx).get_text(cx);
-                let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
-
-                // Run LSP validation
-                let lsp_diagnostics = {
-                    let mut lsp = sql_lsp.write();
-                    lsp.validate_sql(&rope)
-                };
-
-                // Convert to TextEditor format
-                let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
-                    .iter()
-                    .map(|lsp_diag| {
-                        use lsp_types::DiagnosticSeverity;
-                        use zqlz_text_editor::DiagnosticLevel;
-
-                        let start_offset = rope.position_to_offset(&lsp_diag.range.start);
-                        let end_offset = rope.position_to_offset(&lsp_diag.range.end);
-
-                        let severity = match lsp_diag.severity {
-                            Some(DiagnosticSeverity::ERROR) => DiagnosticLevel::Error,
-                            Some(DiagnosticSeverity::WARNING) => DiagnosticLevel::Warning,
-                            Some(DiagnosticSeverity::INFORMATION) => DiagnosticLevel::Info,
-                            Some(DiagnosticSeverity::HINT) => DiagnosticLevel::Hint,
-                            _ => DiagnosticLevel::Error,
-                        };
-
-                        // Convert offsets to line/column for TextEditor Diagnostic
-                        let start_line = rope.offset_to_position(start_offset).line as usize;
-                        let start_column = rope.offset_to_position(start_offset).character as usize;
-                        let end_line = rope.offset_to_position(end_offset).line as usize;
-                        let end_column = rope.offset_to_position(end_offset).character as usize;
-
-                        zqlz_text_editor::Diagnostic {
-                            line: start_line,
-                            column: start_column,
-                            end_line: Some(end_line),
-                            end_column: Some(end_column),
-                            severity,
-                            message: lsp_diag.message.clone(),
-                            source: lsp_diag.source.clone(),
-                        }
-                    })
-                    .collect();
-
-                // Update editor diagnostics
-                let text_editor_diagnostics_clone = text_editor_diagnostics.clone();
-                editor.update(cx, |editor, cx| {
-                    editor.set_diagnostics(text_editor_diagnostics_clone, cx);
-                });
-                this.cached_diagnostics = lsp_diagnostics.clone();
-
-                // Update tracked text
-                this._last_diagnostics_text = Some(text_content.to_string());
-
-                // Emit diagnostics changed event for Problems panel
-                let diagnostic_infos =
-                    Self::diagnostic_infos_from_lsp_diagnostics(&lsp_diagnostics);
-                cx.emit(QueryEditorEvent::DiagnosticsChanged {
-                    diagnostics: diagnostic_infos,
-                });
-
-                cx.notify();
+                this.apply_lsp_diagnostics(text_content, lsp_diagnostics, cx);
             });
         }));
     }
@@ -1629,9 +2256,9 @@ impl QueryEditor {
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
         let settings = ZqlzSettings::global(cx);
         if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
-            self.cached_diagnostics.clear();
+            self._diagnostics_debounce = None;
             self.editor.update(cx, |editor, cx| {
-                editor.set_diagnostics(Vec::new(), cx);
+                editor.set_lsp_diagnostics(Vec::new(), cx);
             });
             cx.emit(QueryEditorEvent::DiagnosticsChanged {
                 diagnostics: Vec::new(),
@@ -1641,9 +2268,9 @@ impl QueryEditor {
         }
 
         if !self.editor.read(cx).diagnostics_enabled() {
-            self.cached_diagnostics.clear();
+            self._diagnostics_debounce = None;
             self.editor.update(cx, |editor, cx| {
-                editor.set_diagnostics(Vec::new(), cx);
+                editor.set_lsp_diagnostics(Vec::new(), cx);
             });
             cx.emit(QueryEditorEvent::DiagnosticsChanged {
                 diagnostics: Vec::new(),
@@ -1652,59 +2279,39 @@ impl QueryEditor {
             return;
         }
 
-        // Get current editor text as a Rope for LSP analysis
-        let text_content = self.editor.read(cx).get_text(cx);
-        let rope = zqlz_ui::widgets::Rope::from(text_content.as_str());
-
-        // Run LSP validation to get diagnostics
-        let lsp_diagnostics = {
-            let mut lsp = self.sql_lsp.write();
-            lsp.validate_sql(&rope)
+        let text_content = self.editor.read(cx).get_text(cx).to_string();
+        let Some(diagnostics_task) = self.editor.read(cx).request_lsp_diagnostics(cx) else {
+            self.editor.update(cx, |editor, cx| {
+                editor.set_lsp_diagnostics(Vec::new(), cx);
+            });
+            cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                diagnostics: Vec::new(),
+            });
+            cx.notify();
+            return;
         };
 
-        // Convert LSP diagnostics (lsp_types::Diagnostic) to TextEditor format
-        let text_editor_diagnostics: Vec<zqlz_text_editor::Diagnostic> = lsp_diagnostics
-            .iter()
-            .map(|lsp_diag| {
-                // Convert LSP Range (line/col) to byte offsets using rope
-                let start_offset = rope.position_to_offset(&lsp_diag.range.start);
-                let end_offset = rope.position_to_offset(&lsp_diag.range.end);
+        self._diagnostics_debounce = Some(cx.spawn(async move |this, cx| {
+            let Ok(lsp_diagnostics) = diagnostics_task.await else {
+                return;
+            };
 
-                // Convert LSP severity to TextEditor severity
-                let severity = match lsp_diag.severity {
-                    Some(DiagnosticSeverity::ERROR) => zqlz_text_editor::DiagnosticLevel::Error,
-                    Some(DiagnosticSeverity::WARNING) => zqlz_text_editor::DiagnosticLevel::Warning,
-                    Some(DiagnosticSeverity::INFORMATION) => {
-                        zqlz_text_editor::DiagnosticLevel::Info
-                    }
-                    Some(DiagnosticSeverity::HINT) => zqlz_text_editor::DiagnosticLevel::Hint,
-                    _ => zqlz_text_editor::DiagnosticLevel::Error,
-                };
+            let _ = this.update(cx, |this, cx| {
+                this.apply_lsp_diagnostics(text_content, lsp_diagnostics, cx);
+            });
+        }));
+    }
 
-                // Convert offsets to line/column for TextEditor Diagnostic
-                let start_line = rope.offset_to_position(start_offset).line as usize;
-                let start_column = rope.offset_to_position(start_offset).character as usize;
-                let end_line = rope.offset_to_position(end_offset).line as usize;
-                let end_column = rope.offset_to_position(end_offset).character as usize;
-
-                zqlz_text_editor::Diagnostic {
-                    line: start_line,
-                    column: start_column,
-                    end_line: Some(end_line),
-                    end_column: Some(end_column),
-                    severity,
-                    message: lsp_diag.message.clone(),
-                    source: lsp_diag.source.clone(),
-                }
-            })
-            .collect();
-
-        // Update editor diagnostics
+    fn apply_lsp_diagnostics(
+        &mut self,
+        text_content: String,
+        lsp_diagnostics: Vec<lsp_types::Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
         self.editor.update(cx, |editor, cx| {
-            editor.set_diagnostics(text_editor_diagnostics, cx);
+            editor.set_lsp_diagnostics(lsp_diagnostics.clone(), cx);
         });
-
-        self.cached_diagnostics = lsp_diagnostics.clone();
+        self._last_diagnostics_text = Some(text_content);
         let diagnostic_infos = Self::diagnostic_infos_from_lsp_diagnostics(&lsp_diagnostics);
         cx.emit(QueryEditorEvent::DiagnosticsChanged {
             diagnostics: diagnostic_infos,
@@ -1716,6 +2323,10 @@ impl QueryEditor {
     /// Get the current SQL content
     pub fn content(&self, cx: &App) -> SharedString {
         self.editor.read(cx).get_text(cx)
+    }
+
+    pub fn document_symbols(&self, cx: &App) -> Vec<QueryDocumentSymbol> {
+        query_document_symbols(self.content(cx).as_ref())
     }
 
     /// Get diagnostic counts from the current editor state
@@ -1731,7 +2342,7 @@ impl QueryEditor {
             return (0, 0, 0);
         }
 
-        Self::diagnostic_counts_from_lsp_diagnostics(&self.cached_diagnostics)
+        self.editor.read(cx).lsp_diagnostic_counts()
     }
 
     /// Get all diagnostics as a list for external display (e.g., Problems panel)
@@ -1745,73 +2356,20 @@ impl QueryEditor {
             return Vec::new();
         }
 
-        Self::ui_diagnostics_from_lsp_diagnostics(&self.cached_diagnostics)
-    }
-
-    fn problem_index_for_cursor(
-        problem_positions: &[(u32, u32)],
-        cursor_line: u32,
-        cursor_column: u32,
-        forward: bool,
-    ) -> Option<usize> {
-        if problem_positions.is_empty() {
-            return None;
-        }
-
-        if forward {
-            problem_positions
-                .iter()
-                .position(|(line, column)| (*line, *column) > (cursor_line, cursor_column))
-                .or(Some(0))
-        } else {
-            problem_positions
-                .iter()
-                .rposition(|(line, column)| (*line, *column) < (cursor_line, cursor_column))
-                .or(Some(problem_positions.len().saturating_sub(1)))
-        }
+        self.editor
+            .read(cx)
+            .lsp_diagnostics()
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect()
     }
 
     fn navigate_problem(&mut self, forward: bool, window: &mut Window, cx: &mut Context<Self>) {
-        let mut diagnostics: Vec<(u32, u32, u32, u32)> = self
-            .get_diagnostics(cx)
-            .into_iter()
-            .map(|diagnostic| {
-                (
-                    diagnostic.range.start.line,
-                    diagnostic.range.start.character,
-                    diagnostic.range.end.line,
-                    diagnostic.range.end.character,
-                )
-            })
-            .collect();
-        diagnostics.sort_unstable_by_key(|(line, column, _, _)| (*line, *column));
-
-        let cursor = self.editor.read(cx).get_cursor_position(cx);
-        let positions: Vec<(u32, u32)> = diagnostics
-            .iter()
-            .map(|(line, column, _, _)| (*line, *column))
-            .collect();
-        let Some(index) = Self::problem_index_for_cursor(
-            &positions,
-            cursor.line as u32,
-            cursor.column as u32,
-            forward,
-        ) else {
-            return;
-        };
-
-        let (line, column, end_line, end_column) = diagnostics[index];
         let focus_handle = self.editor.read(cx).focus_handle(cx);
         focus_handle.focus(window, cx);
         self.editor.update(cx, |editor, cx| {
-            editor.navigate_to(
-                line as usize,
-                column as usize,
-                Some(end_line as usize),
-                Some(end_column as usize),
-                window,
-                cx,
-            );
+            editor.navigate_lsp_diagnostic(forward, window, cx);
         });
     }
 
@@ -1831,8 +2389,8 @@ impl QueryEditor {
 
     /// Set the SQL content
     pub fn set_text(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.dismiss_inline_suggestion(cx);
         self.editor.update(cx, |editor, cx| {
+            editor.clear_inline_suggestion(cx);
             editor.set_text(sql.to_string(), window, cx)
         });
         self._last_diagnostics_text = Some(sql.to_string());
@@ -1849,24 +2407,6 @@ impl QueryEditor {
                     .unwrap_or_else(|| self.content(cx).to_string())
             }
         }
-    }
-
-    /// Toggle between SQL and Template mode
-    fn toggle_editor_mode(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.editor_mode = match self.editor_mode {
-            EditorMode::Sql => EditorMode::Template,
-            EditorMode::Template => EditorMode::Sql,
-        };
-
-        // Update template preview if switching to template mode
-        if self.editor_mode == EditorMode::Template {
-            self.update_template_preview(cx);
-        } else {
-            self.rendered_sql = None;
-            self.template_error = None;
-        }
-
-        cx.notify();
     }
 
     /// Update the template preview based on current content and params
@@ -1994,6 +2534,11 @@ impl QueryEditor {
         self.editor.read(cx).focus_handle(cx)
     }
 
+    fn focus_inner_editor(&self, window: &mut Window, cx: &mut App) {
+        let focus_handle = self.editor.read(cx).focus_handle(cx);
+        focus_handle.focus(window, cx);
+    }
+
     /// Get the editor name
     pub fn name(&self) -> String {
         self.name.clone()
@@ -2023,6 +2568,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExecuteQuery {
             sql,
             connection_id: self.connection_id,
+            database_name: self.current_database.clone(),
             params: self.execution_params(cx),
         });
     }
@@ -2044,6 +2590,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExecuteSelection {
             sql,
             connection_id: self.connection_id,
+            database_name: self.current_database.clone(),
             params: self.execution_params(cx),
         });
     }
@@ -2056,7 +2603,7 @@ impl QueryEditor {
 
     /// Emit cancel query event
     fn emit_cancel_query(&mut self, cx: &mut Context<Self>) {
-        if self.is_executing {
+        if self.is_executing && self.can_cancel_execution {
             cx.emit(QueryEditorEvent::CancelQuery);
         }
     }
@@ -2078,6 +2625,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExplainQuery {
             sql,
             connection_id: self.connection_id,
+            database_name: self.current_database.clone(),
         });
     }
 
@@ -2096,6 +2644,7 @@ impl QueryEditor {
         cx.emit(QueryEditorEvent::ExplainSelection {
             sql,
             connection_id: self.connection_id,
+            database_name: self.current_database.clone(),
         });
     }
 
@@ -2124,6 +2673,24 @@ impl QueryEditor {
         });
     }
 
+    fn emit_preview_ddl(&mut self, cx: &mut Context<Self>) {
+        if !self.object_type.supports_save() {
+            tracing::warn!("Cannot preview DDL: object type does not support save");
+            return;
+        }
+
+        let definition = self.content(cx).to_string();
+        if definition.trim().is_empty() {
+            tracing::warn!("Cannot preview DDL: empty definition");
+            return;
+        }
+
+        cx.emit(QueryEditorEvent::PreviewDdl {
+            object_type: self.object_type.clone(),
+            definition,
+        });
+    }
+
     /// Get the object type being edited
     pub fn object_type(&self) -> &EditorObjectType {
         &self.object_type
@@ -2132,6 +2699,7 @@ impl QueryEditor {
     /// Set the object type (useful when saving a new object with a name)
     pub fn set_object_type(&mut self, object_type: EditorObjectType, cx: &mut Context<Self>) {
         self.object_type = object_type;
+        self.apply_format_provider_to_editor(cx);
         cx.notify();
     }
 
@@ -2180,98 +2748,6 @@ impl QueryEditor {
         cx.notify();
     }
 
-    /// Handle TriggerCompletion action - manually trigger completion popup
-    fn handle_trigger_completion(
-        &mut self,
-        _action: &TriggerCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(&TriggerCompletion, window, cx);
-        });
-    }
-
-    /// Handle AcceptCompletion action - accepts completion if menu is open, otherwise indents
-    fn handle_accept_completion(
-        &mut self,
-        _action: &AcceptCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        // If there's an inline suggestion, accept it
-        if let Some(_inline_suggestion) = &self.inline_suggestion {
-            self.editor.update(cx, |editor, cx| {
-                editor.accept_inline_suggestion(window, cx);
-            });
-            self.inline_suggestion = None;
-            return;
-        }
-
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(&AcceptCompletion, window, cx);
-        });
-    }
-
-    /// Handle CancelCompletion action - hides completion menu
-    fn handle_cancel_completion(
-        &mut self,
-        _action: &CancelCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(
-                &zqlz_text_editor::actions::DismissCompletion,
-                window,
-                cx,
-            );
-        });
-        self.inline_suggestion = None;
-    }
-
-    /// Navigates to the next completion item when the menu is open.
-    /// Propagates the event to the editor (for cursor movement) when closed.
-    fn handle_next_completion(
-        &mut self,
-        _action: &NextCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.editor.read(cx).is_completion_menu_open(cx) {
-            cx.propagate();
-            return;
-        }
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(
-                &zqlz_text_editor::actions::SelectNextCompletion,
-                window,
-                cx,
-            );
-        });
-    }
-
-    /// Navigates to the previous completion item when the menu is open.
-    /// Propagates the event to the editor (for cursor movement) when closed.
-    fn handle_previous_completion(
-        &mut self,
-        _action: &PreviousCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.editor.read(cx).is_completion_menu_open(cx) {
-            cx.propagate();
-            return;
-        }
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(
-                &zqlz_text_editor::actions::SelectPreviousCompletion,
-                window,
-                cx,
-            );
-        });
-    }
-
     fn handle_next_problem(
         &mut self,
         _action: &NextProblem,
@@ -2290,297 +2766,15 @@ impl QueryEditor {
         self.navigate_problem(false, window, cx);
     }
 
-    /// Confirms the selected completion item when the menu is open.
-    /// Propagates the event (for newline/tab) when the menu is closed.
-    fn handle_confirm_completion(
-        &mut self,
-        _action: &ConfirmCompletion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.editor.read(cx).is_completion_menu_open(cx) {
-            cx.propagate();
-            return;
-        }
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(&AcceptCompletion, window, cx);
-        });
-    }
-
-    /// Cancels/hides the completion menu. Propagates the event when the menu is closed.
-    fn handle_cancel_completion_menu(
-        &mut self,
-        _action: &CancelCompletionMenu,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.editor.read(cx).is_completion_menu_open(cx) {
-            cx.propagate();
-            return;
-        }
-        self.editor.update(cx, |editor, cx| {
-            editor.handle_completion_action(
-                &zqlz_text_editor::actions::DismissCompletion,
-                window,
-                cx,
-            );
-        });
-    }
-
-    /// Handle AcceptInlineSuggestion action - accepts the current inline suggestion
-    fn handle_accept_inline_suggestion(
-        &mut self,
-        _action: &AcceptInlineSuggestion,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.inline_suggestion.is_some() {
-            self.accept_inline_suggestion(window, cx);
-            tracing::debug!("Accepted inline suggestion via action");
-        }
-    }
-
-    /// Handle DismissInlineSuggestion action - dismisses the current inline suggestion
-    fn handle_dismiss_inline_suggestion(
-        &mut self,
-        _action: &DismissInlineSuggestion,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.dismiss_inline_suggestion(cx);
-        tracing::debug!("Dismissed inline suggestion via action");
-    }
-
-    /// Trigger inline suggestion at current cursor position.
-    ///
-    /// LSP suggestions are resolved synchronously (they use cached completion state).
-    /// AI suggestions are dispatched as a background task so the GPUI foreground
-    /// thread is never blocked on a network call.
-    pub fn trigger_inline_suggestion(&mut self, cx: &mut Context<Self>) {
-        let settings = ZqlzSettings::global(cx);
-
-        if !settings.editor.inline_suggestions_enabled {
-            return;
-        }
-
-        let inline_suggestions_delay = settings.editor.inline_suggestions_delay_ms;
-
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let text = self.editor.read(cx).get_text(cx);
-
-        let prefix = if cursor_offset <= text.len() {
-            text[..cursor_offset].to_string()
-        } else {
-            text.to_string()
-        };
-        let suffix = if cursor_offset < text.len() {
-            text[cursor_offset..].to_string()
-        } else {
-            String::new()
-        };
-
-        let provider_setting = settings.editor.inline_suggestions_provider;
-
-        // LSP path is synchronous — uses cached completion state, no I/O.
-        let lsp_suggestion = match provider_setting {
-            InlineSuggestionProvider::LspOnly | InlineSuggestionProvider::Both => {
-                self.get_lsp_inline_suggestion(prefix.clone(), suffix.clone(), cursor_offset, cx)
-            }
-            InlineSuggestionProvider::AiOnly => None,
-        };
-
-        if let Some((suggestion_text, start, end, _)) = lsp_suggestion {
-            self.inline_suggestion = Some(InlineSuggestionState {
-                suggestion: suggestion_text.clone(),
-                start_offset: start,
-                end_offset: end,
-                source: InlineSuggestionSource::Lsp,
-            });
-            self.editor.update(cx, |editor, cx| {
-                editor.set_inline_suggestion(suggestion_text, start, cx);
-            });
-            cx.notify();
-            return;
-        }
-
-        // AI path — kick off a background task to avoid blocking the UI thread.
-        let needs_ai = matches!(
-            provider_setting,
-            InlineSuggestionProvider::AiOnly | InlineSuggestionProvider::Both
-        );
-        if !needs_ai {
-            return;
-        }
-
-        let settings = ZqlzSettings::global(cx);
-        let ai_provider = AiProviderFactory::create_provider(
-            settings.editor.ai_provider,
-            settings.editor.ai_api_key.clone(),
-            settings.editor.ai_model.clone(),
-            settings.editor.ai_temperature,
-        );
-        let Some(ai_provider) = ai_provider else {
-            return;
-        };
-        if !ai_provider.is_available() {
-            return;
-        }
-
-        self.inline_suggestion_generation = self.inline_suggestion_generation.wrapping_add(1);
-        let inline_suggestion_generation = self.inline_suggestion_generation;
-
-        let request = CompletionRequest {
-            prefix: prefix.clone().into(),
-            suffix: suffix.clone().into(),
-            cursor_offset,
-            schema_context: None,
-            dialect: None,
-        };
-
-        // Spawn on the background executor so the network call doesn't block the
-        // GPUI foreground thread, then update state on the foreground via WeakEntity.
-        self._inline_suggestion_debounce = Some(cx.spawn(async move |this, cx| {
-            cx.background_executor()
-                .timer(std::time::Duration::from_millis(
-                    inline_suggestions_delay as u64,
-                ))
-                .await;
-
-            let result = cx
-                .background_spawn(async move { ai_provider.suggest(request).await })
-                .await;
-
-            let Ok(response) = result else {
-                return;
-            };
-            let suggestion = response.suggestion;
-            if suggestion.is_empty() {
-                return;
-            }
-
-            this.update(&mut cx.clone(), |this, cx| {
-                if this.inline_suggestion_generation != inline_suggestion_generation {
-                    return;
-                }
-
-                let editor = this.editor.read(cx);
-                let current_cursor_offset = editor.get_cursor_offset(cx);
-                let current_text = editor.get_text(cx);
-                if current_cursor_offset != cursor_offset {
-                    return;
-                }
-                if current_cursor_offset > current_text.len() {
-                    return;
-                }
-                if current_text[..current_cursor_offset] != prefix
-                    || current_text[current_cursor_offset..] != suffix
-                {
-                    return;
-                }
-
-                this.inline_suggestion = Some(InlineSuggestionState {
-                    suggestion: suggestion.to_string(),
-                    start_offset: cursor_offset,
-                    end_offset: cursor_offset + suggestion.len(),
-                    source: InlineSuggestionSource::Ai,
-                });
-                this.editor.update(cx, |editor, cx| {
-                    editor.set_inline_suggestion(suggestion.to_string(), cursor_offset, cx);
-                });
-                cx.notify();
-            })
-            .ok();
-        }));
-    }
-
-    /// Get inline suggestion from LSP completions (synchronous — uses cached state).
-    fn get_lsp_inline_suggestion(
-        &self,
-        _prefix: String,
-        _suffix: String,
-        cursor_offset: usize,
-        cx: &App,
-    ) -> Option<(String, usize, usize, &'static str)> {
-        let settings = ZqlzSettings::global(cx);
-
-        // Check if LSP completions are enabled
-        if !settings.editor.lsp_enabled || !settings.editor.lsp_completions_enabled {
-            return None;
-        }
-
-        if self.editor.read(cx).is_completion_menu_open(cx) {
-            return None;
-        }
-
-        let completions = self.editor.read(cx).get_completions(cx);
-
-        // Find the best completion for inline suggestion
-        for completion in completions.iter() {
-            if let Some(insert_text) = &completion.insert_text
-                && !insert_text.is_empty()
-            {
-                return Some((
-                    insert_text.clone(),
-                    cursor_offset,
-                    cursor_offset + insert_text.len(),
-                    "LSP",
-                ));
-            }
-        }
-
-        None
-    }
-
-    /// Accept the current inline suggestion
-    pub fn accept_inline_suggestion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(inline_suggestion) = self.inline_suggestion.take() {
-            self.editor.update(cx, |editor, cx| {
-                editor.accept_inline_suggestion(window, cx);
-            });
-
-            tracing::debug!(
-                "Inline suggestion accepted: {}",
-                inline_suggestion.suggestion
-            );
-            cx.notify();
-        }
-    }
-
-    /// Dismiss the current inline suggestion
-    pub fn dismiss_inline_suggestion(&mut self, cx: &mut Context<Self>) {
-        self.inline_suggestion_generation = self.inline_suggestion_generation.wrapping_add(1);
-        if self.inline_suggestion.is_some() {
-            self.inline_suggestion = None;
-            self.editor.update(cx, |editor, cx| {
-                editor.clear_inline_suggestion(cx);
-            });
-            tracing::debug!("Inline suggestion dismissed");
-            cx.notify();
-        }
-    }
-
-    /// Check if there's a current inline suggestion
-    pub fn has_inline_suggestion(&self) -> bool {
-        self.inline_suggestion.is_some()
-    }
-
-    /// Get the current inline suggestion
-    pub fn get_inline_suggestion(&self) -> Option<&InlineSuggestionState> {
-        self.inline_suggestion.as_ref()
-    }
-
-    /// Handle ShowHover action - show hover documentation for symbol under cursor
-    /// First checks for schema symbols (tables, columns), then falls back to LSP hover
+    /// Handle ShowHover action - asks the central editor hover provider for cursor docs.
     fn handle_show_hover(
         &mut self,
         _action: &ShowHover,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let settings = ZqlzSettings::global(cx);
         if !settings.editor.lsp_enabled || !settings.editor.lsp_hover_enabled {
-            self.hover_content = None;
-            self.schema_symbol_info = None;
             self.editor.update(cx, |editor, _editor_cx| {
                 editor.clear_hover();
             });
@@ -2588,145 +2782,13 @@ impl QueryEditor {
             return;
         }
 
-        tracing::debug!("ShowHover action triggered");
-
-        // First, try to find a schema symbol at the cursor position
-        let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let text = self.editor.read(cx).get_text(cx);
-
-        // Try schema metadata lookup first
-        let schema_symbol = self.find_schema_symbol_at_cursor(&text, cursor_offset, cx);
-
-        if let Some(symbol_info) = schema_symbol {
-            // Found a schema symbol - show schema metadata overlay
-            tracing::info!(
-                "Schema symbol found: {} ({})",
-                symbol_info.name,
-                symbol_info.symbol_type_name()
-            );
-            self.schema_symbol_info = Some(symbol_info.clone());
-            self.hover_content = Some(Self::format_schema_symbol(&symbol_info));
-        } else {
-            // No schema symbol found - fall back to LSP hover
-            self.schema_symbol_info = None;
-            let text = self.editor.read(cx).get_text(cx).to_string();
-            let rope = zqlz_ui::widgets::Rope::from(text.as_str());
-            let hover = self.sql_lsp.read().get_hover(&rope, cursor_offset);
-
-            if let Some(hover) = hover {
-                let content = match &hover.contents {
-                    lsp_types::HoverContents::Scalar(scalar) => match scalar {
-                        lsp_types::MarkedString::String(s) => s.clone(),
-                        lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
-                    },
-                    lsp_types::HoverContents::Array(arr) => arr
-                        .iter()
-                        .map(|item| match item {
-                            lsp_types::MarkedString::String(s) => s.clone(),
-                            lsp_types::MarkedString::LanguageString(ls) => ls.value.clone(),
-                        })
-                        .collect::<Vec<_>>()
-                        .join("\n\n"),
-                    lsp_types::HoverContents::Markup(markup) => markup.value.clone(),
-                };
-
-                tracing::info!("LSP Hover content: {}", content);
-                self.hover_content = Some(content);
-            } else {
-                self.hover_content = None;
-            }
-        }
-
-        cx.notify();
+        self.editor.update(cx, |editor, cx| {
+            editor.update_hover_at_cursor(window, cx);
+        });
     }
 
-    /// Find a schema symbol at the cursor position
-    fn find_schema_symbol_at_cursor(
-        &mut self,
-        text: &str,
-        offset: usize,
-        _cx: &mut Context<Self>,
-    ) -> Option<SchemaSymbolInfo> {
-        // Ensure schema metadata is initialized
-        if self.schema_metadata.is_none() {
-            // Try to get schema from LSP
-            let lsp = self.sql_lsp.read();
-            let db_schema = lsp.get_schema_for_metadata();
-            drop(lsp);
-
-            // Only create if we have tables (schema is loaded)
-            if !db_schema.tables.is_empty() {
-                self.schema_metadata = Some(SchemaMetadata::new(db_schema));
-            } else {
-                return None;
-            }
-        }
-
-        // Find symbol at offset
-        self.schema_metadata
-            .as_ref()?
-            .find_symbol_at_offset(text, offset)
-    }
-
-    /// Format schema symbol info for display in hover popover
-    fn format_schema_symbol(symbol_info: &SchemaSymbolInfo) -> String {
-        let mut content = String::new();
-
-        // Header with symbol type
-        content.push_str(&format!(
-            "**{}**: `{}`\n\n",
-            symbol_info.symbol_type_name(),
-            symbol_info.name
-        ));
-
-        // Add details if available
-        if let Some(details) = &symbol_info.details {
-            // Table/view details
-            if let Some(columns) = &details.columns {
-                content.push_str("**Columns**:\n");
-                for col in columns.iter().take(10) {
-                    let pk_marker = if col.is_primary_key { " PK" } else { "" };
-                    let _nullable = if col.nullable { "?" } else { "" };
-                    content.push_str(&format!(
-                        "- `{}`: {}{}\n",
-                        col.name, col.data_type, pk_marker
-                    ));
-                }
-                if columns.len() > 10 {
-                    content.push_str(&format!("... and {} more\n", columns.len() - 10));
-                }
-            }
-
-            // Column details
-            if let Some(table_name) = &details.table_name {
-                content.push_str(&format!("**Table**: `{}`\n", table_name));
-            }
-            if let Some(data_type) = &details.data_type {
-                content.push_str(&format!("**Type**: {}\n", data_type));
-            }
-            if let Some(nullable) = details.nullable {
-                content.push_str(&format!(
-                    "**Nullable**: {}\n",
-                    if nullable { "Yes" } else { "No" }
-                ));
-            }
-            if let Some(is_pk) = details.is_primary_key
-                && is_pk
-            {
-                content.push_str("**Primary Key**: Yes\n");
-            }
-            if let Some(row_count) = details.row_count {
-                content.push_str(&format!("**Rows**: ~{}\n", row_count));
-            }
-        }
-
-        content
-    }
-
-    /// Clear the hover popover
+    /// Clear editor overlays owned by the central TextEditor.
     pub fn clear_hover(&mut self, cx: &mut Context<Self>) {
-        self.hover_content = None;
-        self.schema_symbol_info = None;
         self.editor.update(cx, |editor, editor_cx| {
             editor.clear_hover();
             editor.clear_signature_help(editor_cx);
@@ -2834,39 +2896,17 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        tracing::info!("🔍 handle_format_query called!");
         self.format_query(window, cx);
     }
 
     /// Format the SQL query using production-level formatter
     fn format_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        tracing::info!("🔍 format_query called!");
-        let driver_type = self.driver_type.as_deref();
         self.editor.update(cx, |editor, cx| {
-            if self.object_type.is_procedural() {
-                let content = editor.get_text(cx).to_string();
-                let formatted = Self::format_sql_with_dollar_quoting(&content, driver_type);
-                let formatted = Self::normalize_formatted_sql_for_driver(&formatted, driver_type);
-                if formatted != content {
-                    editor.replace_all_text(&formatted, cx);
-                }
-            } else {
-                editor.format_sql(cx);
-
-                if Self::should_normalize_bracket_identifiers(driver_type) {
-                    let formatted = editor.get_text(cx).to_string();
-                    let normalized =
-                        Self::normalize_formatted_sql_for_driver(&formatted, driver_type);
-                    if normalized != formatted {
-                        editor.replace_all_text(&normalized, cx);
-                    }
-                }
-            }
+            editor.format_sql(cx);
         });
         self.update_diagnostics(cx);
         self._last_diagnostics_text = Some(self.content(cx).to_string());
         cx.notify();
-        tracing::info!("🔍 format_query completed successfully");
     }
 
     /// Handle SaveQuery action (Cmd+S / Ctrl+S)
@@ -2895,852 +2935,372 @@ impl QueryEditor {
         });
     }
 
-    fn format_sql(sql: &str, driver_type: Option<&str>) -> String {
-        use sqlformat::{FormatOptions, Indent, QueryParams, format};
-
-        let options = FormatOptions {
-            indent: Indent::Spaces(4),
-            uppercase: Some(true),
-            lines_between_queries: 1,
-            ignore_case_convert: None,
-            inline: false,
-            max_inline_block: 50,
-            max_inline_arguments: None,
-            max_inline_top_level: None,
-            joins_as_top_level: false,
-            dialect: driver_type_to_sqlformat_dialect(driver_type),
-        };
-
-        format(sql, &QueryParams::None, &options)
-    }
-
-    /// Format SQL that may contain dollar-quoted procedural blocks (PL/pgSQL).
-    ///
-    /// Splits on dollar-quote delimiters (`$tag$`), formats only the outer DDL
-    /// parts with the standard SQL formatter, and preserves the procedural body
-    /// verbatim so that PL/pgSQL `DECLARE`/`BEGIN`/`END` blocks are not mangled.
-    fn format_sql_with_dollar_quoting(sql: &str, driver_type: Option<&str>) -> String {
-        // Match dollar-quote delimiters like $$, $function$, $body$, $BODY$, etc.
-        let delimiter_pattern =
-            regex::Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)?\$").unwrap_or_else(|_| {
-                // Fallback: return unformatted if regex fails
-                regex::Regex::new(r"^\b$").expect("infallible regex")
-            });
-
-        let delimiters: Vec<_> = delimiter_pattern.find_iter(sql).collect();
-
-        // Dollar-quoted blocks come in pairs: opening and closing use the same tag
-        if delimiters.len() >= 2 {
-            let open = delimiters[0];
-            let open_tag = open.as_str();
-
-            // Find the matching close delimiter (same tag)
-            if let Some(close) = delimiters[1..].iter().find(|d| d.as_str() == open_tag) {
-                let before_body = &sql[..open.start()];
-                let body = &sql[open.start()..close.end()];
-                let after_body = &sql[close.end()..];
-
-                let formatted_before = Self::format_sql(before_body, driver_type);
-                let formatted_after = if after_body.trim().is_empty() {
-                    after_body.to_string()
-                } else {
-                    Self::format_sql(after_body, driver_type)
-                };
-
-                return format!(
-                    "{}\n{}\n{}",
-                    formatted_before.trim_end(),
-                    body,
-                    formatted_after
-                );
-            }
-        }
-
-        // MySQL-style DELIMITER blocks or no dollar quoting found:
-        // check for BEGIN/END procedural blocks (MySQL stored routines)
-        let sql_upper = sql.to_uppercase();
-        if sql_upper.contains("CREATE") && sql_upper.contains("BEGIN") {
-            // Don't format at all — MySQL procedural bodies break the formatter
-            return sql.to_string();
-        }
-
-        // No procedural content detected, format normally
-        Self::format_sql(sql, driver_type)
-    }
-
-    fn should_normalize_bracket_identifiers(driver_type: Option<&str>) -> bool {
-        matches!(
-            driver_type,
-            Some("sqlite") | Some("mssql") | Some("sqlserver")
-        )
-    }
-
-    fn normalize_formatted_sql_for_driver(sql: &str, driver_type: Option<&str>) -> String {
-        if Self::should_normalize_bracket_identifiers(driver_type) {
-            return Self::normalize_bracket_identifier_spacing(sql);
-        }
-
-        sql.to_string()
-    }
-
-    fn normalize_bracket_identifier_spacing(sql: &str) -> String {
-        let mut normalized = String::with_capacity(sql.len());
-        let mut index = 0;
-
-        while index < sql.len() {
-            let Some(relative_open) = sql[index..].find('[') else {
-                normalized.push_str(&sql[index..]);
-                break;
-            };
-            let open_index = index + relative_open;
-
-            normalized.push_str(&sql[index..open_index]);
-
-            let mut cursor = open_index + 1;
-            let mut closing = None;
-            while cursor < sql.len() {
-                let byte = sql.as_bytes()[cursor];
-                if byte == b']' {
-                    if cursor + 1 < sql.len() && sql.as_bytes()[cursor + 1] == b']' {
-                        cursor += 2;
-                        continue;
-                    }
-
-                    closing = Some(cursor);
-                    break;
-                }
-                cursor += 1;
-            }
-
-            let Some(closing_index) = closing else {
-                normalized.push_str(&sql[open_index..]);
-                break;
-            };
-
-            let inner = &sql[open_index + 1..closing_index];
-            normalized.push('[');
-            normalized.push_str(inner.trim());
-            normalized.push(']');
-            index = closing_index + 1;
-        }
-
-        normalized
-    }
-
-    /// Render the toolbar with execution controls
-    fn render_toolbar(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, _window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
         let is_empty = self.is_content_empty(cx);
         let has_template_error = self.template_error.is_some();
         let supports_save = self.object_type.supports_save();
         let has_connection = self.connection_id.is_some();
+        let save_disabled = if supports_save {
+            !has_connection || is_empty || !self.editor.read(cx).is_dirty()
+        } else {
+            !has_connection || is_empty
+        };
+        let execute_disabled = self.is_executing || is_empty || has_template_error;
+        let run_target_preview = self.run_target_preview(cx);
 
-        h_flex()
+        v_flex()
             .id("query-editor-toolbar")
-            .on_action(cx.listener(Self::handle_accept_inline_suggestion))
-            .on_action(cx.listener(Self::handle_dismiss_inline_suggestion))
             .on_action(cx.listener(Self::handle_format_query))
             .on_action(cx.listener(Self::handle_save_query))
             .on_action(cx.listener(Self::handle_show_hover))
             .on_action(cx.listener(Self::handle_trigger_parameter_hints))
             .on_action(cx.listener(Self::handle_show_code_actions))
             .w_full()
-            .h(px(36.0))
-            .px_2()
-            .gap_2()
-            .items_center()
+            .h(px(42.0))
             .border_b_1()
-            .border_color(theme.border)
-            // Save button for database objects (views, procedures, etc.)
-            .when(supports_save, |this| {
-                this.child(
-                    Button::new("save")
-                        .primary()
-                        .small()
-                        .icon(ZqlzIcon::FloppyDisk)
-                        .label("Save")
-                        .tooltip_with_action("Save", &SaveQuery, None)
-                        .disabled(!has_connection || is_empty || !self.editor.read(cx).is_dirty())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.emit_save_object(cx);
-                        })),
-                )
-            })
-            // Save query button for regular queries (icon only)
-            .when(!supports_save && has_connection, |this| {
-                this.child(
-                    Button::new("save-query")
-                        .ghost()
-                        .small()
-                        .icon(ZqlzIcon::FloppyDisk)
-                        .tooltip_with_action("Save Query", &SaveQuery, None)
-                        .disabled(is_empty)
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            this.handle_save_query(&SaveQuery, window, cx);
-                        })),
-                )
-            })
-            // Run button with Play icon
-            .child(
-                Button::new("execute")
-                    .when(supports_save, |b| b.ghost())
-                    .when(!supports_save, |b| b.primary())
-                    .small()
-                    .icon(ZqlzIcon::Play)
-                    .tooltip(Self::run_query_tooltip_text())
-                    .disabled(self.is_executing || is_empty || has_template_error)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.emit_execute_query(cx);
-                    })),
-            )
-            .child(
-                Button::new("explain")
-                    .ghost()
-                    .small()
-                    .icon(ZqlzIcon::Lightbulb)
-                    .tooltip("Explain Query")
-                    .disabled(self.is_executing || is_empty || has_template_error)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.emit_explain_query(cx);
-                    })),
-            )
-            // Stop button with icon (only shown when executing)
-            .when(self.is_executing, |this| {
-                this.child(
-                    Button::new("stop")
-                        .danger()
-                        .small()
-                        .icon(ZqlzIcon::Stop)
-                        .tooltip({
-                            #[cfg(target_os = "macos")]
-                            {
-                                "Stop Query (⌘Esc)"
-                            }
-                            #[cfg(not(target_os = "macos"))]
-                            {
-                                "Stop Query (Esc)"
-                            }
-                        })
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.emit_cancel_query(cx);
-                        })),
-                )
-            })
-            .child(
-                Button::new("format")
-                    .ghost()
-                    .small()
-                    .icon(ZqlzIcon::TextIndent)
-                    .tooltip_with_action("Format SQL", &FormatQuery, None)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        this.format_query(window, cx);
-                    })),
-            )
-            .child(div().h(px(20.0)).w(px(1.0)).bg(theme.border).mx_1())
-            // Only show SQL/Template toggle for regular queries
-            .when(!supports_save, |this| {
-                this.child({
-                    let is_active = self.editor_mode == EditorMode::Sql;
-                    let btn = Button::new("mode-sql")
-                        .small()
-                        .icon(ZqlzIcon::Code)
-                        .tooltip("SQL Mode")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.editor_mode != EditorMode::Sql {
-                                this.toggle_editor_mode(window, cx);
-                            }
-                        }));
-                    if is_active {
-                        btn.secondary_primary().selected(true)
-                    } else {
-                        btn.ghost()
-                    }
-                })
-                .child({
-                    let is_active = self.editor_mode == EditorMode::Template;
-                    let btn = Button::new("mode-template")
-                        .small()
-                        .icon(ZqlzIcon::BracketsCurly)
-                        .tooltip("Template Mode")
-                        .on_click(cx.listener(|this, _, window, cx| {
-                            if this.editor_mode != EditorMode::Template {
-                                this.toggle_editor_mode(window, cx);
-                            }
-                        }));
-                    if is_active {
-                        btn.secondary_primary().selected(true)
-                    } else {
-                        btn.ghost()
-                    }
-                })
-            })
-            // Show object type indicator for database objects
-            .when(supports_save, |this| {
-                this.child(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::MEDIUM)
-                        .text_color(theme.accent)
-                        .child(self.object_type.display_name()),
-                )
-            })
-            .child(div().flex_1())
-            .when(
-                self.editor_mode == EditorMode::Template && self.template_error.is_some(),
-                |this| {
-                    this.child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.danger)
-                            .max_w(px(300.0))
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(self.template_error.clone().unwrap_or_default()),
-                    )
-                },
-            )
-            // Connection switcher dropdown (only shown if there are available connections)
-            .when(!self.available_connections.is_empty(), |this| {
-                let connection_label = if let Some(name) = &self.connection_name {
-                    name.clone()
-                } else if self.connection_id.is_some() {
-                    "Connected".to_string()
-                } else {
-                    "Select Connection".to_string()
-                };
-
-                let available_connections = self.available_connections.clone();
-                let current_connection_id = self.connection_id;
-                let entity = cx.entity().downgrade();
-
-                this.child(
-                    Button::new("connection-switcher")
-                        .small()
-                        .ghost()
-                        .icon(ZqlzIcon::Database)
-                        .label(connection_label.clone())
-                        .dropdown_menu(move |mut menu, _window, _cx| {
-                            use zqlz_ui::widgets::menu::PopupMenuItem;
-                            menu = menu.max_h(px(300.0)).scrollable(true);
-                            for (conn_id, conn_name) in &available_connections {
-                                let is_current = current_connection_id == Some(*conn_id);
-                                let conn_id = *conn_id;
-                                let conn_name_clone = conn_name.clone();
-                                let entity = entity.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(conn_name_clone)
-                                        .checked(is_current)
-                                        .on_click(move |_event, _window, cx| {
-                                            _ = entity.update(cx, |_this, cx| {
-                                                cx.emit(QueryEditorEvent::SwitchConnection {
-                                                    connection_id: conn_id,
-                                                });
-                                            });
-                                        }),
-                                );
-                            }
-                            menu
-                        }),
-                )
-            })
-            // Database switcher dropdown (only shown if there are available databases)
-            .when(!self.available_databases.is_empty(), |this| {
-                let database_label = if let Some(db) = &self.current_database {
-                    db.clone()
-                } else {
-                    "Select Database".to_string()
-                };
-
-                let available_databases = self.available_databases.clone();
-                let current_database = self.current_database.clone();
-                let entity = cx.entity().downgrade();
-
-                this.child(
-                    Button::new("database-switcher")
-                        .small()
-                        .ghost()
-                        .icon(ZqlzIcon::Table)
-                        .label(database_label.clone())
-                        .dropdown_menu(move |mut menu, _window, _cx| {
-                            use zqlz_ui::widgets::menu::PopupMenuItem;
-                            menu = menu.max_h(px(300.0)).scrollable(true);
-                            for db_name in &available_databases {
-                                let is_current = current_database.as_ref() == Some(db_name);
-                                let db_name_clone = db_name.clone();
-                                let entity = entity.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(db_name_clone.clone())
-                                        .checked(is_current)
-                                        .on_click(move |_event, _window, cx| {
-                                            _ = entity.update(cx, |_this, cx| {
-                                                cx.emit(QueryEditorEvent::SwitchDatabase {
-                                                    database_name: db_name_clone.clone(),
-                                                });
-                                            });
-                                        }),
-                                );
-                            }
-                            menu
-                        }),
-                )
-            })
+            .border_color(theme.border.opacity(0.65))
+            .bg(theme.background)
             .child(
                 h_flex()
+                    .w_full()
+                    .h(px(40.0))
+                    .px_2()
                     .gap_2()
                     .items_center()
-                    .text_sm()
-                    .text_color(theme.muted_foreground)
-                    .child(self.render_toolbar_shortcut_hints(window, cx))
-                    // Error/warning count badge
-                    .map(|this| {
-                        let (errors, warnings, _) = self.diagnostic_counts(cx);
-                        if errors > 0 {
-                            this.child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().size_2().rounded_full().bg(theme.danger))
-                                    .child(div().text_xs().text_color(theme.danger).child(format!(
-                                        "{} error{}",
-                                        errors,
-                                        if errors == 1 { "" } else { "s" }
-                                    )))
-                                    .child(self.render_problem_shortcut_hints(window, cx)),
-                            )
-                        } else if warnings > 0 {
-                            this.child(
-                                h_flex()
-                                    .gap_1()
-                                    .items_center()
-                                    .child(div().size_2().rounded_full().bg(theme.warning))
-                                    .child(div().text_xs().text_color(theme.warning).child(
-                                        format!(
-                                            "{} warning{}",
-                                            warnings,
-                                            if warnings == 1 { "" } else { "s" }
-                                        ),
-                                    ))
-                                    .child(self.render_problem_shortcut_hints(window, cx)),
-                            )
+                    .child(
+                        Button::new("save-query")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::FloppyDisk)
+                            .tooltip("Save")
+                            .disabled(save_disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.handle_save_query(&SaveQuery, window, cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("format")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::TextIndent)
+                            .tooltip("Format")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.format_query(window, cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("assist")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::MagicWand)
+                            .tooltip("Assist")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.handle_show_code_actions(&ShowCodeActions, window, cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("refresh-schema")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::ArrowsClockwise)
+                            .tooltip("Refresh Schema")
+                            .disabled(!has_connection)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.trigger_lsp_schema_refresh(cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(div().w(px(1.0)).h_5().bg(theme.border.opacity(0.65)))
+                    .when(!self.available_connections.is_empty(), |this| {
+                        let connection_label = if let Some(name) = &self.connection_name {
+                            name.clone()
+                        } else if self.connection_id.is_some() {
+                            "Connected".to_string()
                         } else {
-                            this
-                        }
+                            "Select Connection".to_string()
+                        };
+                        let available_connections = self.available_connections.clone();
+                        let current_connection_id = self.connection_id;
+                        let entity = cx.entity().downgrade();
+
+                        this.child(
+                            Button::new("connection-switcher")
+                                .xsmall()
+                                .ghost()
+                                .icon(ZqlzIcon::Plug)
+                                .tooltip(connection_label.clone())
+                                .w(px(220.0))
+                                .flex_shrink()
+                                .child(Self::selector_label(connection_label))
+                                .dropdown_menu(move |mut menu, _window, _cx| {
+                                    use zqlz_ui::widgets::menu::PopupMenuItem;
+                                    menu = menu.max_h(px(300.0)).scrollable(true);
+                                    for (conn_id, conn_name) in &available_connections {
+                                        let is_current = current_connection_id == Some(*conn_id);
+                                        let conn_id = *conn_id;
+                                        let conn_name_clone = conn_name.clone();
+                                        let entity = entity.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(conn_name_clone)
+                                                .checked(is_current)
+                                                .on_click(move |_event, _window, cx| {
+                                                    _ = entity.update(cx, |_this, cx| {
+                                                        cx.emit(
+                                                            QueryEditorEvent::SwitchConnection {
+                                                                connection_id: conn_id,
+                                                            },
+                                                        );
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
                     })
-                    .child(if let Some(name) = &self.connection_name {
-                        name.clone()
-                    } else if self.connection_id.is_some() {
-                        "Connected".to_string()
-                    } else {
-                        "No Connection".to_string()
+                    .when(self.available_databases.len() > 1, |this| {
+                        let database_label = self
+                            .current_database
+                            .clone()
+                            .unwrap_or_else(|| "Select Database".to_string());
+                        let available_databases = self.available_databases.clone();
+                        let current_database = self.current_database.clone();
+                        let entity = cx.entity().downgrade();
+
+                        this.child(
+                            Button::new("database-switcher")
+                                .xsmall()
+                                .ghost()
+                                .icon(ZqlzIcon::Database)
+                                .tooltip(database_label.clone())
+                                .w(px(180.0))
+                                .flex_shrink()
+                                .child(Self::selector_label(database_label))
+                                .dropdown_menu(move |mut menu, _window, _cx| {
+                                    use zqlz_ui::widgets::menu::PopupMenuItem;
+                                    menu = menu.max_h(px(300.0)).scrollable(true);
+                                    for db_name in &available_databases {
+                                        let is_current = current_database.as_ref() == Some(db_name);
+                                        let db_name_clone = db_name.clone();
+                                        let entity = entity.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(db_name_clone.clone())
+                                                .checked(is_current)
+                                                .on_click(move |_event, _window, cx| {
+                                                    _ = entity.update(cx, |_this, cx| {
+                                                        cx.emit(QueryEditorEvent::SwitchDatabase {
+                                                            database_name: db_name_clone.clone(),
+                                                        });
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                    })
+                    .when(!self.available_schemas.is_empty(), |this| {
+                        let schema_label = self
+                            .current_schema
+                            .clone()
+                            .unwrap_or_else(|| "Select Schema".to_string());
+                        let available_schemas = self.available_schemas.clone();
+                        let current_schema = self.current_schema.clone();
+                        let entity = cx.entity().downgrade();
+
+                        this.child(
+                            Button::new("schema-switcher")
+                                .xsmall()
+                                .ghost()
+                                .icon(ZqlzIcon::Stack)
+                                .tooltip(schema_label.clone())
+                                .w(px(180.0))
+                                .flex_shrink()
+                                .child(Self::selector_label(schema_label))
+                                .dropdown_menu(move |mut menu, _window, _cx| {
+                                    use zqlz_ui::widgets::menu::PopupMenuItem;
+                                    menu = menu.max_h(px(300.0)).scrollable(true);
+                                    for schema_name in &available_schemas {
+                                        let is_current = current_schema.as_ref() == Some(schema_name);
+                                        let schema_name_clone = schema_name.clone();
+                                        let entity = entity.clone();
+                                        menu = menu.item(
+                                            PopupMenuItem::new(schema_name_clone.clone())
+                                                .checked(is_current)
+                                                .on_click(move |_event, _window, cx| {
+                                                    _ = entity.update(cx, |this, cx| {
+                                                        this.current_schema =
+                                                            Some(schema_name_clone.clone());
+                                                        this.clear_schema_dependent_ui_state();
+                                                        {
+                                                            let mut lsp = this.sql_lsp.write();
+                                                            lsp.set_active_schema(
+                                                                this.current_schema.clone(),
+                                                            );
+                                                            lsp.schema_loading = true;
+                                                        }
+                                                        this.trigger_lsp_schema_refresh(cx);
+                                                        cx.notify();
+                                                    });
+                                                }),
+                                        );
+                                    }
+                                    menu
+                                }),
+                        )
+                    })
+                    .child(
+                        DropdownButton::new("execute-menu")
+                            .button(
+                                Button::new("execute")
+                                    .primary()
+                                    .xsmall()
+                                    .icon(ZqlzIcon::Play)
+                                    .label("Run")
+                                    .tooltip("Run")
+                                    .disabled(execute_disabled)
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.emit_execute_query(cx);
+                                        this.focus_inner_editor(window, cx);
+                                    })),
+                            )
+                            .dropdown_menu({
+                                let entity = cx.entity().downgrade();
+                                let run_target_preview = run_target_preview.clone();
+                                move |mut menu, _window, _cx| {
+                                    use zqlz_ui::widgets::menu::PopupMenuItem;
+                                    menu = menu.min_w(px(320.0)).max_w(px(420.0));
+                                    for entry in QueryEditor::run_menu_entries() {
+                                        if entry.separator_before {
+                                            menu = menu.item(PopupMenuItem::separator());
+                                        }
+                                        let entity = entity.clone();
+                                        let action = entry.action;
+                                        let disabled = execute_disabled || entry.disabled;
+                                        let item = if action
+                                            == QueryEditorRunMenuAction::RunCurrentStatement
+                                        {
+                                            let preview = run_target_preview.clone();
+                                            PopupMenuItem::element(move |_window, cx| {
+                                                let theme = cx.theme().clone();
+                                                v_flex()
+                                                    .w_full()
+                                                    .py_1()
+                                                    .gap_0p5()
+                                                    .child(
+                                                        h_flex()
+                                                            .w_full()
+                                                            .items_center()
+                                                            .justify_between()
+                                                            .gap_2()
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .font_weight(
+                                                                        gpui::FontWeight::MEDIUM,
+                                                                    )
+                                                                    .child(preview.label.clone()),
+                                                            )
+                                                            .child(
+                                                                div()
+                                                                    .flex_none()
+                                                                    .text_xs()
+                                                                    .text_color(
+                                                                        theme.muted_foreground,
+                                                                    )
+                                                                    .child(preview.detail.clone()),
+                                                            ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .w_full()
+                                                            .min_w_0()
+                                                            .truncate()
+                                                            .text_xs()
+                                                            .text_color(theme.muted_foreground)
+                                                            .child(preview.preview.clone()),
+                                                    )
+                                            })
+                                            .icon(Icon::new(ZqlzIcon::Play).size_3())
+                                        } else {
+                                            PopupMenuItem::new(entry.label)
+                                        };
+                                        let item = item
+                                            .checked(entry.checked)
+                                            .disabled(disabled)
+                                            .on_click(move |_event, _window, cx| {
+                                                _ = entity.update(cx, |this, cx| match action {
+                                                    QueryEditorRunMenuAction::Run => {
+                                                        this.emit_execute_query(cx);
+                                                    }
+                                                    QueryEditorRunMenuAction::RunCurrentStatement => {
+                                                        this.emit_execute_selection(cx);
+                                                    }
+                                                    QueryEditorRunMenuAction::ContinueOnError => {}
+                                                });
+                                            });
+                                        menu = menu.item(item);
+                                    }
+                                    menu
+                                }
+                            })
+                            .primary()
+                            .xsmall()
+                            .disabled(execute_disabled),
+                    )
+                    .child(
+                        Button::new("stop")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::Stop)
+                            .tooltip("Stop")
+                            .disabled(!(self.is_executing && self.can_cancel_execution))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.emit_cancel_query(cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .child(
+                        Button::new("explain")
+                            .ghost()
+                            .xsmall()
+                            .icon(ZqlzIcon::Lightbulb)
+                            .tooltip("Explain")
+                            .disabled(execute_disabled)
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.emit_explain_query(cx);
+                                this.focus_inner_editor(window, cx);
+                            })),
+                    )
+                    .when(supports_save, |this| {
+                        this.child(
+                            Button::new("preview-ddl")
+                                .ghost()
+                                .xsmall()
+                                .icon(ZqlzIcon::Eye)
+                                .tooltip("Preview DDL")
+                                .disabled(is_empty)
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.emit_preview_ddl(cx);
+                                    this.focus_inner_editor(window, cx);
+                                })),
+                        )
                     }),
             )
     }
-
-    fn render_toolbar_shortcut_hints(
-        &self,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let mut hints: Vec<AnyElement> = Vec::new();
-
-        #[cfg(target_os = "macos")]
-        let run_shortcut = Self::kbd_for_keystroke("cmd-enter");
-        #[cfg(not(target_os = "macos"))]
-        let run_shortcut = Self::kbd_for_keystroke("ctrl-enter");
-
-        if let Some(kbd) = run_shortcut {
-            hints.push(self.render_toolbar_shortcut_hint("Run", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(
-            &zqlz_text_editor::actions::TriggerCompletion,
-            &self.focus_handle,
-            window,
-        ) {
-            hints.push(self.render_toolbar_shortcut_hint("Complete", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(&FormatQuery, &self.focus_handle, window) {
-            hints.push(self.render_toolbar_shortcut_hint("Format", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(&ShowHover, &self.focus_handle, window) {
-            hints.push(self.render_toolbar_shortcut_hint("Hover", kbd, cx));
-        }
-        if let Some(kbd) =
-            Kbd::binding_for_action_in(&TriggerParameterHints, &self.focus_handle, window)
-        {
-            hints.push(self.render_toolbar_shortcut_hint("Params", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(&ShowCodeActions, &self.focus_handle, window)
-        {
-            hints.push(self.render_toolbar_shortcut_hint("Actions", kbd, cx));
-        }
-
-        h_flex().gap_3().items_center().children(hints)
-    }
-
-    fn render_toolbar_shortcut_hint(
-        &self,
-        label: impl Into<SharedString>,
-        kbd: Kbd,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let label = label.into();
-        h_flex()
-            .gap_1()
-            .items_center()
-            .child(
-                div()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(label),
-            )
-            .child(kbd)
-            .into_any_element()
-    }
-
-    fn render_problem_shortcut_hints(&self, window: &Window, cx: &mut Context<Self>) -> AnyElement {
-        let mut hints: Vec<AnyElement> = Vec::new();
-
-        if let Some(kbd) = Kbd::binding_for_action_in(&NextProblem, &self.focus_handle, window) {
-            hints.push(self.render_toolbar_shortcut_hint("Next", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(&PreviousProblem, &self.focus_handle, window)
-        {
-            hints.push(self.render_toolbar_shortcut_hint("Prev", kbd, cx));
-        }
-        if let Some(kbd) = Kbd::binding_for_action_in(
-            &super::actions::ToggleProblemsPanel,
-            &self.focus_handle,
-            window,
-        ) {
-            hints.push(self.render_toolbar_shortcut_hint("Panel", kbd, cx));
-        }
-
-        h_flex()
-            .gap_2()
-            .items_center()
-            .children(hints)
-            .into_any_element()
-    }
-
-    fn kbd_for_keystroke(stroke: &str) -> Option<Kbd> {
-        Keystroke::parse(stroke).ok().map(Kbd::new)
-    }
-
-    fn formatted_keystroke(stroke: &str) -> Option<String> {
-        Keystroke::parse(stroke).ok().map(|key| Kbd::format(&key))
-    }
-
-    fn run_query_tooltip_text() -> SharedString {
-        #[cfg(target_os = "macos")]
-        {
-            Self::formatted_keystroke("cmd-enter")
-                .map(|shortcut| format!("Run Query ({shortcut})"))
-                .unwrap_or_else(|| "Run Query".into())
-                .into()
-        }
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            match (
-                Self::formatted_keystroke("ctrl-enter"),
-                Self::formatted_keystroke("f5"),
-            ) {
-                (Some(primary), Some(secondary)) => {
-                    format!("Run Query ({primary} / {secondary})").into()
-                }
-                (Some(primary), None) => format!("Run Query ({primary})").into(),
-                (None, Some(secondary)) => format!("Run Query ({secondary})").into(),
-                (None, None) => "Run Query".into(),
-            }
-        }
-    }
-
     /// Render the SQL editor area using the custom TextEditor
-    fn render_editor(&self, _cx: &mut Context<Self>) -> impl IntoElement {
-        self.editor.clone().into_any_element()
-    }
-
-    /// Parse and format hover content with markdown-like styling
-    /// Supports: headings (#), code blocks (```), inline code (`), bold (**)
-    fn format_hover_content(&self, content: &str, cx: &mut Context<Self>) -> gpui::AnyElement {
-        let theme = cx.theme().clone();
-
-        if content.contains("```") {
-            self.render_markdown_with_code_blocks(content, &theme)
-        } else {
-            self.render_simple_markdown(content, &theme)
-        }
-    }
-
-    fn render_markdown_with_code_blocks(&self, content: &str, theme: &Theme) -> gpui::AnyElement {
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-        let mut in_code_block = false;
-        let mut code_block_lines: Vec<&str> = Vec::new();
-
-        for line in content.lines() {
-            if line.starts_with("```") {
-                if !in_code_block {
-                    in_code_block = true;
-                    code_block_lines.clear();
-                } else {
-                    let code_text = code_block_lines.join("\n");
-                    elements.push(
-                        div()
-                            .w_full()
-                            .bg(theme.muted)
-                            .border_1()
-                            .border_color(theme.border.opacity(0.5))
-                            .p_2()
-                            .mb_2()
-                            .font_family(theme.mono_font_family.clone())
-                            .text_xs()
-                            .text_color(theme.foreground)
-                            .overflow_x_scrollbar()
-                            .child(code_text)
-                            .into_any_element(),
-                    );
-                    in_code_block = false;
-                    code_block_lines.clear();
-                }
-            } else if in_code_block {
-                code_block_lines.push(line);
-            } else {
-                let styled = self.render_markdown_line(line, theme);
-                elements.push(div().w_full().mb_1().child(styled).into_any_element());
-            }
-        }
-
-        if in_code_block && !code_block_lines.is_empty() {
-            let code_text = code_block_lines.join("\n");
-            elements.push(
-                div()
-                    .w_full()
-                    .bg(theme.muted)
-                    .border_1()
-                    .border_color(theme.border.opacity(0.5))
-                    .p_2()
-                    .mb_2()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_xs()
-                    .text_color(theme.foreground)
-                    .overflow_x_scrollbar()
-                    .child(code_text)
-                    .into_any_element(),
-            );
-        }
-
-        if elements.is_empty() {
-            div().child(content.to_string()).into_any_element()
-        } else {
-            div()
-                .children(
-                    elements
-                        .into_iter()
-                        .map(gpui::IntoElement::into_any_element),
-                )
-                .into_any_element()
-        }
-    }
-
-    fn render_markdown_line(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
-        if line.starts_with("### ") {
-            return div()
-                .text_sm()
-                .font_weight(gpui::FontWeight::from(700.0))
-                .text_color(theme.foreground)
-                .mb_1()
-                .child(line.trim_start_matches("### ").to_string())
-                .into_any_element();
-        }
-        if line.starts_with("## ") {
-            return div()
-                .text_base()
-                .font_weight(gpui::FontWeight::from(700.0))
-                .text_color(theme.foreground)
-                .mb_1()
-                .child(line.trim_start_matches("## ").to_string())
-                .into_any_element();
-        }
-        if line.starts_with("# ") {
-            return div()
-                .text_base()
-                .font_weight(gpui::FontWeight::from(700.0))
-                .text_color(theme.foreground)
-                .mb_2()
-                .child(line.trim_start_matches("# ").to_string())
-                .into_any_element();
-        }
-
-        if line.contains('`') {
-            return self.render_inline_code(line, theme);
-        }
-
-        if line.contains("**") {
-            return self.render_bold_text(line, theme);
-        }
-
+    fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let fonts = ZqlzSettings::global(cx).fonts.clone();
         div()
-            .text_xs()
-            .text_color(theme.popover_foreground)
-            .child(line.to_string())
-            .into_any_element()
-    }
-
-    fn render_inline_code(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
-        let mut parts: Vec<gpui::AnyElement> = Vec::new();
-        let mut remaining = line;
-
-        while let Some(start) = remaining.find('`') {
-            if start > 0 {
-                parts.push(
-                    div()
-                        .text_xs()
-                        .text_color(theme.popover_foreground)
-                        .child(remaining[..start].to_string())
-                        .into_any_element(),
-                );
-            }
-
-            if let Some(end) = remaining[start + 1..].find('`') {
-                let code = &remaining[start + 1..start + 1 + end];
-                parts.push(
-                    div()
-                        .bg(theme.muted)
-                        .border_1()
-                        .border_color(theme.border.opacity(0.5))
-                        .px_1()
-                        .font_family(theme.mono_font_family.clone())
-                        .text_xs()
-                        .text_color(theme.accent)
-                        .child(code.to_string())
-                        .into_any_element(),
-                );
-                remaining = &remaining[start + 1 + end + 1..];
-            } else {
-                parts.push(
-                    div()
-                        .text_xs()
-                        .text_color(theme.popover_foreground)
-                        .child(remaining.to_string())
-                        .into_any_element(),
-                );
-                break;
-            }
-        }
-
-        if !remaining.is_empty() {
-            parts.push(
-                div()
-                    .text_xs()
-                    .text_color(theme.popover_foreground)
-                    .child(remaining.to_string())
-                    .into_any_element(),
-            );
-        }
-
-        div()
-            .children(parts.into_iter().map(gpui::IntoElement::into_any_element))
-            .into_any_element()
-    }
-
-    fn render_bold_text(&self, line: &str, theme: &Theme) -> gpui::AnyElement {
-        let mut parts: Vec<gpui::AnyElement> = Vec::new();
-        let mut remaining = line;
-
-        while let Some(start) = remaining.find("**") {
-            if start > 0 {
-                parts.push(
-                    div()
-                        .text_xs()
-                        .text_color(theme.popover_foreground)
-                        .child(remaining[..start].to_string())
-                        .into_any_element(),
-                );
-            }
-
-            if let Some(end) = remaining[start + 2..].find("**") {
-                let bold = &remaining[start + 2..start + 2 + end];
-                parts.push(
-                    div()
-                        .text_xs()
-                        .font_weight(gpui::FontWeight::from(700.0))
-                        .text_color(theme.foreground)
-                        .child(bold.to_string())
-                        .into_any_element(),
-                );
-                remaining = &remaining[start + 2 + end + 2..];
-            } else {
-                parts.push(
-                    div()
-                        .text_xs()
-                        .text_color(theme.popover_foreground)
-                        .child(remaining.to_string())
-                        .into_any_element(),
-                );
-                break;
-            }
-        }
-
-        if !remaining.is_empty() {
-            parts.push(
-                div()
-                    .text_xs()
-                    .text_color(theme.popover_foreground)
-                    .child(remaining.to_string())
-                    .into_any_element(),
-            );
-        }
-
-        div()
-            .children(parts.into_iter().map(gpui::IntoElement::into_any_element))
-            .into_any_element()
-    }
-
-    fn render_simple_markdown(&self, content: &str, theme: &Theme) -> gpui::AnyElement {
-        let mut elements: Vec<gpui::AnyElement> = Vec::new();
-
-        for line in content.lines() {
-            let styled = self.render_markdown_line(line, theme);
-            elements.push(div().w_full().mb_1().child(styled).into_any_element());
-        }
-
-        if elements.is_empty() {
-            div().child(content.to_string()).into_any_element()
-        } else {
-            div()
-                .children(
-                    elements
-                        .into_iter()
-                        .map(gpui::IntoElement::into_any_element),
-                )
-                .into_any_element()
-        }
-    }
-
-    /// Render the hover popover if there's content to show
-    fn render_hover_popover(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
-        let content = self.hover_content.as_ref()?;
-        let theme = cx.theme();
-
-        Some(
-            div()
-                .absolute()
-                .top_8()
-                .left_4()
-                .max_w(px(500.0))
-                .max_h(px(400.0))
-                .overflow_y_scrollbar()
-                .overflow_x_hidden()
-                .bg(theme.popover)
-                .border_1()
-                .border_color(theme.border.opacity(0.6))
-                .shadow_lg()
-                .p_3()
-                .child(self.format_hover_content(content, cx))
-                .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                    this.clear_hover(cx);
-                })),
-        )
+            .size_full()
+            .text_size(px(fonts.editor_font_size))
+            .font_family(fonts.editor_font_family.clone())
+            .font_weight(gpui::FontWeight::from(fonts.editor_font_weight as f32))
+            .child(self.editor.clone())
     }
 
     /// Render the template params panel (JSON editor) - shown only in template mode
@@ -3819,17 +3379,8 @@ impl QueryEditor {
 impl Render for QueryEditor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let bg_color = cx.theme().background;
-        let indicator_bg = cx.theme().primary.opacity(0.1);
-        let subtle_border = cx.theme().border.opacity(0.5);
 
         let is_template_mode = self.editor_mode == EditorMode::Template;
-        let hover_content = self.hover_content.clone();
-
-        let inline_suggestion_text = self
-            .inline_suggestion
-            .as_ref()
-            .map(|s| s.suggestion.clone());
-        let muted_foreground = cx.theme().muted_foreground;
 
         v_flex()
             .id("query-editor")
@@ -3839,15 +3390,8 @@ impl Render for QueryEditor {
             .key_context("Editor")
             .size_full()
             .bg(bg_color)
-            .on_action(cx.listener(Self::handle_trigger_completion))
-            .on_action(cx.listener(Self::handle_accept_completion))
-            .on_action(cx.listener(Self::handle_cancel_completion))
-            .on_action(cx.listener(Self::handle_next_completion))
-            .on_action(cx.listener(Self::handle_previous_completion))
             .on_action(cx.listener(Self::handle_next_problem))
             .on_action(cx.listener(Self::handle_previous_problem))
-            .on_action(cx.listener(Self::handle_confirm_completion))
-            .on_action(cx.listener(Self::handle_cancel_completion_menu))
             .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
                 let key = event.keystroke.key.as_str();
                 let modifiers = event.keystroke.modifiers;
@@ -3858,8 +3402,10 @@ impl Render for QueryEditor {
                     && (modifiers.platform || modifiers.control);
 
                 if is_manual_completion_shortcut && !this.is_executing {
-                    this.dismiss_inline_suggestion(cx);
-                    this.handle_trigger_completion(&TriggerCompletion, window, cx);
+                    this.editor.update(cx, |editor, cx| {
+                        editor.clear_inline_suggestion(cx);
+                        editor.trigger_completion_action(window, cx);
+                    });
                     window.prevent_default();
                     cx.stop_propagation();
                     return;
@@ -3869,8 +3415,13 @@ impl Render for QueryEditor {
                 // - Cmd+Enter and F5 execute the current query
                 // - Cmd/Ctrl+Shift+Enter executes selection/current statement
                 // - Escape / Cmd+Escape cancels the running query via app keymap
-                if (this.is_executing && key == "escape" && !modifiers.shift && !modifiers.alt)
+                if (this.is_executing
+                    && this.can_cancel_execution
+                    && key == "escape"
+                    && !modifiers.shift
+                    && !modifiers.alt)
                     || (this.is_executing
+                        && this.can_cancel_execution
                         && key == "escape"
                         && modifiers.platform
                         && !modifiers.shift
@@ -3898,7 +3449,9 @@ impl Render for QueryEditor {
                     && let Some(ch) = key.chars().next()
                     && !ch.is_control()
                 {
-                    this.dismiss_inline_suggestion(cx);
+                    this.editor.update(cx, |editor, cx| {
+                        editor.clear_inline_suggestion(cx);
+                    });
                 }
 
                 // Allow the event to continue propagating so the inner TextEditor
@@ -3917,52 +3470,7 @@ impl Render for QueryEditor {
                             .h_full()
                             .overflow_hidden()
                             .relative()
-                            .child(self.render_editor(cx))
-                            .when_some(hover_content, |this, _content| {
-                                this.children(self.render_hover_popover(cx))
-                            })
-                            .when_some(inline_suggestion_text, |this, suggestion_text| {
-                                this.child(
-                                    div()
-                                        .absolute()
-                                        .bottom_2()
-                                        .right_2()
-                                        .px_3()
-                                        .py_1()
-                                        .border_1()
-                                        .border_color(subtle_border)
-                                        .bg(indicator_bg)
-                                        .text_sm()
-                                        .font_medium()
-                                        .child(
-                                            h_flex()
-                                                .gap_1()
-                                                .items_center()
-                                                .child("⟪")
-                                                .child(suggestion_text)
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(muted_foreground)
-                                                        .child("accept"),
-                                                )
-                                                .when_some(
-                                                    Self::kbd_for_keystroke("tab"),
-                                                    |this, kbd| this.child(kbd),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .text_xs()
-                                                        .text_color(muted_foreground)
-                                                        .child("dismiss"),
-                                                )
-                                                .when_some(
-                                                    Self::kbd_for_keystroke("escape"),
-                                                    |this, kbd| this.child(kbd),
-                                                ),
-                                        ),
-                                )
-                            }),
+                            .child(self.render_editor(cx)),
                     )
                     .when(is_template_mode, |this| {
                         this.child(self.render_template_params(cx))
@@ -3993,6 +3501,29 @@ impl Panel for QueryEditor {
         }
     }
 
+    fn tab_name(&self, _cx: &App) -> Option<SharedString> {
+        Some(self.name.clone().into())
+    }
+
+    fn tab_icon(&self, _cx: &App) -> Option<ZqlzIcon> {
+        Some(ZqlzIcon::FileSql)
+    }
+
+    fn tab_tooltip(&self, _cx: &App) -> Option<SharedString> {
+        let mut parts = vec![self.name.clone()];
+        if let Some(connection_name) = &self.connection_name {
+            parts.push(connection_name.clone());
+        }
+        if let Some(database) = &self.current_database {
+            parts.push(database.clone());
+        }
+        if let Some(schema) = &self.current_schema {
+            parts.push(schema.clone());
+        }
+
+        Some(parts.join(" / ").into())
+    }
+
     fn title_style(&self, _cx: &App) -> Option<TitleStyle> {
         None
     }
@@ -4001,8 +3532,28 @@ impl Panel for QueryEditor {
         true
     }
 
+    fn can_split(&self, _cx: &App) -> bool {
+        true
+    }
+
+    fn can_move_to_new_window(&self, _cx: &App) -> bool {
+        true
+    }
+
     fn has_unsaved_changes(&self, _cx: &App) -> bool {
         self.editor.read(_cx).is_dirty()
+    }
+}
+
+fn schema_cache_scope(database: Option<&str>, schema: Option<&str>) -> Option<String> {
+    let database = database.map(str::trim).filter(|value| !value.is_empty());
+    let schema = schema.map(str::trim).filter(|value| !value.is_empty());
+
+    match (database, schema) {
+        (Some(database), Some(schema)) => Some(format!("db:{database}|schema:{schema}")),
+        (Some(database), None) => Some(format!("db:{database}")),
+        (None, Some(schema)) => Some(format!("schema:{schema}")),
+        (None, None) => None,
     }
 }
 
@@ -4071,16 +3622,21 @@ fn save_schema_cache_to_disk(
 
 #[cfg(test)]
 mod tests {
-    use super::{DiagnosticInfo, DiagnosticInfoSeverity, QueryEditor};
+    use super::{
+        AppEditorSettings, CursorBlink, CursorShape, DiagnosticInfo, DiagnosticInfoSeverity,
+        EditorMode, QueryDocumentSymbol, QueryEditor, QueryEditorRunMenuAction,
+        QueryEditorStatusInput, ScrollBeyondLastLine, SoftWrapMode, query_document_symbols,
+        schema_cache_scope,
+    };
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use std::path::Path;
-    use zqlz_text_editor::DocumentIdentity;
+    use zqlz_text_editor::{DocumentIdentity, TextEditor};
 
     #[test]
     fn problem_index_forward_wraps_to_start() {
         let problems = vec![(2, 0), (4, 5), (10, 1)];
         assert_eq!(
-            QueryEditor::problem_index_for_cursor(&problems, 10, 2, true),
+            TextEditor::lsp_diagnostic_index_for_position(&problems, 10, 2, true),
             Some(0)
         );
     }
@@ -4089,7 +3645,7 @@ mod tests {
     fn problem_index_forward_picks_next() {
         let problems = vec![(2, 0), (4, 5), (10, 1)];
         assert_eq!(
-            QueryEditor::problem_index_for_cursor(&problems, 2, 0, true),
+            TextEditor::lsp_diagnostic_index_for_position(&problems, 2, 0, true),
             Some(1)
         );
     }
@@ -4098,7 +3654,7 @@ mod tests {
     fn problem_index_backward_wraps_to_end() {
         let problems = vec![(2, 0), (4, 5), (10, 1)];
         assert_eq!(
-            QueryEditor::problem_index_for_cursor(&problems, 1, 0, false),
+            TextEditor::lsp_diagnostic_index_for_position(&problems, 1, 0, false),
             Some(2)
         );
     }
@@ -4107,7 +3663,7 @@ mod tests {
     fn problem_index_backward_picks_previous() {
         let problems = vec![(2, 0), (4, 5), (10, 1)];
         assert_eq!(
-            QueryEditor::problem_index_for_cursor(&problems, 8, 0, false),
+            TextEditor::lsp_diagnostic_index_for_position(&problems, 8, 0, false),
             Some(1)
         );
     }
@@ -4116,7 +3672,7 @@ mod tests {
     fn internal_text_document_starts_with_internal_identity() {
         let document = QueryEditor::internal_text_document("select 1");
 
-        assert_eq!(document.buffer.text(), "select 1");
+        assert_eq!(document.text(), "select 1");
         match document.identity() {
             DocumentIdentity::Internal { uri } => {
                 assert!(uri.as_str().starts_with("sql://internal/"));
@@ -4158,9 +3714,180 @@ mod tests {
         ];
 
         assert_eq!(
-            QueryEditor::diagnostic_counts_from_lsp_diagnostics(&diagnostics),
+            TextEditor::lsp_diagnostic_counts_from(&diagnostics),
             (1, 1, 2)
         );
+    }
+
+    #[test]
+    fn status_labels_show_cursor_context_and_empty_connection_state() {
+        let labels = QueryEditor::status_labels_from_parts(QueryEditorStatusInput {
+            cursor_line: 2,
+            cursor_column: 4,
+            selection_chars: Some(12),
+            mode: EditorMode::Sql,
+            connection_name: None,
+            has_connection: false,
+            database: None,
+            diagnostics: (0, 0, 0),
+            is_executing: false,
+        });
+
+        assert_eq!(labels.cursor, "Ln 3, Col 5");
+        assert_eq!(labels.selection.as_deref(), Some("12 selected"));
+        assert_eq!(labels.mode, "SQL");
+        assert_eq!(labels.connection, "No Connection");
+        assert_eq!(labels.database, "No Database");
+        assert_eq!(labels.diagnostics, "No Problems");
+        assert_eq!(labels.execution, None);
+    }
+
+    #[test]
+    fn status_labels_prioritize_errors_and_running_state() {
+        let labels = QueryEditor::status_labels_from_parts(QueryEditorStatusInput {
+            cursor_line: 0,
+            cursor_column: 0,
+            selection_chars: None,
+            mode: EditorMode::Template,
+            connection_name: Some("postgres@localhost"),
+            has_connection: true,
+            database: Some("erp_lab"),
+            diagnostics: (1, 3, 2),
+            is_executing: true,
+        });
+
+        assert_eq!(labels.cursor, "Ln 1, Col 1");
+        assert_eq!(labels.selection, None);
+        assert_eq!(labels.mode, "Template");
+        assert_eq!(labels.connection, "postgres@localhost");
+        assert_eq!(labels.database, "erp_lab");
+        assert_eq!(labels.diagnostics, "1 error");
+        assert_eq!(labels.execution.as_deref(), Some("Running"));
+    }
+
+    #[test]
+    fn run_menu_entries_match_navicat_v1_actions() {
+        let entries = QueryEditor::run_menu_entries();
+
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].label, "Run");
+        assert_eq!(entries[0].action, QueryEditorRunMenuAction::Run);
+        assert!(!entries[0].checked);
+        assert!(!entries[0].disabled);
+        assert!(!entries[0].separator_before);
+        assert_eq!(entries[1].label, "Run Current Statement");
+        assert_eq!(
+            entries[1].action,
+            QueryEditorRunMenuAction::RunCurrentStatement
+        );
+        assert_eq!(entries[2].label, "Continue on Error");
+        assert_eq!(entries[2].action, QueryEditorRunMenuAction::ContinueOnError);
+        assert!(entries[2].checked);
+        assert!(entries[2].disabled);
+        assert!(entries[2].separator_before);
+    }
+
+    #[test]
+    fn run_target_preview_describes_selected_sql() {
+        let preview = QueryEditor::run_target_preview_from_parts(
+            "select 1;",
+            Some("select *\nfrom customers"),
+            0,
+            EditorMode::Sql,
+        );
+
+        assert_eq!(preview.label, "Run Selection");
+        assert!(preview.is_selection);
+        assert_eq!(preview.detail, "2 lines");
+        assert_eq!(preview.preview, "select * from customers");
+    }
+
+    #[test]
+    fn run_target_preview_describes_current_statement() {
+        let sql = "select 1;\n\nselect * from accounts where id = 1;\nselect 3;";
+        let cursor_offset = sql.find("accounts").expect("cursor target");
+        let preview =
+            QueryEditor::run_target_preview_from_parts(sql, None, cursor_offset, EditorMode::Sql);
+
+        assert_eq!(preview.label, "Run Current Statement");
+        assert!(!preview.is_selection);
+        assert!(preview.detail.contains("Ln 3"));
+        assert!(preview.preview.contains("accounts"));
+        assert!(!preview.preview.contains("select 3"));
+    }
+
+    #[test]
+    fn run_target_preview_describes_rendered_template_without_selection() {
+        let preview = QueryEditor::run_target_preview_from_parts(
+            "select * from {{ table_name }}",
+            None,
+            0,
+            EditorMode::Template,
+        );
+
+        assert_eq!(preview.label, "Run Rendered Template");
+        assert_eq!(preview.detail, "1 line");
+        assert_eq!(preview.preview, "select * from {{ table_name }}");
+    }
+
+    #[test]
+    fn query_header_hides_mode_problems_template_and_keymap_noise() {
+        let visibility = QueryEditor::header_visibility();
+
+        assert!(!visibility.show_mode_segment);
+        assert!(!visibility.show_problems_badge);
+        assert!(!visibility.show_template_error);
+        assert!(!visibility.show_keymap_hints);
+        assert!(!visibility.show_repeated_connection_label);
+    }
+
+    #[test]
+    fn schema_labels_prefer_schema_names_then_table_schemas() {
+        assert_eq!(
+            QueryEditor::schema_labels_from_parts(
+                vec![
+                    "public".to_string(),
+                    " ".to_string(),
+                    "sales".to_string(),
+                    "public".to_string()
+                ],
+                vec![Some("ignored".to_string())],
+            ),
+            vec!["public".to_string(), "sales".to_string()]
+        );
+
+        assert_eq!(
+            QueryEditor::schema_labels_from_parts(
+                Vec::<String>::new(),
+                vec![
+                    Some("public".to_string()),
+                    None,
+                    Some("sales".to_string()),
+                    Some("public".to_string()),
+                    Some("".to_string()),
+                ],
+            ),
+            vec!["public".to_string(), "sales".to_string()]
+        );
+
+        assert!(QueryEditor::schema_labels_from_parts(Vec::<String>::new(), vec![None]).is_empty());
+    }
+
+    #[test]
+    fn schema_cache_scope_keeps_database_and_schema_snapshots_separate() {
+        assert_eq!(
+            schema_cache_scope(Some("erp_lab"), Some("zqlz_audit")).as_deref(),
+            Some("db:erp_lab|schema:zqlz_audit")
+        );
+        assert_eq!(
+            schema_cache_scope(Some("erp_lab"), None).as_deref(),
+            Some("db:erp_lab")
+        );
+        assert_eq!(
+            schema_cache_scope(None, Some("public")).as_deref(),
+            Some("schema:public")
+        );
+        assert_eq!(schema_cache_scope(Some(" "), Some("")), None);
     }
 
     #[test]
@@ -4188,28 +3915,74 @@ mod tests {
     }
 
     #[test]
-    fn normalize_bracket_identifier_spacing_trims_only_edges() {
-        let sql =
-            "CREATE VIEW [ ProductDetails_V ] AS SELECT [ Product ] . [ Name ] FROM [ users ]";
-        let normalized = QueryEditor::normalize_bracket_identifier_spacing(sql);
+    fn app_editor_settings_map_to_text_editor_settings() {
+        let app_settings = AppEditorSettings {
+            tab_size: 2,
+            insert_spaces: false,
+            show_line_numbers: false,
+            word_wrap: true,
+            cursor_blink: CursorBlink::Off,
+            cursor_shape: CursorShape::Underline,
+            selection_highlight: false,
+            relative_line_numbers: true,
+            scroll_beyond_last_line: ScrollBeyondLastLine::Enabled,
+            vertical_scroll_margin: 7,
+            horizontal_scroll_margin: 9,
+            scroll_sensitivity: 1.5,
+            hover_delay_ms: 250,
+            lsp_completions_enabled: false,
+            ..AppEditorSettings::default()
+        };
 
+        let text_settings = QueryEditor::text_editor_settings_from_app(&app_settings);
+
+        assert_eq!(text_settings.document.indent_size, 2);
+        assert!(text_settings.document.use_tabs);
+        assert!(text_settings.gutter.show_line_numbers);
+        assert!(text_settings.gutter.show_relative_line_numbers);
+        assert_eq!(text_settings.soft_wrap, SoftWrapMode::EditorWidth);
+        assert!(!text_settings.cursor.blink);
         assert_eq!(
-            normalized,
-            "CREATE VIEW [ProductDetails_V] AS SELECT [Product] . [Name] FROM [users]"
+            text_settings.cursor.shape,
+            zqlz_text_editor::CursorShape::Underline
         );
+        assert!(!text_settings.highlight_selection_matches);
+        assert!(text_settings.scroll.scroll_beyond_last_line);
+        assert_eq!(text_settings.scroll.vertical_margin_lines, 7);
+        assert_eq!(text_settings.scroll.horizontal_margin_columns, 9);
+        assert_eq!(text_settings.scroll.sensitivity, 150);
+        assert_eq!(
+            text_settings.hover_delay,
+            std::time::Duration::from_millis(250)
+        );
+        assert!(!text_settings.completion.automatically_show);
     }
 
     #[test]
-    fn normalize_formatted_sql_for_driver_applies_only_to_sqlite_like_dialects() {
-        let sql = "SELECT [ users ]";
+    fn query_document_symbols_split_statements_and_track_lines() {
+        let symbols = query_document_symbols(
+            "select * from users;\n\ncreate table audit_log (id int);\nupdate users set name = 'a;b';",
+        );
 
         assert_eq!(
-            QueryEditor::normalize_formatted_sql_for_driver(sql, Some("sqlite")),
-            "SELECT [users]"
-        );
-        assert_eq!(
-            QueryEditor::normalize_formatted_sql_for_driver(sql, Some("postgres")),
-            sql
+            symbols,
+            vec![
+                QueryDocumentSymbol {
+                    label: "Query".to_string(),
+                    line: 0,
+                    column: 0,
+                },
+                QueryDocumentSymbol {
+                    label: "CREATE audit_log".to_string(),
+                    line: 2,
+                    column: 0,
+                },
+                QueryDocumentSymbol {
+                    label: "UPDATE users".to_string(),
+                    line: 3,
+                    column: 0,
+                },
+            ]
         );
     }
 }

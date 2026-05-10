@@ -2,6 +2,7 @@
 
 use super::test_helpers::*;
 use lsp_types::{HoverContents, MarkedString, MarkupKind};
+use zqlz_core::SequenceInfo;
 use zqlz_ui::widgets::Rope;
 
 fn hover_to_text(hover: lsp_types::Hover) -> String {
@@ -147,6 +148,60 @@ fn test_hover_on_table_alias_shows_table_metadata() {
         hover_text.contains("**Columns:**"),
         "Hover on an alias should include table columns. Got: {}",
         hover_text
+    );
+}
+
+#[test]
+fn test_hover_on_sequence_name() {
+    let mut lsp = create_test_lsp();
+    let mut cache = crate::SchemaCache::default();
+    cache.sequences.insert(
+        "etl_stage_order_lines_stage_id_seq".to_string(),
+        SequenceInfo {
+            schema: Some("analytics".to_string()),
+            name: "etl_stage_order_lines_stage_id_seq".to_string(),
+            data_type: "bigint".to_string(),
+            start_value: 1,
+            min_value: 1,
+            max_value: 9_223_372_036_854_775_807,
+            increment_by: 1,
+            current_value: Some(42),
+            owner: None,
+            comment: None,
+        },
+    );
+    lsp.set_schema_cache(cache);
+
+    let sql = r#"CREATE SEQUENCE "analytics"."etl_stage_order_lines_stage_id_seq" AS bigint INCREMENT BY 1 MINVALUE 1 MAXVALUE 9223372036854775807 START 1 CACHE 1 NO CYCLE;"#;
+    let text = Rope::from(sql);
+    let Some(sequence_offset) = sql.find("etl_stage_order_lines_stage_id_seq") else {
+        panic!("sequence name should be in SQL")
+    };
+    let offset = sequence_offset + 5;
+
+    let hover = lsp.get_hover(&text, offset).expect("hover for sequence");
+    let hover_text = hover_to_text(hover);
+
+    assert!(hover_text.contains("**Sequence: etl_stage_order_lines_stage_id_seq**"));
+    assert!(hover_text.contains("Schema: `analytics`"));
+    assert!(hover_text.contains("Type: `bigint`"));
+}
+
+#[test]
+fn test_hover_on_unknown_create_sequence_identifier_returns_none() {
+    let lsp = create_test_lsp();
+    let sql = r#"CREATE SEQUENCE "analytics"."missing_sequence" AS bigint INCREMENT BY 1;"#;
+    let text = Rope::from(sql);
+    let Some(sequence_offset) = sql.find("missing_sequence") else {
+        panic!("sequence name should be in SQL")
+    };
+    let offset = sequence_offset + 5;
+
+    let hover = lsp.get_hover(&text, offset);
+
+    assert!(
+        hover.is_none(),
+        "DDL object names should not fall through to query-derived hover"
     );
 }
 

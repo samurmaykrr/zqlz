@@ -27,6 +27,11 @@ impl TableViewerDelegate {
             return;
         }
 
+        if !self.can_edit_cells() {
+            tracing::info!("Skipping bulk edit: table has no stable row identity");
+            return;
+        }
+
         if self.disable_inline_edit {
             tracing::info!("Skipping bulk edit: inline editing disabled");
             return;

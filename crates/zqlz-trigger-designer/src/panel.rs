@@ -1,13 +1,4 @@
 //! Trigger Designer Panel
-//!
-//! A panel for designing and modifying database triggers.
-//! Features a form interface with:
-//! - Trigger name input
-//! - Table selection
-//! - Timing selection (BEFORE/AFTER/INSTEAD OF)
-//! - Event selection (INSERT/UPDATE/DELETE)
-//! - Trigger body editor with syntax highlighting
-//! - DDL preview
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -19,6 +10,7 @@ use zqlz_ui::widgets::{
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
+    scroll::ScrollableElement,
     select::{Select, SelectEvent, SelectItem, SelectState},
     tab::{Tab, TabBar},
     typography::code,
@@ -81,57 +73,34 @@ impl SelectItem for TableOption {
 /// Trigger Designer Panel for creating and modifying triggers
 pub struct TriggerDesignerPanel {
     focus_handle: FocusHandle,
-
-    /// Connection ID this design is for
     connection_id: Uuid,
-
-    /// The trigger design being edited
     design: TriggerDesign,
-
-    /// Original trigger name (for renaming)
     original_name: Option<String>,
-
-    /// Current active tab
     active_tab: DesignerTab,
-
-    /// Input state for trigger name
     name_input: Entity<InputState>,
-
-    /// Select state for table
     table_select: Entity<SelectState<Vec<TableOption>>>,
-
-    /// Available tables
     #[allow(dead_code)]
     tables: Vec<TableOption>,
-
-    /// Select state for timing
     timing_select: Entity<SelectState<Vec<TimingOption>>>,
-
-    /// Available timing options for current dialect
     #[allow(dead_code)]
     timing_options: Vec<TimingOption>,
-
-    /// Input state for WHEN condition
     when_input: Entity<InputState>,
-
-    /// Input state for trigger body
     body_input: Entity<InputState>,
-
-    /// Checkboxes for events
+    function_schema_input: Entity<InputState>,
+    function_name_input: Entity<InputState>,
+    function_arguments_input: Entity<InputState>,
+    comment_input: Entity<InputState>,
     insert_checked: bool,
     update_checked: bool,
     delete_checked: bool,
-
-    /// FOR EACH ROW vs STATEMENT (Postgres only)
+    truncate_checked: bool,
     for_each_row: bool,
-
-    /// Generated DDL preview (cached)
+    enabled: bool,
+    update_columns: Vec<String>,
+    relation_columns: Vec<String>,
+    postgres_functions: Vec<String>,
     ddl_preview: Option<String>,
-
-    /// Whether the design has been modified
     is_dirty: bool,
-
-    /// Subscriptions to input events
     _subscriptions: Vec<gpui::Subscription>,
 }
 
@@ -141,11 +110,22 @@ impl TriggerDesignerPanel {
         connection_id: Uuid,
         dialect: DatabaseDialect,
         tables: Vec<String>,
+        relation_columns: Vec<String>,
+        postgres_functions: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let design = TriggerDesign::new(dialect);
-        Self::create(connection_id, design, None, tables, window, cx)
+        Self::create(
+            connection_id,
+            design,
+            None,
+            tables,
+            relation_columns,
+            postgres_functions,
+            window,
+            cx,
+        )
     }
 
     /// Create a trigger designer for editing an existing trigger
@@ -153,56 +133,54 @@ impl TriggerDesignerPanel {
         connection_id: Uuid,
         design: TriggerDesign,
         tables: Vec<String>,
+        relation_columns: Vec<String>,
+        postgres_functions: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let original_name = Some(design.name.clone());
-        Self::create(connection_id, design, original_name, tables, window, cx)
+        Self::create(
+            connection_id,
+            design,
+            original_name,
+            tables,
+            relation_columns,
+            postgres_functions,
+            window,
+            cx,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn create(
         connection_id: Uuid,
         design: TriggerDesign,
         original_name: Option<String>,
         tables: Vec<String>,
+        relation_columns: Vec<String>,
+        postgres_functions: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         let mut subscriptions = Vec::new();
 
-        // Create name input
-        let name_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("Trigger name");
-            state.set_value(&design.name, window, cx);
-            state
-        });
-        subscriptions.push(
-            cx.subscribe(&name_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }),
-        );
+        let name_input = input_state(&design.name, "Trigger name", false, window, cx);
+        subscriptions.push(Self::dirty_subscription(&name_input, cx));
 
-        // Create table options
         let table_options: Vec<TableOption> = tables
             .iter()
             .map(|name| TableOption { name: name.clone() })
             .collect();
-
-        // Find selected table index as IndexPath
         let selected_table_idx = table_options
             .iter()
-            .position(|t| t.name == design.table_name)
-            .map(|i| IndexPath::default().row(i));
-
+            .position(|table| table.name == design.table_name)
+            .map(|index| IndexPath::default().row(index));
         let table_select = cx.new(|cx| {
             SelectState::new(table_options.clone(), selected_table_idx, window, cx).searchable(true)
         });
         subscriptions.push(cx.subscribe(
             &table_select,
             |this, _, event: &SelectEvent<Vec<TableOption>>, cx| {
-                // SelectEvent::Confirm contains the Value type (String)
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.design.table_name = value.clone();
                     this.mark_dirty(cx);
@@ -210,26 +188,24 @@ impl TriggerDesignerPanel {
             },
         ));
 
-        // Create timing options
-        let timing_options: Vec<TimingOption> = TriggerTiming::all_for_dialect(design.dialect)
+        let timing_options: Vec<TimingOption> = design
+            .dialect
+            .timings()
             .into_iter()
-            .map(|t| TimingOption {
-                timing: t,
-                label: t.as_str().to_string(),
+            .map(|timing| TimingOption {
+                timing,
+                label: timing.as_str().to_string(),
             })
             .collect();
-
         let selected_timing_idx = timing_options
             .iter()
-            .position(|t| t.timing == design.timing)
-            .map(|i| IndexPath::default().row(i));
-
+            .position(|option| option.timing == design.timing)
+            .map(|index| IndexPath::default().row(index));
         let timing_select =
             cx.new(|cx| SelectState::new(timing_options.clone(), selected_timing_idx, window, cx));
         subscriptions.push(cx.subscribe(
             &timing_select,
             |this, _, event: &SelectEvent<Vec<TimingOption>>, cx| {
-                // SelectEvent::Confirm contains the Value type (TriggerTiming)
                 if let SelectEvent::Confirm(Some(timing)) = event {
                     this.design.timing = *timing;
                     this.mark_dirty(cx);
@@ -237,43 +213,57 @@ impl TriggerDesignerPanel {
             },
         ));
 
-        // Create WHEN condition input
-        let when_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx).placeholder("Optional WHEN condition");
-            if let Some(ref cond) = design.when_condition {
-                state.set_value(cond, window, cx);
-            }
-            state
-        });
-        subscriptions.push(
-            cx.subscribe(&when_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }),
+        let when_input = input_state(
+            design.when_condition.as_deref().unwrap_or_default(),
+            "Optional WHEN condition",
+            false,
+            window,
+            cx,
         );
+        subscriptions.push(Self::dirty_subscription(&when_input, cx));
 
-        // Create body input (multi-line code editor)
-        let body_input = cx.new(|cx| {
-            let mut state = InputState::new(window, cx)
-                .placeholder("Trigger body (SQL statements)")
-                .multi_line(true)
-                .code_editor("sql");
-            state.set_value(&design.body, window, cx);
-            state
-        });
-        subscriptions.push(
-            cx.subscribe(&body_input, |this, _, event: &InputEvent, cx| {
-                if matches!(event, InputEvent::Change) {
-                    this.mark_dirty(cx);
-                }
-            }),
+        let body_input = input_state(
+            &design.body,
+            "Trigger body (SQL statements)",
+            true,
+            window,
+            cx,
         );
+        subscriptions.push(Self::dirty_subscription(&body_input, cx));
 
-        // Extract event states
+        let function_schema_input = input_state(
+            design.function_schema.as_deref().unwrap_or_default(),
+            "Function schema",
+            false,
+            window,
+            cx,
+        );
+        subscriptions.push(Self::dirty_subscription(&function_schema_input, cx));
+
+        let function_name_input =
+            input_state(&design.function_name, "Function name", false, window, cx);
+        subscriptions.push(Self::dirty_subscription(&function_name_input, cx));
+
+        let function_arguments_input =
+            input_state(&design.function_arguments, "Arguments", false, window, cx);
+        subscriptions.push(Self::dirty_subscription(&function_arguments_input, cx));
+
+        let comment_input = input_state(
+            design.comment.as_deref().unwrap_or_default(),
+            "Comment",
+            true,
+            window,
+            cx,
+        );
+        subscriptions.push(Self::dirty_subscription(&comment_input, cx));
+
         let insert_checked = design.events.contains(&TriggerEvent::Insert);
         let update_checked = design.events.contains(&TriggerEvent::Update);
         let delete_checked = design.events.contains(&TriggerEvent::Delete);
+        let truncate_checked = design.events.contains(&TriggerEvent::Truncate);
+        let update_columns = design.update_columns.clone();
+        let for_each_row = design.for_each_row;
+        let enabled = design.enabled;
 
         Self {
             focus_handle: cx.focus_handle(),
@@ -288,40 +278,62 @@ impl TriggerDesignerPanel {
             timing_options,
             when_input,
             body_input,
+            function_schema_input,
+            function_name_input,
+            function_arguments_input,
+            comment_input,
             insert_checked,
             update_checked,
             delete_checked,
-            for_each_row: true,
+            truncate_checked,
+            for_each_row,
+            enabled,
+            update_columns,
+            relation_columns,
+            postgres_functions,
             ddl_preview: None,
             is_dirty: false,
             _subscriptions: subscriptions,
         }
     }
 
-    /// Sync form values from the input entities
+    fn dirty_subscription(
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> gpui::Subscription {
+        cx.subscribe(input, |this, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                this.mark_dirty(cx);
+            }
+        })
+    }
+
     fn sync_from_inputs(&mut self, cx: &Context<Self>) {
         self.design.name = self.name_input.read(cx).value().to_string();
-
-        let when_val = self.when_input.read(cx).value().to_string();
-        self.design.when_condition = if when_val.is_empty() {
-            None
-        } else {
-            Some(when_val)
-        };
-
         self.design.body = self.body_input.read(cx).value().to_string();
+        self.design.enabled = self.enabled;
+        self.design.for_each_row = self.for_each_row;
+        self.design.update_columns = self.update_columns.clone();
 
-        // Sync table from select
+        let when_value = self.when_input.read(cx).value().to_string();
+        self.design.when_condition = non_empty(when_value);
+
+        let function_schema = self.function_schema_input.read(cx).value().to_string();
+        self.design.function_schema = non_empty(function_schema);
+        self.design.function_name = self.function_name_input.read(cx).value().to_string();
+        self.design.function_arguments = self.function_arguments_input.read(cx).value().to_string();
+
+        let comment = self.comment_input.read(cx).value().to_string();
+        self.design.comment = non_empty(comment);
+
         if let Some(value) = self.table_select.read(cx).selected_value() {
             self.design.table_name = value.clone();
         }
 
-        // Sync timing from select
         if let Some(value) = self.timing_select.read(cx).selected_value() {
             self.design.timing = *value;
         }
 
-        // Sync events from checkboxes
         self.design.events.clear();
         if self.insert_checked {
             self.design.events.push(TriggerEvent::Insert);
@@ -332,8 +344,46 @@ impl TriggerDesignerPanel {
         if self.delete_checked {
             self.design.events.push(TriggerEvent::Delete);
         }
+        if self.truncate_checked {
+            self.design.events.push(TriggerEvent::Truncate);
+        }
+    }
 
-        self.design.for_each_row = self.for_each_row;
+    fn design_from_inputs(&self, cx: &Context<Self>) -> TriggerDesign {
+        let mut design = self.design.clone();
+        design.name = self.name_input.read(cx).value().to_string();
+        design.body = self.body_input.read(cx).value().to_string();
+        design.enabled = self.enabled;
+        design.for_each_row = self.for_each_row;
+        design.update_columns = self.update_columns.clone();
+        design.when_condition = non_empty(self.when_input.read(cx).value().to_string());
+        design.function_schema = non_empty(self.function_schema_input.read(cx).value().to_string());
+        design.function_name = self.function_name_input.read(cx).value().to_string();
+        design.function_arguments = self.function_arguments_input.read(cx).value().to_string();
+        design.comment = non_empty(self.comment_input.read(cx).value().to_string());
+
+        if let Some(value) = self.table_select.read(cx).selected_value() {
+            design.table_name = value.clone();
+        }
+
+        if let Some(value) = self.timing_select.read(cx).selected_value() {
+            design.timing = *value;
+        }
+
+        design.events.clear();
+        if self.insert_checked {
+            design.events.push(TriggerEvent::Insert);
+        }
+        if self.update_checked {
+            design.events.push(TriggerEvent::Update);
+        }
+        if self.delete_checked {
+            design.events.push(TriggerEvent::Delete);
+        }
+        if self.truncate_checked {
+            design.events.push(TriggerEvent::Truncate);
+        }
+        design
     }
 
     fn mark_dirty(&mut self, cx: &mut Context<Self>) {
@@ -369,7 +419,27 @@ impl TriggerDesignerPanel {
         cx.notify();
     }
 
-    /// Render the tab bar
+    fn set_single_event(&mut self, event: TriggerEvent, cx: &mut Context<Self>) {
+        self.insert_checked = event == TriggerEvent::Insert;
+        self.update_checked = event == TriggerEvent::Update;
+        self.delete_checked = event == TriggerEvent::Delete;
+        self.truncate_checked = event == TriggerEvent::Truncate;
+        self.mark_dirty(cx);
+    }
+
+    fn toggle_column(&mut self, column: &str, cx: &mut Context<Self>) {
+        if let Some(index) = self
+            .update_columns
+            .iter()
+            .position(|selected| selected == column)
+        {
+            self.update_columns.remove(index);
+        } else {
+            self.update_columns.push(column.to_string());
+        }
+        self.mark_dirty(cx);
+    }
+
     fn render_tab_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let active_tab = self.active_tab;
 
@@ -381,8 +451,8 @@ impl TriggerDesignerPanel {
                 DesignerTab::Body => 1,
                 DesignerTab::SqlPreview => 2,
             })
-            .on_click(cx.listener(|this, ix: &usize, _window, cx| {
-                this.active_tab = match ix {
+            .on_click(cx.listener(|this, index: &usize, _window, cx| {
+                this.active_tab = match index {
                     0 => DesignerTab::General,
                     1 => DesignerTab::Body,
                     2 => {
@@ -394,14 +464,31 @@ impl TriggerDesignerPanel {
                 cx.notify();
             }))
             .child(Tab::new().label("General"))
-            .child(Tab::new().label("Body"))
+            .child(
+                Tab::new().label(if self.design.dialect.uses_trigger_function() {
+                    "Function Body"
+                } else {
+                    "Body"
+                }),
+            )
             .child(Tab::new().label("SQL Preview"))
     }
 
-    /// Render the general settings tab
     fn render_general_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let is_postgres = self.design.dialect == DatabaseDialect::Postgres;
+        let muted_foreground = cx.theme().muted_foreground;
+        let dialect = self.design.dialect;
+        let supports_update_columns = dialect.supports_update_columns() && self.update_checked;
+        let supports_when = dialect.supports_when_condition();
+        let uses_function = dialect.uses_trigger_function();
+        let enable_row = self.render_enable_row(cx).into_any_element();
+        let events = self.render_events(cx).into_any_element();
+        let granularity = dialect
+            .supports_statement_level()
+            .then(|| self.render_granularity(cx).into_any_element());
+        let update_columns =
+            supports_update_columns.then(|| self.render_update_columns(cx).into_any_element());
+        let function_section =
+            uses_function.then(|| self.render_function_section(cx).into_any_element());
 
         v_flex()
             .id("general-tab-content")
@@ -409,196 +496,345 @@ impl TriggerDesignerPanel {
             .p_4()
             .gap_4()
             .overflow_y_scroll()
-            // Trigger Name
+            .child(enable_row)
+            .child(self.render_labeled_input("Trigger Name", &self.name_input, px(400.0)))
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Trigger Name"),
-                    )
-                    .child(
-                        Input::new(&self.name_input)
-                            .small()
-                            .w_full()
-                            .max_w(px(400.0)),
-                    ),
+                v_flex().gap_1().child(Self::label("Target")).child(
+                    Select::new(&self.table_select)
+                        .small()
+                        .w(px(360.0))
+                        .placeholder("Select table or view..."),
+                ),
             )
-            // Table
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Table"),
-                    )
-                    .child(
-                        Select::new(&self.table_select)
-                            .small()
-                            .w(px(300.0))
-                            .placeholder("Select table..."),
-                    ),
+                v_flex().gap_1().child(Self::label("Timing")).child(
+                    Select::new(&self.timing_select)
+                        .small()
+                        .w(px(220.0))
+                        .placeholder("Select timing..."),
+                ),
             )
-            // Timing
-            .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Timing"),
-                    )
-                    .child(
-                        Select::new(&self.timing_select)
-                            .small()
-                            .w(px(200.0))
-                            .placeholder("Select timing..."),
-                    ),
-            )
-            // Events
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Events"),
-                    )
-                    .child(
-                        h_flex()
-                            .gap_4()
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        Checkbox::new("event-insert")
-                                            .checked(self.insert_checked)
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.insert_checked = !this.insert_checked;
-                                                this.mark_dirty(cx);
-                                            })),
-                                    )
-                                    .child(div().text_sm().child("INSERT")),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        Checkbox::new("event-update")
-                                            .checked(self.update_checked)
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.update_checked = !this.update_checked;
-                                                this.mark_dirty(cx);
-                                            })),
-                                    )
-                                    .child(div().text_sm().child("UPDATE")),
-                            )
-                            .child(
-                                h_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        Checkbox::new("event-delete")
-                                            .checked(self.delete_checked)
-                                            .on_click(cx.listener(|this, _, _window, cx| {
-                                                this.delete_checked = !this.delete_checked;
-                                                this.mark_dirty(cx);
-                                            })),
-                                    )
-                                    .child(div().text_sm().child("DELETE")),
-                            ),
-                    ),
-            )
-            // FOR EACH ROW (Postgres only)
-            .when(is_postgres, |this| {
+            .child(events)
+            .when_some(granularity, |this, granularity| this.child(granularity))
+            .when_some(update_columns, |this, update_columns| {
+                this.child(update_columns)
+            })
+            .when(supports_when, |this| {
                 this.child(
                     v_flex()
-                        .gap_2()
+                        .gap_1()
+                        .child(Self::label("WHEN Clause"))
                         .child(
                             div()
-                                .text_sm()
-                                .font_weight(FontWeight::MEDIUM)
-                                .child("Granularity"),
+                                .text_xs()
+                                .text_color(muted_foreground)
+                                .child("Example: OLD.status IS DISTINCT FROM NEW.status"),
                         )
                         .child(
-                            h_flex()
-                                .gap_4()
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            Checkbox::new("for-each-row")
-                                                .checked(self.for_each_row)
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.for_each_row = true;
-                                                    this.mark_dirty(cx);
-                                                })),
-                                        )
-                                        .child(div().text_sm().child("FOR EACH ROW")),
-                                )
-                                .child(
-                                    h_flex()
-                                        .gap_2()
-                                        .items_center()
-                                        .child(
-                                            Checkbox::new("for-each-statement")
-                                                .checked(!self.for_each_row)
-                                                .on_click(cx.listener(|this, _, _window, cx| {
-                                                    this.for_each_row = false;
-                                                    this.mark_dirty(cx);
-                                                })),
-                                        )
-                                        .child(div().text_sm().child("FOR EACH STATEMENT")),
-                                ),
+                            Input::new(&self.when_input)
+                                .small()
+                                .w_full()
+                                .max_w(px(560.0)),
                         ),
                 )
             })
-            // WHEN Condition
+            .when_some(function_section, |this, function_section| {
+                this.child(function_section)
+            })
             .child(
-                v_flex()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("WHEN Condition (optional)"),
-                    )
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(theme.muted_foreground)
-                            .child("e.g., OLD.status != NEW.status"),
-                    )
-                    .child(
-                        Input::new(&self.when_input)
-                            .small()
-                            .w_full()
-                            .max_w(px(500.0)),
-                    ),
+                v_flex().gap_1().child(Self::label("Comment")).child(
+                    div()
+                        .w_full()
+                        .max_w(px(560.0))
+                        .h(px(72.0))
+                        .child(Input::new(&self.comment_input).w_full().h_full()),
+                ),
             )
     }
 
-    /// Render the body editor tab
+    fn render_enable_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Checkbox::new("trigger-enabled")
+                    .checked(self.enabled)
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        this.enabled = !this.enabled;
+                        this.mark_dirty(cx);
+                    })),
+            )
+            .child(div().text_sm().child("Enable"))
+            .child(
+                div()
+                    .ml_2()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(self.design.trigger_type.clone()),
+            )
+    }
+
+    fn render_events(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let multi = self.design.dialect.supports_multi_event();
+
+        v_flex().gap_2().child(Self::label("Events")).child(
+            h_flex()
+                .gap_4()
+                .child(self.render_event_checkbox(
+                    "event-insert",
+                    "INSERT",
+                    TriggerEvent::Insert,
+                    multi,
+                    cx,
+                ))
+                .child(self.render_event_checkbox(
+                    "event-update",
+                    "UPDATE",
+                    TriggerEvent::Update,
+                    multi,
+                    cx,
+                ))
+                .child(self.render_event_checkbox(
+                    "event-delete",
+                    "DELETE",
+                    TriggerEvent::Delete,
+                    multi,
+                    cx,
+                ))
+                .when(
+                    self.design
+                        .dialect
+                        .events()
+                        .contains(&TriggerEvent::Truncate),
+                    |this| {
+                        this.child(self.render_event_checkbox(
+                            "event-truncate",
+                            "TRUNCATE",
+                            TriggerEvent::Truncate,
+                            multi,
+                            cx,
+                        ))
+                    },
+                ),
+        )
+    }
+
+    fn render_event_checkbox(
+        &self,
+        id: &'static str,
+        label: &'static str,
+        event: TriggerEvent,
+        multi: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        let checked = match event {
+            TriggerEvent::Insert => self.insert_checked,
+            TriggerEvent::Update => self.update_checked,
+            TriggerEvent::Delete => self.delete_checked,
+            TriggerEvent::Truncate => self.truncate_checked,
+        };
+
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(Checkbox::new(id).checked(checked).on_click(cx.listener(
+                move |this, _, _window, cx| {
+                    if multi {
+                        match event {
+                            TriggerEvent::Insert => this.insert_checked = !this.insert_checked,
+                            TriggerEvent::Update => this.update_checked = !this.update_checked,
+                            TriggerEvent::Delete => this.delete_checked = !this.delete_checked,
+                            TriggerEvent::Truncate => {
+                                this.truncate_checked = !this.truncate_checked
+                            }
+                        }
+                        this.mark_dirty(cx);
+                    } else {
+                        this.set_single_event(event, cx);
+                    }
+                },
+            )))
+            .child(div().text_sm().child(label))
+    }
+
+    fn render_granularity(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        v_flex().gap_2().child(Self::label("For Each")).child(
+            h_flex()
+                .gap_4()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Checkbox::new("for-each-row")
+                                .checked(self.for_each_row)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.for_each_row = true;
+                                    this.mark_dirty(cx);
+                                })),
+                        )
+                        .child(div().text_sm().child("ROW")),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Checkbox::new("for-each-statement")
+                                .checked(!self.for_each_row)
+                                .on_click(cx.listener(|this, _, _window, cx| {
+                                    this.for_each_row = false;
+                                    this.mark_dirty(cx);
+                                })),
+                        )
+                        .child(div().text_sm().child("STATEMENT")),
+                ),
+        )
+    }
+
+    fn render_update_columns(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut list = v_flex()
+            .gap_2()
+            .child(Self::label("UPDATE OF Fields"))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Only fire UPDATE trigger when selected columns change."),
+            );
+
+        let columns = self.relation_columns.clone();
+        if columns.is_empty() {
+            list = list.child(
+                div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child("Column list unavailable; save still allows manual SQL body."),
+            );
+        } else {
+            let mut column_list = v_flex()
+                .gap_1()
+                .max_w(px(560.0))
+                .max_h(px(180.0))
+                .overflow_y_scrollbar()
+                .border_1()
+                .border_color(theme.border)
+                .rounded_sm()
+                .p_2();
+            for column in columns {
+                let checked = self.update_columns.contains(&column);
+                let column_for_click = column.clone();
+                column_list = column_list.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            Checkbox::new(SharedString::from(format!("update-column-{column}")))
+                                .checked(checked)
+                                .on_click(cx.listener(move |this, _, _window, cx| {
+                                    this.toggle_column(&column_for_click, cx);
+                                })),
+                        )
+                        .child(div().text_sm().child(column)),
+                );
+            }
+            list = list.child(column_list);
+        }
+        list
+    }
+
+    fn render_function_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let mut section = v_flex().gap_3().child(Self::label("Function")).child(
+            h_flex()
+                .gap_2()
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_xs().child("Schema"))
+                        .child(Input::new(&self.function_schema_input).small().w(px(180.0))),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_xs().child("Name"))
+                        .child(Input::new(&self.function_name_input).small().w(px(260.0))),
+                )
+                .child(
+                    v_flex()
+                        .gap_1()
+                        .child(div().text_xs().child("Arguments"))
+                        .child(
+                            Input::new(&self.function_arguments_input)
+                                .small()
+                                .w(px(220.0)),
+                        ),
+                ),
+        );
+
+        if !self.postgres_functions.is_empty() {
+            let mut suggestions = h_flex().gap_2().flex_wrap();
+            for function in self.postgres_functions.iter().take(8) {
+                let function = function.clone();
+                let label = function.clone();
+                suggestions = suggestions.child(
+                    Button::new(SharedString::from(format!("function-{function}")))
+                        .label(label)
+                        .xsmall()
+                        .secondary()
+                        .on_click(cx.listener(move |this, _event, window, cx| {
+                            let (schema, name) = split_qualified_name(&function);
+                            this.function_schema_input.update(cx, |input, cx| {
+                                input.set_value(schema.as_deref().unwrap_or_default(), window, cx);
+                            });
+                            this.function_name_input.update(cx, |input, cx| {
+                                input.set_value(&name, window, cx);
+                            });
+                            this.mark_dirty(cx);
+                        })),
+                );
+            }
+            section = section
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Detected trigger-capable functions"),
+                )
+                .child(suggestions);
+        }
+
+        section
+    }
+
+    fn render_labeled_input(
+        &self,
+        label: &'static str,
+        input: &Entity<InputState>,
+        max_width: Pixels,
+    ) -> impl IntoElement {
+        v_flex()
+            .gap_1()
+            .child(Self::label(label))
+            .child(Input::new(input).small().w_full().max_w(max_width))
+    }
+
+    fn label(label: &'static str) -> impl IntoElement {
+        div().text_sm().font_weight(FontWeight::MEDIUM).child(label)
+    }
+
     fn render_body_tab(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let dialect_hint = match self.design.dialect {
             DatabaseDialect::Sqlite => {
-                "SQLite: Use BEGIN...END block. Access OLD and NEW for row data."
+                "SQLite inline trigger body. OLD and NEW available for row data."
             }
             DatabaseDialect::Postgres => {
-                "PostgreSQL: Write the function body. Use RETURN NEW/OLD at the end."
+                "PostgreSQL trigger function body. Return NEW, OLD, or NULL as needed."
             }
             DatabaseDialect::Mysql => {
-                "MySQL: Use BEGIN...END block. Access OLD and NEW for row data."
+                "MySQL inline trigger body. OLD and NEW available for row data."
             }
         };
 
@@ -606,12 +842,13 @@ impl TriggerDesignerPanel {
             .size_full()
             .p_4()
             .gap_2()
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::MEDIUM)
-                    .child("Trigger Body"),
-            )
+            .child(Self::label(
+                if self.design.dialect.uses_trigger_function() {
+                    "Function Body"
+                } else {
+                    "Trigger Body"
+                },
+            ))
             .child(
                 div()
                     .text_xs()
@@ -627,13 +864,12 @@ impl TriggerDesignerPanel {
             )
     }
 
-    /// Render the SQL preview tab
     fn render_sql_preview_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let ddl = self
             .ddl_preview
             .clone()
-            .unwrap_or_else(|| "-- Click 'Generate Preview' to see DDL".to_string());
+            .unwrap_or_else(|| "-- Click 'Refresh Preview' to see DDL".to_string());
 
         v_flex()
             .size_full()
@@ -643,12 +879,7 @@ impl TriggerDesignerPanel {
                 h_flex()
                     .w_full()
                     .justify_between()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(FontWeight::MEDIUM)
-                            .child("Generated DDL"),
-                    )
+                    .child(Self::label("Generated DDL"))
                     .child(
                         Button::new("generate-preview")
                             .label("Refresh Preview")
@@ -682,33 +913,16 @@ impl TriggerDesignerPanel {
                         .on_click(cx.listener(|this, _, _window, cx| {
                             if let Some(ref ddl) = this.ddl_preview {
                                 cx.write_to_clipboard(ClipboardItem::new_string(ddl.clone()));
-                                tracing::info!("DDL copied to clipboard");
                             }
                         })),
                 ),
             )
     }
 
-    /// Render the footer with validation and buttons
     fn render_footer(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-
-        // Get validation errors
-        let mut design_copy = self.design.clone();
-        design_copy.name = self.name_input.read(cx).value().to_string();
-        design_copy.body = self.body_input.read(cx).value().to_string();
-        design_copy.events.clear();
-        if self.insert_checked {
-            design_copy.events.push(TriggerEvent::Insert);
-        }
-        if self.update_checked {
-            design_copy.events.push(TriggerEvent::Update);
-        }
-        if self.delete_checked {
-            design_copy.events.push(TriggerEvent::Delete);
-        }
-
-        let errors = design_copy.validate();
+        let design = self.design_from_inputs(cx);
+        let errors = design.validate();
         let is_valid = errors.is_empty();
 
         h_flex()
@@ -722,10 +936,12 @@ impl TriggerDesignerPanel {
                     .gap_2()
                     .when(!is_valid, |this| {
                         this.child(
-                            div()
-                                .text_xs()
-                                .text_color(theme.danger)
-                                .child(errors.first().map(|e| e.to_string()).unwrap_or_default()),
+                            div().text_xs().text_color(theme.danger).child(
+                                errors
+                                    .first()
+                                    .map(|error| error.to_string())
+                                    .unwrap_or_default(),
+                            ),
                         )
                     })
                     .when(is_valid && self.is_dirty, |this| {
@@ -769,29 +985,24 @@ impl TriggerDesignerPanel {
 
 impl Render for TriggerDesignerPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        let bg_color = theme.background;
+        let background = cx.theme().background;
         let active_tab = self.active_tab;
 
-        // Render tab content based on active tab
         let tab_content = match active_tab {
             DesignerTab::General => self.render_general_tab(cx).into_any_element(),
             DesignerTab::Body => self.render_body_tab(cx).into_any_element(),
             DesignerTab::SqlPreview => self.render_sql_preview_tab(cx).into_any_element(),
         };
 
-        let tab_bar = self.render_tab_bar(cx).into_any_element();
-        let footer = self.render_footer(cx).into_any_element();
-
         v_flex()
             .id("trigger-designer-panel")
             .key_context("TriggerDesignerPanel")
             .track_focus(&self.focus_handle)
             .size_full()
-            .bg(bg_color)
-            .child(tab_bar)
+            .bg(background)
+            .child(self.render_tab_bar(cx))
             .child(div().flex_1().overflow_hidden().child(tab_content))
-            .child(footer)
+            .child(self.render_footer(cx))
     }
 }
 
@@ -823,5 +1034,35 @@ impl Panel for TriggerDesignerPanel {
 
     fn closable(&self, _cx: &App) -> bool {
         true
+    }
+}
+
+fn input_state(
+    value: &str,
+    placeholder: &'static str,
+    multi_line: bool,
+    window: &mut Window,
+    cx: &mut App,
+) -> Entity<InputState> {
+    cx.new(|cx| {
+        let mut state = InputState::new(window, cx).placeholder(placeholder);
+        if multi_line {
+            state = state.multi_line(true).code_editor("sql");
+        }
+        state.set_value(value, window, cx);
+        state
+    })
+}
+
+fn non_empty(value: String) -> Option<String> {
+    let value = value.trim().to_string();
+    if value.is_empty() { None } else { Some(value) }
+}
+
+fn split_qualified_name(name: &str) -> (Option<String>, String) {
+    if let Some((schema, name)) = name.split_once('.') {
+        (Some(schema.to_string()), name.to_string())
+    } else {
+        (None, name.to_string())
     }
 }

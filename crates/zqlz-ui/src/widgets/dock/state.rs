@@ -104,7 +104,13 @@ pub enum PanelInfo {
         axis: usize, // 0 for horizontal, 1 for vertical
     },
     #[serde(rename = "tabs")]
-    Tabs { active_index: usize },
+    Tabs {
+        active_index: usize,
+        #[serde(default)]
+        pinned_indices: Vec<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        preview_index: Option<usize>,
+    },
     #[serde(rename = "panel")]
     Panel(serde_json::Value),
     #[serde(rename = "tiles")]
@@ -120,7 +126,27 @@ impl PanelInfo {
     }
 
     pub fn tabs(active_index: usize) -> Self {
-        Self::Tabs { active_index }
+        Self::Tabs {
+            active_index,
+            pinned_indices: Vec::new(),
+            preview_index: None,
+        }
+    }
+
+    pub fn tabs_with_pinned(active_index: usize, pinned_indices: Vec<usize>) -> Self {
+        Self::tabs_with_pinned_and_preview(active_index, pinned_indices, None)
+    }
+
+    pub fn tabs_with_pinned_and_preview(
+        active_index: usize,
+        pinned_indices: Vec<usize>,
+        preview_index: Option<usize>,
+    ) -> Self {
+        Self::Tabs {
+            active_index,
+            pinned_indices,
+            preview_index,
+        }
     }
 
     pub fn panel(info: serde_json::Value) -> Self {
@@ -151,7 +177,21 @@ impl PanelInfo {
 
     pub fn active_index(&self) -> Option<usize> {
         match self {
-            Self::Tabs { active_index } => Some(*active_index),
+            Self::Tabs { active_index, .. } => Some(*active_index),
+            _ => None,
+        }
+    }
+
+    pub fn pinned_indices(&self) -> &[usize] {
+        match self {
+            Self::Tabs { pinned_indices, .. } => pinned_indices,
+            _ => &[],
+        }
+    }
+
+    pub fn preview_index(&self) -> Option<usize> {
+        match self {
+            Self::Tabs { preview_index, .. } => *preview_index,
             _ => None,
         }
     }
@@ -203,7 +243,11 @@ impl PanelState {
                 let sizes = sizes.iter().map(|s| Some(*s)).collect_vec();
                 DockItem::split_with_sizes(axis, items, sizes, &dock_area, window, cx)
             }
-            PanelInfo::Tabs { active_index } => {
+            PanelInfo::Tabs {
+                active_index,
+                pinned_indices,
+                preview_index,
+            } => {
                 if items.len() == 1 {
                     return items[0].clone();
                 }
@@ -219,7 +263,10 @@ impl PanelState {
                     })
                     .collect_vec();
 
-                DockItem::tabs(items, &dock_area, window, cx).active_index(active_index, cx)
+                DockItem::tabs(items, &dock_area, window, cx)
+                    .active_index(active_index, cx)
+                    .pinned_indices(&pinned_indices, cx)
+                    .preview_index(preview_index, cx)
             }
             PanelInfo::Panel(_) => {
                 let view = PanelRegistry::build_panel(
@@ -278,5 +325,44 @@ mod tests {
         assert_eq!(right_dock.panel.panel_name, "TabPanel");
         assert_eq!(right_dock.panel.children.len(), 1);
         assert_eq!(right_dock.panel.children[0].panel_name, "StoryContainer");
+    }
+
+    #[test]
+    fn tabs_info_deserializes_without_pinned_indices() {
+        let info: PanelInfo = serde_json::from_str(r#"{"tabs":{"active_index":2}}"#).unwrap();
+
+        assert_eq!(info.active_index(), Some(2));
+        assert!(info.pinned_indices().is_empty());
+        assert_eq!(info.preview_index(), None);
+    }
+
+    #[test]
+    fn tabs_info_serializes_pinned_indices() {
+        let info = PanelInfo::tabs_with_pinned(1, vec![0, 2]);
+        let value = serde_json::to_value(info).unwrap();
+
+        assert_eq!(value["tabs"]["active_index"], 1);
+        assert_eq!(value["tabs"]["pinned_indices"], serde_json::json!([0, 2]));
+        assert!(value["tabs"].get("preview_index").is_none());
+    }
+
+    #[test]
+    fn tabs_info_serializes_preview_index() {
+        let info = PanelInfo::tabs_with_pinned_and_preview(1, vec![0], Some(2));
+        let value = serde_json::to_value(info).unwrap();
+
+        assert_eq!(value["tabs"]["active_index"], 1);
+        assert_eq!(value["tabs"]["pinned_indices"], serde_json::json!([0]));
+        assert_eq!(value["tabs"]["preview_index"], 2);
+    }
+
+    #[test]
+    fn tabs_info_deserializes_preview_index() {
+        let info: PanelInfo =
+            serde_json::from_str(r#"{"tabs":{"active_index":1,"preview_index":2}}"#).unwrap();
+
+        assert_eq!(info.active_index(), Some(1));
+        assert!(info.pinned_indices().is_empty());
+        assert_eq!(info.preview_index(), Some(2));
     }
 }

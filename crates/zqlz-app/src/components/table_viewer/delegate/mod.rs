@@ -11,7 +11,10 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::{ColumnMeta, DriverCategory, ForeignKeyInfo, QueryResult, Value};
+use zqlz_core::{
+    ColumnMeta, DataEditingFeatureSet, DriverCategory, FeatureAvailability, ForeignKeyInfo,
+    QueryResult, Value,
+};
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, IndexPath, Sizable, Size, ZqlzIcon,
     button::{Button, ButtonVariants},
@@ -147,6 +150,8 @@ pub struct TableViewerDelegate {
 
     /// Driver category (Relational, KeyValue, etc.) — determines sort/filter behavior
     pub(super) driver_category: DriverCategory,
+
+    pub(super) data_editing_features: DataEditingFeatureSet,
 
     /// Weak reference back to the panel (to emit events)
     pub(super) viewer_panel: WeakEntity<TableViewerPanel>,

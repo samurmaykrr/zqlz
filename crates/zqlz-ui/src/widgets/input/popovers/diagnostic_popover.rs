@@ -92,7 +92,7 @@ impl RenderOnce for DiagnosticPopover {
         deferred(
             anchored()
                 .snap_to_window_with_margin(px(8.))
-                .anchor(Anchor::TopLeft.into())
+                .anchor(Anchor::TopLeft)
                 .position(self.origin)
                 .child(div().relative().child(content)),
         )
