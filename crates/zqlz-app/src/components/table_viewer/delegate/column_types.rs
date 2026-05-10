@@ -1,92 +1,80 @@
 use super::*;
+use zqlz_core::{SqlNumericKind, SqlTemporalKind, SqlTypeFamily, SqlTypeInfo};
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ColumnTypePresentation {
+    pub(crate) label: String,
+    pub(crate) tooltip: String,
+    pub(crate) family: SqlTypeFamily,
+}
 
 #[allow(dead_code)]
 impl TableViewerDelegate {
+    pub(crate) fn type_presentation_for_meta(meta: &ColumnMeta) -> ColumnTypePresentation {
+        let label = SqlTypeInfo::display_label_for_column(meta);
+        let tooltip = if label == meta.data_type {
+            meta.data_type.clone()
+        } else {
+            format!("{} ({})", label, meta.data_type)
+        };
+
+        ColumnTypePresentation {
+            label,
+            tooltip,
+            family: SqlTypeInfo::from_column_meta(meta).family,
+        }
+    }
+
     pub fn is_boolean_column(&self, data_col_ix: usize) -> bool {
         self.column_meta
             .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                t == "boolean"
-                    || t == "bool"
-                    || t == "bit"
-                    || t == "tinyint(1)"
-                    || t.starts_with("bool")
+            .is_some_and(|col| SqlTypeInfo::from_column_meta(col).family == SqlTypeFamily::Boolean)
+    }
+
+    fn numeric_kind_for_column(&self, data_col_ix: usize) -> Option<SqlNumericKind> {
+        self.column_meta
+            .get(data_col_ix)
+            .and_then(|column| SqlTypeInfo::from_column_meta(column).numeric_kind)
+    }
+
+    fn scalar_temporal_kind_for_column(&self, data_col_ix: usize) -> Option<SqlTemporalKind> {
+        self.column_meta
+            .get(data_col_ix)
+            .and_then(|column| {
+                let info = SqlTypeInfo::from_column_meta(column);
+                info.is_scalar_temporal()
+                    .then_some(info.temporal_kind)
+                    .flatten()
             })
-            .unwrap_or(false)
+            .or_else(|| {
+                self.column_meta
+                    .get(data_col_ix)
+                    .and_then(classify_text_column_temporal_hint)
+            })
+    }
+
+    fn column_type_family(&self, data_col_ix: usize) -> SqlTypeFamily {
+        self.column_meta
+            .get(data_col_ix)
+            .map(SqlTypeInfo::from_column_meta)
+            .map(|info| info.family)
+            .unwrap_or(SqlTypeFamily::Unknown)
     }
 
     pub fn is_integer_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                let base = base_type(&t);
-                matches!(
-                    base,
-                    "int2"
-                        | "int4"
-                        | "int8"
-                        | "smallint"
-                        | "integer"
-                        | "bigint"
-                        | "int"
-                        | "mediumint"
-                        | "tinyint"
-                        | "serial"
-                        | "bigserial"
-                        | "smallserial"
-                ) && !self.is_boolean_column(data_col_ix)
-            })
-            .unwrap_or(false)
+        self.numeric_kind_for_column(data_col_ix) == Some(SqlNumericKind::Integer)
+            && !self.is_boolean_column(data_col_ix)
     }
 
     pub fn is_float_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                let base = base_type(&t);
-                matches!(
-                    base,
-                    "float4"
-                        | "float8"
-                        | "real"
-                        | "double precision"
-                        | "double"
-                        | "float"
-                        | "numeric"
-                        | "decimal"
-                        | "money"
-                )
-            })
-            .unwrap_or(false)
+        matches!(
+            self.numeric_kind_for_column(data_col_ix),
+            Some(SqlNumericKind::Float | SqlNumericKind::Decimal)
+        )
     }
 
     pub fn is_string_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                let base = base_type(&t);
-                matches!(
-                    base,
-                    "text"
-                        | "varchar"
-                        | "char"
-                        | "bpchar"
-                        | "name"
-                        | "citext"
-                        | "character varying"
-                        | "character"
-                        | "nvarchar"
-                        | "nchar"
-                        | "longtext"
-                        | "mediumtext"
-                        | "tinytext"
-                )
-            })
-            .unwrap_or(false)
+        self.column_type_family(data_col_ix) == SqlTypeFamily::Text
     }
 
     pub fn can_generate_uuid_for_column(&self, data_col_ix: usize) -> bool {
@@ -236,94 +224,23 @@ impl TableViewerDelegate {
     }
 
     pub fn is_date_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                if t == "date" {
-                    return true;
-                }
-                if t == "text" || t == "dynamic" {
-                    let name = col.name.to_lowercase();
-                    if name.ends_with("_date")
-                        || name == "date"
-                        || name == "birthdate"
-                        || name == "dob"
-                    {
-                        return true;
-                    }
-                }
-                false
-            })
-            .unwrap_or(false)
+        self.scalar_temporal_kind_for_column(data_col_ix) == Some(SqlTemporalKind::Date)
     }
 
     pub fn is_time_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                t == "time"
-                    || t.starts_with("time without")
-                    || t.starts_with("time with")
-                    || t.starts_with("time(")
-            })
-            .unwrap_or(false)
+        self.scalar_temporal_kind_for_column(data_col_ix) == Some(SqlTemporalKind::Time)
     }
 
     pub fn is_datetime_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                if t == "datetime"
-                    || t == "datetime2"
-                    || t == "smalldatetime"
-                    || t == "datetimeoffset"
-                    || t == "timestamp"
-                    || t == "timestamptz"
-                    || t.starts_with("timestamp without")
-                    || t.starts_with("timestamp with")
-                    || t.starts_with("timestamp(")
-                    || t.starts_with("datetime(")
-                {
-                    return true;
-                }
-                if t == "text" || t == "dynamic" {
-                    let name = col.name.to_lowercase();
-                    if name.ends_with("_at")
-                        || name.ends_with("_time")
-                        || name == "timestamp"
-                        || name == "datetime"
-                        || name == "created"
-                        || name == "updated"
-                        || name == "deleted"
-                    {
-                        return true;
-                    }
-                }
-                false
-            })
-            .unwrap_or(false)
+        self.scalar_temporal_kind_for_column(data_col_ix) == Some(SqlTemporalKind::DateTime)
     }
 
     pub fn is_date_time_column(&self, data_col_ix: usize) -> bool {
-        self.is_date_column(data_col_ix)
-            || self.is_time_column(data_col_ix)
-            || self.is_datetime_column(data_col_ix)
+        self.scalar_temporal_kind_for_column(data_col_ix).is_some()
     }
 
     pub fn is_enum_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                if col.enum_values.as_ref().is_some_and(|v| !v.is_empty()) {
-                    return true;
-                }
-                let t = col.data_type.to_lowercase();
-                t.starts_with("enum") || t.starts_with("set(")
-            })
-            .unwrap_or(false)
+        self.column_type_family(data_col_ix) == SqlTypeFamily::Enum
     }
 
     pub fn get_enum_values(&self, data_col_ix: usize) -> Option<&Vec<String>> {
@@ -335,25 +252,7 @@ impl TableViewerDelegate {
 
     /// Detect binary/blob columns that store raw byte data
     pub fn is_binary_column(&self, data_col_ix: usize) -> bool {
-        self.column_meta
-            .get(data_col_ix)
-            .map(|col| {
-                let t = col.data_type.to_lowercase();
-                t == "blob"
-                    || t == "mediumblob"
-                    || t == "longblob"
-                    || t == "tinyblob"
-                    || t == "bytea"
-                    || t == "binary"
-                    || t == "varbinary"
-                    || t.starts_with("binary(")
-                    || t.starts_with("varbinary(")
-                    || t.starts_with("bit(")
-                    || t == "image"
-                    || t == "raw"
-                    || t.starts_with("raw(")
-            })
-            .unwrap_or(false)
+        self.column_type_family(data_col_ix) == SqlTypeFamily::Binary
     }
 
     /// Check if a cell value is binary data
@@ -371,36 +270,63 @@ fn base_type(type_string: &str) -> &str {
     }
 }
 
-fn is_uuid_generation_compatible_data_type(data_type: &str) -> bool {
-    let normalized = data_type.to_lowercase();
-    let base = base_type(&normalized);
+fn classify_text_column_temporal_hint(meta: &ColumnMeta) -> Option<SqlTemporalKind> {
+    let normalized = meta.data_type.trim().to_ascii_lowercase();
+    let base = base_type(&normalized).trim();
+    if !matches!(base, "text" | "dynamic") {
+        return None;
+    }
 
+    let name = meta.name.to_ascii_lowercase();
+    if name.ends_with("_date") || matches!(name.as_str(), "date" | "birthdate" | "dob") {
+        return Some(SqlTemporalKind::Date);
+    }
+
+    if name.ends_with("_at")
+        || name.ends_with("_time")
+        || matches!(
+            name.as_str(),
+            "timestamp" | "datetime" | "created" | "updated" | "deleted"
+        )
+    {
+        return Some(SqlTemporalKind::DateTime);
+    }
+
+    None
+}
+
+fn is_uuid_generation_compatible_data_type(data_type: &str) -> bool {
     matches!(
-        base,
-        "uuid"
-            | "uniqueidentifier"
-            | "guid"
-            | "text"
-            | "varchar"
-            | "char"
-            | "bpchar"
-            | "name"
-            | "citext"
-            | "character varying"
-            | "character"
-            | "nvarchar"
-            | "nchar"
-            | "longtext"
-            | "mediumtext"
-            | "tinytext"
+        SqlTypeInfo::from_data_type(data_type).family,
+        SqlTypeFamily::Uuid | SqlTypeFamily::Text
     )
 }
 
 #[cfg(test)]
 mod tests {
-    use super::is_uuid_generation_compatible_data_type;
+    use super::{
+        TableViewerDelegate, classify_text_column_temporal_hint,
+        is_uuid_generation_compatible_data_type,
+    };
+    use zqlz_core::{ColumnMeta, SqlTemporalKind, SqlTypeFamily};
 
-    #[test]
+    fn meta(data_type: &str) -> ColumnMeta {
+        ColumnMeta {
+            name: "value".to_string(),
+            data_type: data_type.to_string(),
+            nullable: true,
+            ordinal: 0,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        }
+    }
+
+    #[::core::prelude::v1::test]
     fn allows_uuid_and_string_like_types() {
         assert!(is_uuid_generation_compatible_data_type("uuid"));
         assert!(is_uuid_generation_compatible_data_type("UNIQUEIDENTIFIER"));
@@ -411,11 +337,99 @@ mod tests {
         ));
     }
 
-    #[test]
+    #[::core::prelude::v1::test]
     fn rejects_non_uuid_non_string_like_types() {
         assert!(!is_uuid_generation_compatible_data_type("int"));
         assert!(!is_uuid_generation_compatible_data_type("boolean"));
         assert!(!is_uuid_generation_compatible_data_type("jsonb"));
         assert!(!is_uuid_generation_compatible_data_type("date"));
+    }
+
+    #[::core::prelude::v1::test]
+    fn type_presentation_classifies_driver_types() {
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("uuid")).family,
+            SqlTypeFamily::Uuid
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("jsonb")).family,
+            SqlTypeFamily::Json
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("numeric(18,4)")).family,
+            SqlTypeFamily::Number
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("timestamp with time zone"))
+                .family,
+            SqlTypeFamily::Temporal
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("daterange")).family,
+            SqlTypeFamily::Temporal
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("TINYINT(1)")).family,
+            SqlTypeFamily::Boolean
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("varbinary(max)")).family,
+            SqlTypeFamily::Binary
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("String")).family,
+            SqlTypeFamily::Text
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn range_types_are_not_scalar_date_picker_types() {
+        for data_type in ["daterange", "tsrange", "tstzrange"] {
+            let info = zqlz_core::SqlTypeInfo::from_data_type(data_type);
+            assert_eq!(info.family, SqlTypeFamily::Temporal);
+            assert!(info.is_range);
+            assert!(!info.is_scalar_temporal());
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn text_temporal_hints_only_apply_to_weak_text_types() {
+        let mut text_date = meta("text");
+        text_date.name = "shipped_date".to_string();
+        assert_eq!(
+            classify_text_column_temporal_hint(&text_date),
+            Some(SqlTemporalKind::Date)
+        );
+
+        let mut typed_date = meta("varchar");
+        typed_date.name = "shipped_date".to_string();
+        assert_eq!(classify_text_column_temporal_hint(&typed_date), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn type_presentation_preserves_driver_native_label() {
+        let mut numeric = meta("numeric");
+        numeric.precision = Some(18);
+        numeric.scale = Some(4);
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&numeric).label,
+            "numeric(18,4)"
+        );
+
+        let mut varchar = meta("varchar");
+        varchar.max_length = Some(255);
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&varchar).label,
+            "varchar(255)"
+        );
+
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("jsonb")).label,
+            "jsonb"
+        );
+        assert_eq!(
+            TableViewerDelegate::type_presentation_for_meta(&meta("nvarchar(max)")).label,
+            "nvarchar(max)"
+        );
     }
 }

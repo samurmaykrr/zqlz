@@ -18,6 +18,7 @@ use crate::main_view::table_handlers_utils::{
     conversion::resolve_schema_qualifier,
     redis::{fetch_redis_key_value, parse_human_readable_ttl},
 };
+use crate::workspace::WorkspaceController;
 
 pub(in crate::main_view) struct RedisKeyEditRequest {
     pub connection_id: Uuid,
@@ -221,7 +222,7 @@ pub(in crate::main_view) fn handle_edit_cell_event(
     cell_data: CellData,
     viewer_weak: WeakEntity<TableViewerPanel>,
     cell_editor_panel: &Entity<CellEditorPanel>,
-    dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
+    workspace_controller: &Entity<WorkspaceController>,
     inspector_panel: &Entity<InspectorPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -242,8 +243,8 @@ pub(in crate::main_view) fn handle_edit_cell_event(
         panel.set_active_view(InspectorView::CellEditor, cx);
     });
 
-    dock_area.update(cx, |area, cx| {
-        area.activate_panel(
+    workspace_controller.update(cx, |workspace, cx| {
+        workspace.reveal_panel(
             "InspectorPanel",
             zqlz_ui::widgets::dock::DockPlacement::Right,
             window,
@@ -255,7 +256,7 @@ pub(in crate::main_view) fn handle_edit_cell_event(
 pub(in crate::main_view) fn handle_redis_key_edit_event(
     request: RedisKeyEditRequest,
     key_value_editor_panel: &Entity<KeyValueEditorPanel>,
-    dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
+    workspace_controller: &Entity<WorkspaceController>,
     inspector_panel: &Entity<InspectorPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -324,7 +325,7 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
     let connection_id = request.connection_id;
     let database_name = request.database_name;
     let key_value_editor_panel = key_value_editor_panel.clone();
-    let dock_area = dock_area.clone();
+    let workspace_controller = workspace_controller.clone();
     let inspector_panel = inspector_panel.clone();
 
     window
@@ -351,8 +352,8 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
                     panel.set_active_view(InspectorView::KeyEditor, cx);
                 });
 
-                dock_area.update(cx, |area, cx| {
-                    area.activate_panel(
+                workspace_controller.update(cx, |workspace, cx| {
+                    workspace.reveal_panel(
                         "InspectorPanel",
                         zqlz_ui::widgets::dock::DockPlacement::Right,
                         window,

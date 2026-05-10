@@ -201,7 +201,7 @@ pub trait SchemaMetadataRenderer: Send {
     );
 }
 
-/// Default no-op renderer (placeholder)
+/// Default renderer for builds that do not install schema metadata UI.
 impl SchemaMetadataRenderer for () {
     fn render_metadata_entry(
         &self,
@@ -277,19 +277,10 @@ pub struct SchemaMetadata {
 impl SchemaMetadata {
     /// Create a new SchemaMetadata from a DatabaseSchema
     pub fn new(schema: DatabaseSchema) -> Self {
-        let metadata = Self {
+        Self {
             schema: Some(schema),
             columns: HashMap::new(),
-        };
-        // Try to extract column info from objects_panel_data if available
-        if let Some(ref schema) = metadata.schema
-            && let Some(ref _objects_data) = schema.objects_panel_data
-        {
-            // ObjectsPanelData has columns and rows but not in the format we need
-            // This is a placeholder - actual column extraction would require
-            // additional schema queries
         }
-        metadata
     }
 
     /// Create an empty SchemaMetadata
@@ -364,6 +355,8 @@ impl SchemaMetadataProvider for SchemaMetadata {
                 columns,
                 indexes,
                 foreign_keys,
+                constraints: Vec::new(),
+                triggers: Vec::new(),
                 primary_key_columns,
                 row_count: info.row_count.map(|c| c as usize),
             })
@@ -379,6 +372,8 @@ impl SchemaMetadataProvider for SchemaMetadata {
                 columns,
                 indexes,
                 foreign_keys,
+                constraints: Vec::new(),
+                triggers: Vec::new(),
                 primary_key_columns,
                 row_count: None,
             })
@@ -595,12 +590,18 @@ mod tests {
         let schema = DatabaseSchema {
             table_infos: vec![],
             objects_panel_data: None,
+            objects_panel_manifest: None,
             tables: vec!["users".to_string(), "orders".to_string()],
             views: vec!["user_stats".to_string()],
             materialized_views: vec![],
             triggers: vec![],
             functions: vec!["get_user".to_string()],
             procedures: vec![],
+            events: vec![],
+            sequences: vec![],
+            domains: vec![],
+            types: vec![],
+            extensions: vec![],
             table_indexes: HashMap::new(),
             database_name: Some("testdb".to_string()),
             schema_name: Some("public".to_string()),
@@ -617,12 +618,18 @@ mod tests {
         let schema = DatabaseSchema {
             table_infos: vec![],
             objects_panel_data: None,
+            objects_panel_manifest: None,
             tables: vec!["users".to_string(), "orders".to_string()],
             views: vec![],
             materialized_views: vec![],
             triggers: vec![],
             functions: vec![],
             procedures: vec![],
+            events: vec![],
+            sequences: vec![],
+            domains: vec![],
+            types: vec![],
+            extensions: vec![],
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
@@ -648,12 +655,18 @@ mod tests {
         let schema = DatabaseSchema {
             table_infos: vec![],
             objects_panel_data: None,
+            objects_panel_manifest: None,
             tables: vec![],
             views: vec!["active_users".to_string()],
             materialized_views: vec![],
             triggers: vec![],
             functions: vec![],
             procedures: vec![],
+            events: vec![],
+            sequences: vec![],
+            domains: vec![],
+            types: vec![],
+            extensions: vec![],
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
@@ -678,12 +691,18 @@ mod tests {
         let schema = DatabaseSchema {
             table_infos: vec![],
             objects_panel_data: None,
+            objects_panel_manifest: None,
             tables: vec![],
             views: vec![],
             materialized_views: vec![],
             triggers: vec![],
             functions: vec!["calculate_total".to_string()],
             procedures: vec![],
+            events: vec![],
+            sequences: vec![],
+            domains: vec![],
+            types: vec![],
+            extensions: vec![],
             table_indexes: HashMap::new(),
             database_name: None,
             schema_name: None,
@@ -803,6 +822,8 @@ mod tests {
                 ..Default::default()
             }],
             foreign_keys: vec![],
+            constraints: Vec::new(),
+            triggers: Vec::new(),
             primary_key_columns: vec!["id".to_string()],
             row_count: Some(100),
         };

@@ -15,21 +15,9 @@ actions!(
         NextProblem,
         PreviousProblem,
         ToggleProblemsPanel,
-        // IntelliSense / Completions
-        AcceptCompletion,
-        CancelCompletion,
-        TriggerCompletion,
         TriggerParameterHints,
         ShowHover,
-        // Inline Suggestions
-        AcceptInlineSuggestion,
-        DismissInlineSuggestion,
         // Code Actions & Rename
         ShowCodeActions,
-        // Completion menu navigation
-        ConfirmCompletion,
-        CancelCompletionMenu,
-        NextCompletion,
-        PreviousCompletion,
     ]
 );

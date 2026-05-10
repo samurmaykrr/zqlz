@@ -101,20 +101,35 @@ impl TableViewerPanel {
         self.is_loading = loading;
         if loading {
             self.loading_started_at = Some(std::time::Instant::now());
+            let table_name = self.table_name.clone();
+            let connection_id = self.connection_id;
+            let database_name = self.database_name.clone();
+            let request_generation = self.active_request_generation;
             // Tick every 100ms to update the elapsed timer display
             self._loading_timer_task = Some(cx.spawn(async move |this, cx| {
                 loop {
                     smol::Timer::after(std::time::Duration::from_millis(100)).await;
-                    let should_continue = this
-                        .update(cx, |panel, cx| {
-                            if panel.is_loading {
-                                cx.notify();
-                                true
-                            } else {
-                                false
-                            }
-                        })
-                        .unwrap_or(false);
+                    let should_continue = match this.update(cx, |panel, cx| {
+                        if panel.is_loading {
+                            cx.notify();
+                            true
+                        } else {
+                            false
+                        }
+                    }) {
+                        Ok(should_continue) => should_continue,
+                        Err(error) => {
+                            tracing::debug!(
+                                error = %error,
+                                connection_id = ?connection_id,
+                                table_name = ?table_name,
+                                database_name = ?database_name,
+                                request_generation,
+                                "Stopped table-viewer loading timer after panel dropped"
+                            );
+                            false
+                        }
+                    };
                     if !should_continue {
                         break;
                     }
@@ -127,9 +142,17 @@ impl TableViewerPanel {
         cx.notify();
     }
 
-    /// Begin loading a specific table — sets the table name for display while loading
-    pub fn begin_loading_table(&mut self, table_name: String, cx: &mut Context<Self>) -> u64 {
+    /// Begin loading a specific table and mark the viewer as owned by that request.
+    pub fn begin_loading_table(
+        &mut self,
+        connection_id: Uuid,
+        table_name: String,
+        database_name: Option<String>,
+        cx: &mut Context<Self>,
+    ) -> u64 {
+        self.connection_id = Some(connection_id);
         self.table_name = Some(table_name);
+        self.database_name = database_name;
         self.begin_data_request(cx)
     }
 
@@ -143,8 +166,17 @@ impl TableViewerPanel {
         }
     }
 
-    pub fn set_primary_key_columns(&mut self, columns: Vec<String>) {
-        self.primary_key_columns = columns;
+    pub fn set_primary_key_columns(&mut self, columns: Vec<String>, cx: &mut Context<Self>) {
+        self.primary_key_columns = columns.clone();
+
+        if let Some(table_state) = &self.table_state {
+            table_state.update(cx, |table, cx| {
+                table.delegate_mut().set_primary_key_columns(columns);
+                table.refresh(cx);
+            });
+        }
+
+        cx.notify();
     }
 
     pub fn update_column_types_from_schema(
@@ -185,15 +217,37 @@ impl TableViewerPanel {
         }
 
         if let Some(table_state) = &self.table_state {
-            table_state.update(cx, |table, _cx| {
+            table_state.update(cx, |table, cx| {
                 let delegate = table.delegate_mut();
                 for col in &mut delegate.column_meta {
                     if let Some(schema_col) = schema_columns.iter().find(|sc| sc.name == col.name) {
                         merge_column(col, schema_col);
                     }
                 }
+
+                let data_widths: Vec<f32> = delegate
+                    .column_meta
+                    .iter()
+                    .enumerate()
+                    .map(|(data_col_ix, metadata)| {
+                        TableViewerDelegate::calculate_initial_column_width(
+                            data_col_ix,
+                            metadata,
+                            &delegate.rows,
+                        )
+                    })
+                    .collect();
+                for (data_col_ix, width) in data_widths.into_iter().enumerate() {
+                    if let Some(column) = delegate.columns_mut().get_mut(data_col_ix + 1)
+                        && column.width.as_f32() < width
+                    {
+                        *column = column.clone().width(width);
+                    }
+                }
+                table.refresh(cx);
             });
         }
+        cx.notify();
     }
 
     pub fn set_fk_values(
@@ -237,18 +291,40 @@ impl TableViewerPanel {
     /// Called when a `CountCompleted` event arrives after the initial data
     /// load (for slow-count drivers where the count is decoupled from the
     /// data query for faster display).
+    #[allow(clippy::too_many_arguments)]
     pub fn update_total_rows(
         &mut self,
+        connection_id: Uuid,
         total_rows: u64,
         is_estimated: bool,
         table_name: &str,
+        database_name: Option<&str>,
         request_generation: u64,
         cx: &mut Context<Self>,
     ) {
-        // Only apply if we're still showing the same table
-        if self.table_name.as_deref() != Some(table_name)
-            || !self.is_current_request(request_generation)
-        {
+        let current_connection_id = self.connection_id;
+        let is_same_connection = current_connection_id == Some(connection_id);
+        let current_table_name = self.table_name.as_deref();
+        let is_same_table = current_table_name == Some(table_name);
+        let current_database_name = self.database_name.as_deref();
+        let is_same_database = current_database_name == database_name;
+        let is_current_request = self.is_current_request(request_generation);
+
+        // Background count completions can arrive after a user has already
+        // switched viewers. Keep the existing stale-update suppression behavior,
+        // but log skip context so asynchronous ownership decisions are observable.
+        if !is_same_connection || !is_same_table || !is_same_database || !is_current_request {
+            tracing::debug!(
+                connection_id = %connection_id,
+                current_connection_id = ?current_connection_id,
+                table_name,
+                current_table_name = ?current_table_name,
+                database_name,
+                current_database_name = ?current_database_name,
+                request_generation,
+                current_request_generation = self.current_request_generation(),
+                "Skipped stale background-count total-row update"
+            );
             return;
         }
         if let Some(ref pagination_state) = self.pagination_state {

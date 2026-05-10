@@ -12,7 +12,12 @@ actions!(
         // Application actions
         OpenSettings,
         OpenCommandPalette,
+        InstallCli,
         Quit,
+        NewWindow,
+        CloseWindow,
+        MinimizeWindow,
+        ZoomWindow,
         // Connection actions
         NewConnection,
         RefreshConnection,
@@ -29,6 +34,7 @@ actions!(
         ToggleLeftSidebar,
         ToggleRightSidebar,
         ToggleBottomPanel,
+        ToggleAllDocks,
         // Focus actions
         FocusEditor,
         FocusResults,
@@ -51,10 +57,21 @@ actions!(
     [
         ActivateNextTab,
         ActivatePrevTab,
+        CloseEditor,
         CloseActiveTab,
         CloseOtherTabs,
         CloseTabsToRight,
+        CloseTabsToLeft,
+        CloseCleanTabs,
         CloseAllTabs,
+        MoveTabToNewWindow,
+        TogglePinActiveTab,
+        PinTab,
+        UnpinTab,
+        MarkActiveTabAsPreview,
+        ClearActiveTabPreview,
+        NavigateTabBack,
+        NavigateTabForward,
         ActivateTab1,
         ActivateTab2,
         ActivateTab3,
@@ -85,6 +102,20 @@ actions!(
         ExportJsonToFile,
         /// Export visible rows as SQL INSERT to a file on disk
         ExportSqlToFile,
+    ]
+);
+
+actions!(
+    cell_editor,
+    [
+        /// Save the current cell editor value
+        SaveCellEdit,
+        /// Cancel the current cell edit
+        CancelCellEdit,
+        /// Format the current cell editor value
+        FormatCellEdit,
+        /// Toggle word wrap in the cell editor
+        ToggleCellEditorWordWrap,
     ]
 );
 

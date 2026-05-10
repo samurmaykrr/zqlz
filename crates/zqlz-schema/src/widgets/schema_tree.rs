@@ -46,7 +46,7 @@ impl Render for ContextMenuState {
         deferred(
             anchored()
                 .snap_to_window_with_margin(px(8.))
-                .anchor(Corner::TopLeft)
+                .anchor(Anchor::TopLeft)
                 .position(self.position)
                 .child(
                     div()

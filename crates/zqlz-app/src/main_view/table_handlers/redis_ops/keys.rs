@@ -2,6 +2,7 @@
 
 use gpui::{Context, Window};
 use uuid::Uuid;
+use zqlz_services::LoadKeyValueKeysRequest;
 
 use crate::app::AppState;
 use crate::main_view::MainView;
@@ -27,12 +28,13 @@ impl MainView {
 
         let database_name = format!("db{}", database_index);
 
-        let connections = app_state.connections.clone();
+        let connection_service = app_state.connection_service.clone();
+        let key_value_service = app_state.key_value_service.clone();
         let connection_sidebar = self.connection_sidebar.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            let connection = match connections
-                .get_for_database(connection_id, &database_name)
+            let connection = match connection_service
+                .get_connection_for_database(connection_id, &database_name)
                 .await
             {
                 Ok(connection) => connection,
@@ -47,53 +49,26 @@ impl MainView {
                 }
             };
 
-            // List keys using the database-scoped Redis connection.
-            let mut keys = Vec::new();
-            let mut cursor = 0u64;
-            let limit = 1000usize; // Limit to prevent overwhelming large databases
-
-            loop {
-                let scan_cmd = format!("SCAN {} MATCH * COUNT 100", cursor);
-                let result = match connection.query(&scan_cmd, &[]).await {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::error!("Failed to scan Redis keys: {}", e);
-                        break;
-                    }
-                };
-
-                if result.rows.len() < 2 {
-                    break;
+            let key_load_request = LoadKeyValueKeysRequest {
+                database_index,
+                limit: 1000,
+                scan_batch_size: 100,
+            };
+            let keys = match key_value_service
+                .load_keys(connection, key_load_request)
+                .await
+            {
+                Ok(outcome) => outcome.keys,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database_index,
+                        error = %error,
+                        "Failed to load Redis keys via table service"
+                    );
+                    Vec::new()
                 }
-
-                // First row contains the new cursor
-                let new_cursor = result.rows[0]
-                    .get_by_name("value")
-                    .and_then(|v| match v {
-                        zqlz_core::Value::String(s) => s.parse::<u64>().ok(),
-                        zqlz_core::Value::Int64(n) => Some(*n as u64),
-                        _ => None,
-                    })
-                    .unwrap_or(0);
-
-                // Remaining rows are keys
-                for row in result.rows.iter().skip(1) {
-                    if let Some(zqlz_core::Value::String(key)) = row.get_by_name("value") {
-                        keys.push(key.clone());
-                        if keys.len() >= limit {
-                            break;
-                        }
-                    }
-                }
-
-                cursor = new_cursor;
-                if cursor == 0 || keys.len() >= limit {
-                    break;
-                }
-            }
-
-            // Sort keys for consistent display
-            keys.sort();
+            };
 
             tracing::info!(
                 "Loaded {} keys for Redis database {}",

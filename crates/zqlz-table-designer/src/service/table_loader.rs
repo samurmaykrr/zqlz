@@ -64,6 +64,10 @@ mod tests {
             DatabaseDialect::Sqlite
         );
         assert_eq!(
+            TableLoader::detect_dialect_from_driver("turso"),
+            DatabaseDialect::Sqlite
+        );
+        assert_eq!(
             TableLoader::detect_dialect_from_driver("postgres"),
             DatabaseDialect::Postgres
         );

@@ -707,4 +707,111 @@ mod tests {
             ]
         );
     }
+
+    #[test]
+    fn collection_normalization_preserves_indexes_after_sorting_and_merging() {
+        let collection = SelectionsCollection::from_entries(
+            vec![
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(2, 6)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(2, 2),
+                        Position::new(2, 6),
+                    ),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(0, 5)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(0, 5),
+                        Position::new(0, 1),
+                    ),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(2, 4)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(2, 3),
+                        Position::new(2, 4),
+                    ),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(4, 1)),
+                    selection: Selection::at(Position::new(4, 1)),
+                },
+            ],
+            2,
+            1,
+        )
+        .expect("entries");
+
+        let normalized = collection.normalized();
+
+        assert_eq!(normalized.len(), 3);
+        assert_eq!(normalized.primary_index(), 1);
+        assert_eq!(normalized.newest_index(), 0);
+        assert_eq!(
+            normalized
+                .primary()
+                .expect("primary selection")
+                .selection
+                .range(),
+            Range::new(Position::new(2, 2), Position::new(2, 6))
+        );
+        assert_eq!(
+            normalized
+                .newest()
+                .expect("newest selection")
+                .selection
+                .range(),
+            Range::new(Position::new(0, 1), Position::new(0, 5))
+        );
+    }
+
+    #[test]
+    fn collection_normalization_is_idempotent_for_mixed_direction_entries() {
+        let collection = SelectionsCollection::from_entries(
+            vec![
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(3, 8)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(3, 8),
+                        Position::new(3, 2),
+                    ),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(1, 1)),
+                    selection: Selection::at(Position::new(1, 1)),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(3, 10)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(3, 5),
+                        Position::new(3, 10),
+                    ),
+                },
+                SelectionEntry {
+                    cursor: Cursor::at(Position::new(5, 4)),
+                    selection: Selection::from_anchor_head(
+                        Position::new(5, 1),
+                        Position::new(5, 4),
+                    ),
+                },
+            ],
+            0,
+            3,
+        )
+        .expect("entries");
+
+        let normalized = collection.normalized();
+        let normalized_again = normalized.normalized();
+
+        assert_eq!(normalized, normalized_again);
+        assert_eq!(
+            normalized.disjoint_ranges(),
+            vec![
+                Range::new(Position::new(1, 1), Position::new(1, 1)),
+                Range::new(Position::new(3, 2), Position::new(3, 10)),
+                Range::new(Position::new(5, 1), Position::new(5, 4)),
+            ]
+        );
+    }
 }

@@ -21,8 +21,6 @@ pub enum InspectorView {
     CellEditor,
     KeyEditor,
     QueryHistory,
-    // TODO: Templates
-    // TODO: Projects
 }
 
 /// Events emitted by the InspectorPanel
@@ -46,8 +44,6 @@ pub struct InspectorPanel {
     cell_editor_panel: Entity<CellEditorPanel>,
     key_editor_panel: Entity<KeyValueEditorPanel>,
     query_history_panel: Entity<QueryHistoryPanel>,
-    // TODO: TemplateLibraryPanel
-    // TODO: ProjectManagerPanel
     _subscriptions: Vec<Subscription>,
 }
 

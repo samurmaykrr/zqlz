@@ -7,7 +7,7 @@ mod schema;
 mod ssh;
 mod tls;
 
-pub use connection::MySqlConnection;
+pub use connection::{MySqlConnectOptions, MySqlConnection};
 pub use dialect::mysql_dialect;
 pub use driver::MySqlDriver;
 pub use ssh::{MysqlSshTunnel, MysqlSshTunnelError};

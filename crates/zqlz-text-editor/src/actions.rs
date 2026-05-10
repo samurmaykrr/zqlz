@@ -35,12 +35,16 @@ actions!(
         SelectToParagraphEnd,
         SelectToNextSubwordEnd,
         SelectToPreviousSubwordStart,
+        SelectPageUp,
+        SelectPageDown,
         SelectAll,
         /// Toggle block (column/rectangular) selection mode.
         ToggleBlockSelection,
         // Editing
         Backspace,
         Delete,
+        DeleteToBeginningOfLine,
+        DeleteToEndOfLine,
         DeleteSubwordLeft,
         DeleteSubwordRight,
         Newline,
@@ -62,6 +66,7 @@ actions!(
         // Selection features (feat-016/017/018)
         SelectLine,
         SelectNextOccurrence,
+        SelectPreviousOccurrence,
         SelectAllOccurrences,
         // Multi-cursor (feat-021/022)
         AddCursorAbove,
@@ -129,8 +134,19 @@ actions!(
         RenameSymbol,
         OpenContextMenu,
         // Folding
+        Fold,
+        UnfoldLines,
         FoldAll,
         UnfoldAll,
+        FoldAtLevel1,
+        FoldAtLevel2,
+        FoldAtLevel3,
+        FoldAtLevel4,
+        FoldAtLevel5,
+        FoldAtLevel6,
+        FoldAtLevel7,
+        FoldAtLevel8,
+        FoldAtLevel9,
         // Misc
         Escape,
     ]
@@ -149,6 +165,8 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("end", MoveToEndOfLine, Some(CONTEXT)),
         KeyBinding::new("pageup", PageUp, Some(CONTEXT)),
         KeyBinding::new("pagedown", PageDown, Some(CONTEXT)),
+        KeyBinding::new("shift-pageup", SelectPageUp, Some(CONTEXT)),
+        KeyBinding::new("shift-pagedown", SelectPageDown, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-up", MoveToBeginning, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
@@ -222,8 +240,6 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("shift-down", SelectDown, Some(CONTEXT)),
         KeyBinding::new("shift-home", SelectToBeginningOfLine, Some(CONTEXT)),
         KeyBinding::new("shift-end", SelectToEndOfLine, Some(CONTEXT)),
-        KeyBinding::new("shift-pageup", SelectToBeginning, Some(CONTEXT)),
-        KeyBinding::new("shift-pagedown", SelectToEnd, Some(CONTEXT)),
         #[cfg(target_os = "macos")]
         KeyBinding::new("cmd-shift-up", SelectToBeginning, Some(CONTEXT)),
         #[cfg(target_os = "macos")]

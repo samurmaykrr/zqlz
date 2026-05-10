@@ -170,10 +170,13 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        viewer_entity.read(cx).database_name().as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connection_service
+        .get_connection_for_database_cached(
+            connection_id,
+            viewer_entity.read(cx).database_name().as_deref(),
+        )
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -181,9 +184,8 @@ pub(in crate::main_view) fn handle_last_page_requested_event(
     let table_name = table_name.to_string();
     let connection = connection.clone();
     let connection_name = app_state
-        .connection_manager()
-        .get_saved(connection_id)
-        .map(|s| s.name.clone())
+        .connection_service
+        .get_saved_connection_name(connection_id)
         .unwrap_or_else(|| "Unknown".to_string());
     let table_service = app_state.table_service.clone();
 

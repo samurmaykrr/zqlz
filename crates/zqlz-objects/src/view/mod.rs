@@ -4,8 +4,10 @@
 //! database views and materialized views across different database systems.
 
 mod manager;
+mod workflow;
 
 #[cfg(test)]
 mod tests;
 
 pub use manager::*;
+pub use workflow::*;

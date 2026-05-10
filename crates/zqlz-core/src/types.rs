@@ -5,6 +5,303 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Broad semantic category for database column types.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlTypeFamily {
+    Text,
+    Number,
+    Boolean,
+    Temporal,
+    Json,
+    Binary,
+    Uuid,
+    Enum,
+    Network,
+    Geometry,
+    Array,
+    Range,
+    Unknown,
+}
+
+/// Numeric subtype used by validation and editors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlNumericKind {
+    Integer,
+    Float,
+    Decimal,
+}
+
+/// Temporal subtype used by date/time editors.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SqlTemporalKind {
+    Date,
+    Time,
+    DateTime,
+}
+
+/// Canonical semantic information derived from database type metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SqlTypeInfo {
+    pub family: SqlTypeFamily,
+    pub numeric_kind: Option<SqlNumericKind>,
+    pub temporal_kind: Option<SqlTemporalKind>,
+    pub is_range: bool,
+    pub is_array: bool,
+    pub base_type: String,
+    pub normalized_type: String,
+}
+
+impl SqlTypeInfo {
+    pub fn from_column_meta(meta: &ColumnMeta) -> Self {
+        let mut info = Self::from_data_type(&meta.data_type);
+        if meta
+            .enum_values
+            .as_ref()
+            .is_some_and(|values| !values.is_empty())
+        {
+            info.family = SqlTypeFamily::Enum;
+        }
+        info
+    }
+
+    pub fn from_data_type(data_type: &str) -> Self {
+        let normalized_type = normalize_sql_type_name(data_type);
+        let array_element_type = Value::array_element_type(&normalized_type);
+        let is_array = array_element_type.is_some();
+        let classified_type = array_element_type.as_deref().unwrap_or(&normalized_type);
+        let base_type = strip_sql_type_modifiers(classified_type).to_string();
+        let is_range = is_range_type(&base_type);
+        let is_boolean = matches!(base_type.as_str(), "bool" | "boolean" | "bit")
+            || normalized_type == "tinyint(1)";
+        let numeric_kind = if is_boolean {
+            None
+        } else {
+            classify_numeric_kind(&base_type)
+        };
+        let temporal_kind = classify_temporal_kind(&base_type, classified_type);
+
+        let family = if is_array {
+            SqlTypeFamily::Array
+        } else if is_boolean {
+            SqlTypeFamily::Boolean
+        } else if numeric_kind.is_some() {
+            SqlTypeFamily::Number
+        } else if matches!(base_type.as_str(), "uuid" | "uniqueidentifier" | "guid") {
+            SqlTypeFamily::Uuid
+        } else if matches!(base_type.as_str(), "json" | "jsonb" | "bson") {
+            SqlTypeFamily::Json
+        } else if is_binary_type(&base_type) {
+            SqlTypeFamily::Binary
+        } else if temporal_kind.is_some() {
+            SqlTypeFamily::Temporal
+        } else if matches!(base_type.as_str(), "inet" | "cidr" | "macaddr" | "macaddr8") {
+            SqlTypeFamily::Network
+        } else if is_geometry_type(&base_type) {
+            SqlTypeFamily::Geometry
+        } else if is_range {
+            SqlTypeFamily::Range
+        } else if is_text_type(&base_type) {
+            SqlTypeFamily::Text
+        } else if base_type.starts_with("enum") || base_type.starts_with("set") {
+            SqlTypeFamily::Enum
+        } else {
+            SqlTypeFamily::Unknown
+        };
+
+        Self {
+            family,
+            numeric_kind,
+            temporal_kind,
+            is_range,
+            is_array,
+            base_type,
+            normalized_type,
+        }
+    }
+
+    pub fn display_label_for_column(meta: &ColumnMeta) -> String {
+        let data_type = meta.data_type.trim();
+        if data_type.is_empty() {
+            return "unknown".to_string();
+        }
+
+        if let (Some(precision), Some(scale)) = (meta.precision, meta.scale)
+            && !data_type.contains('(')
+            && matches!(
+                strip_sql_type_modifiers(&data_type.to_ascii_lowercase()),
+                "numeric" | "decimal"
+            )
+        {
+            return format!("{}({},{})", data_type, precision, scale);
+        }
+
+        if let Some(max_length) = meta.max_length
+            && max_length > 0
+            && !data_type.contains('(')
+            && matches!(
+                strip_sql_type_modifiers(&data_type.to_ascii_lowercase()),
+                "char" | "varchar" | "nchar" | "nvarchar" | "binary" | "varbinary"
+            )
+        {
+            return format!("{}({})", data_type, max_length);
+        }
+
+        data_type.to_string()
+    }
+
+    pub fn is_scalar_temporal(&self) -> bool {
+        self.temporal_kind.is_some() && !self.is_range && !self.is_array
+    }
+}
+
+fn normalize_sql_type_name(data_type: &str) -> String {
+    let lower = data_type.trim().to_ascii_lowercase();
+    match lower.as_str() {
+        "boolean" => "bool".to_string(),
+        "integer" | "int" => "int4".to_string(),
+        "bigint" => "int8".to_string(),
+        "smallint" => "int2".to_string(),
+        "decimal" => "numeric".to_string(),
+        "double" | "double precision" => "float8".to_string(),
+        "real" => "float4".to_string(),
+        "datetime" => "timestamp".to_string(),
+        "timestamp with time zone" => "timestamptz".to_string(),
+        "timestamp without time zone" => "timestamp".to_string(),
+        "time without time zone" => "time".to_string(),
+        "time with time zone" => "timetz".to_string(),
+        "blob" | "tinyblob" | "mediumblob" | "longblob" => "bytea".to_string(),
+        "json" | "jsonb" | "jsonarray" => lower,
+        _ => lower,
+    }
+}
+
+fn strip_sql_type_modifiers(data_type: &str) -> &str {
+    match data_type.find('(') {
+        Some(index) => data_type[..index].trim(),
+        None => data_type.trim(),
+    }
+}
+
+fn classify_numeric_kind(base_type: &str) -> Option<SqlNumericKind> {
+    if matches!(
+        base_type,
+        "int2"
+            | "int4"
+            | "int8"
+            | "smallint"
+            | "integer"
+            | "bigint"
+            | "int"
+            | "mediumint"
+            | "tinyint"
+            | "serial"
+            | "bigserial"
+            | "smallserial"
+    ) {
+        return Some(SqlNumericKind::Integer);
+    }
+
+    if matches!(
+        base_type,
+        "float4" | "float8" | "real" | "double precision" | "double" | "float"
+    ) {
+        return Some(SqlNumericKind::Float);
+    }
+
+    if matches!(base_type, "numeric" | "decimal" | "money") {
+        return Some(SqlNumericKind::Decimal);
+    }
+
+    None
+}
+
+fn classify_temporal_kind(base_type: &str, normalized_type: &str) -> Option<SqlTemporalKind> {
+    if matches!(base_type, "date" | "daterange" | "datemultirange") {
+        return Some(SqlTemporalKind::Date);
+    }
+
+    if matches!(base_type, "time" | "timetz")
+        || normalized_type.starts_with("time without")
+        || normalized_type.starts_with("time with")
+    {
+        return Some(SqlTemporalKind::Time);
+    }
+
+    if matches!(
+        base_type,
+        "datetime"
+            | "datetime2"
+            | "smalldatetime"
+            | "datetimeoffset"
+            | "timestamp"
+            | "timestamptz"
+            | "tsrange"
+            | "tstzrange"
+            | "tsmultirange"
+            | "tstzmultirange"
+    ) || normalized_type.starts_with("timestamp without")
+        || normalized_type.starts_with("timestamp with")
+    {
+        return Some(SqlTemporalKind::DateTime);
+    }
+
+    None
+}
+
+fn is_range_type(base_type: &str) -> bool {
+    base_type.ends_with("range") || base_type.ends_with("multirange")
+}
+
+fn is_binary_type(base_type: &str) -> bool {
+    matches!(
+        base_type,
+        "blob"
+            | "mediumblob"
+            | "longblob"
+            | "tinyblob"
+            | "bytea"
+            | "binary"
+            | "varbinary"
+            | "image"
+            | "raw"
+    )
+}
+
+fn is_text_type(base_type: &str) -> bool {
+    matches!(
+        base_type,
+        "text"
+            | "varchar"
+            | "char"
+            | "bpchar"
+            | "name"
+            | "citext"
+            | "character varying"
+            | "character"
+            | "nvarchar"
+            | "nchar"
+            | "longtext"
+            | "mediumtext"
+            | "tinytext"
+            | "string"
+    )
+}
+
+fn is_geometry_type(base_type: &str) -> bool {
+    matches!(
+        base_type,
+        "point"
+            | "line"
+            | "lseg"
+            | "box"
+            | "path"
+            | "polygon"
+            | "circle"
+            | "geometry"
+            | "geography"
+    )
+}
+
 /// A database value that can represent any SQL type
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub enum Value {
@@ -54,15 +351,125 @@ impl From<String> for Value {
 }
 
 impl Value {
-    fn strip_type_modifiers(data_type: &str) -> &str {
-        match data_type.find('(') {
-            Some(index) => data_type[..index].trim(),
-            None => data_type.trim(),
-        }
+    pub fn normalize_data_type(data_type: &str) -> String {
+        normalize_sql_type_name(data_type)
     }
 
-    fn strip_array_suffix(data_type: &str) -> Option<&str> {
-        data_type.strip_suffix("[]").map(str::trim)
+    pub fn is_json_data_type(data_type: &str) -> bool {
+        matches!(
+            Self::normalize_data_type(data_type).as_str(),
+            "json" | "jsonb"
+        )
+    }
+
+    fn strip_type_modifiers(data_type: &str) -> &str {
+        strip_sql_type_modifiers(data_type)
+    }
+
+    pub fn array_element_type(data_type: &str) -> Option<String> {
+        if let Some(element_type) = data_type.strip_suffix("[]").map(str::trim) {
+            return Some(Self::normalize_data_type(element_type));
+        }
+
+        let element_type = data_type.strip_suffix("array")?.trim();
+        if element_type.is_empty() {
+            return None;
+        }
+
+        Some(match element_type {
+            "bigint" => "int8".to_string(),
+            "bool" | "boolean" => "bool".to_string(),
+            "byte" | "bytea" | "binary" | "bytes" => "bytea".to_string(),
+            "datetime" => "timestamp".to_string(),
+            "decimal" => "numeric".to_string(),
+            "double" => "float8".to_string(),
+            "integer" | "int" => "int4".to_string(),
+            "smallint" => "int2".to_string(),
+            "string" => "text".to_string(),
+            other => Self::normalize_data_type(other),
+        })
+    }
+
+    pub fn is_array_data_type(data_type: &str) -> bool {
+        let normalized = Self::normalize_data_type(data_type);
+        Self::array_element_type(&normalized).is_some()
+    }
+
+    pub fn requires_string_round_trip(data_type: &str) -> bool {
+        let normalized = Self::normalize_data_type(data_type);
+        let base_type = Self::strip_type_modifiers(&normalized);
+
+        if Self::is_json_data_type(base_type)
+            || Self::is_array_data_type(&normalized)
+            || Self::is_string_data_type(base_type)
+        {
+            return false;
+        }
+
+        if base_type.ends_with("range") || base_type.ends_with("multirange") {
+            return true;
+        }
+
+        matches!(
+            base_type,
+            "inet"
+                | "cidr"
+                | "macaddr"
+                | "macaddr8"
+                | "interval"
+                | "bit"
+                | "varbit"
+                | "bit varying"
+                | "hstore"
+                | "point"
+                | "line"
+                | "lseg"
+                | "box"
+                | "path"
+                | "polygon"
+                | "circle"
+                | "geometry"
+                | "geography"
+                | "ltree"
+                | "lquery"
+                | "ltxtquery"
+                | "xml"
+        )
+    }
+
+    pub fn to_json_value(&self) -> serde_json::Value {
+        match self {
+            Value::Null => serde_json::Value::Null,
+            Value::Bool(value) => serde_json::Value::Bool(*value),
+            Value::Int8(value) => serde_json::json!(value),
+            Value::Int16(value) => serde_json::json!(value),
+            Value::Int32(value) => serde_json::json!(value),
+            Value::Int64(value) => serde_json::json!(value),
+            Value::Float32(value) => serde_json::json!(value),
+            Value::Float64(value) => serde_json::json!(value),
+            Value::Decimal(value) => value
+                .parse::<f64>()
+                .map(|value| serde_json::json!(value))
+                .unwrap_or_else(|_| serde_json::Value::String(value.clone())),
+            Value::String(value) => serde_json::Value::String(value.clone()),
+            Value::Bytes(value) => {
+                let hex: String = value.iter().map(|byte| format!("{:02x}", byte)).collect();
+                serde_json::Value::String(format!("0x{}", hex))
+            }
+            Value::Uuid(value) => serde_json::Value::String(value.to_string()),
+            Value::Date(value) => serde_json::Value::String(value.to_string()),
+            Value::Time(value) => {
+                serde_json::Value::String(value.format("%H:%M:%S%.f").to_string())
+            }
+            Value::DateTime(value) => {
+                serde_json::Value::String(value.format("%Y-%m-%d %H:%M:%S%.f").to_string())
+            }
+            Value::DateTimeUtc(value) => serde_json::Value::String(value.to_rfc3339()),
+            Value::Json(value) => value.clone(),
+            Value::Array(values) => {
+                serde_json::Value::Array(values.iter().map(Value::to_json_value).collect())
+            }
+        }
     }
 
     fn parse_hex_bytes(input: &str) -> Option<Vec<u8>> {
@@ -342,6 +749,7 @@ impl Value {
         match self {
             Value::Float32(v) => Some(*v as f64),
             Value::Float64(v) => Some(*v),
+            Value::Decimal(v) => v.parse::<f64>().ok(),
             Value::String(s) => s.parse::<f64>().ok(),
             _ => None,
         }
@@ -413,17 +821,29 @@ impl Value {
     /// Empty strings and the literal "NULL" (case-insensitive) produce `Value::Null`
     /// for non-string columns. String-like columns preserve the literal input.
     pub fn parse_from_string(input: &str, data_type: &str) -> Value {
-        let lower = data_type.trim().to_lowercase();
-        if let Some(element_type) = Self::strip_array_suffix(&lower)
-            && let Some(value) = Self::parse_array(input, element_type)
+        let lower = Self::normalize_data_type(data_type);
+        if let Some(element_type) = Self::array_element_type(&lower)
+            && let Some(value) = Self::parse_array(input, &element_type)
         {
             return value;
+        }
+
+        if Self::strip_type_modifiers(&lower) == "set"
+            && let Ok(serde_json::Value::Array(values)) =
+                serde_json::from_str::<serde_json::Value>(input.trim())
+        {
+            return Value::Array(
+                values
+                    .iter()
+                    .map(|value| Self::parse_json_with_type_hint(value, "text"))
+                    .collect(),
+            );
         }
 
         let base_type = Self::strip_type_modifiers(&lower);
 
         if input.is_empty() || input.eq_ignore_ascii_case("null") {
-            if Self::is_string_data_type(base_type) {
+            if Self::is_string_data_type(base_type) || Self::requires_string_round_trip(base_type) {
                 return Value::String(input.to_string());
             }
 
@@ -431,11 +851,8 @@ impl Value {
         }
 
         match base_type {
-            "boolean" | "bool" | "bit" | "tinyint"
-                if lower == "tinyint(1)"
-                    || base_type == "boolean"
-                    || base_type == "bool"
-                    || base_type == "bit" =>
+            "boolean" | "bool" | "tinyint"
+                if lower == "tinyint(1)" || base_type == "boolean" || base_type == "bool" =>
             {
                 match input.to_lowercase().as_str() {
                     "true" | "t" | "1" | "yes" | "y" | "on" => Value::Bool(true),
@@ -467,7 +884,10 @@ impl Value {
                 .parse::<f64>()
                 .map(Value::Float64)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
-            "numeric" | "decimal" | "money" => Value::Decimal(input.to_string()),
+            "numeric" | "decimal" | "money" => input
+                .parse::<f64>()
+                .map(Value::Float64)
+                .unwrap_or_else(|_| Value::Decimal(input.to_string())),
             "json" | "jsonb" => serde_json::from_str::<serde_json::Value>(input)
                 .map(Value::Json)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
@@ -521,7 +941,7 @@ impl std::fmt::Display for Value {
 
 #[cfg(test)]
 mod tests {
-    use super::Value;
+    use super::{SqlNumericKind, SqlTemporalKind, SqlTypeFamily, SqlTypeInfo, Value};
     use chrono::NaiveDate;
 
     #[test]
@@ -588,6 +1008,176 @@ mod tests {
             Value::parse_from_string("[1, 2, NULL]", "int4[]"),
             Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Null])
         );
+        assert_eq!(
+            Value::parse_from_string("[\"one\", \"2\"]", "TextArray"),
+            Value::Array(vec![
+                Value::String("one".to_string()),
+                Value::String("2".to_string())
+            ])
+        );
+        assert_eq!(
+            Value::parse_from_string("[]", "TextArray"),
+            Value::Array(vec![])
+        );
+        assert_eq!(
+            Value::parse_from_string("[true, false, null]", "BoolArray"),
+            Value::Array(vec![Value::Bool(true), Value::Bool(false), Value::Null])
+        );
+        assert_eq!(
+            Value::parse_from_string("[1, 2]", "IntArray"),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2)])
+        );
+        assert_eq!(
+            Value::parse_from_string("[\"550e8400-e29b-41d4-a716-446655440000\"]", "UuidArray"),
+            Value::Array(vec![Value::Uuid(
+                uuid::Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").unwrap()
+            )])
+        );
+        assert_eq!(
+            Value::parse_from_string("[{\"enabled\":true}]", "JsonArray"),
+            Value::Array(vec![Value::Json(serde_json::json!({ "enabled": true }))])
+        );
+        assert_eq!(
+            Value::parse_from_string("[{\"enabled\":true}]", "jsonb[]"),
+            Value::Array(vec![Value::Json(serde_json::json!({ "enabled": true }))])
+        );
+        assert_eq!(
+            Value::parse_from_string("[12.5, null]", "NumericArray"),
+            Value::Array(vec![Value::Float64(12.5), Value::Null])
+        );
+        assert_eq!(
+            Value::parse_from_string("[\"0xdeadbeef\"]", "ByteaArray"),
+            Value::Array(vec![Value::Bytes(vec![0xde, 0xad, 0xbe, 0xef])])
+        );
+        assert_eq!(
+            Value::parse_from_string("[\"14:30:00\"]", "TimeArray"),
+            Value::Array(vec![Value::Time(
+                chrono::NaiveTime::from_hms_opt(14, 30, 0).unwrap()
+            )])
+        );
+        assert_eq!(
+            Value::parse_from_string("[\"read\", \"write\"]", "set"),
+            Value::Array(vec![
+                Value::String("read".to_string()),
+                Value::String("write".to_string())
+            ])
+        );
+    }
+
+    #[test]
+    fn parse_from_string_round_trips_special_scalars_as_strings() {
+        assert_eq!(
+            Value::parse_from_string("192.168.0.1", "inet"),
+            Value::String("192.168.0.1".to_string())
+        );
+        assert_eq!(
+            Value::parse_from_string("[1,4)", "int4range"),
+            Value::String("[1,4)".to_string())
+        );
+        assert_eq!(
+            Value::parse_from_string("1 day", "interval"),
+            Value::String("1 day".to_string())
+        );
+        assert_eq!(
+            Value::parse_from_string("1010", "bit(4)"),
+            Value::String("1010".to_string())
+        );
+    }
+
+    #[test]
+    fn sql_type_info_classifies_core_database_types() {
+        let cases = [
+            (
+                "date",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::Date),
+                false,
+            ),
+            (
+                "time",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::Time),
+                false,
+            ),
+            (
+                "timestamp",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::DateTime),
+                false,
+            ),
+            (
+                "timestamptz",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::DateTime),
+                false,
+            ),
+            (
+                "timestamp(6) with time zone",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::DateTime),
+                false,
+            ),
+            (
+                "daterange",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::Date),
+                true,
+            ),
+            (
+                "tsrange",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::DateTime),
+                true,
+            ),
+            (
+                "tstzrange",
+                SqlTypeFamily::Temporal,
+                None,
+                Some(SqlTemporalKind::DateTime),
+                true,
+            ),
+            (
+                "int4",
+                SqlTypeFamily::Number,
+                Some(SqlNumericKind::Integer),
+                None,
+                false,
+            ),
+            (
+                "integer",
+                SqlTypeFamily::Number,
+                Some(SqlNumericKind::Integer),
+                None,
+                false,
+            ),
+            (
+                "numeric(18,4)",
+                SqlTypeFamily::Number,
+                Some(SqlNumericKind::Decimal),
+                None,
+                false,
+            ),
+            ("tinyint(1)", SqlTypeFamily::Boolean, None, None, false),
+            ("uuid", SqlTypeFamily::Uuid, None, None, false),
+            ("jsonb", SqlTypeFamily::Json, None, None, false),
+            ("bytea", SqlTypeFamily::Binary, None, None, false),
+            ("varchar(255)", SqlTypeFamily::Text, None, None, false),
+        ];
+
+        for (data_type, family, numeric_kind, temporal_kind, is_range) in cases {
+            let info = SqlTypeInfo::from_data_type(data_type);
+            assert_eq!(info.family, family, "{data_type}");
+            assert_eq!(info.numeric_kind, numeric_kind, "{data_type}");
+            assert_eq!(info.temporal_kind, temporal_kind, "{data_type}");
+            assert_eq!(info.is_range, is_range, "{data_type}");
+        }
     }
 }
 

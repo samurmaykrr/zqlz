@@ -170,6 +170,9 @@ pub enum Request {
     QueryHistoryEntry {
         id: Uuid,
     },
+    OpenTargets {
+        targets: Vec<String>,
+    },
 }
 
 /// Responses the GUI server sends back.

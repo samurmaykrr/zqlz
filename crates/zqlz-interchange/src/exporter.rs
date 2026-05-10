@@ -67,6 +67,10 @@ pub struct ExportOptions {
     pub include_indexes: bool,
     /// Whether to include foreign keys
     pub include_foreign_keys: bool,
+    /// Whether to include sequence current values
+    pub include_sequences: bool,
+    /// Whether to keep exporting remaining tables after a table-level failure
+    pub continue_on_error: bool,
     /// Batch size for fetching rows
     pub batch_size: u32,
     /// Tables to include (empty = all tables)
@@ -88,6 +92,8 @@ impl Default for ExportOptions {
             include_data: true,
             include_indexes: true,
             include_foreign_keys: true,
+            include_sequences: true,
+            continue_on_error: true,
             batch_size: 1000,
             include_tables: Vec::new(),
             exclude_tables: Vec::new(),
@@ -110,6 +116,7 @@ impl ExportOptions {
             include_schema: false,
             include_indexes: false,
             include_foreign_keys: false,
+            include_sequences: false,
             ..Default::default()
         }
     }
@@ -243,6 +250,12 @@ impl GenericExporter {
         SourceInfo::new(&self.driver_name)
     }
 
+    fn is_mysql_source(&self) -> bool {
+        self.driver_name == "mysql"
+            || self.connection.driver_name() == "mysql"
+            || self.connection.dialect_id() == Some("mysql")
+    }
+
     fn should_include_table(&self, table_name: &str, options: &ExportOptions) -> bool {
         if !options.include_tables.is_empty()
             && !options.include_tables.iter().any(|t| t == table_name)
@@ -256,6 +269,83 @@ impl GenericExporter {
         self.connection
             .as_schema_introspection()
             .ok_or(ExportError::SchemaIntrospectionNotSupported)
+    }
+
+    fn usable_objects_panel_value<'a>(
+        row: &'a zqlz_core::ObjectsPanelRow,
+        key: &str,
+    ) -> Option<&'a str> {
+        row.values
+            .get(key)
+            .map(String::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty() && *value != "-" && *value != "NULL")
+    }
+
+    fn copy_mysql_table_storage_options_from_row(
+        &self,
+        table_def: &mut TableDefinition,
+        row: &zqlz_core::ObjectsPanelRow,
+    ) {
+        if !self.is_mysql_source() {
+            return;
+        }
+
+        for (source_key, target_key) in [
+            ("engine", "engine"),
+            ("row_format", "row_format"),
+            ("auto_increment", "auto_increment"),
+            ("collation", "collation"),
+            ("create_options", "create_options"),
+        ] {
+            if let Some(value) = Self::usable_objects_panel_value(row, source_key) {
+                table_def
+                    .storage_options
+                    .insert(target_key.to_string(), value.to_string());
+            }
+        }
+
+        if let Some(collation) = table_def.storage_options.get("collation")
+            && let Some((charset, _)) = collation.split_once('_')
+            && !charset.is_empty()
+        {
+            table_def
+                .storage_options
+                .insert("charset".to_string(), charset.to_string());
+        }
+
+        if let Some(comment) = Self::usable_objects_panel_value(row, "comment") {
+            table_def.comment = Some(comment.to_string());
+            table_def
+                .storage_options
+                .insert("comment".to_string(), comment.to_string());
+        }
+    }
+
+    async fn enrich_mysql_table_storage_options(
+        &self,
+        introspection: &dyn SchemaIntrospection,
+        table_def: &mut TableDefinition,
+        options: &ExportOptions,
+    ) {
+        if !self.is_mysql_source() {
+            return;
+        }
+
+        let Ok(data) = introspection
+            .list_objects_panel_data_for_kind(options.schema.as_deref(), "table")
+            .await
+        else {
+            return;
+        };
+
+        if let Some(row) = data
+            .rows
+            .iter()
+            .find(|row| row.object_name() == table_def.name)
+        {
+            self.copy_mysql_table_storage_options_from_row(table_def, row);
+        }
     }
 
     async fn get_table_list(&self, options: &ExportOptions) -> Result<Vec<TableInfo>, ExportError> {
@@ -279,6 +369,8 @@ impl GenericExporter {
 
         let mut table_def = TableDefinition::new(table_name);
         table_def.schema = options.schema.clone();
+        self.enrich_mysql_table_storage_options(introspection, &mut table_def, options)
+            .await;
 
         let include_cols = options.include_columns.get(table_name);
         for col in columns {
@@ -346,7 +438,31 @@ impl GenericExporter {
     }
 
     fn column_info_to_definition(&self, col: &ColumnInfo) -> ColumnDefinition {
-        let canonical_type = self.type_mapper.to_canonical(&col.data_type);
+        let mut canonical_type = self.type_mapper.to_canonical(&col.data_type);
+        if let Some(values) = col.enum_values.as_ref().filter(|values| !values.is_empty()) {
+            let lower_data_type = col.data_type.trim().to_ascii_lowercase();
+            canonical_type = match canonical_type {
+                crate::CanonicalType::Enum { name, .. } => crate::CanonicalType::Enum {
+                    name,
+                    values: values.clone(),
+                },
+                crate::CanonicalType::Set { .. } => crate::CanonicalType::Set {
+                    values: values.clone(),
+                },
+                _ if lower_data_type == "enum" || lower_data_type.starts_with("enum(") => {
+                    crate::CanonicalType::Enum {
+                        name: None,
+                        values: values.clone(),
+                    }
+                }
+                _ if lower_data_type == "set" || lower_data_type.starts_with("set(") => {
+                    crate::CanonicalType::Set {
+                        values: values.clone(),
+                    }
+                }
+                other => other,
+            };
+        }
         let mut col_def = ColumnDefinition::new(&col.name, canonical_type, &col.data_type);
         col_def.nullable = col.nullable;
         if let Some(ref default) = col.default_value {
@@ -354,6 +470,8 @@ impl GenericExporter {
         }
         col_def.auto_increment = col.is_auto_increment;
         col_def.comment = col.comment.clone();
+        col_def.charset = col.charset.clone();
+        col_def.collation = col.collation.clone();
 
         // Preserve generated column metadata so importers can recreate the expression
         // rather than treating generated columns as plain columns with static defaults.
@@ -797,17 +915,52 @@ impl Exporter for GenericExporter {
             });
 
             let table_def = if options.include_schema {
-                let def = self.build_table_definition(&table.name, options).await?;
-                doc.add_table(def.clone());
-                def
+                match self.build_table_definition(&table.name, options).await {
+                    Ok(def) => {
+                        doc.add_table(def.clone());
+                        def
+                    }
+                    Err(error) if options.continue_on_error => {
+                        progress(ExportProgress {
+                            phase: ExportPhase::ExportingData,
+                            current_table: Some(table.name.clone()),
+                            total_tables,
+                            tables_completed: idx + 1,
+                            rows_exported: 0,
+                            total_rows: None,
+                            message: Some(format!(
+                                "Skipped schema for [{}]: {}",
+                                table.name, error
+                            )),
+                        });
+                        TableDefinition::new(&table.name)
+                    }
+                    Err(error) => return Err(error),
+                }
             } else {
                 TableDefinition::new(&table.name)
             };
 
             if options.include_data {
-                let table_data = self
+                let table_data = match self
                     .export_table_data(&table.name, &table_def, options)
-                    .await?;
+                    .await
+                {
+                    Ok(table_data) => table_data,
+                    Err(error) if options.continue_on_error => {
+                        progress(ExportProgress {
+                            phase: ExportPhase::ExportingData,
+                            current_table: Some(table.name.clone()),
+                            total_tables,
+                            tables_completed: idx + 1,
+                            rows_exported: 0,
+                            total_rows: None,
+                            message: Some(format!("Skipped data for [{}]: {}", table.name, error)),
+                        });
+                        continue;
+                    }
+                    Err(error) => return Err(error),
+                };
                 let row_count = table_data.rows.len() as u64;
                 doc.data.insert(table.name.clone(), table_data);
 
@@ -823,7 +976,7 @@ impl Exporter for GenericExporter {
             }
         }
 
-        if options.include_schema && options.include_data {
+        if options.include_schema && options.include_data && options.include_sequences {
             self.export_sequences(&mut doc).await?;
         }
 
@@ -1103,6 +1256,14 @@ mod tests {
         GenericExporter::new(Arc::new(StubConnection), "sqlite")
     }
 
+    fn make_mysql_exporter() -> GenericExporter {
+        GenericExporter::with_type_mapper(
+            Arc::new(StubConnection),
+            "mysql",
+            get_type_mapper("mysql"),
+        )
+    }
+
     // ===== ExportOptions tests =====
 
     #[test]
@@ -1120,6 +1281,53 @@ mod tests {
         let options = ExportOptions::schema_only();
         assert!(options.include_schema);
         assert!(!options.include_data);
+    }
+
+    #[test]
+    fn test_copy_mysql_table_storage_options_from_objects_panel_row() {
+        let exporter = make_mysql_exporter();
+        let mut table_def = TableDefinition::new("orders");
+        let mut values = std::collections::BTreeMap::new();
+        values.insert("engine".to_string(), "InnoDB".to_string());
+        values.insert("row_format".to_string(), "Dynamic".to_string());
+        values.insert("auto_increment".to_string(), "42".to_string());
+        values.insert("collation".to_string(), "utf8mb4_unicode_ci".to_string());
+        values.insert(
+            "create_options".to_string(),
+            "stats_persistent=1".to_string(),
+        );
+        values.insert("comment".to_string(), "customer orders".to_string());
+        let row = zqlz_core::ObjectsPanelRow {
+            name: "orders".to_string(),
+            schema: Some("shop".to_string()),
+            object_type: "table".to_string(),
+            object_ref: Some(
+                zqlz_core::ObjectsPanelObjectRef::new("table", "orders")
+                    .with_schema_option(Some("shop".to_string())),
+            ),
+            values,
+            redis_database_index: None,
+            key_value_info: None,
+        };
+
+        exporter.copy_mysql_table_storage_options_from_row(&mut table_def, &row);
+
+        assert_eq!(
+            table_def.storage_options.get("engine").map(String::as_str),
+            Some("InnoDB")
+        );
+        assert_eq!(
+            table_def.storage_options.get("charset").map(String::as_str),
+            Some("utf8mb4")
+        );
+        assert_eq!(
+            table_def
+                .storage_options
+                .get("auto_increment")
+                .map(String::as_str),
+            Some("42")
+        );
+        assert_eq!(table_def.comment.as_deref(), Some("customer orders"));
     }
 
     #[test]
@@ -1177,6 +1385,23 @@ mod tests {
     }
 
     #[test]
+    fn test_column_info_to_definition_preserves_charset_and_collation() {
+        let exporter = make_mysql_exporter();
+        let col = zqlz_core::ColumnInfo {
+            name: "name".to_string(),
+            data_type: "varchar(100)".to_string(),
+            charset: Some("utf8mb4".to_string()),
+            collation: Some("utf8mb4_unicode_ci".to_string()),
+            ..Default::default()
+        };
+
+        let def = exporter.column_info_to_definition(&col);
+
+        assert_eq!(def.charset.as_deref(), Some("utf8mb4"));
+        assert_eq!(def.collation.as_deref(), Some("utf8mb4_unicode_ci"));
+    }
+
+    #[test]
     fn test_column_info_to_definition_generated_virtual() {
         let exporter = make_exporter();
         let col = zqlz_core::ColumnInfo {
@@ -1212,6 +1437,47 @@ mod tests {
             Some("quantity * unit_price")
         );
         assert!(def.is_generated_stored);
+    }
+
+    #[test]
+    fn test_column_info_to_definition_uses_resolved_enum_values() {
+        let exporter = make_mysql_exporter();
+        let col = zqlz_core::ColumnInfo {
+            name: "status".to_string(),
+            data_type: "enum".to_string(),
+            enum_values: Some(vec!["pending".to_string(), "paid".to_string()]),
+            ..Default::default()
+        };
+
+        let def = exporter.column_info_to_definition(&col);
+
+        assert_eq!(
+            def.canonical_type,
+            crate::CanonicalType::Enum {
+                name: None,
+                values: vec!["pending".to_string(), "paid".to_string()]
+            }
+        );
+    }
+
+    #[test]
+    fn test_column_info_to_definition_uses_resolved_set_values() {
+        let exporter = make_mysql_exporter();
+        let col = zqlz_core::ColumnInfo {
+            name: "flags".to_string(),
+            data_type: "set".to_string(),
+            enum_values: Some(vec!["read".to_string(), "write".to_string()]),
+            ..Default::default()
+        };
+
+        let def = exporter.column_info_to_definition(&col);
+
+        assert_eq!(
+            def.canonical_type,
+            crate::CanonicalType::Set {
+                values: vec!["read".to_string(), "write".to_string()]
+            }
+        );
     }
 
     // ===== index_info_to_definition tests =====

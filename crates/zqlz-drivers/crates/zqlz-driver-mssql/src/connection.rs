@@ -8,10 +8,10 @@ use tokio::sync::Mutex;
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 use zqlz_core::{
-    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta, Connection, DropTableOptions,
-    DropTriggerOptions, DropViewOptions, ExplainConfig, ForeignKeyChecksSql,
-    ImportIndexCapabilities, ImportSemanticDefault, QueryResult, Result, Row, SchemaIntrospection,
-    SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta, Connection, ConnectionScope,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ForeignKeyChecksSql,
+    ImportIndexCapabilities, ImportSemanticDefault, QueryResult, ResolvedConnectionScope, Result,
+    Row, SchemaIntrospection, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
 };
 
 /// MS SQL Server connection errors
@@ -212,6 +212,39 @@ impl Connection for MssqlConnection {
 
     fn requires_database_scoped_connection(&self) -> bool {
         true
+    }
+
+    async fn resolve_scope(&self, scope: ConnectionScope) -> Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                resolved.effective_database = self.current_database_name().await?;
+                resolved.effective_namespace = self.current_namespace_name().await?;
+            }
+            ConnectionScope::Database(database_name) => {
+                let database_name = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                resolved.effective_database = Some(database_name.clone());
+                resolved.physical_database_key = Some(database_name);
+                resolved.requires_dedicated_connection = true;
+                resolved.effective_namespace = self.current_namespace_name().await?;
+            }
+            ConnectionScope::Namespace(namespace) => {
+                let namespace = namespace.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Namespace(namespace.clone());
+                resolved.effective_database = self.current_database_name().await?;
+                resolved.effective_namespace = Some(namespace.clone());
+                resolved.introspection_scope = Some(namespace);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
     }
 
     fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
@@ -493,6 +526,16 @@ impl Connection for MssqlConnection {
 
     async fn resolve_session_namespace(&self) -> Result<Option<String>> {
         let result = self.query("SELECT SCHEMA_NAME()", &[]).await?;
+        Ok(result
+            .rows
+            .first()
+            .and_then(|row| row.get(0))
+            .and_then(|value| value.as_str())
+            .map(ToString::to_string))
+    }
+
+    async fn current_database_name(&self) -> Result<Option<String>> {
+        let result = self.query("SELECT DB_NAME()", &[]).await?;
         Ok(result
             .rows
             .first()

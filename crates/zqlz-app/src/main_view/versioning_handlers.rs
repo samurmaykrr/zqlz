@@ -6,10 +6,6 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, DropViewOptions, SqlObjectName, TableDetails};
-use zqlz_schema_tools::{
-    MigrationConfig, MigrationDialect, MigrationGenerator, SchemaComparator, SchemaDiff,
-};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     button::ButtonVariant,
@@ -20,7 +16,7 @@ use zqlz_ui::widgets::{
     v_flex,
 };
 use zqlz_versioning::{
-    DatabaseObjectType, VersionEntry,
+    DatabaseObjectType, DiffWithParentResult, RestorePlanningResult,
     widgets::{DiffViewer, DiffViewerEvent, VersionHistoryPanel, VersionHistoryPanelEvent},
 };
 
@@ -28,171 +24,6 @@ use crate::app::AppState;
 use crate::workspace_state::RefreshScope;
 
 use super::MainView;
-
-#[derive(Clone)]
-struct RestorePlan {
-    version: VersionEntry,
-    statements: Vec<String>,
-    preview_sql: String,
-}
-
-fn version_restore_commit_message(version: &VersionEntry) -> String {
-    format!(
-        "Restore {} {} to version {}",
-        version.object_type.display_name().to_lowercase(),
-        version.object_name,
-        version.short_id()
-    )
-}
-
-fn migration_dialect_for_connection(connection: &Arc<dyn Connection>) -> MigrationDialect {
-    if matches!(
-        connection.dialect_id(),
-        Some("postgres") | Some("postgresql")
-    ) {
-        MigrationDialect::PostgreSQL
-    } else if matches!(connection.dialect_id(), Some("mysql") | Some("mariadb")) {
-        MigrationDialect::MySQL
-    } else if matches!(connection.dialect_id(), Some("mssql") | Some("sqlserver")) {
-        MigrationDialect::MsSql
-    } else {
-        MigrationDialect::SQLite
-    }
-}
-
-fn quote_qualified_name(
-    connection: &Arc<dyn Connection>,
-    schema: Option<&str>,
-    object_name: &str,
-) -> String {
-    match schema {
-        Some(schema_name) if !schema_name.is_empty() => connection
-            .render_qualified_name(&SqlObjectName::with_namespace(schema_name, object_name)),
-        _ => connection.quote_identifier(object_name),
-    }
-}
-
-fn is_postgres_dialect(connection: &Arc<dyn Connection>) -> bool {
-    matches!(
-        connection.dialect_id(),
-        Some("postgres") | Some("postgresql")
-    )
-}
-
-fn supports_create_or_replace_view(connection: &Arc<dyn Connection>) -> bool {
-    matches!(
-        connection.dialect_id(),
-        Some("postgres") | Some("postgresql") | Some("mysql") | Some("mariadb")
-    )
-}
-
-fn build_sql_restore_plan(
-    connection: &Arc<dyn Connection>,
-    version: VersionEntry,
-) -> anyhow::Result<Option<RestorePlan>> {
-    let trimmed_content = version.content.trim();
-    if trimmed_content.is_empty() {
-        anyhow::bail!("Saved version does not contain any SQL to restore")
-    }
-
-    let statements = match version.object_type {
-        DatabaseObjectType::View => {
-            if is_postgres_dialect(connection) {
-                vec![trimmed_content.to_string()]
-            } else {
-                let view_object_name = match version.object_schema.as_deref() {
-                    Some(schema_name) if !schema_name.is_empty() => {
-                        SqlObjectName::with_namespace(schema_name, &version.object_name)
-                    }
-                    _ => SqlObjectName::new(&version.object_name),
-                };
-                let drop_view_sql = connection
-                    .drop_view_sql(
-                        &view_object_name,
-                        DropViewOptions {
-                            if_exists: true,
-                            cascade: false,
-                        },
-                    )
-                    .unwrap_or_else(|_| {
-                        format!(
-                            "DROP VIEW IF EXISTS {}",
-                            quote_qualified_name(
-                                connection,
-                                version.object_schema.as_deref(),
-                                &version.object_name,
-                            )
-                        )
-                    });
-                vec![
-                    drop_view_sql,
-                    if supports_create_or_replace_view(connection) {
-                        connection.normalize_create_view_sql(trimmed_content)
-                    } else {
-                        trimmed_content.to_string()
-                    },
-                ]
-            }
-        }
-        _ if version.object_type.is_applyable() => vec![trimmed_content.to_string()],
-        _ => return Ok(None),
-    };
-
-    let preview_sql = statements.join(";\n\n") + if statements.is_empty() { "" } else { ";" };
-
-    Ok(Some(RestorePlan {
-        version,
-        statements,
-        preview_sql,
-    }))
-}
-
-async fn build_table_restore_plan(
-    connection: Arc<dyn Connection>,
-    version: VersionEntry,
-) -> anyhow::Result<Option<RestorePlan>> {
-    let target_snapshot: TableDetails = serde_json::from_str(&version.content)?;
-    let schema_introspection = connection.as_schema_introspection().ok_or_else(|| {
-        anyhow::anyhow!("Schema introspection is not available for this connection")
-    })?;
-    let current_snapshot = schema_introspection
-        .get_table(version.object_schema.as_deref(), &version.object_name)
-        .await?;
-
-    let comparator = SchemaComparator::new();
-    let Some(table_diff) = comparator.compare_table_details(&target_snapshot, &current_snapshot)
-    else {
-        return Ok(None);
-    };
-
-    let mut schema_diff = SchemaDiff::new();
-    schema_diff.modified_tables.push(table_diff);
-
-    let generator = MigrationGenerator::with_config(MigrationConfig::for_dialect(
-        migration_dialect_for_connection(&connection),
-    ));
-    let migration = generator.generate(&schema_diff)?;
-    if migration.up_sql.is_empty() {
-        return Ok(None);
-    }
-
-    Ok(Some(RestorePlan {
-        version,
-        preview_sql: migration.up_script(),
-        statements: migration.up_sql,
-    }))
-}
-
-async fn build_restore_plan(
-    connection: Arc<dyn Connection>,
-    version: VersionEntry,
-) -> anyhow::Result<Option<RestorePlan>> {
-    if version.object_type == DatabaseObjectType::Table {
-        build_table_restore_plan(connection, version).await
-    } else {
-        build_sql_restore_plan(&connection, version)
-    }
-}
 
 impl MainView {
     /// Show version history for a database object.
@@ -241,13 +72,12 @@ impl MainView {
 
             // Add panel to the right dock
             let panel_view: Arc<dyn PanelView> = Arc::new(panel.clone());
-            self.dock_area.update(cx, |area, cx| {
-                area.add_panel(panel_view, DockPlacement::Right, None, window, cx);
+            self.workspace_controller.update(cx, |workspace, cx| {
+                workspace.add_panel(panel_view, DockPlacement::Right, None, window, cx);
             });
 
-            // Open right dock if not already open
-            self.dock_area.update(cx, |area, cx| {
-                area.set_dock_open(DockPlacement::Right, true, window, cx);
+            self.workspace_controller.update(cx, |workspace, cx| {
+                workspace.reveal_panel("VersionHistoryPanel", DockPlacement::Right, window, cx);
             });
 
             self.version_history_panel = Some(panel);
@@ -297,9 +127,11 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let repository = self.version_repository.clone();
-
-        match repository.diff(from_version_id, to_version_id) {
+        match zqlz_versioning::diff_versions(
+            self.version_repository.as_ref(),
+            from_version_id,
+            to_version_id,
+        ) {
             Ok(diff) => {
                 self.open_diff_viewer(diff, window, cx);
             }
@@ -320,13 +152,14 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let repository = self.version_repository.clone();
-
-        match repository.diff_with_parent(version_id) {
-            Ok(Some(diff)) => {
-                self.open_diff_viewer(diff, window, cx);
+        match zqlz_versioning::diff_version_with_parent(
+            self.version_repository.as_ref(),
+            version_id,
+        ) {
+            Ok(DiffWithParentResult::Diff(diff)) => {
+                self.open_diff_viewer(*diff, window, cx);
             }
-            Ok(None) => {
+            Ok(DiffWithParentResult::InitialVersion) => {
                 window.push_notification(
                     Notification::info(
                         "This is the initial version (no previous version to compare)",
@@ -374,8 +207,8 @@ impl MainView {
 
             // Add panel to center dock (like a query result)
             let panel_view: Arc<dyn PanelView> = Arc::new(panel.clone());
-            self.dock_area.update(cx, |area, cx| {
-                area.add_panel(panel_view, DockPlacement::Center, None, window, cx);
+            self.workspace_controller.update(cx, |workspace, cx| {
+                workspace.add_center_item(panel_view, window, cx);
             });
 
             self.diff_viewer_panel = Some(panel);
@@ -393,8 +226,8 @@ impl MainView {
             DiffViewerEvent::Close => {
                 if let Some(panel) = self.diff_viewer_panel.take() {
                     let panel_view: Arc<dyn PanelView> = Arc::new(panel);
-                    self.dock_area.update(cx, |area, cx| {
-                        area.remove_panel(panel_view, DockPlacement::Center, window, cx);
+                    self.workspace_controller.update(cx, |workspace, cx| {
+                        workspace.remove_center_item(panel_view, window, cx);
                     });
                 }
             }
@@ -411,15 +244,19 @@ impl MainView {
 
     /// Restore a specific version of a database object
     fn restore_version(&mut self, version_id: Uuid, window: &mut Window, cx: &mut Context<Self>) {
-        let repository = self.version_repository.clone();
-
-        match repository.get_version(version_id) {
-            Ok(Some(version)) => {
+        match zqlz_versioning::resolve_version_for_restore(
+            self.version_repository.as_ref(),
+            version_id,
+        ) {
+            Ok(version) => {
                 let Some(app_state) = cx.try_global::<AppState>() else {
                     tracing::error!("No AppState available");
                     return;
                 };
-                let Some(connection) = app_state.connections.get(version.connection_id) else {
+                let Some(connection) = app_state
+                    .connection_service
+                    .get_connection(version.connection_id)
+                else {
                     window.push_notification(Notification::error("Connection not found"), cx);
                     return;
                 };
@@ -430,10 +267,12 @@ impl MainView {
                 let window_handle = window.window_handle();
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    match build_restore_plan(connection.clone(), version.clone()).await {
-                        Ok(Some(plan)) => {
+                    match zqlz_versioning::build_restore_plan(connection.clone(), version.clone())
+                        .await
+                    {
+                        Ok(RestorePlanningResult::Plan(plan)) => {
                             cx.update(|window, cx| {
-                                let plan_for_dialog = plan.clone();
+                                let plan_for_dialog = (*plan).clone();
                                 let connection = connection.clone();
                                 let repository = repository.clone();
                                 let main_view = main_view.clone();
@@ -490,17 +329,16 @@ impl MainView {
                                             let main_view = main_view.clone();
 
                                             cx.spawn(async move |cx| {
-                                                let mut apply_error = None;
-                                                for statement in &plan.statements {
-                                                    if let Err(error) = connection.execute(statement, &[]).await {
-                                                        apply_error = Some(error.to_string());
-                                                        break;
-                                                    }
-                                                }
+                                                let apply_result = zqlz_versioning::apply_restore_plan(
+                                                    connection.clone(),
+                                                    repository.as_ref(),
+                                                    &plan,
+                                                )
+                                                .await;
 
                                                 let _ = cx.update_window(window_handle, |_, window, cx| {
-                                                    match apply_error {
-                                                        Some(error) => {
+                                                    match apply_result {
+                                                        Err(error) => {
                                                             tracing::error!(%error, object = %plan.version.object_id, "Failed to restore version");
                                                             window.push_notification(
                                                                 Notification::error(format!(
@@ -512,16 +350,13 @@ impl MainView {
                                                                 cx,
                                                             );
                                                         }
-                                                        None => {
-                                                            if let Err(error) = repository.commit(
-                                                                plan.version.connection_id,
-                                                                plan.version.object_type,
-                                                                plan.version.object_schema.clone(),
-                                                                plan.version.object_name.clone(),
-                                                                plan.version.content.clone(),
-                                                                version_restore_commit_message(&plan.version),
-                                                            ) {
-                                                                tracing::error!(%error, object = %plan.version.object_id, "Failed to record restore version snapshot");
+                                                        Ok(apply_result) => {
+                                                            if let Some(record_error) = apply_result.restore_commit_record_error {
+                                                                tracing::error!(
+                                                                    object = %plan.version.object_id,
+                                                                    error = %record_error,
+                                                                    "Failed to record restore version snapshot"
+                                                                );
                                                             }
 
                                                             let _ = main_view.update(cx, |main_view, cx| {
@@ -558,7 +393,7 @@ impl MainView {
                                 });
                             })?;
                         }
-                        Ok(None) => {
+                        Ok(RestorePlanningResult::NoChanges) => {
                             cx.update(|window, cx| {
                                 window.push_notification(
                                     Notification::info(format!(
@@ -566,6 +401,17 @@ impl MainView {
                                         version.object_type.display_name(),
                                         version.object_name,
                                         version.short_id()
+                                    )),
+                                    cx,
+                                );
+                            })?;
+                        }
+                        Ok(RestorePlanningResult::UnsupportedObjectType(object_type)) => {
+                            cx.update(|window, cx| {
+                                window.push_notification(
+                                    Notification::warning(format!(
+                                        "Restore is not supported for {} objects",
+                                        object_type.display_name().to_lowercase()
                                     )),
                                     cx,
                                 );
@@ -590,9 +436,6 @@ impl MainView {
                     anyhow::Ok(())
                 })
                 .detach();
-            }
-            Ok(None) => {
-                window.push_notification(Notification::error("Version not found"), cx);
             }
             Err(e) => {
                 tracing::error!("Failed to restore version: {}", e);
@@ -643,7 +486,7 @@ impl MainView {
                         return false;
                     }
 
-                    match repository.tag(version_id, &tag_name, None) {
+                    match zqlz_versioning::tag_version(repository.as_ref(), version_id, &tag_name) {
                         Ok(_) => {
                             tracing::info!("Tagged version {} as '{}'", version_id, tag_name);
                         }

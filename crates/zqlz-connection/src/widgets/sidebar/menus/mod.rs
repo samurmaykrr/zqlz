@@ -16,8 +16,10 @@
 pub(super) mod state;
 
 mod connection_menu;
+mod driver_object_menu;
 mod function_menu;
 mod materialized_view_menu;
+mod metadata_object_menu;
 mod procedure_menu;
 mod query_menu;
 mod redis_menu;

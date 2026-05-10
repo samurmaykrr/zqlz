@@ -5,8 +5,9 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::ForeignKeyAction;
 use zqlz_ui::widgets::{
-    ActiveTheme, Sizable,
+    ActiveTheme, Sizable, Theme,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex, v_flex,
@@ -36,7 +37,12 @@ pub struct ForeignKeyInfo {
     pub name: String,
     pub columns: Vec<String>,
     pub referenced_table: String,
+    pub referenced_schema: Option<String>,
     pub referenced_columns: Vec<String>,
+    pub on_update: ForeignKeyAction,
+    pub on_delete: ForeignKeyAction,
+    pub is_deferrable: bool,
+    pub initially_deferred: bool,
 }
 
 /// Schema details for a table or view
@@ -399,6 +405,7 @@ impl SchemaDetailsPanel {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let theme = cx.theme();
+        let foreign_keys = coalesce_foreign_keys(foreign_keys);
 
         v_flex()
             .w_full()
@@ -414,7 +421,17 @@ impl SchemaDetailsPanel {
                 v_flex()
                     .w_full()
                     .gap_1()
-                    .children(foreign_keys.iter().map(|fk| {
+                    .children(foreign_keys.into_iter().map(|fk| {
+                        let referenced_table = referenced_table_label(&fk);
+                        let column_pairs = fk
+                            .columns
+                            .iter()
+                            .zip(fk.referenced_columns.iter())
+                            .map(|(column, referenced_column)| {
+                                format!("{column} -> {referenced_table}.{referenced_column}")
+                            })
+                            .collect::<Vec<_>>();
+
                         v_flex()
                             .w_full()
                             .px_2()
@@ -424,21 +441,136 @@ impl SchemaDetailsPanel {
                             .rounded_md()
                             .gap_1()
                             .child(
-                                div()
-                                    .text_sm()
-                                    .font_weight(FontWeight::MEDIUM)
-                                    .child(fk.name.clone()),
+                                h_flex()
+                                    .gap_2()
+                                    .items_start()
+                                    .flex_wrap()
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .font_weight(FontWeight::MEDIUM)
+                                            .flex_1()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .child(fk.name.clone()),
+                                    )
+                                    .children(foreign_key_badges(&fk, theme)),
                             )
-                            .child(div().text_xs().text_color(theme.muted_foreground).child(
-                                format!(
-                                    "({}) -> {}.{}",
-                                    fk.columns.join(", "),
-                                    fk.referenced_table,
-                                    fk.referenced_columns.join(", ")
-                                ),
-                            ))
+                            .child(v_flex().gap_0p5().children(column_pairs.into_iter().map(
+                                |column_pair| {
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .child(column_pair)
+                                },
+                            )))
                     })),
             )
+    }
+}
+
+fn coalesce_foreign_keys(foreign_keys: &[ForeignKeyInfo]) -> Vec<ForeignKeyInfo> {
+    let mut grouped: Vec<ForeignKeyInfo> = Vec::new();
+
+    for foreign_key in foreign_keys {
+        if let Some(grouped_key) = grouped
+            .iter_mut()
+            .find(|grouped_key| same_foreign_key_group(grouped_key, foreign_key))
+        {
+            for (column, referenced_column) in foreign_key
+                .columns
+                .iter()
+                .zip(foreign_key.referenced_columns.iter())
+            {
+                let already_shown = grouped_key
+                    .columns
+                    .iter()
+                    .zip(grouped_key.referenced_columns.iter())
+                    .any(|(shown_column, shown_referenced_column)| {
+                        shown_column == column && shown_referenced_column == referenced_column
+                    });
+
+                if !already_shown {
+                    grouped_key.columns.push(column.clone());
+                    grouped_key
+                        .referenced_columns
+                        .push(referenced_column.clone());
+                }
+            }
+        } else {
+            grouped.push(foreign_key.clone());
+        }
+    }
+
+    grouped
+}
+
+fn same_foreign_key_group(left: &ForeignKeyInfo, right: &ForeignKeyInfo) -> bool {
+    left.name == right.name
+        && left.referenced_schema == right.referenced_schema
+        && left.referenced_table == right.referenced_table
+        && left.on_update == right.on_update
+        && left.on_delete == right.on_delete
+        && left.is_deferrable == right.is_deferrable
+        && left.initially_deferred == right.initially_deferred
+}
+
+fn referenced_table_label(foreign_key: &ForeignKeyInfo) -> String {
+    foreign_key
+        .referenced_schema
+        .as_deref()
+        .filter(|schema| !schema.is_empty())
+        .map(|schema| format!("{schema}.{}", foreign_key.referenced_table))
+        .unwrap_or_else(|| foreign_key.referenced_table.clone())
+}
+
+fn foreign_key_badges(foreign_key: &ForeignKeyInfo, theme: &Theme) -> Vec<AnyElement> {
+    let mut badges = Vec::new();
+
+    badges.push(foreign_key_badge(
+        format!("DELETE {}", foreign_key_action_label(foreign_key.on_delete)),
+        theme,
+    ));
+    badges.push(foreign_key_badge(
+        format!("UPDATE {}", foreign_key_action_label(foreign_key.on_update)),
+        theme,
+    ));
+
+    if foreign_key.is_deferrable {
+        badges.push(foreign_key_badge(
+            if foreign_key.initially_deferred {
+                "DEFERRABLE INITIALLY DEFERRED".to_string()
+            } else {
+                "DEFERRABLE".to_string()
+            },
+            theme,
+        ));
+    }
+
+    badges
+}
+
+fn foreign_key_badge(label: String, theme: &Theme) -> AnyElement {
+    div()
+        .text_xs()
+        .px_1()
+        .rounded_sm()
+        .bg(theme.info.opacity(0.2))
+        .text_color(theme.info)
+        .flex_shrink_0()
+        .child(label)
+        .into_any_element()
+}
+
+fn foreign_key_action_label(action: ForeignKeyAction) -> &'static str {
+    match action {
+        ForeignKeyAction::NoAction => "NO ACTION",
+        ForeignKeyAction::Restrict => "RESTRICT",
+        ForeignKeyAction::Cascade => "CASCADE",
+        ForeignKeyAction::SetNull => "SET NULL",
+        ForeignKeyAction::SetDefault => "SET DEFAULT",
     }
 }
 

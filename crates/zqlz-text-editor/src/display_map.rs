@@ -56,6 +56,39 @@ pub struct DisplayTextChunk {
     pub inlay_hints: Vec<AnchoredInlayHint>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DisplayHitTest {
+    pub display_point: DisplayPoint,
+    pub row_id: DisplayRowId,
+    pub visual_row: usize,
+    pub position: Position,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMinimapLine {
+    pub buffer_line: usize,
+    pub display_row: usize,
+    pub visual_row_start: usize,
+    pub visual_row_count: usize,
+    pub has_diagnostics: bool,
+    pub has_inlay_hints: bool,
+    pub has_block_widgets: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DisplayMinimapSnapshot {
+    lines: Arc<Vec<DisplayMinimapLine>>,
+    total_visual_rows: usize,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct DisplayInvalidationSnapshot {
+    pub fold_range: Option<Range<usize>>,
+    pub wrap_range: Option<Range<usize>>,
+    pub block_range: Option<Range<usize>>,
+    pub affected_range: Option<Range<usize>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct DisplayViewport {
     visible_rows: Range<usize>,
@@ -201,8 +234,10 @@ struct WrapLayoutCacheEntry {
 #[derive(Clone, Debug)]
 pub struct HighlightSnapshot {
     syntax_highlights: Arc<Vec<Highlight>>,
+    semantic_highlights: Arc<Vec<Highlight>>,
     diagnostics: Arc<Vec<AnchoredDiagnostic>>,
     highlight_indexes_by_line: Arc<Vec<Vec<usize>>>,
+    semantic_highlight_indexes_by_line: Arc<Vec<Vec<usize>>>,
     diagnostic_indexes_by_line: Arc<Vec<Vec<usize>>>,
 }
 
@@ -240,8 +275,10 @@ struct ViewportCacheEntry {
 struct HighlightMapState {
     total_lines: usize,
     syntax_highlights: Arc<Vec<Highlight>>,
+    semantic_highlights: Arc<Vec<Highlight>>,
     diagnostics: Arc<Vec<AnchoredDiagnostic>>,
     highlight_indexes_by_line: Arc<Vec<Vec<usize>>>,
+    semantic_highlight_indexes_by_line: Arc<Vec<Vec<usize>>>,
     diagnostic_indexes_by_line: Arc<Vec<Vec<usize>>>,
     last_sync_range: Option<Range<usize>>,
 }
@@ -322,6 +359,14 @@ impl DisplayMap {
         self.block_map.last_sync_range()
     }
 
+    pub fn invalidation_snapshot(&self) -> DisplayInvalidationSnapshot {
+        DisplayInvalidationSnapshot::new(
+            self.last_sync_range(),
+            self.last_wrap_sync_range(),
+            self.last_block_sync_range(),
+        )
+    }
+
     pub fn update_wrap_rows(
         &mut self,
         buffer_lines: &[usize],
@@ -344,9 +389,38 @@ impl DisplayMap {
         inlay_hints: Arc<Vec<AnchoredInlayHint>>,
         code_actions: &[AnchoredCodeAction],
     ) -> DisplaySnapshot {
-        let highlight_snapshot =
-            self.highlight_map
-                .snapshot(&buffer, syntax_highlights.clone(), diagnostics);
+        self.snapshot_with_semantic_highlights(
+            buffer,
+            fold_regions,
+            folded_lines,
+            soft_wrap,
+            syntax_highlights,
+            Arc::new(Vec::new()),
+            diagnostics,
+            inlay_hints,
+            code_actions,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn snapshot_with_semantic_highlights(
+        &self,
+        buffer: BufferSnapshot,
+        fold_regions: &[FoldRegion],
+        folded_lines: &HashSet<usize>,
+        soft_wrap: bool,
+        syntax_highlights: Arc<Vec<Highlight>>,
+        semantic_highlights: Arc<Vec<Highlight>>,
+        diagnostics: &[AnchoredDiagnostic],
+        inlay_hints: Arc<Vec<AnchoredInlayHint>>,
+        code_actions: &[AnchoredCodeAction],
+    ) -> DisplaySnapshot {
+        let highlight_snapshot = self.highlight_map.snapshot(
+            &buffer,
+            syntax_highlights.clone(),
+            semantic_highlights,
+            diagnostics,
+        );
         let inlay_snapshot = self.inlay_map.snapshot(&buffer, inlay_hints);
         let block_snapshot =
             self.block_map
@@ -373,6 +447,30 @@ impl DisplayMap {
             block_snapshot,
             chunk_snapshot,
         }
+    }
+}
+
+impl DisplayInvalidationSnapshot {
+    fn new(
+        fold_range: Option<Range<usize>>,
+        wrap_range: Option<Range<usize>>,
+        block_range: Option<Range<usize>>,
+    ) -> Self {
+        let affected_range = [fold_range.clone(), wrap_range.clone(), block_range.clone()]
+            .into_iter()
+            .flatten()
+            .reduce(union_ranges);
+
+        Self {
+            fold_range,
+            wrap_range,
+            block_range,
+            affected_range,
+        }
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.affected_range.is_none()
     }
 }
 
@@ -707,6 +805,7 @@ impl HighlightMap {
         &self,
         buffer: &BufferSnapshot,
         syntax_highlights: Arc<Vec<Highlight>>,
+        semantic_highlights: Arc<Vec<Highlight>>,
         diagnostics: &[AnchoredDiagnostic],
     ) -> HighlightSnapshot {
         let line_count = buffer.line_count();
@@ -719,6 +818,18 @@ impl HighlightMap {
             state.highlight_indexes_by_line = Arc::new(indexes_by_line_for_offsets(
                 line_count,
                 syntax_highlights
+                    .iter()
+                    .map(|highlight| highlight.start..highlight.end),
+                buffer,
+            ));
+        }
+
+        if state.total_lines != line_count
+            || state.semantic_highlights.as_ref() != semantic_highlights.as_ref()
+        {
+            state.semantic_highlight_indexes_by_line = Arc::new(indexes_by_line_for_offsets(
+                line_count,
+                semantic_highlights
                     .iter()
                     .map(|highlight| highlight.start..highlight.end),
                 buffer,
@@ -742,12 +853,15 @@ impl HighlightMap {
         };
         state.total_lines = line_count;
         state.syntax_highlights = syntax_highlights.clone();
+        state.semantic_highlights = semantic_highlights.clone();
         state.diagnostics = diagnostics.clone();
 
         HighlightSnapshot {
             syntax_highlights,
+            semantic_highlights,
             diagnostics,
             highlight_indexes_by_line: state.highlight_indexes_by_line.clone(),
+            semantic_highlight_indexes_by_line: state.semantic_highlight_indexes_by_line.clone(),
             diagnostic_indexes_by_line: state.diagnostic_indexes_by_line.clone(),
         }
     }
@@ -1126,6 +1240,10 @@ impl FoldDisplayState {
     pub fn last_wrap_sync_range(&self) -> Option<Range<usize>> {
         self.display_map.last_wrap_sync_range()
     }
+
+    pub fn invalidation_snapshot(&self) -> DisplayInvalidationSnapshot {
+        self.display_map.invalidation_snapshot()
+    }
 }
 
 impl FoldSnapshot {
@@ -1367,12 +1485,23 @@ impl HighlightSnapshot {
         self.syntax_highlights.clone()
     }
 
+    pub fn semantic_highlights(&self) -> Arc<Vec<Highlight>> {
+        self.semantic_highlights.clone()
+    }
+
     pub fn diagnostics(&self) -> &[AnchoredDiagnostic] {
         &self.diagnostics
     }
 
     pub fn highlight_indexes_for_line(&self, line: usize) -> &[usize] {
         self.highlight_indexes_by_line
+            .get(line)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn semantic_highlight_indexes_for_line(&self, line: usize) -> &[usize] {
+        self.semantic_highlight_indexes_by_line
             .get(line)
             .map(Vec::as_slice)
             .unwrap_or(&[])
@@ -1535,26 +1664,8 @@ impl DisplayChunkSnapshot {
         let start_offset = self.buffer.line_to_byte(row_info.buffer_line).unwrap_or(0);
         let end_offset = start_offset + line_text.len();
 
-        let highlights = self
-            .highlight_snapshot
-            .highlight_indexes_for_line(row_info.buffer_line)
-            .iter()
-            .filter_map(|&highlight_index| {
-                let highlight = self
-                    .highlight_snapshot
-                    .syntax_highlights
-                    .get(highlight_index)?;
-                if highlight.end <= start_offset || highlight.start >= end_offset {
-                    return None;
-                }
-
-                Some(ChunkHighlight {
-                    start: highlight.start.saturating_sub(start_offset),
-                    end: highlight.end.min(end_offset).saturating_sub(start_offset),
-                    kind: highlight.kind,
-                })
-            })
-            .collect();
+        let highlights =
+            self.composed_highlights_for_line(row_info.buffer_line, start_offset, end_offset);
 
         let diagnostics = self
             .highlight_snapshot
@@ -1596,6 +1707,118 @@ impl DisplayChunkSnapshot {
             .insert(display_row, chunk.clone());
         chunk
     }
+
+    fn composed_highlights_for_line(
+        &self,
+        buffer_line: usize,
+        start_offset: usize,
+        end_offset: usize,
+    ) -> Vec<ChunkHighlight> {
+        let semantic_highlights =
+            self.clipped_semantic_highlights(buffer_line, start_offset, end_offset);
+        let mut highlights = self.clipped_syntax_highlights(
+            buffer_line,
+            start_offset,
+            end_offset,
+            &semantic_highlights,
+        );
+        highlights.extend(semantic_highlights);
+        highlights.sort_by_key(|highlight| (highlight.start, highlight.end));
+        highlights
+    }
+
+    fn clipped_semantic_highlights(
+        &self,
+        buffer_line: usize,
+        start_offset: usize,
+        end_offset: usize,
+    ) -> Vec<ChunkHighlight> {
+        self.highlight_snapshot
+            .semantic_highlight_indexes_for_line(buffer_line)
+            .iter()
+            .filter_map(|&highlight_index| {
+                let highlight = self
+                    .highlight_snapshot
+                    .semantic_highlights
+                    .get(highlight_index)?;
+                clip_highlight_to_line(highlight, start_offset, end_offset)
+            })
+            .collect()
+    }
+
+    fn clipped_syntax_highlights(
+        &self,
+        buffer_line: usize,
+        start_offset: usize,
+        end_offset: usize,
+        semantic_highlights: &[ChunkHighlight],
+    ) -> Vec<ChunkHighlight> {
+        self.highlight_snapshot
+            .highlight_indexes_for_line(buffer_line)
+            .iter()
+            .filter_map(|&highlight_index| {
+                let highlight = self
+                    .highlight_snapshot
+                    .syntax_highlights
+                    .get(highlight_index)?;
+                clip_highlight_to_line(highlight, start_offset, end_offset)
+            })
+            .flat_map(|highlight| subtract_highlight_overlaps(highlight, semantic_highlights))
+            .collect()
+    }
+}
+
+fn clip_highlight_to_line(
+    highlight: &Highlight,
+    start_offset: usize,
+    end_offset: usize,
+) -> Option<ChunkHighlight> {
+    if highlight.end <= start_offset || highlight.start >= end_offset {
+        return None;
+    }
+
+    Some(ChunkHighlight {
+        start: highlight.start.saturating_sub(start_offset),
+        end: highlight.end.min(end_offset).saturating_sub(start_offset),
+        kind: highlight.kind,
+    })
+}
+
+fn subtract_highlight_overlaps(
+    highlight: ChunkHighlight,
+    semantic_highlights: &[ChunkHighlight],
+) -> Vec<ChunkHighlight> {
+    let mut remaining = vec![highlight];
+
+    for semantic_highlight in semantic_highlights {
+        let mut next_remaining = Vec::new();
+        for candidate in remaining {
+            if semantic_highlight.end <= candidate.start
+                || semantic_highlight.start >= candidate.end
+            {
+                next_remaining.push(candidate);
+                continue;
+            }
+
+            if candidate.start < semantic_highlight.start {
+                next_remaining.push(ChunkHighlight {
+                    start: candidate.start,
+                    end: semantic_highlight.start,
+                    kind: candidate.kind,
+                });
+            }
+            if semantic_highlight.end < candidate.end {
+                next_remaining.push(ChunkHighlight {
+                    start: semantic_highlight.end,
+                    end: candidate.end,
+                    kind: candidate.kind,
+                });
+            }
+        }
+        remaining = next_remaining;
+    }
+
+    remaining
 }
 
 impl DisplayViewport {
@@ -1613,6 +1836,16 @@ impl DisplayViewport {
 
     pub fn block_widgets(&self) -> Arc<Vec<(usize, BlockWidgetChunk)>> {
         self.block_widgets.clone()
+    }
+}
+
+impl DisplayMinimapSnapshot {
+    pub fn lines(&self) -> Arc<Vec<DisplayMinimapLine>> {
+        self.lines.clone()
+    }
+
+    pub fn total_visual_rows(&self) -> usize {
+        self.total_visual_rows
     }
 }
 
@@ -1852,6 +2085,59 @@ impl DisplaySnapshot {
         self.position_for_display_column(buffer_line, display_point.column)
     }
 
+    pub fn hit_test_display_point(&self, display_point: DisplayPoint) -> Option<DisplayHitTest> {
+        let buffer_line = self.buffer_line_for_display_slot(display_point.row)?;
+        let position = self.position_for_display_column(buffer_line, display_point.column);
+        let row_id = self.point_to_row_id(position)?;
+        let visual_row = self.visual_row_for_row_id(row_id)?;
+
+        Some(DisplayHitTest {
+            display_point,
+            row_id,
+            visual_row,
+            position,
+        })
+    }
+
+    pub fn minimap_snapshot(&self) -> DisplayMinimapSnapshot {
+        let lines = self
+            .visible_buffer_lines()
+            .iter()
+            .enumerate()
+            .map(|(display_row, &buffer_line)| {
+                let visual_row_start = self
+                    .wrap_snapshot
+                    .visual_row_for_display_row(display_row)
+                    .unwrap_or(display_row);
+                let visual_row_count = self.wrap_snapshot.visual_rows_for_line(buffer_line).max(1);
+
+                DisplayMinimapLine {
+                    buffer_line,
+                    display_row,
+                    visual_row_start,
+                    visual_row_count,
+                    has_diagnostics: !self
+                        .highlight_snapshot
+                        .diagnostic_indexes_for_line(buffer_line)
+                        .is_empty(),
+                    has_inlay_hints: !self
+                        .inlay_snapshot
+                        .inlay_indexes_for_line(buffer_line)
+                        .is_empty(),
+                    has_block_widgets: !self
+                        .block_snapshot
+                        .block_indexes_for_line(buffer_line)
+                        .is_empty(),
+                }
+            })
+            .collect();
+
+        DisplayMinimapSnapshot {
+            lines: Arc::new(lines),
+            total_visual_rows: self.visual_display_row_count(),
+        }
+    }
+
     pub fn display_column_for_position(&self, position: Position) -> Option<usize> {
         let line_text = self.buffer.line(position.line)?;
         Some(
@@ -1999,6 +2285,121 @@ mod tests {
                 end: 4,
                 kind: HighlightKind::Keyword
             }]
+        );
+    }
+
+    #[test]
+    fn test_display_snapshot_exposes_semantic_highlights_separately() {
+        let buffer = TextBuffer::new("alpha\nbeta");
+        let display_map = DisplayMap::from_display_lines(vec![0, 1]);
+        let snapshot = display_map.snapshot_with_semantic_highlights(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            Arc::new(vec![Highlight {
+                start: 0,
+                end: 5,
+                kind: HighlightKind::Identifier,
+            }]),
+            Arc::new(vec![Highlight {
+                start: 1,
+                end: 4,
+                kind: HighlightKind::Function,
+            }]),
+            &[],
+            Arc::new(vec![]),
+            &[],
+        );
+
+        assert_eq!(
+            snapshot.highlight_snapshot().highlight_indexes_for_line(0),
+            &[0]
+        );
+        assert_eq!(
+            snapshot
+                .highlight_snapshot()
+                .semantic_highlight_indexes_for_line(0),
+            &[0]
+        );
+
+        let chunks = snapshot.text_chunks(0..1);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(
+            chunks[0].highlights,
+            vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 1,
+                    kind: HighlightKind::Identifier,
+                },
+                ChunkHighlight {
+                    start: 1,
+                    end: 4,
+                    kind: HighlightKind::Function,
+                },
+                ChunkHighlight {
+                    start: 4,
+                    end: 5,
+                    kind: HighlightKind::Identifier,
+                },
+            ]
+        );
+        assert_eq!(
+            snapshot.highlight_snapshot().semantic_highlights().as_ref(),
+            &vec![Highlight {
+                start: 1,
+                end: 4,
+                kind: HighlightKind::Function,
+            }]
+        );
+    }
+
+    #[test]
+    fn semantic_highlights_take_precedence_over_overlapping_syntax_chunks() {
+        let buffer = TextBuffer::new("select count(*)");
+        let display_map = DisplayMap::from_display_lines(vec![0]);
+        let snapshot = display_map.snapshot_with_semantic_highlights(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            Arc::new(vec![
+                Highlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                Highlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Identifier,
+                },
+            ]),
+            Arc::new(vec![Highlight {
+                start: 7,
+                end: 12,
+                kind: HighlightKind::Function,
+            }]),
+            &[],
+            Arc::new(vec![]),
+            &[],
+        );
+
+        assert_eq!(
+            snapshot.text_chunks(0..1)[0].highlights,
+            vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Function,
+                },
+            ]
         );
     }
 
@@ -2289,6 +2690,113 @@ mod tests {
         );
         assert_eq!(snapshot.inlay_snapshot().inlay_indexes_for_line(2), &[0]);
         assert_eq!(snapshot.block_snapshot().block_indexes_for_line(2), &[0]);
+    }
+
+    #[test]
+    fn display_snapshot_composes_fold_wrap_tab_diagnostic_inlay_and_block_inputs() {
+        let buffer = TextBuffer::new("SELECT\talpha\nhidden\nvisible");
+        let mut display_map = DisplayMap::new();
+        let folded_lines = HashSet::from([0]);
+        let fold_regions = vec![FoldRegion::new(0, 1, crate::FoldKind::Block)];
+        display_map.sync(buffer.line_count(), &fold_regions, &folded_lines);
+        display_map.set_tab_size(4);
+        display_map.update_wrap_rows(&[0, 2], 4, &[3, 2]);
+
+        let visible_start = buffer
+            .snapshot()
+            .line_to_byte(2)
+            .expect("visible line start offset");
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &fold_regions,
+            &folded_lines,
+            true,
+            Arc::new(vec![Highlight {
+                start: 0,
+                end: 6,
+                kind: HighlightKind::Keyword,
+            }]),
+            &[AnchoredDiagnostic {
+                range: buffer
+                    .anchored_range(
+                        visible_start..visible_start + "visible".len(),
+                        Bias::Left,
+                        Bias::Right,
+                    )
+                    .expect("diagnostic range"),
+                kind: HighlightKind::Error,
+            }],
+            Arc::new(vec![AnchoredInlayHint {
+                anchor: buffer
+                    .anchor_at(visible_start + "visible".len(), Bias::Right)
+                    .expect("inlay anchor"),
+                label: "hint".to_string(),
+                side: InlayHintSide::After,
+                kind: None,
+                padding_left: false,
+                padding_right: false,
+            }]),
+            &[AnchoredCodeAction {
+                line: 2,
+                label: "Quick fix".to_string(),
+            }],
+        );
+
+        assert_eq!(snapshot.visible_buffer_lines(), &[0, 2]);
+        assert_eq!(snapshot.visual_display_row_count(), 5);
+        assert_eq!(snapshot.display_slot_for_buffer_line(1), None);
+        assert_eq!(
+            snapshot.point_to_display_point(Position::new(0, 7)),
+            Some(DisplayPoint { row: 0, column: 8 })
+        );
+
+        let visible_chunk = snapshot
+            .text_chunks(1..2)
+            .into_iter()
+            .next()
+            .expect("visible row chunk");
+        assert_eq!(visible_chunk.buffer_line, 2);
+        assert_eq!(visible_chunk.diagnostics, vec![0.."visible".len()]);
+        assert_eq!(visible_chunk.inlay_hints.len(), 1);
+        assert_eq!(
+            snapshot.block_widgets_for_rows(1..2)[0].1.label,
+            "Quick fix"
+        );
+    }
+
+    #[test]
+    fn display_snapshot_exposes_hit_test_contract_for_visible_wrapped_rows() {
+        let buffer = TextBuffer::new("SELECT\talpha\nhidden\nvisible");
+        let mut display_map = DisplayMap::new();
+        let folded_lines = HashSet::from([0]);
+        let fold_regions = vec![FoldRegion::new(0, 1, crate::FoldKind::Block)];
+        display_map.sync(buffer.line_count(), &fold_regions, &folded_lines);
+        display_map.set_tab_size(4);
+        display_map.update_wrap_rows(&[0, 2], 4, &[3, 2]);
+
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &fold_regions,
+            &folded_lines,
+            true,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        let hit = snapshot
+            .hit_test_display_point(DisplayPoint { row: 1, column: 5 })
+            .expect("visible display point should resolve");
+
+        assert_eq!(hit.position, Position::new(2, 5));
+        assert_eq!(hit.row_id.buffer_line, 2);
+        assert_eq!(hit.row_id.wrap_subrow, 1);
+        assert_eq!(hit.visual_row, 4);
+        assert_eq!(
+            snapshot.hit_test_display_point(DisplayPoint { row: 3, column: 0 }),
+            None
+        );
     }
 
     #[test]
@@ -2861,6 +3369,36 @@ mod tests {
     }
 
     #[test]
+    fn display_map_exposes_combined_invalidation_snapshot() {
+        let buffer = TextBuffer::new("zero\none\ntwo\nthree\nfour");
+        let mut display_map = DisplayMap::new();
+        display_map.sync(4, &[], &HashSet::new());
+        display_map.update_wrap_rows(&[3], 8, &[3]);
+
+        display_map.sync_range(5, &[], &HashSet::new(), 1..2);
+        let _snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            true,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[AnchoredCodeAction {
+                line: 4,
+                label: "Quick fix".to_string(),
+            }],
+        );
+
+        let invalidation = display_map.invalidation_snapshot();
+        assert_eq!(invalidation.fold_range, Some(1..2));
+        assert_eq!(invalidation.wrap_range, Some(1..2));
+        assert_eq!(invalidation.block_range, Some(4..5));
+        assert_eq!(invalidation.affected_range, Some(1..5));
+        assert!(!invalidation.is_clean());
+    }
+
+    #[test]
     fn viewport_reuses_cached_row_chunk_and_block_slices_for_identical_range() {
         let buffer = TextBuffer::new("alpha\nbeta\ngamma");
         let display_map = DisplayMap::from_display_lines(vec![0, 1, 2]);
@@ -2946,5 +3484,60 @@ mod tests {
         assert_eq!(row_lines, vec![0, 2, 3]);
         assert_eq!(chunk_lines, vec![0, 2, 3]);
         assert_eq!(block_rows, vec![1, 2]);
+    }
+
+    #[test]
+    fn display_snapshot_exposes_minimap_summary_inputs() {
+        let buffer = TextBuffer::new("zero\none\ntwo\nthree");
+        let mut display_map = DisplayMap::new();
+        let folded_lines = HashSet::from([0]);
+        let fold_regions = vec![FoldRegion::new(0, 1, crate::FoldKind::Block)];
+        display_map.sync(buffer.line_count(), &fold_regions, &folded_lines);
+        display_map.update_wrap_rows(&[0, 2, 3], 8, &[1, 2, 1]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &fold_regions,
+            &folded_lines,
+            true,
+            Arc::new(Vec::new()),
+            &[AnchoredDiagnostic {
+                range: buffer
+                    .anchored_range(9..12, Bias::Left, Bias::Right)
+                    .expect("diagnostic range"),
+                kind: HighlightKind::Error,
+            }],
+            Arc::new(vec![AnchoredInlayHint {
+                anchor: buffer.anchor_at(15, Bias::Right).expect("inlay anchor"),
+                label: "hint".to_string(),
+                side: InlayHintSide::After,
+                kind: None,
+                padding_left: false,
+                padding_right: false,
+            }]),
+            &[AnchoredCodeAction {
+                line: 3,
+                label: "Quick fix".to_string(),
+            }],
+        );
+
+        let minimap = snapshot.minimap_snapshot();
+        let lines = minimap.lines();
+
+        assert_eq!(minimap.total_visual_rows(), 4);
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0].buffer_line, 0);
+        assert_eq!(lines[0].display_row, 0);
+        assert_eq!(lines[0].visual_row_start, 0);
+        assert_eq!(lines[0].visual_row_count, 1);
+        assert!(!lines[0].has_diagnostics);
+        assert_eq!(lines[1].buffer_line, 2);
+        assert_eq!(lines[1].visual_row_start, 1);
+        assert_eq!(lines[1].visual_row_count, 2);
+        assert!(lines[1].has_diagnostics);
+        assert!(!lines[1].has_inlay_hints);
+        assert_eq!(lines[2].buffer_line, 3);
+        assert_eq!(lines[2].visual_row_start, 3);
+        assert!(lines[2].has_inlay_hints);
+        assert!(lines[2].has_block_widgets);
     }
 }

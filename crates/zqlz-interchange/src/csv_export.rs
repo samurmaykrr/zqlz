@@ -90,6 +90,7 @@ impl CsvExporter {
 
         let mut output_files = Vec::new();
         let total_tables = selected_tables.len();
+        let mut errors = Vec::new();
 
         for (idx, table_config) in selected_tables.iter().enumerate() {
             let table_index = idx + 1;
@@ -104,9 +105,27 @@ impl CsvExporter {
                 message: format!("Exporting table: {}", table_config.table_name),
             });
 
-            let output_path = self
+            let output_path = match self
                 .export_table(table_config, table_index, total_tables)
-                .await?;
+                .await
+            {
+                Ok(output_path) => output_path,
+                Err(error) if self.state.csv_options.continue_on_error => {
+                    let message = format!("Skipped {}: {}", table_config.table_name, error);
+                    errors.push(message.clone());
+                    self.report_progress(CsvExportProgress {
+                        current_table: table_config.table_name.clone(),
+                        table_index,
+                        total_tables,
+                        rows_exported: 0,
+                        total_rows: None,
+                        log_level: LogLevel::Warning,
+                        message,
+                    });
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             output_files.push(output_path);
 
             self.report_progress(CsvExportProgress {
@@ -129,6 +148,10 @@ impl CsvExporter {
             log_level: LogLevel::Success,
             message: format!("Export complete. {} file(s) created.", output_files.len()),
         });
+
+        if output_files.is_empty() && !errors.is_empty() {
+            return Err(CsvExportError::QueryError(errors.join("; ")));
+        }
 
         Ok(output_files)
     }

@@ -1,11 +1,11 @@
 use std::rc::Rc;
 
 use gpui::{
-    Context, Corner, DismissEvent, ElementId, Entity, Focusable, InteractiveElement, IntoElement,
+    Anchor, Context, DismissEvent, ElementId, Entity, Focusable, InteractiveElement, IntoElement,
     RenderOnce, SharedString, StyleRefinement, Styled, Window,
 };
 
-use crate::widgets::{Anchor, Selectable, button::Button, menu::PopupMenu, popover::Popover};
+use crate::widgets::{Selectable, button::Button, menu::PopupMenu, popover::Popover};
 
 type DropdownMenuBuilder = Rc<dyn Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu>;
 
@@ -16,13 +16,13 @@ pub trait DropdownMenu: Styled + Selectable + InteractiveElement + IntoElement +
         self,
         f: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     ) -> DropdownMenuPopover<Self> {
-        self.dropdown_menu_with_anchor(Corner::TopLeft, f)
+        self.dropdown_menu_with_anchor(Anchor::TopLeft, f)
     }
 
     /// Create a dropdown menu with the given items, anchored to the given corner
     fn dropdown_menu_with_anchor(
         mut self,
-        anchor: impl Into<Corner>,
+        anchor: impl Into<Anchor>,
         f: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     ) -> DropdownMenuPopover<Self> {
         let style = self.style().clone();
@@ -49,22 +49,22 @@ where
 {
     fn new(
         id: ElementId,
-        anchor: impl Into<Corner>,
+        anchor: impl Into<Anchor>,
         trigger: T,
         builder: impl Fn(PopupMenu, &mut Window, &mut Context<PopupMenu>) -> PopupMenu + 'static,
     ) -> Self {
         Self {
             id: SharedString::from(format!("dropdown-menu:{:?}", id)).into(),
             style: StyleRefinement::default(),
-            anchor: Anchor::from(anchor.into()),
+            anchor: anchor.into(),
             trigger,
             builder: Rc::new(builder),
         }
     }
 
     /// Set the anchor corner for the dropdown menu popover.
-    pub fn anchor(mut self, anchor: impl Into<Corner>) -> Self {
-        self.anchor = Anchor::from(anchor.into());
+    pub fn anchor(mut self, anchor: impl Into<Anchor>) -> Self {
+        self.anchor = anchor.into();
         self
     }
 

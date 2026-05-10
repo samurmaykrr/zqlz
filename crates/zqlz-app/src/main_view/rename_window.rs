@@ -2,6 +2,8 @@ use std::sync::Arc;
 
 use gpui::*;
 use uuid::Uuid;
+use zqlz_core::validate_view_name;
+use zqlz_services::{RenameTableRequest, TableService};
 use zqlz_ui::widgets::{
     ActiveTheme as _, Disableable, Root,
     button::{Button, ButtonVariants as _},
@@ -14,13 +16,9 @@ use zqlz_ui::widgets::{
 use crate::main_view::MainView;
 use crate::workspace_state::RefreshScope;
 
-use super::{
-    table_handlers_utils::validation::validate_table_name,
-    view_handlers::{
-        build_drop_view_statement, build_rename_table_statement, fetch_view_definition,
-        replace_create_view_identifier, validate_view_name,
-    },
-};
+use super::table_handlers_utils::validation::validate_table_name;
+use zqlz_objects::build_drop_view_statement as build_drop_view_statement_for_object;
+use zqlz_objects::replace_create_view_identifier as replace_create_view_identifier_from_objects;
 
 #[derive(Clone)]
 enum RenameTarget {
@@ -28,6 +26,7 @@ enum RenameTarget {
         connection_id: Uuid,
         old_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
+        table_service: Arc<TableService>,
         main_view: WeakEntity<MainView>,
     },
     View {
@@ -85,32 +84,51 @@ impl RenameTarget {
             Self::Table {
                 old_name,
                 connection,
+                table_service,
                 ..
-            } => {
-                let sql = build_rename_table_statement(connection, old_name, new_name);
-
-                connection
-                    .execute(&sql, &[])
-                    .await
-                    .map(|_| ())
-                    .map_err(|error| format!("Failed to rename table: {error}"))
-            }
+            } => table_service
+                .rename_table(
+                    connection.clone(),
+                    RenameTableRequest {
+                        source_table_name: old_name.clone(),
+                        target_table_name: new_name.to_string(),
+                    },
+                )
+                .await
+                .map_err(|error| error.to_string()),
             Self::View {
                 old_name,
                 connection,
                 ..
             } => {
-                let definition = fetch_view_definition(connection, None, old_name).await?;
-                let create_renamed_sql =
-                    replace_create_view_identifier(&definition, connection, new_name).ok_or_else(
-                        || "Failed to parse CREATE VIEW statement while renaming view".to_string(),
-                    )?;
-                let restore_sql = replace_create_view_identifier(&definition, connection, old_name)
-                    .ok_or_else(|| {
-                        "Failed to prepare restore SQL while renaming view".to_string()
-                    })?;
+                let definition = zqlz_objects::fetch_object_definition(
+                    connection,
+                    &zqlz_objects::ObjectDefinitionRequest::new(
+                        zqlz_core::ObjectType::View,
+                        old_name,
+                    ),
+                )
+                .await
+                .map_err(|error| format!("Failed to fetch source view definition: {error}"))?;
+                let create_renamed_sql = replace_create_view_identifier_from_objects(
+                    connection,
+                    &zqlz_objects::ReplaceViewIdentifierRequest::new(&definition, new_name),
+                )
+                .map(|result| result.replaced_definition)
+                .ok_or_else(|| {
+                    "Failed to parse CREATE VIEW statement while renaming view".to_string()
+                })?;
+                let restore_sql = replace_create_view_identifier_from_objects(
+                    connection,
+                    &zqlz_objects::ReplaceViewIdentifierRequest::new(&definition, old_name),
+                )
+                .map(|result| result.replaced_definition)
+                .ok_or_else(|| "Failed to prepare restore SQL while renaming view".to_string())?;
 
-                let drop_sql = build_drop_view_statement(connection, old_name, false);
+                let drop_sql = build_drop_view_statement_for_object(connection, old_name, false)
+                    .map_err(|error| {
+                        format!("View removal statement generation failed: {error}")
+                    })?;
                 connection
                     .execute(&drop_sql, &[])
                     .await
@@ -172,6 +190,7 @@ impl RenameWindow {
         table_name: String,
         _driver_name: String,
         connection: Arc<dyn zqlz_core::Connection>,
+        table_service: Arc<TableService>,
         main_view: WeakEntity<MainView>,
         cx: &mut App,
     ) {
@@ -180,6 +199,7 @@ impl RenameWindow {
                 connection_id,
                 old_name: table_name,
                 connection,
+                table_service,
                 main_view,
             },
             cx,

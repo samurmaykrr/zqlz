@@ -17,6 +17,16 @@ pub(super) enum SidebarRowIcon {
     Trigger,
     Function,
     Procedure,
+    Event,
+    Sequence,
+    Domain,
+    Type,
+    Extension,
+    Field,
+    Index,
+    ForeignKey,
+    Constraint,
+    Rule,
     Query,
 }
 
@@ -84,6 +94,14 @@ pub(super) enum SidebarLeafKind {
         procedure_name: String,
         object_schema: Option<String>,
     },
+    MetadataObject {
+        conn_id: Uuid,
+        object_name: String,
+        object_schema: Option<String>,
+        database_name: Option<String>,
+        object_type: &'static str,
+    },
+    TableChildSummary,
     Query {
         conn_id: Uuid,
         query_id: Uuid,
@@ -92,6 +110,11 @@ pub(super) enum SidebarLeafKind {
     RedisDatabase {
         conn_id: Uuid,
         database_index: u16,
+    },
+    DocumentCollection {
+        conn_id: Uuid,
+        database_name: String,
+        collection_name: String,
     },
 }
 
@@ -176,4 +199,9 @@ pub(super) struct SchemaSectionGroup {
     pub(super) triggers: Vec<String>,
     pub(super) functions: Vec<String>,
     pub(super) procedures: Vec<String>,
+    pub(super) events: Vec<String>,
+    pub(super) sequences: Vec<String>,
+    pub(super) domains: Vec<String>,
+    pub(super) types: Vec<String>,
+    pub(super) extensions: Vec<String>,
 }

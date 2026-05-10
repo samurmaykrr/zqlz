@@ -70,8 +70,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     let database_name = viewer_entity.read(cx).database_name();
 
     let Some(connection) = app_state
-        .connections
-        .get_for_database_cached(request.connection_id, database_name.as_deref())
+        .connection_service
+        .get_connection_for_database_cached(request.connection_id, database_name.as_deref())
     else {
         tracing::error!("Connection not found: {}", request.connection_id);
         return;
@@ -80,9 +80,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
     let table_name = request.table_name;
     let connection = connection.clone();
     let connection_name = app_state
-        .connection_manager()
-        .get_saved(request.connection_id)
-        .map(|s| s.name.clone())
+        .connection_service
+        .get_saved_connection_name(request.connection_id)
         .unwrap_or_else(|| "Unknown".to_string());
     let table_service = app_state.table_service.clone();
 
@@ -232,17 +231,19 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_with
                             })
                             .await;
                         match count_result {
-                            Ok((total, is_estimated)) => {
+                            Ok(Some((total, is_estimated))) => {
                                 viewer_entity.update(cx, |_viewer, cx| {
                                     cx.emit(TableViewerEvent::CountCompleted {
                                         connection_id,
                                         table_name: table_name.clone(),
+                                        database_name: database_name.clone(),
                                         request_generation,
                                         total_rows: total,
                                         is_estimated,
                                     });
                                 });
                             }
+                            Ok(None) => {}
                             Err(e) => {
                                 tracing::warn!(
                                     "Background row count failed for {}: {}",
@@ -295,8 +296,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     let database_name = viewer_entity.read(cx).database_name();
 
     let Some(connection) = app_state
-        .connections
-        .get_for_database_cached(request.connection_id, database_name.as_deref())
+        .connection_service
+        .get_connection_for_database_cached(request.connection_id, database_name.as_deref())
     else {
         tracing::error!("Connection not found: {}", request.connection_id);
         return;
@@ -305,9 +306,8 @@ pub(in crate::main_view::table_handlers::standalone_events) fn reload_table_reve
     let table_name = request.table_name;
     let connection = connection.clone();
     let connection_name = app_state
-        .connection_manager()
-        .get_saved(request.connection_id)
-        .map(|s| s.name.clone())
+        .connection_service
+        .get_saved_connection_name(request.connection_id)
         .unwrap_or_else(|| "Unknown".to_string());
     let table_service = app_state.table_service.clone();
 

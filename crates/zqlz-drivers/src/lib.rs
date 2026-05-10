@@ -14,6 +14,8 @@ pub use zqlz_driver_mysql as mysql;
 pub use zqlz_driver_postgres as postgres;
 #[cfg(feature = "sqlite")]
 pub use zqlz_driver_sqlite as sqlite;
+#[cfg(feature = "turso")]
+pub use zqlz_driver_turso as turso;
 
 // NoSQL Databases
 #[cfg(feature = "clickhouse")]

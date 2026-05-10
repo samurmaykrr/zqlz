@@ -47,6 +47,8 @@ pub struct ExplainResult {
     pub query_plan: Option<QueryResult>,
     /// Parsed and analyzed query plan with optimization suggestions
     pub analyzed_plan: Option<QueryAnalysis>,
+    /// Dialect/provider id used to choose EXPLAIN syntax and parser behavior
+    pub provider_id: Option<String>,
     /// Error message if EXPLAIN failed
     pub error: Option<String>,
     /// Connection name for display

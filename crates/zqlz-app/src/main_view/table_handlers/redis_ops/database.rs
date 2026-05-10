@@ -4,6 +4,7 @@ use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
+use zqlz_services::LoadKeyValueDatabaseRowsRequest;
 
 use crate::MainView;
 use crate::app::AppState;
@@ -11,7 +12,7 @@ use crate::components::{InspectorView, TableViewerEvent, TableViewerPanel};
 use crate::main_view::table_handlers::standalone_events::{
     BecameActiveRequest, RedisKeyEditRequest,
 };
-use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
+use crate::workspace_state::{WorkspaceSessionViewerKind, WorkspaceSessionViewerTab};
 
 use super::super::{
     handle_became_active_event, handle_became_inactive_event, handle_delete_redis_keys_event,
@@ -39,7 +40,7 @@ impl MainView {
             return;
         };
 
-        let Some(_connection) = app_state.connections.get(connection_id) else {
+        let Some(_connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -49,11 +50,227 @@ impl MainView {
 
         cx.spawn_in(window, async move |this, cx| {
             _ = this.update_in(cx, |this, window, cx| {
-                this.open_table_viewer(
+                this.open_redis_key_viewer(
                     connection_id,
+                    database_index,
                     key_name_clone,
-                    Some(database_name),
-                    false,
+                    database_name,
+                    window,
+                    cx,
+                );
+            });
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn open_redis_key_viewer(
+        &mut self,
+        connection_id: Uuid,
+        database_index: u16,
+        key_name: String,
+        db_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("No AppState available");
+            return;
+        };
+
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Redis".to_string());
+        let connection_service = app_state.connection_service.clone();
+        let key_value_service = app_state.key_value_service.clone();
+
+        let viewer_entity = cx.new(TableViewerPanel::new);
+        let table_viewer: Arc<dyn zqlz_ui::widgets::dock::PanelView> =
+            Arc::new(viewer_entity.clone());
+
+        let schema_details_panel = self.schema_details_panel.clone();
+        let results_panel = self.results_panel.clone();
+        let inspector_panel = self.inspector_panel.clone();
+        let workspace_controller = self.workspace_controller.clone();
+        let viewer_entity_for_refresh = viewer_entity.clone();
+        let db_name_for_events = db_name.clone();
+
+        cx.subscribe_in(&viewer_entity, window, {
+            move |_this, _viewer, event: &TableViewerEvent, window, cx| match event {
+                TableViewerEvent::RefreshTable {
+                    connection_id,
+                    table_name,
+                    driver_category,
+                    database_name: _,
+                } => {
+                    handle_refresh_table_event(
+                        *connection_id,
+                        table_name,
+                        *driver_category,
+                        viewer_entity_for_refresh.clone(),
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::BecameActive {
+                    connection_id,
+                    table_name,
+                    database_name,
+                } => {
+                    handle_became_active_event(
+                        BecameActiveRequest {
+                            connection_id: *connection_id,
+                            table_name: table_name.clone(),
+                            database_name: database_name.clone(),
+                        },
+                        schema_details_panel.clone(),
+                        results_panel.clone(),
+                        &workspace_controller,
+                        &inspector_panel,
+                        window,
+                        cx,
+                    );
+                }
+                TableViewerEvent::BecameInactive {
+                    connection_id,
+                    table_name,
+                } => {
+                    handle_became_inactive_event(
+                        *connection_id,
+                        table_name,
+                        &schema_details_panel,
+                        cx,
+                    );
+                }
+                TableViewerEvent::HideColumn { column_name } => {
+                    _viewer.update(cx, |panel, cx| {
+                        panel.hide_column(column_name, cx);
+                    });
+                }
+                TableViewerEvent::FreezeColumn { col_ix } => {
+                    _viewer.update(cx, |panel, cx| {
+                        panel.freeze_column(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::UnfreezeColumn { col_ix } => {
+                    _viewer.update(cx, |panel, cx| {
+                        panel.unfreeze_column(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::SizeColumnToFit { col_ix } => {
+                    _viewer.update(cx, |panel, cx| {
+                        panel.size_column_to_fit(*col_ix, cx);
+                    });
+                }
+                TableViewerEvent::SizeAllColumnsToFit => {
+                    _viewer.update(cx, |panel, cx| {
+                        panel.size_all_columns_to_fit(cx);
+                    });
+                }
+                TableViewerEvent::EditCell { .. }
+                | TableViewerEvent::SaveCell { .. }
+                | TableViewerEvent::InlineEditStarted
+                | TableViewerEvent::ValidationFailed { .. }
+                | TableViewerEvent::DiscardChanges
+                | TableViewerEvent::ApplyFilters { .. }
+                | TableViewerEvent::SortColumn { .. }
+                | TableViewerEvent::ColumnVisibilityChanged { .. }
+                | TableViewerEvent::MultiLineContentFlattened
+                | TableViewerEvent::CellSelected { .. }
+                | TableViewerEvent::RowSelected { .. }
+                | TableViewerEvent::EditRow { .. }
+                | TableViewerEvent::DeleteRows { .. }
+                | TableViewerEvent::MarkRowsForDeletion { .. }
+                | TableViewerEvent::AddRedisKey { .. }
+                | TableViewerEvent::AddRowForm { .. }
+                | TableViewerEvent::AddRow { .. }
+                | TableViewerEvent::SaveNewRow { .. }
+                | TableViewerEvent::CommitChanges { .. }
+                | TableViewerEvent::GenerateChangesSql { .. }
+                | TableViewerEvent::PageChanged { .. }
+                | TableViewerEvent::LimitChanged { .. }
+                | TableViewerEvent::LimitEnabledChanged { .. }
+                | TableViewerEvent::LoadMore { .. }
+                | TableViewerEvent::LoadFkValues { .. }
+                | TableViewerEvent::NavigateToFkTable { .. }
+                | TableViewerEvent::AddQuickFilter { .. }
+                | TableViewerEvent::LastPageRequested { .. }
+                | TableViewerEvent::LoadDistinctValues { .. }
+                | TableViewerEvent::CountCompleted { .. } => {
+                    tracing::debug!(
+                        database_name = %db_name_for_events,
+                        "Ignoring table event for key-value key viewer"
+                    );
+                }
+            }
+        })
+        .detach();
+
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.add_center_item(table_viewer, window, cx);
+        });
+        self.workspace_state.update(cx, |state, cx| {
+            state.record_open_viewer_tab(
+                WorkspaceSessionViewerTab {
+                    connection_id,
+                    kind: WorkspaceSessionViewerKind::RedisKey {
+                        database_index,
+                        key_name: key_name.clone(),
+                    },
+                },
+                cx,
+            );
+        });
+
+        let viewer_weak = viewer_entity.downgrade();
+        let db_name_for_spawn = db_name.clone();
+        let key_name_for_spawn = key_name.clone();
+
+        cx.spawn_in(window, async move |_this, cx| {
+            let connection = match connection_service
+                .get_connection_for_database(connection_id, &db_name_for_spawn)
+                .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database_index,
+                        error = %error,
+                        "Failed to get key-value database-specific connection"
+                    );
+                    return anyhow::Ok(());
+                }
+            };
+
+            let query_result = match key_value_service
+                .browse_key(connection, &key_name_for_spawn, Some(1000))
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database_index,
+                        key = %key_name_for_spawn,
+                        error = %error,
+                        "Failed to load key-value key"
+                    );
+                    return anyhow::Ok(());
+                }
+            };
+
+            _ = viewer_weak.update_in(cx, |viewer, window, cx| {
+                viewer.load_table(
+                    connection_id,
+                    connection_name,
+                    key_name_for_spawn,
+                    Some(db_name_for_spawn),
+                    true,
+                    query_result,
+                    DriverCategory::KeyValue,
                     window,
                     cx,
                 );
@@ -82,7 +299,7 @@ impl MainView {
             return;
         };
 
-        let Some(_connection) = app_state.connections.get(connection_id) else {
+        let Some(_connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -113,11 +330,11 @@ impl MainView {
         };
 
         let connection_name = app_state
-            .connection_manager()
-            .get_saved(connection_id)
-            .map(|s| s.name.clone())
+            .connection_service
+            .get_saved_connection_name(connection_id)
             .unwrap_or_else(|| "Redis".to_string());
-        let connections = app_state.connections.clone();
+        let connection_service = app_state.connection_service.clone();
+        let key_value_service = app_state.key_value_service.clone();
         let event_db_name = db_name.clone();
 
         let viewer_entity = cx.new(TableViewerPanel::new);
@@ -125,7 +342,7 @@ impl MainView {
             Arc::new(viewer_entity.clone());
 
         let key_value_editor_panel = self.key_value_editor_panel.clone();
-        let dock_area = self.dock_area.clone();
+        let workspace_controller = self.workspace_controller.clone();
         let inspector_panel = self.inspector_panel.clone();
         let schema_details_panel = self.schema_details_panel.clone();
         let results_panel = self.results_panel.clone();
@@ -149,7 +366,7 @@ impl MainView {
                             all_column_names: all_column_names.clone(),
                         },
                         &key_value_editor_panel,
-                        &dock_area,
+                        &workspace_controller,
                         &inspector_panel,
                         window,
                         cx,
@@ -180,8 +397,8 @@ impl MainView {
                         panel.set_active_view(InspectorView::KeyEditor, cx);
                     });
 
-                    dock_area.update(cx, |area, cx| {
-                        area.activate_panel(
+                    workspace_controller.update(cx, |workspace, cx| {
+                        workspace.reveal_panel(
                             "InspectorPanel",
                             zqlz_ui::widgets::dock::DockPlacement::Right,
                             window,
@@ -217,7 +434,7 @@ impl MainView {
                         },
                         schema_details_panel.clone(),
                         results_panel.clone(),
-                        &dock_area,
+                        &workspace_controller,
                         &inspector_panel,
                         window,
                         cx,
@@ -292,12 +509,15 @@ impl MainView {
         })
         .detach();
 
-        self.dock_area.update(cx, |dock_area, cx| {
-            dock_area.add_panel(
-                table_viewer,
-                zqlz_ui::widgets::dock::DockPlacement::Center,
-                None,
-                window,
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.add_center_item(table_viewer, window, cx);
+        });
+        self.workspace_state.update(cx, |state, cx| {
+            state.record_open_viewer_tab(
+                WorkspaceSessionViewerTab {
+                    connection_id,
+                    kind: WorkspaceSessionViewerKind::RedisDatabase { database_index },
+                },
                 cx,
             );
         });
@@ -306,8 +526,8 @@ impl MainView {
         let db_name_for_spawn = db_name.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            let connection_clone = match connections
-                .get_for_database(connection_id, &db_name_for_spawn)
+            let connection_clone = match connection_service
+                .get_connection_for_database(connection_id, &db_name_for_spawn)
                 .await
             {
                 Ok(connection) => connection,
@@ -322,152 +542,30 @@ impl MainView {
                 }
             };
 
-            let table_infos =
-                if let Some(schema_introspection) = connection_clone.as_schema_introspection() {
-                    match schema_introspection.list_tables(None).await {
-                        Ok(tables) => tables,
-                        Err(e) => {
-                            tracing::error!("Failed to list Redis keys: {}", e);
-                            return anyhow::Ok(());
-                        }
-                    }
-                } else {
-                    tracing::error!("Redis connection does not support schema introspection");
+            let query_result = match key_value_service
+                .load_database_rows(
+                    connection_clone,
+                    LoadKeyValueDatabaseRowsRequest { database_index },
+                )
+                .await
+            {
+                Ok(outcome) => outcome.query_result,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database_index,
+                        error = %error,
+                        "Failed to load Redis database rows via table service"
+                    );
                     return anyhow::Ok(());
-                };
+                }
+            };
 
             tracing::info!(
                 "Loaded {} keys for Redis database {}",
-                table_infos.len(),
+                query_result.rows.len(),
                 database_index
             );
-
-            let columns = vec![
-                zqlz_core::ColumnMeta {
-                    name: "Key".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: false,
-                    ordinal: 0,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Redis key name".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Type".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: false,
-                    ordinal: 1,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Redis data type".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Value".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 2,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Value preview".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Size".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 3,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Memory size".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "TTL".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 4,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Time to live".to_string()),
-                    enum_values: None,
-                },
-            ];
-
-            let column_names = vec![
-                "Key".to_string(),
-                "Type".to_string(),
-                "Value".to_string(),
-                "Size".to_string(),
-                "TTL".to_string(),
-            ];
-
-            let rows: Vec<zqlz_core::Row> = table_infos
-                .iter()
-                .map(|info| {
-                    let key_value_info = info.key_value_info.as_ref();
-
-                    let key = zqlz_core::Value::String(info.name.clone());
-
-                    let key_type = key_value_info
-                        .map(|kv| zqlz_core::Value::String(kv.key_type.clone()))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let value = key_value_info
-                        .and_then(|kv| kv.value_preview.as_ref())
-                        .map(|v| zqlz_core::Value::String(v.clone()))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let size = key_value_info
-                        .and_then(|kv| kv.size_bytes)
-                        .map(|bytes| zqlz_core::Value::String(format_bytes(bytes)))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let ttl = key_value_info
-                        .and_then(|kv| kv.ttl_seconds)
-                        .map(|ttl| {
-                            zqlz_core::Value::String(if ttl == -1 {
-                                "No TTL".to_string()
-                            } else if ttl == -2 {
-                                "Not Found".to_string()
-                            } else {
-                                format_ttl_seconds(ttl)
-                            })
-                        })
-                        .unwrap_or(zqlz_core::Value::String("No TTL".to_string()));
-
-                    zqlz_core::Row::new(column_names.clone(), vec![key, key_type, value, size, ttl])
-                })
-                .collect();
-
-            let total_rows = rows.len();
-
-            let query_result = zqlz_core::QueryResult {
-                id: uuid::Uuid::new_v4(),
-                columns,
-                rows,
-                total_rows: Some(total_rows as u64),
-                is_estimated_total: false,
-                affected_rows: 0,
-                execution_time_ms: 0,
-                warnings: vec![],
-            };
 
             _ = viewer_weak.update_in(cx, |viewer, window, cx| {
                 viewer.load_table(

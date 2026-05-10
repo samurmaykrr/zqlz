@@ -34,22 +34,37 @@ impl SelectItem for FkSelectItem {
     fn render(&self, _: &mut Window, cx: &mut App) -> impl IntoElement {
         use zqlz_ui::widgets::ActiveTheme;
         let theme = cx.theme();
+        let label = self.label.replace(&format!("{} - ", self.value), "");
 
-        // Render FK item with value highlighted and label secondary
         div()
             .flex()
+            .h(px(24.))
+            .min_w_0()
             .items_center()
-            .gap_1()
-            .child(div().text_color(theme.foreground).child(self.value.clone()))
+            .gap_2()
+            .overflow_hidden()
+            .font_family(theme.font_family.clone())
+            .text_sm()
+            .line_height(relative(1.0))
+            .child(
+                div()
+                    .min_w_0()
+                    .max_w(px(160.))
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(theme.foreground)
+                    .child(self.value.clone()),
+            )
             .when(self.label != self.value, |this| {
                 this.child(
                     div()
+                        .min_w_0()
+                        .flex_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
                         .text_color(theme.muted_foreground)
                         .text_xs()
-                        .child(format!(
-                            "({})",
-                            self.label.replace(&format!("{} - ", self.value), "")
-                        )),
+                        .child(label),
                 )
             })
     }
@@ -82,10 +97,6 @@ impl CellValue {
             Self::Null => "NULL".to_string(),
             Self::Value(value) => value.display_for_table(),
         }
-    }
-
-    pub fn is_null(&self) -> bool {
-        matches!(self, Self::Null)
     }
 
     pub fn as_value(&self) -> Value {

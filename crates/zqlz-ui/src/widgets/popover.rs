@@ -171,7 +171,7 @@ impl Popover {
             Point::default()
         };
 
-        trigger_bounds.corner(anchor.swap_vertical().into())
+        trigger_bounds.corner(anchor.other_side_along(gpui::Axis::Vertical))
             + offset
             + Point {
                 x: px(0.),
@@ -297,7 +297,7 @@ impl Popover {
         deferred(
             anchored()
                 .snap_to_window_with_margin(px(8.))
-                .anchor(anchor.into())
+                .anchor(anchor)
                 .position(Self::resolved_corner(anchor, trigger_bounds))
                 .child(div().relative().child(content)),
         )
@@ -318,6 +318,7 @@ impl Popover {
             .map(|this| match anchor {
                 Anchor::TopLeft | Anchor::TopCenter | Anchor::TopRight => this.top_1(),
                 Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => this.bottom_1(),
+                Anchor::LeftCenter | Anchor::RightCenter => this.top_1(),
             })
     }
 }
@@ -384,7 +385,7 @@ impl RenderOnce for Popover {
             deferred(
                 anchored()
                     .snap_to_window_with_margin(px(8.))
-                    .anchor(self.anchor.into())
+                    .anchor(self.anchor)
                     .when_some(trigger_bounds, |this, trigger_bounds| {
                         this.position(Self::resolved_corner(self.anchor, trigger_bounds))
                     })
@@ -405,6 +406,7 @@ impl RenderOnce for Popover {
                                 Anchor::BottomLeft | Anchor::BottomCenter | Anchor::BottomRight => {
                                     this.bottom_1()
                                 }
+                                Anchor::LeftCenter | Anchor::RightCenter => this.top_1(),
                             })
                             .when_some(self.content, |this, content| {
                                 this.child(

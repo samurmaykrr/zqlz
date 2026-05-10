@@ -585,6 +585,8 @@ impl GenericImporter {
             IndexMethod::Fulltext => {
                 if capabilities.supports_fulltext {
                     IndexMethodSupport::Supported
+                } else if capabilities.supports_gin {
+                    IndexMethodSupport::DegradeToBtree
                 } else {
                     IndexMethodSupport::Skip
                 }
@@ -592,10 +594,25 @@ impl GenericImporter {
             IndexMethod::Spatial => {
                 if capabilities.supports_spatial {
                     IndexMethodSupport::Supported
+                } else if capabilities.supports_gist {
+                    IndexMethodSupport::DegradeToBtree
                 } else {
                     IndexMethodSupport::Skip
                 }
             }
+        }
+    }
+
+    fn index_method_display_name(method: &IndexMethod) -> &'static str {
+        match method {
+            IndexMethod::Btree => "BTREE",
+            IndexMethod::Hash => "HASH",
+            IndexMethod::Gin => "GIN",
+            IndexMethod::Gist => "GIST",
+            IndexMethod::SpGist => "SPGIST",
+            IndexMethod::Brin => "BRIN",
+            IndexMethod::Fulltext => "FULLTEXT",
+            IndexMethod::Spatial => "SPATIAL",
         }
     }
 
@@ -617,6 +634,89 @@ impl GenericImporter {
             .get(source_name)
             .cloned()
             .unwrap_or_else(|| source_name.to_string())
+    }
+
+    fn is_mysql_target(&self) -> bool {
+        self.connection.dialect_id() == Some("mysql") || self.connection.driver_name() == "mysql"
+    }
+
+    fn mysql_option_identifier(value: &str) -> Option<&str> {
+        let value = value.trim();
+        if value.is_empty()
+            || !value
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+        Some(value)
+    }
+
+    fn mysql_table_options_sql(&self, table: &TableDefinition) -> String {
+        if !self.is_mysql_target() {
+            return String::new();
+        }
+
+        let mut fragments = Vec::new();
+        for key in ["engine", "ENGINE"] {
+            if let Some(engine) = table
+                .storage_options
+                .get(key)
+                .and_then(|value| Self::mysql_option_identifier(value))
+            {
+                fragments.push(format!("ENGINE={engine}"));
+                break;
+            }
+        }
+        for key in ["charset", "default_charset", "character_set", "CHARSET"] {
+            if let Some(charset) = table
+                .storage_options
+                .get(key)
+                .and_then(|value| Self::mysql_option_identifier(value))
+            {
+                fragments.push(format!("DEFAULT CHARSET={charset}"));
+                break;
+            }
+        }
+        for key in ["collation", "collate", "COLLATE"] {
+            if let Some(collation) = table
+                .storage_options
+                .get(key)
+                .and_then(|value| Self::mysql_option_identifier(value))
+            {
+                fragments.push(format!("COLLATE={collation}"));
+                break;
+            }
+        }
+        for key in ["row_format", "ROW_FORMAT"] {
+            if let Some(row_format) = table
+                .storage_options
+                .get(key)
+                .and_then(|value| Self::mysql_option_identifier(value))
+            {
+                fragments.push(format!("ROW_FORMAT={row_format}"));
+                break;
+            }
+        }
+        for key in ["auto_increment", "AUTO_INCREMENT"] {
+            if let Some(auto_increment) = table
+                .storage_options
+                .get(key)
+                .and_then(|value| value.trim().parse::<u64>().ok())
+            {
+                fragments.push(format!("AUTO_INCREMENT={auto_increment}"));
+                break;
+            }
+        }
+        if let Some(comment) = table.storage_options.get("comment") {
+            fragments.push(format!("COMMENT='{}'", comment.replace('\'', "''")));
+        }
+
+        if fragments.is_empty() {
+            String::new()
+        } else {
+            format!(" {}", fragments.join(" "))
+        }
     }
 
     #[allow(dead_code)]
@@ -676,6 +776,7 @@ impl GenericImporter {
         }
 
         sql.push_str("\n)");
+        sql.push_str(&self.mysql_table_options_sql(table));
         sql
     }
 
@@ -701,6 +802,23 @@ impl GenericImporter {
     fn generate_column_sql(&self, col: &ColumnDefinition) -> String {
         let native_type = self.type_mapper.native_type_for(&col.canonical_type);
         let mut sql = format!("  {} {}", self.quote_identifier(&col.name), native_type);
+
+        if self.is_mysql_target() {
+            if let Some(charset) = col
+                .charset
+                .as_deref()
+                .and_then(Self::mysql_option_identifier)
+            {
+                sql.push_str(&format!(" CHARACTER SET {charset}"));
+            }
+            if let Some(collation) = col
+                .collation
+                .as_deref()
+                .and_then(Self::mysql_option_identifier)
+            {
+                sql.push_str(&format!(" COLLATE {collation}"));
+            }
+        }
 
         // SQLite has no native ENUM type, so we represent it as TEXT and add an
         // inline CHECK constraint to restrict values to the declared set.
@@ -1016,19 +1134,18 @@ impl GenericImporter {
         table_name: &str,
         col: &ColumnDefinition,
     ) -> Vec<ImportWarning> {
-        let CanonicalType::Enum { ref name, .. } = col.canonical_type else {
+        let CanonicalType::Enum { .. } = col.canonical_type else {
             return vec![];
         };
 
         let supports_named_enums = self.supports_named_enum_types();
-        let source_has_name = name.is_some();
 
         if !supports_named_enums {
             return vec![ImportWarning {
                 table: Some(table_name.to_owned()),
                 column: Some(col.name.clone()),
                 message: format!(
-                    "Column '{}' in table '{}': named enum type converted to inline/compat form \
+                    "Column '{}' in table '{}': named enum type converted to TEXT/inline compat form \
                      on target driver (no schema-level enum type support)",
                     col.name, table_name
                 ),
@@ -1036,19 +1153,7 @@ impl GenericImporter {
             }];
         }
 
-        if source_has_name {
-            vec![ImportWarning {
-                table: Some(table_name.to_owned()),
-                column: Some(col.name.clone()),
-                message: format!(
-                    "Column '{}' in table '{}': named enum type preserved via target enum handling",
-                    col.name, table_name
-                ),
-                kind: ImportWarningKind::TypeConversion,
-            }]
-        } else {
-            vec![]
-        }
+        vec![]
     }
 
     /// Generates a `CREATE TYPE <name> AS ENUM (...)` statement for a PostgreSQL target.
@@ -1067,6 +1172,30 @@ impl GenericImporter {
 
     fn foreign_key_checks_sql(&self) -> Option<zqlz_core::ForeignKeyChecksSql> {
         self.connection.foreign_key_checks_sql()
+    }
+
+    async fn set_foreign_key_checks(&self, sql: &str) -> Result<(), ImportError> {
+        self.connection
+            .execute(sql, &[])
+            .await
+            .map(|_| ())
+            .map_err(|e| ImportError::QueryError(e.to_string()))
+    }
+
+    async fn re_enable_foreign_key_checks_after_error<T>(
+        &self,
+        enable_sql: Option<&str>,
+        original_error: ImportError,
+    ) -> Result<T, ImportError> {
+        if let Some(enable_sql) = enable_sql
+            && let Err(enable_error) = self.set_foreign_key_checks(enable_sql).await
+        {
+            tracing::warn!(
+                error = %enable_error,
+                "failed to re-enable foreign-key checks after import error"
+            );
+        }
+        Err(original_error)
     }
 
     /// Generates column SQL with an optional override of the canonical enum type name.
@@ -1157,6 +1286,17 @@ impl GenericImporter {
                     (IndexMethod::Spatial, IndexMethodSupport::Supported) => {
                         (" SPATIAL".to_string(), None)
                     }
+                    (IndexMethod::Fulltext, IndexMethodSupport::DegradeToBtree)
+                        if capabilities.supports_gin =>
+                    {
+                        (
+                            String::new(),
+                            Some(format!(
+                                "FULLTEXT index '{}' on '{}' has no direct equivalent on {}; created as a BTREE index instead; consider a GIN tsvector index for equivalent search behavior",
+                                index.name, table_name, driver
+                            )),
+                        )
+                    }
                     (IndexMethod::Spatial, IndexMethodSupport::DegradeToBtree)
                         if capabilities.supports_gist =>
                     {
@@ -1170,8 +1310,11 @@ impl GenericImporter {
                     }
                     (index_method, IndexMethodSupport::Skip) => {
                         return Err(IndexMappingOutcome::Skipped(format!(
-                            "{:?} index '{}' on '{}' has no equivalent on {} — index dropped",
-                            index_method, index.name, table_name, driver
+                            "{} index '{}' on '{}' has no equivalent on {} — index dropped",
+                            Self::index_method_display_name(index_method),
+                            index.name,
+                            table_name,
+                            driver
                         )));
                     }
                     (_, IndexMethodSupport::DegradeToBtree) => (
@@ -2034,6 +2177,11 @@ impl Importer for GenericImporter {
                 current_error: None,
             });
 
+            let fk_checks_sql = self.foreign_key_checks_sql();
+            if let Some(sql) = fk_checks_sql.as_ref() {
+                self.set_foreign_key_checks(&sql.disable_sql).await?;
+            }
+
             for (idx, (table_name, table_def)) in tables.iter().enumerate() {
                 if let Some(table_data) = doc.data.get(*table_name) {
                     let target_name = self.get_target_table_name(table_name, options);
@@ -2073,7 +2221,19 @@ impl Importer for GenericImporter {
                         let mut chunk_rows_decoded = 0usize;
 
                         for row in chunk {
-                            let all_values = self.decode_row(&row.values)?;
+                            let all_values = match self.decode_row(&row.values) {
+                                Ok(values) => values,
+                                Err(error) => {
+                                    return self
+                                        .re_enable_foreign_key_checks_after_error(
+                                            fk_checks_sql
+                                                .as_ref()
+                                                .map(|checks| checks.enable_sql.as_str()),
+                                            error,
+                                        )
+                                        .await;
+                                }
+                            };
                             for &col_idx in &insertable_indices {
                                 batch_values
                                     .push(all_values.get(col_idx).cloned().unwrap_or(Value::Null));
@@ -2088,19 +2248,31 @@ impl Importer for GenericImporter {
                         );
 
                         let insert_result = if options.use_transaction {
-                            let tx = self
+                            let tx = match self
                                 .connection
                                 .begin_transaction()
                                 .await
-                                .map_err(|e| ImportError::QueryError(e.to_string()))?;
+                                .map_err(|e| ImportError::QueryError(e.to_string()))
+                            {
+                                Ok(tx) => tx,
+                                Err(error) => {
+                                    return self
+                                        .re_enable_foreign_key_checks_after_error(
+                                            fk_checks_sql
+                                                .as_ref()
+                                                .map(|checks| checks.enable_sql.as_str()),
+                                            error,
+                                        )
+                                        .await;
+                                }
+                            };
 
                             match tx.execute(&sql, &batch_values).await {
-                                Ok(_) => {
-                                    tx.commit()
-                                        .await
-                                        .map_err(|e| ImportError::QueryError(e.to_string()))?;
-                                    Ok(chunk_rows_decoded as u64)
-                                }
+                                Ok(_) => tx
+                                    .commit()
+                                    .await
+                                    .map(|_| chunk_rows_decoded as u64)
+                                    .map_err(|e| ImportError::QueryError(e.to_string())),
                                 Err(e) => {
                                     // Best-effort rollback.  If the rollback itself
                                     // fails there is nothing more we can do; the
@@ -2132,7 +2304,14 @@ impl Importer for GenericImporter {
                                 if options.continue_on_error {
                                     result.errors.push(e.to_string());
                                 } else {
-                                    return Err(e);
+                                    return self
+                                        .re_enable_foreign_key_checks_after_error(
+                                            fk_checks_sql
+                                                .as_ref()
+                                                .map(|checks| checks.enable_sql.as_str()),
+                                            e,
+                                        )
+                                        .await;
                                 }
                             }
                         }
@@ -2152,6 +2331,10 @@ impl Importer for GenericImporter {
                         .rows_imported
                         .insert(table_name.to_string(), rows_imported);
                 }
+            }
+
+            if let Some(sql) = fk_checks_sql.as_ref() {
+                self.set_foreign_key_checks(&sql.enable_sql).await?;
             }
         }
 
@@ -2284,10 +2467,7 @@ impl Importer for GenericImporter {
             // when tables reference each other.  Disable them for the duration
             // of FK creation and re-enable afterwards.
             if let Some(sql) = fk_checks_sql.as_ref() {
-                self.connection
-                    .execute(&sql.disable_sql, &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
+                self.set_foreign_key_checks(&sql.disable_sql).await?;
             }
 
             for (table_name, table_def) in &tables {
@@ -2345,10 +2525,14 @@ impl Importer for GenericImporter {
                             } else {
                                 // Best-effort re-enable before returning so the
                                 // connection is left in a clean state.
-                                if let Some(sql) = fk_checks_sql.as_ref() {
-                                    let _ = self.connection.execute(&sql.enable_sql, &[]).await;
-                                }
-                                return Err(ImportError::QueryError(e.to_string()));
+                                return self
+                                    .re_enable_foreign_key_checks_after_error(
+                                        fk_checks_sql
+                                            .as_ref()
+                                            .map(|checks| checks.enable_sql.as_str()),
+                                        ImportError::QueryError(e.to_string()),
+                                    )
+                                    .await;
                             }
                         }
                     }
@@ -2357,10 +2541,7 @@ impl Importer for GenericImporter {
 
             // Re-enable FK checks now that all constraints have been applied.
             if let Some(sql) = fk_checks_sql.as_ref() {
-                self.connection
-                    .execute(&sql.enable_sql, &[])
-                    .await
-                    .map_err(|e| ImportError::QueryError(e.to_string()))?;
+                self.set_foreign_key_checks(&sql.enable_sql).await?;
             }
         }
 
@@ -2420,17 +2601,144 @@ mod tests {
     use crate::document::{ColumnDefinition, IndexColumn, NullsOrder, SortOrder};
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
-    use zqlz_core::{QueryResult, Result, StatementResult, Transaction, ZqlzError};
+    use zqlz_core::{
+        BindPlaceholderPolicy, ImportIndexCapabilities, ImportSemanticDefault, QueryResult, Result,
+        SqlObjectName, StatementResult, Transaction, ZqlzError,
+    };
 
     /// Minimal mock connection whose driver name is configurable.
     struct MockConnection {
         driver: &'static str,
     }
 
+    fn normalized_test_driver(driver: &'static str) -> &'static str {
+        match driver {
+            "postgresql" => "postgres",
+            other => other,
+        }
+    }
+
+    fn quote_test_identifier(driver: &'static str, identifier: &str) -> String {
+        if normalized_test_driver(driver) == "mysql" {
+            format!("`{}`", identifier.replace('`', "``"))
+        } else {
+            format!("\"{}\"", identifier.replace('"', "\"\""))
+        }
+    }
+
+    fn test_bind_placeholder_policy(driver: &'static str) -> BindPlaceholderPolicy {
+        if normalized_test_driver(driver) == "postgres" {
+            BindPlaceholderPolicy::DollarNumbered
+        } else {
+            BindPlaceholderPolicy::QuestionMark
+        }
+    }
+
+    fn test_max_bind_parameters(driver: &'static str) -> usize {
+        if normalized_test_driver(driver) == "sqlite" {
+            32_766
+        } else {
+            65_535
+        }
+    }
+
+    fn test_semantic_default_sql(
+        driver: &'static str,
+        kind: ImportSemanticDefault,
+    ) -> Option<String> {
+        match (normalized_test_driver(driver), kind) {
+            ("postgres", ImportSemanticDefault::CurrentUser) => Some("CURRENT_USER".to_string()),
+            ("postgres", ImportSemanticDefault::GeneratedUuid) => {
+                Some("gen_random_uuid()".to_string())
+            }
+            ("mysql", ImportSemanticDefault::CurrentUser) => Some("CURRENT_USER".to_string()),
+            ("mysql", ImportSemanticDefault::GeneratedUuid) => Some("(UUID())".to_string()),
+            _ => None,
+        }
+    }
+
+    fn test_index_capabilities(driver: &'static str) -> ImportIndexCapabilities {
+        match normalized_test_driver(driver) {
+            "postgres" => ImportIndexCapabilities {
+                supports_hash: true,
+                supports_gin: true,
+                supports_gist: true,
+                supports_spgist: true,
+                supports_brin: true,
+                supports_fulltext: false,
+                supports_spatial: false,
+                supports_partial: true,
+                supports_include: true,
+                supports_nulls_ordering: true,
+            },
+            "mysql" => ImportIndexCapabilities {
+                supports_hash: false,
+                supports_gin: false,
+                supports_gist: false,
+                supports_spgist: false,
+                supports_brin: false,
+                supports_fulltext: true,
+                supports_spatial: true,
+                supports_partial: false,
+                supports_include: false,
+                supports_nulls_ordering: false,
+            },
+            "sqlite" => ImportIndexCapabilities {
+                supports_hash: false,
+                supports_gin: false,
+                supports_gist: false,
+                supports_spgist: false,
+                supports_brin: false,
+                supports_fulltext: false,
+                supports_spatial: false,
+                supports_partial: true,
+                supports_include: false,
+                supports_nulls_ordering: true,
+            },
+            _ => ImportIndexCapabilities::standard(),
+        }
+    }
+
     #[async_trait]
     impl zqlz_core::Connection for MockConnection {
         fn driver_name(&self) -> &str {
             self.driver
+        }
+
+        fn dialect_id(&self) -> Option<&'static str> {
+            Some(normalized_test_driver(self.driver))
+        }
+
+        fn quote_identifier(&self, identifier: &str) -> String {
+            quote_test_identifier(self.driver, identifier)
+        }
+
+        fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+            test_bind_placeholder_policy(self.driver)
+        }
+
+        fn max_bind_parameters(&self) -> usize {
+            test_max_bind_parameters(self.driver)
+        }
+
+        fn generated_column_storage_keyword(&self, requested_stored: bool) -> &'static str {
+            if normalized_test_driver(self.driver) == "postgres" || requested_stored {
+                "STORED"
+            } else {
+                "VIRTUAL"
+            }
+        }
+
+        fn semantic_default_sql(&self, kind: ImportSemanticDefault) -> Option<String> {
+            test_semantic_default_sql(self.driver, kind)
+        }
+
+        fn import_index_capabilities(&self) -> ImportIndexCapabilities {
+            test_index_capabilities(self.driver)
+        }
+
+        fn supports_import_named_enum_types(&self) -> bool {
+            normalized_test_driver(self.driver) == "postgres"
         }
 
         fn rename_table_sql(
@@ -2479,11 +2787,40 @@ mod tests {
             ))
         }
 
-        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
-            Ok(format!(
-                "TRUNCATE TABLE {}",
-                self.render_qualified_name(table_name)
-            ))
+        fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+            if normalized_test_driver(self.driver) == "sqlite" {
+                Ok(format!(
+                    "DELETE FROM {}",
+                    self.render_qualified_name(table_name)
+                ))
+            } else {
+                Ok(format!(
+                    "TRUNCATE TABLE {}",
+                    self.render_qualified_name(table_name)
+                ))
+            }
+        }
+
+        fn reset_table_identity_sql(&self, table_name: &SqlObjectName) -> Option<String> {
+            if normalized_test_driver(self.driver) == "sqlite" {
+                Some(format!(
+                    "DELETE FROM sqlite_sequence WHERE name = '{}'",
+                    table_name.name.replace('\'', "''")
+                ))
+            } else {
+                None
+            }
+        }
+
+        fn foreign_key_checks_sql(&self) -> Option<zqlz_core::ForeignKeyChecksSql> {
+            if normalized_test_driver(self.driver) == "mysql" {
+                Some(zqlz_core::ForeignKeyChecksSql {
+                    disable_sql: "SET FOREIGN_KEY_CHECKS=0".to_string(),
+                    enable_sql: "SET FOREIGN_KEY_CHECKS=1".to_string(),
+                })
+            } else {
+                None
+            }
         }
 
         fn duplicate_table_sql(
@@ -2670,6 +3007,42 @@ mod tests {
             self.driver
         }
 
+        fn dialect_id(&self) -> Option<&'static str> {
+            Some(normalized_test_driver(self.driver))
+        }
+
+        fn quote_identifier(&self, identifier: &str) -> String {
+            quote_test_identifier(self.driver, identifier)
+        }
+
+        fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
+            test_bind_placeholder_policy(self.driver)
+        }
+
+        fn max_bind_parameters(&self) -> usize {
+            test_max_bind_parameters(self.driver)
+        }
+
+        fn generated_column_storage_keyword(&self, requested_stored: bool) -> &'static str {
+            if normalized_test_driver(self.driver) == "postgres" || requested_stored {
+                "STORED"
+            } else {
+                "VIRTUAL"
+            }
+        }
+
+        fn semantic_default_sql(&self, kind: ImportSemanticDefault) -> Option<String> {
+            test_semantic_default_sql(self.driver, kind)
+        }
+
+        fn import_index_capabilities(&self) -> ImportIndexCapabilities {
+            test_index_capabilities(self.driver)
+        }
+
+        fn supports_import_named_enum_types(&self) -> bool {
+            normalized_test_driver(self.driver) == "postgres"
+        }
+
         fn rename_table_sql(
             &self,
             table_name: &zqlz_core::SqlObjectName,
@@ -2716,11 +3089,40 @@ mod tests {
             ))
         }
 
-        fn truncate_table_sql(&self, table_name: &zqlz_core::SqlObjectName) -> Result<String> {
-            Ok(format!(
-                "TRUNCATE TABLE {}",
-                self.render_qualified_name(table_name)
-            ))
+        fn truncate_table_sql(&self, table_name: &SqlObjectName) -> Result<String> {
+            if normalized_test_driver(self.driver) == "sqlite" {
+                Ok(format!(
+                    "DELETE FROM {}",
+                    self.render_qualified_name(table_name)
+                ))
+            } else {
+                Ok(format!(
+                    "TRUNCATE TABLE {}",
+                    self.render_qualified_name(table_name)
+                ))
+            }
+        }
+
+        fn reset_table_identity_sql(&self, table_name: &SqlObjectName) -> Option<String> {
+            if normalized_test_driver(self.driver) == "sqlite" {
+                Some(format!(
+                    "DELETE FROM sqlite_sequence WHERE name = '{}'",
+                    table_name.name.replace('\'', "''")
+                ))
+            } else {
+                None
+            }
+        }
+
+        fn foreign_key_checks_sql(&self) -> Option<zqlz_core::ForeignKeyChecksSql> {
+            if normalized_test_driver(self.driver) == "mysql" {
+                Some(zqlz_core::ForeignKeyChecksSql {
+                    disable_sql: "SET FOREIGN_KEY_CHECKS=0".to_string(),
+                    enable_sql: "SET FOREIGN_KEY_CHECKS=1".to_string(),
+                })
+            } else {
+                None
+            }
         }
 
         fn duplicate_table_sql(
@@ -2884,6 +3286,109 @@ mod tests {
         let mut table = TableDefinition::new("users");
         table.add_column(col);
         table
+    }
+
+    #[tokio::test]
+    async fn test_mysql_import_data_wraps_foreign_key_checks() {
+        let (conn, importer) = make_tracking_importer("mysql");
+        let mut doc = UdifDocument::new(crate::document::SourceInfo::new("mysql"));
+        let mut table = TableDefinition::new("users");
+        table.add_column(ColumnDefinition::new(
+            "name",
+            crate::CanonicalType::Text,
+            "varchar(255)",
+        ));
+        doc.add_table(table);
+        doc.data.insert(
+            "users".to_string(),
+            crate::document::TableData {
+                rows: vec![crate::document::EncodedRow::new(vec![
+                    crate::value_encoding::encode_value(&Value::String("Ada".to_string())),
+                ])],
+                ..Default::default()
+            },
+        );
+
+        let options = ImportOptions {
+            create_tables: false,
+            create_indexes: false,
+            create_foreign_keys: false,
+            use_transaction: false,
+            validate_types: false,
+            ..Default::default()
+        };
+        importer.import(&doc, &options).await.unwrap();
+
+        let sqls = conn.executed_sql();
+        assert_eq!(
+            sqls.first().map(String::as_str),
+            Some("SET FOREIGN_KEY_CHECKS=0")
+        );
+        assert!(
+            sqls.iter()
+                .any(|sql| sql.starts_with("INSERT INTO `users`")),
+            "expected INSERT between FK-check toggles, got: {sqls:?}"
+        );
+        assert_eq!(
+            sqls.last().map(String::as_str),
+            Some("SET FOREIGN_KEY_CHECKS=1")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_mysql_foreign_key_creation_wraps_foreign_key_checks() {
+        let (conn, importer) = make_tracking_importer("mysql");
+        let mut doc = UdifDocument::new(crate::document::SourceInfo::new("mysql"));
+        let mut parent = TableDefinition::new("users");
+        parent.add_column(ColumnDefinition::new(
+            "id",
+            crate::CanonicalType::BigInt,
+            "bigint",
+        ));
+        let mut child = TableDefinition::new("orders");
+        child.add_column(ColumnDefinition::new(
+            "user_id",
+            crate::CanonicalType::BigInt,
+            "bigint",
+        ));
+        child.foreign_keys.push(ForeignKeyConstraint {
+            name: Some("fk_orders_user".to_string()),
+            columns: vec!["user_id".to_string()],
+            referenced_table: "users".to_string(),
+            referenced_schema: None,
+            referenced_columns: vec!["id".to_string()],
+            on_delete: ForeignKeyAction::Cascade,
+            on_update: ForeignKeyAction::Restrict,
+            is_deferrable: false,
+            initially_deferred: false,
+        });
+        doc.add_table(parent);
+        doc.add_table(child);
+
+        let options = ImportOptions {
+            create_tables: false,
+            import_data: false,
+            create_indexes: false,
+            create_foreign_keys: true,
+            validate_types: false,
+            ..Default::default()
+        };
+        importer.import(&doc, &options).await.unwrap();
+
+        let sqls = conn.executed_sql();
+        assert_eq!(
+            sqls.first().map(String::as_str),
+            Some("SET FOREIGN_KEY_CHECKS=0")
+        );
+        assert!(
+            sqls.iter()
+                .any(|sql| sql.starts_with("ALTER TABLE `orders`")),
+            "expected ALTER TABLE FK statement between toggles, got: {sqls:?}"
+        );
+        assert_eq!(
+            sqls.last().map(String::as_str),
+            Some("SET FOREIGN_KEY_CHECKS=1")
+        );
     }
 
     /// PostgreSQL uses TRUNCATE TABLE, which is faster than DELETE FROM and
@@ -3513,6 +4018,63 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_generate_create_table_sql_mysql_preserves_storage_options() {
+        let importer = make_importer("mysql");
+        let mut table = TableDefinition::new("orders");
+        table.add_column(ColumnDefinition::new(
+            "id",
+            crate::CanonicalType::Integer,
+            "INT",
+        ));
+        table
+            .storage_options
+            .insert("engine".to_string(), "InnoDB".to_string());
+        table
+            .storage_options
+            .insert("charset".to_string(), "utf8mb4".to_string());
+        table
+            .storage_options
+            .insert("collation".to_string(), "utf8mb4_unicode_ci".to_string());
+        table
+            .storage_options
+            .insert("row_format".to_string(), "DYNAMIC".to_string());
+        table
+            .storage_options
+            .insert("auto_increment".to_string(), "42".to_string());
+        table
+            .storage_options
+            .insert("comment".to_string(), "customer's orders".to_string());
+
+        let sql = importer.generate_create_table_sql(&table);
+        assert!(
+            sql.ends_with(
+                "ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci ROW_FORMAT=DYNAMIC AUTO_INCREMENT=42 COMMENT='customer''s orders'"
+            ),
+            "MySQL table options must be appended in stable order: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_generate_create_table_sql_non_mysql_ignores_storage_options() {
+        let importer = make_importer("postgresql");
+        let mut table = TableDefinition::new("orders");
+        table.add_column(ColumnDefinition::new(
+            "id",
+            crate::CanonicalType::Integer,
+            "INT",
+        ));
+        table
+            .storage_options
+            .insert("engine".to_string(), "InnoDB".to_string());
+
+        let sql = importer.generate_create_table_sql(&table);
+        assert!(
+            !sql.contains("ENGINE="),
+            "PostgreSQL must ignore MySQL options: {sql}"
+        );
+    }
+
     // ===== generate_column_sql semantic DefaultValue tests =====
 
     fn make_col_with_default(
@@ -3522,6 +4084,52 @@ mod tests {
         let mut col = ColumnDefinition::new(name, crate::CanonicalType::Text, "TEXT");
         col.default_value = Some(default);
         col
+    }
+
+    #[test]
+    fn test_generate_column_sql_mysql_preserves_charset_and_collation() {
+        let importer = make_importer("mysql");
+        let mut col = ColumnDefinition::new(
+            "name",
+            crate::CanonicalType::String {
+                max_length: Some(255),
+                fixed_length: false,
+            },
+            "varchar(255)",
+        );
+        col.charset = Some("utf8mb4".to_string());
+        col.collation = Some("utf8mb4_0900_ai_ci".to_string());
+
+        let sql = importer.generate_column_sql(&col);
+        assert!(
+            sql.contains("`name` VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_ai_ci"),
+            "MySQL column charset/collation must be preserved: {sql}"
+        );
+    }
+
+    #[test]
+    fn test_generate_column_sql_rejects_unsafe_mysql_options() {
+        let importer = make_importer("mysql");
+        let mut col = ColumnDefinition::new(
+            "name",
+            crate::CanonicalType::String {
+                max_length: Some(255),
+                fixed_length: false,
+            },
+            "varchar(255)",
+        );
+        col.charset = Some("utf8mb4;DROP".to_string());
+        col.collation = Some("utf8mb4_unicode_ci".to_string());
+
+        let sql = importer.generate_column_sql(&col);
+        assert!(
+            !sql.contains("CHARACTER SET"),
+            "unsafe charset option must be ignored: {sql}"
+        );
+        assert!(
+            sql.contains("COLLATE utf8mb4_unicode_ci"),
+            "safe collation option must remain: {sql}"
+        );
     }
 
     #[test]

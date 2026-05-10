@@ -164,22 +164,20 @@ impl Element for Anchored {
             let mut anchor_corner = self.anchor_corner;
 
             if desired.left() < limits.left() || desired.right() > limits.right() {
-                let switched = Bounds::from_corner_and_size(
-                    anchor_corner
-                        .other_side_corner_along(Axis::Horizontal)
-                        .into(),
+                let switched = Bounds::from_anchor_and_size(
+                    anchor_corner.other_side_along(Axis::Horizontal),
                     origin,
                     size,
                 );
                 if !(switched.left() < limits.left() || switched.right() > limits.right()) {
-                    anchor_corner = anchor_corner.other_side_corner_along(Axis::Horizontal);
+                    anchor_corner = anchor_corner.other_side_along(Axis::Horizontal);
                     desired = switched
                 }
             }
 
             if desired.top() < limits.top() || desired.bottom() > limits.bottom() {
-                let switched = Bounds::from_corner_and_size(
-                    anchor_corner.other_side_corner_along(Axis::Vertical).into(),
+                let switched = Bounds::from_anchor_and_size(
+                    anchor_corner.other_side_along(Axis::Vertical),
                     origin,
                     size,
                 );
@@ -327,6 +325,14 @@ impl AnchoredPositionMode {
             Anchor::BottomRight => Point {
                 x: origin.x - size.width,
                 y: origin.y - size.height,
+            },
+            Anchor::LeftCenter => Point {
+                x: origin.x,
+                y: origin.y - size.height.half(),
+            },
+            Anchor::RightCenter => Point {
+                x: origin.x - size.width,
+                y: origin.y - size.height.half(),
             },
         };
 

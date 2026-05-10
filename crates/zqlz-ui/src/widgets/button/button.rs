@@ -242,7 +242,12 @@ impl Button {
             selected: false,
             variant: ButtonVariant::default(),
             rounded: ButtonRounded::Medium,
-            border_corners: Corners::all(true),
+            border_corners: Corners {
+                top_left: true,
+                top_right: true,
+                bottom_right: true,
+                bottom_left: true,
+            },
             border_edges: Edges::all(true),
             size: Size::Medium,
             tooltip: None,

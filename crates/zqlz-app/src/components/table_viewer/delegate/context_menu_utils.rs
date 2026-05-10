@@ -1,4 +1,24 @@
 use std::collections::HashSet;
+use zqlz_core::{DataEditingFeatureSet, FeatureAvailability};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
+pub(super) enum TableContextMenuAction {
+    EditCells,
+    DeleteRows,
+    InsertRows,
+}
+
+pub(super) fn table_context_menu_action_availability(
+    features: &DataEditingFeatureSet,
+    action: TableContextMenuAction,
+) -> FeatureAvailability {
+    match action {
+        TableContextMenuAction::EditCells => features.edit_cells.clone(),
+        TableContextMenuAction::DeleteRows => features.delete_rows.clone(),
+        TableContextMenuAction::InsertRows => features.insert_rows.clone(),
+    }
+}
 
 pub(super) fn ordered_unique_actual_rows_from_display_rows<F>(
     selected_display_rows: &[usize],
@@ -38,6 +58,42 @@ pub(super) fn pasted_text_for_selection_index(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zqlz_core::FeatureAvailability;
+
+    fn data_editing_features(
+        edit_cells: FeatureAvailability,
+        insert_rows: FeatureAvailability,
+        delete_rows: FeatureAvailability,
+    ) -> DataEditingFeatureSet {
+        DataEditingFeatureSet {
+            browse_rows: FeatureAvailability::available(),
+            edit_cells,
+            insert_rows,
+            delete_rows,
+        }
+    }
+
+    #[test]
+    fn table_context_menu_action_availability_maps_to_data_editing_features() {
+        let features = data_editing_features(
+            FeatureAvailability::unavailable("edit blocked"),
+            FeatureAvailability::available(),
+            FeatureAvailability::unavailable("delete blocked"),
+        );
+
+        assert_eq!(
+            table_context_menu_action_availability(&features, TableContextMenuAction::EditCells),
+            FeatureAvailability::unavailable("edit blocked")
+        );
+        assert_eq!(
+            table_context_menu_action_availability(&features, TableContextMenuAction::InsertRows),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            table_context_menu_action_availability(&features, TableContextMenuAction::DeleteRows),
+            FeatureAvailability::unavailable("delete blocked")
+        );
+    }
 
     #[test]
     fn ordered_unique_rows_preserve_display_order() {

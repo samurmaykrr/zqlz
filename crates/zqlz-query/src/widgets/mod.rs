@@ -3,6 +3,7 @@
 //! UI components for query editing, execution, and results display.
 
 mod actions;
+mod explain_analysis_view;
 mod history_panel;
 mod problems_panel;
 mod query_editor;
@@ -10,9 +11,8 @@ mod query_tabs_panel;
 mod results_panel;
 
 pub use actions::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, DismissInlineSuggestion,
     FormatQuery, NextProblem, PreviousProblem, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover,
-    ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints,
+    ToggleProblemsPanel, TriggerParameterHints,
 };
 pub use history_panel::{QueryHistoryPanel, QueryHistoryPanelEvent};
 pub use problems_panel::{ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent};

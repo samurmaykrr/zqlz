@@ -1,0 +1,15 @@
+[package]
+name = "zqlz-explain-visual"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Navicat-style EXPLAIN graph layout and rendering for ZQLZ"
+
+[lib]
+path = "src/zqlz_explain_visual.rs"
+
+[dependencies]
+gpui.workspace = true
+serde_json.workspace = true
+zqlz-analyzer.workspace = true
+zqlz-ui.workspace = true

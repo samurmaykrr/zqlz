@@ -18,13 +18,14 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
+use zqlz_core::{ObjectFormMode, ObjectsPanelObjectRef};
 use zqlz_ui::widgets::{
     ActiveTheme, DatabaseLogo, Icon, IconName, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
-    scroll::{Scrollbar, ScrollbarShow},
+    scroll::Scrollbar,
     typography::body_small,
     v_flex,
 };
@@ -58,6 +59,12 @@ pub enum ConnectionSidebarEvent {
     OpenTable {
         connection_id: Uuid,
         table_name: String,
+        database_name: Option<String>,
+    },
+    LoadTableDetails {
+        connection_id: Uuid,
+        table_name: String,
+        object_schema: Option<String>,
         database_name: Option<String>,
     },
     /// User wants to open a view
@@ -218,6 +225,16 @@ pub enum ConnectionSidebarEvent {
         trigger_name: Option<String>,
         object_schema: Option<String>,
     },
+    OpenGenericObjectDefinition {
+        connection_id: Uuid,
+        object_ref: ObjectsPanelObjectRef,
+    },
+    OpenObjectDesigner {
+        connection_id: Uuid,
+        kind_id: String,
+        mode: ObjectFormMode,
+        object_ref: Option<ObjectsPanelObjectRef>,
+    },
 
     // Redis-specific events
     /// User expanded a Redis database and needs keys loaded
@@ -236,6 +253,15 @@ pub enum ConnectionSidebarEvent {
         connection_id: Uuid,
         database_index: u16,
     },
+    LoadDocumentCollections {
+        connection_id: Uuid,
+        database_name: String,
+    },
+    OpenDocumentCollection {
+        connection_id: Uuid,
+        database_name: String,
+        collection_name: String,
+    },
 
     // Multi-database events
     /// User wants to connect to a different database on the same server
@@ -247,8 +273,7 @@ pub enum ConnectionSidebarEvent {
     /// User expanded a section that has not been loaded yet (lazy loading)
     LoadSection {
         connection_id: Uuid,
-        /// One of: "views", "materialized_views", "triggers", "functions", "procedures"
-        section: &'static str,
+        section: SidebarSection,
     },
 }
 
@@ -271,6 +296,10 @@ pub struct ConnectionSidebar {
 
     /// Flattened rows rendered by the sidebar virtual list.
     virtual_rows: Vec<SidebarVirtualRow>,
+
+    table_details: std::collections::HashMap<SidebarTableKey, SidebarTableDetailsData>,
+    expanded_table_keys: std::collections::HashSet<SidebarTableKey>,
+    loading_table_keys: std::collections::HashSet<SidebarTableKey>,
 
     /// Tracks whether virtual rows need rebuilding before render.
     virtual_rows_dirty: bool,
@@ -323,6 +352,9 @@ pub struct ConnectionSidebar {
     /// Context menu for Redis database items
     redis_db_context_menu: Option<Entity<ContextMenuState>>,
 
+    /// Context menu for metadata object items
+    metadata_object_context_menu: Option<Entity<ContextMenuState>>,
+
     /// Subscriptions to keep alive
     _subscriptions: Vec<Subscription>,
 }
@@ -336,6 +368,9 @@ impl ConnectionSidebar {
             active_leaf_item_id: None,
             scroll_handle: UniformListScrollHandle::new(),
             virtual_rows: Vec::new(),
+            table_details: std::collections::HashMap::new(),
+            expanded_table_keys: std::collections::HashSet::new(),
+            loading_table_keys: std::collections::HashSet::new(),
             virtual_rows_dirty: true,
             rendered_rows_len: 0,
             search_query: String::new(),
@@ -353,8 +388,13 @@ impl ConnectionSidebar {
             section_context_menu: None,
             materialized_view_context_menu: None,
             redis_db_context_menu: None,
+            metadata_object_context_menu: None,
             _subscriptions: Vec::new(),
         }
+    }
+
+    fn sidebar_indent(depth: usize) -> Pixels {
+        px(10.0 + depth as f32 * 14.0)
     }
 
     /// Ensure the search input state is initialized
@@ -549,6 +589,55 @@ impl ConnectionSidebar {
         cx.notify();
     }
 
+    fn table_key(
+        conn_id: Uuid,
+        database_name: Option<String>,
+        object_schema: Option<String>,
+        table_name: String,
+    ) -> SidebarTableKey {
+        SidebarTableKey {
+            conn_id,
+            database_name,
+            schema_name: object_schema,
+            table_name,
+        }
+    }
+
+    fn toggle_table_details(
+        &mut self,
+        conn_id: Uuid,
+        database_name: Option<String>,
+        object_schema: Option<String>,
+        table_name: String,
+        cx: &mut Context<Self>,
+    ) {
+        let key = Self::table_key(
+            conn_id,
+            database_name.clone(),
+            object_schema.clone(),
+            table_name.clone(),
+        );
+        let should_load = if self.expanded_table_keys.contains(&key) {
+            self.expanded_table_keys.remove(&key);
+            false
+        } else {
+            self.expanded_table_keys.insert(key.clone());
+            !self.table_details.contains_key(&key) && self.loading_table_keys.insert(key)
+        };
+
+        self.virtual_rows_dirty = true;
+        cx.notify();
+
+        if should_load {
+            cx.emit(ConnectionSidebarEvent::LoadTableDetails {
+                connection_id: conn_id,
+                table_name,
+                object_schema,
+                database_name,
+            });
+        }
+    }
+
     /// Toggle views section expand/collapse
     fn toggle_views_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
         let mut should_load = false;
@@ -567,7 +656,7 @@ impl ConnectionSidebar {
         if should_load {
             cx.emit(ConnectionSidebarEvent::LoadSection {
                 connection_id: id,
-                section: "views",
+                section: SidebarSection::Views,
             });
         }
     }
@@ -593,7 +682,7 @@ impl ConnectionSidebar {
         if should_load {
             cx.emit(ConnectionSidebarEvent::LoadSection {
                 connection_id: id,
-                section: "materialized_views",
+                section: SidebarSection::MaterializedViews,
             });
         }
     }
@@ -616,7 +705,7 @@ impl ConnectionSidebar {
         if should_load {
             cx.emit(ConnectionSidebarEvent::LoadSection {
                 connection_id: id,
-                section: "triggers",
+                section: SidebarSection::Triggers,
             });
         }
     }
@@ -639,7 +728,7 @@ impl ConnectionSidebar {
         if should_load {
             cx.emit(ConnectionSidebarEvent::LoadSection {
                 connection_id: id,
-                section: "functions",
+                section: SidebarSection::Functions,
             });
         }
     }
@@ -662,9 +751,20 @@ impl ConnectionSidebar {
         if should_load {
             cx.emit(ConnectionSidebarEvent::LoadSection {
                 connection_id: id,
-                section: "procedures",
+                section: SidebarSection::Procedures,
             });
         }
+    }
+
+    fn toggle_events_expand(&mut self, id: Uuid, cx: &mut Context<Self>) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            if !conn.object_capabilities.supports_events {
+                return;
+            }
+            conn.events_expanded = !conn.events_expanded;
+        }
+        self.virtual_rows_dirty = true;
+        cx.notify();
     }
 
     /// Toggle a schema section within a specific database node.
@@ -690,6 +790,7 @@ impl ConnectionSidebar {
                 "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
                 "functions" => schema.functions_expanded = !schema.functions_expanded,
                 "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
+                "events" => schema.events_expanded = !schema.events_expanded,
                 _ => {}
             }
         }
@@ -805,16 +906,31 @@ impl ConnectionSidebar {
     /// triggers schema loading so the user doesn't need a second click.
     fn toggle_database_expand(&mut self, id: Uuid, db_name: &str, cx: &mut Context<Self>) {
         let mut should_load_schema = false;
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id)
-            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name)
-        {
+        let mut should_load_collections = false;
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
+            let is_document = conn.is_document();
+            let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) else {
+                return;
+            };
             db.is_expanded = !db.is_expanded;
-            if db.is_expanded && db.schema.is_none() && !db.is_active && !db.is_loading {
+            if is_document {
+                db.collections_expanded = db.is_expanded;
+                if db.is_expanded && db.collections.is_empty() && !db.collections_loading {
+                    db.collections_loading = true;
+                    should_load_collections = true;
+                }
+            } else if db.is_expanded && db.schema.is_none() && !db.is_active && !db.is_loading {
                 should_load_schema = true;
             }
         }
         if should_load_schema {
             cx.emit(ConnectionSidebarEvent::ConnectToDatabase {
+                connection_id: id,
+                database_name: db_name.to_string(),
+            });
+        }
+        if should_load_collections {
+            cx.emit(ConnectionSidebarEvent::LoadDocumentCollections {
                 connection_id: id,
                 database_name: db_name.to_string(),
             });
@@ -861,15 +977,9 @@ impl ConnectionSidebar {
 
     fn supports_sidebar_section(&self, conn_id: Uuid, section: &str) -> bool {
         let capabilities = self.object_capabilities_for_connection(conn_id);
-        match section {
-            "tables" | "queries" | "redis_databases" => true,
-            "views" => capabilities.supports_views,
-            "materialized_views" => capabilities.supports_materialized_views,
-            "triggers" => capabilities.supports_triggers,
-            "functions" => capabilities.supports_functions,
-            "procedures" => capabilities.supports_procedures,
-            _ => true,
-        }
+        SidebarSection::from_key(section)
+            .map(|section| capabilities.supports_section(section))
+            .unwrap_or(true)
     }
 
     /// Check if an object name matches the search query (case-insensitive)
@@ -934,6 +1044,7 @@ impl ConnectionSidebar {
     fn db_icon_for_virtual_rows(&self, db_type: &str) -> ZqlzIcon {
         match db_type.to_ascii_lowercase().as_str() {
             "sqlite" => ZqlzIcon::SQLite,
+            "turso" => ZqlzIcon::Turso,
             "postgresql" | "postgres" => ZqlzIcon::PostgreSQL,
             "mysql" => ZqlzIcon::MySQL,
             "mariadb" => ZqlzIcon::MariaDB,
@@ -949,6 +1060,7 @@ impl ConnectionSidebar {
     fn db_logo_for_virtual_rows(&self, db_type: &str) -> Option<DatabaseLogo> {
         match db_type.to_ascii_lowercase().as_str() {
             "sqlite" => Some(DatabaseLogo::SQLite),
+            "turso" => Some(DatabaseLogo::Turso),
             "postgresql" | "postgres" => Some(DatabaseLogo::PostgreSQL),
             "mysql" => Some(DatabaseLogo::MySQL),
             "mariadb" => Some(DatabaseLogo::MariaDB),
@@ -1013,6 +1125,42 @@ impl ConnectionSidebar {
                 .size_3()
                 .text_color(muted_foreground)
                 .into_any_element(),
+            SidebarRowIcon::Event => Icon::new(ZqlzIcon::Calendar)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Sequence => Icon::new(ZqlzIcon::ListNumbers)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Domain | SidebarRowIcon::Type => Icon::new(ZqlzIcon::BracketsCurly)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Extension => Icon::new(ZqlzIcon::Stack)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Field => Icon::new(ZqlzIcon::Columns)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Index => Icon::new(ZqlzIcon::Key)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::ForeignKey => Icon::new(ZqlzIcon::Link)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Constraint => Icon::new(ZqlzIcon::CheckCircle)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
+            SidebarRowIcon::Rule => Icon::new(ZqlzIcon::ListBullets)
+                .size_3()
+                .text_color(muted_foreground)
+                .into_any_element(),
             SidebarRowIcon::Query => Icon::new(ZqlzIcon::FileSql)
                 .size_3()
                 .text_color(muted_foreground)
@@ -1037,6 +1185,11 @@ impl ConnectionSidebar {
         triggers: &[String],
         functions: &[String],
         procedures: &[String],
+        events: &[String],
+        sequences: &[String],
+        domains: &[String],
+        types: &[String],
+        extensions: &[String],
         schema_names: &[String],
         fallback_schema_name: Option<&str>,
     ) -> Option<Vec<(String, SchemaSectionGroup)>> {
@@ -1163,7 +1316,40 @@ impl ConnectionSidebar {
             }
         }
 
-        if !saw_schema_qualified_name {
+        for (objects, push) in [
+            (events, 0usize),
+            (sequences, 1usize),
+            (domains, 2usize),
+            (types, 3usize),
+            (extensions, 4usize),
+        ] {
+            for object_name in objects {
+                if let Some((schema_name, object_name)) =
+                    Self::split_schema_qualified_name_for_rows(object_name)
+                {
+                    saw_schema_qualified_name = true;
+                    let group = groups.entry(schema_name.to_string()).or_default();
+                    match push {
+                        0 => group.events.push(object_name.to_string()),
+                        1 => group.sequences.push(object_name.to_string()),
+                        2 => group.domains.push(object_name.to_string()),
+                        3 => group.types.push(object_name.to_string()),
+                        _ => group.extensions.push(object_name.to_string()),
+                    }
+                } else {
+                    let group = groups.entry(fallback_schema.clone()).or_default();
+                    match push {
+                        0 => group.events.push(object_name.clone()),
+                        1 => group.sequences.push(object_name.clone()),
+                        2 => group.domains.push(object_name.clone()),
+                        3 => group.types.push(object_name.clone()),
+                        _ => group.extensions.push(object_name.clone()),
+                    }
+                }
+            }
+        }
+
+        if !saw_schema_qualified_name && schema_names.is_empty() {
             return None;
         }
 
@@ -1190,6 +1376,8 @@ impl ConnectionSidebar {
 
             if connection.is_redis() {
                 self.append_redis_virtual_rows(connection, &mut rows, &mut matched_leaf_rows);
+            } else if connection.is_document() {
+                self.append_document_virtual_rows(connection, &mut rows, &mut matched_leaf_rows);
             } else {
                 self.append_sql_virtual_rows(connection, &mut rows, &mut matched_leaf_rows);
             }
@@ -1329,6 +1517,73 @@ impl ConnectionSidebar {
         }
     }
 
+    fn append_document_virtual_rows(
+        &self,
+        connection: &ConnectionEntry,
+        rows: &mut Vec<SidebarVirtualRow>,
+        matched_leaf_rows: &mut usize,
+    ) {
+        let has_search = !self.search_query_lowercase.is_empty();
+        let search_lowercase = self.search_query_lowercase.as_str();
+        for database in &connection.databases {
+            let matching_collections = database
+                .collections
+                .iter()
+                .filter(|collection| {
+                    !has_search
+                        || collection.to_lowercase().contains(search_lowercase)
+                        || database.name.to_lowercase().contains(search_lowercase)
+                })
+                .collect::<Vec<_>>();
+
+            if has_search && matching_collections.is_empty() {
+                continue;
+            }
+
+            rows.push(SidebarVirtualRow::Database(DatabaseRow {
+                conn_id: connection.id,
+                database_name: database.name.clone(),
+                is_expanded: database.is_expanded,
+                has_schema: !database.collections.is_empty(),
+                is_active: database.is_active,
+                size_label: database
+                    .size_bytes
+                    .map(Self::format_database_size_virtual_rows),
+            }));
+
+            if database.is_expanded {
+                if database.collections_loading {
+                    rows.push(SidebarVirtualRow::Loading(LoadingRow {
+                        element_id: format!(
+                            "loading-collections-{}-{}",
+                            connection.id, database.name
+                        ),
+                        text: "Loading collections...".to_string(),
+                        depth: 2,
+                    }));
+                }
+
+                for collection_name in matching_collections {
+                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                        element_id: format!(
+                            "document-collection-{}-{}-{}",
+                            connection.id, database.name, collection_name
+                        ),
+                        icon: SidebarRowIcon::Table,
+                        label: collection_name.clone(),
+                        depth: 2,
+                        kind: SidebarLeafKind::DocumentCollection {
+                            conn_id: connection.id,
+                            database_name: database.name.clone(),
+                            collection_name: collection_name.clone(),
+                        },
+                    }));
+                    *matched_leaf_rows += 1;
+                }
+            }
+        }
+    }
+
     fn append_sql_virtual_rows(
         &self,
         connection: &ConnectionEntry,
@@ -1371,12 +1626,16 @@ impl ConnectionSidebar {
                 continue;
             }
 
-            if !(database.schema.is_some() || database.is_active) {
+            if Self::should_render_database_loading(database) {
                 rows.push(SidebarVirtualRow::Loading(LoadingRow {
                     element_id: format!("loading-schema-{}-{}", connection.id, database.name),
                     text: "Loading schema...".to_string(),
                     depth: 2,
                 }));
+                continue;
+            }
+
+            if Self::should_skip_unloaded_database(database) {
                 continue;
             }
 
@@ -1388,6 +1647,11 @@ impl ConnectionSidebar {
                     &schema_data.triggers,
                     &schema_data.functions,
                     &schema_data.procedures,
+                    &schema_data.events,
+                    &schema_data.sequences,
+                    &schema_data.domains,
+                    &schema_data.types,
+                    &schema_data.extensions,
                     &schema_data.schema_names,
                     schema_data.schema_name.as_deref(),
                 ) {
@@ -1451,6 +1715,11 @@ impl ConnectionSidebar {
                     &connection.triggers,
                     &connection.functions,
                     &connection.procedures,
+                    &connection.events,
+                    &connection.sequences,
+                    &connection.domains,
+                    &connection.types,
+                    &connection.extensions,
                     &connection.schema_names,
                     connection.schema_name.as_deref(),
                 )
@@ -1507,6 +1776,14 @@ impl ConnectionSidebar {
         }
     }
 
+    fn should_render_database_loading(database: &SidebarDatabaseInfo) -> bool {
+        database.is_loading
+    }
+
+    fn should_skip_unloaded_database(database: &SidebarDatabaseInfo) -> bool {
+        database.schema.is_none() && !database.is_active && !database.is_loading
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn append_grouped_objects_rows(
         &self,
@@ -1537,6 +1814,11 @@ impl ConnectionSidebar {
             let filtered_triggers = self.filter_by_search(&group.triggers);
             let filtered_functions = self.filter_by_search(&group.functions);
             let filtered_procedures = self.filter_by_search(&group.procedures);
+            let filtered_events = self.filter_by_search(&group.events);
+            let filtered_sequences = self.filter_by_search(&group.sequences);
+            let filtered_domains = self.filter_by_search(&group.domains);
+            let filtered_types = self.filter_by_search(&group.types);
+            let filtered_extensions = self.filter_by_search(&group.extensions);
 
             let schema_has_matches = self.matches_search(schema_name)
                 || !filtered_tables.is_empty()
@@ -1544,7 +1826,12 @@ impl ConnectionSidebar {
                 || !filtered_materialized_views.is_empty()
                 || !filtered_triggers.is_empty()
                 || !filtered_functions.is_empty()
-                || !filtered_procedures.is_empty();
+                || !filtered_procedures.is_empty()
+                || !filtered_events.is_empty()
+                || !filtered_sequences.is_empty()
+                || !filtered_domains.is_empty()
+                || !filtered_types.is_empty()
+                || !filtered_extensions.is_empty();
 
             if has_search && !schema_has_matches {
                 continue;
@@ -1566,13 +1853,21 @@ impl ConnectionSidebar {
                     + group.materialized_views.len()
                     + group.triggers.len()
                     + group.functions.len()
-                    + group.procedures.len(),
+                    + group.procedures.len()
+                    + group.sequences.len()
+                    + group.domains.len()
+                    + group.types.len()
+                    + group.extensions.len(),
                 filtered_count: filtered_tables.len()
                     + filtered_views.len()
                     + filtered_materialized_views.len()
                     + filtered_triggers.len()
                     + filtered_functions.len()
-                    + filtered_procedures.len(),
+                    + filtered_procedures.len()
+                    + filtered_sequences.len()
+                    + filtered_domains.len()
+                    + filtered_types.len()
+                    + filtered_extensions.len(),
                 is_expanded: schema_is_expanded,
                 depth,
                 action: SidebarSectionAction::SchemaGroup {
@@ -1638,6 +1933,14 @@ impl ConnectionSidebar {
                             }));
 
                             *matched_leaf_rows += 1;
+                            self.append_table_detail_rows(
+                                rows,
+                                connection.id,
+                                database_name.clone(),
+                                Some(schema_name.clone()),
+                                table_name,
+                                leaf_depth + 1,
+                            );
                         }
                     }
                 }
@@ -1925,6 +2228,92 @@ impl ConnectionSidebar {
                     }
                 }
             }
+
+            Self::append_metadata_section_rows(
+                rows,
+                matched_leaf_rows,
+                connection.id,
+                database_name.clone(),
+                schema_name,
+                "events",
+                "Events",
+                SidebarRowIcon::Event,
+                &group.events,
+                &filtered_events,
+                connection.object_capabilities.supports_events,
+                expanded_schema_section_keys,
+                has_search,
+                section_depth,
+                leaf_depth,
+            );
+            Self::append_metadata_section_rows(
+                rows,
+                matched_leaf_rows,
+                connection.id,
+                database_name.clone(),
+                schema_name,
+                "sequences",
+                "Sequences",
+                SidebarRowIcon::Sequence,
+                &group.sequences,
+                &filtered_sequences,
+                connection.object_capabilities.supports_sequences,
+                expanded_schema_section_keys,
+                has_search,
+                section_depth,
+                leaf_depth,
+            );
+            Self::append_metadata_section_rows(
+                rows,
+                matched_leaf_rows,
+                connection.id,
+                database_name.clone(),
+                schema_name,
+                "domains",
+                "Domains",
+                SidebarRowIcon::Domain,
+                &group.domains,
+                &filtered_domains,
+                connection.object_capabilities.supports_domains,
+                expanded_schema_section_keys,
+                has_search,
+                section_depth,
+                leaf_depth,
+            );
+            Self::append_metadata_section_rows(
+                rows,
+                matched_leaf_rows,
+                connection.id,
+                database_name.clone(),
+                schema_name,
+                "types",
+                "Types",
+                SidebarRowIcon::Type,
+                &group.types,
+                &filtered_types,
+                connection.object_capabilities.supports_types,
+                expanded_schema_section_keys,
+                has_search,
+                section_depth,
+                leaf_depth,
+            );
+            Self::append_metadata_section_rows(
+                rows,
+                matched_leaf_rows,
+                connection.id,
+                database_name.clone(),
+                schema_name,
+                "extensions",
+                "Extensions",
+                SidebarRowIcon::Extension,
+                &group.extensions,
+                &filtered_extensions,
+                connection.object_capabilities.supports_extensions,
+                expanded_schema_section_keys,
+                has_search,
+                section_depth,
+                leaf_depth,
+            );
         }
 
         let filtered_queries: Vec<_> = queries
@@ -1968,6 +2357,141 @@ impl ConnectionSidebar {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn append_metadata_section_rows(
+        rows: &mut Vec<SidebarVirtualRow>,
+        matched_leaf_rows: &mut usize,
+        conn_id: Uuid,
+        database_name: Option<String>,
+        schema_name: &str,
+        section: &'static str,
+        label: &str,
+        icon: SidebarRowIcon,
+        objects: &[String],
+        filtered_objects: &[&String],
+        supported: bool,
+        expanded_schema_section_keys: &std::collections::HashSet<String>,
+        has_search: bool,
+        section_depth: usize,
+        leaf_depth: usize,
+    ) {
+        if !supported || (has_search && filtered_objects.is_empty()) {
+            return;
+        }
+
+        let section_key = format!("{schema_name}::{section}");
+        let section_expanded = expanded_schema_section_keys.contains(&section_key)
+            || (has_search && !filtered_objects.is_empty());
+        rows.push(SidebarVirtualRow::Section(SectionRow {
+            element_id: format!("{section}-header-{conn_id}-{schema_name}"),
+            icon: icon.clone(),
+            label: label.to_string(),
+            total_count: objects.len(),
+            filtered_count: filtered_objects.len(),
+            is_expanded: section_expanded,
+            depth: section_depth,
+            action: SidebarSectionAction::SchemaGroupSection {
+                conn_id,
+                database_name: database_name.clone(),
+                schema_name: schema_name.to_string(),
+                section,
+            },
+            context_menu_section: if section == "events" {
+                Some(section)
+            } else {
+                None
+            },
+        }));
+
+        if !section_expanded {
+            return;
+        }
+
+        for object_name in filtered_objects {
+            rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                element_id: format!("{section}-{conn_id}-{schema_name}-{object_name}"),
+                icon: icon.clone(),
+                label: (*object_name).clone(),
+                depth: leaf_depth,
+                kind: SidebarLeafKind::MetadataObject {
+                    conn_id,
+                    object_name: (*object_name).clone(),
+                    object_schema: Some(schema_name.to_string()),
+                    database_name: database_name.clone(),
+                    object_type: section,
+                },
+            }));
+            *matched_leaf_rows += 1;
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_table_detail_rows(
+        &self,
+        rows: &mut Vec<SidebarVirtualRow>,
+        conn_id: Uuid,
+        database_name: Option<String>,
+        object_schema: Option<String>,
+        table_name: &str,
+        depth: usize,
+    ) {
+        let key = Self::table_key(
+            conn_id,
+            database_name,
+            object_schema,
+            table_name.to_string(),
+        );
+        if !self.expanded_table_keys.contains(&key) {
+            return;
+        }
+
+        if self.loading_table_keys.contains(&key) {
+            rows.push(SidebarVirtualRow::Loading(LoadingRow {
+                element_id: format!("loading-table-details-{conn_id}-{table_name}"),
+                text: "Loading metadata...".to_string(),
+                depth,
+            }));
+            return;
+        }
+
+        let Some(details) = self.table_details.get(&key) else {
+            return;
+        };
+
+        for (section, icon, count) in [
+            ("Fields", SidebarRowIcon::Field, details.fields.len()),
+            ("Indexes", SidebarRowIcon::Index, details.indexes.len()),
+            (
+                "Foreign Keys",
+                SidebarRowIcon::ForeignKey,
+                details.foreign_keys.len(),
+            ),
+            ("Uniques", SidebarRowIcon::Constraint, details.uniques.len()),
+            ("Checks", SidebarRowIcon::Constraint, details.checks.len()),
+            (
+                "Excludes",
+                SidebarRowIcon::Constraint,
+                details.excludes.len(),
+            ),
+            ("Rules", SidebarRowIcon::Rule, 0),
+            ("Triggers", SidebarRowIcon::Trigger, details.triggers.len()),
+        ] {
+            rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                element_id: format!(
+                    "table-detail-{}-{}-{}-{}",
+                    conn_id,
+                    key.schema_name.as_deref().unwrap_or_default(),
+                    table_name,
+                    section.to_ascii_lowercase().replace(' ', "-")
+                ),
+                icon,
+                label: format!("{section} ({count})"),
+                depth,
+                kind: SidebarLeafKind::TableChildSummary,
+            }));
+        }
+    }
+
     fn append_connection_level_objects_rows(
         &self,
         connection: &ConnectionEntry,
@@ -1983,6 +2507,7 @@ impl ConnectionSidebar {
         let filtered_triggers = self.filter_by_search(&connection.triggers);
         let filtered_functions = self.filter_by_search(&connection.functions);
         let filtered_procedures = self.filter_by_search(&connection.procedures);
+        let filtered_events = self.filter_by_search(&connection.events);
         let filtered_queries: Vec<_> = connection
             .queries
             .iter()
@@ -2001,6 +2526,8 @@ impl ConnectionSidebar {
             connection.functions_expanded || (has_search && !filtered_functions.is_empty());
         let procedures_expanded =
             connection.procedures_expanded || (has_search && !filtered_procedures.is_empty());
+        let events_expanded =
+            connection.events_expanded || (has_search && !filtered_events.is_empty());
         let queries_expanded =
             connection.queries_expanded || (has_search && !filtered_queries.is_empty());
 
@@ -2043,11 +2570,19 @@ impl ConnectionSidebar {
                             conn_id: connection.id,
                             open_table_name: (*table_name).clone(),
                             menu_table_name: (*table_name).clone(),
-                            object_schema,
+                            object_schema: object_schema.clone(),
                             database_name: database_name.clone(),
                         },
                     }));
                     *matched_leaf_rows += 1;
+                    self.append_table_detail_rows(
+                        rows,
+                        connection.id,
+                        database_name.clone(),
+                        object_schema,
+                        table_name,
+                        depth + 2,
+                    );
                 }
             }
         }
@@ -2313,6 +2848,47 @@ impl ConnectionSidebar {
             }
         }
 
+        if connection.object_capabilities.supports_events {
+            let include_events_section = Self::push_section_row(
+                rows,
+                SectionRow {
+                    element_id: format!("events-header-{}", connection.id),
+                    icon: SidebarRowIcon::Event,
+                    label: "Events".to_string(),
+                    total_count: connection.events.len(),
+                    filtered_count: filtered_events.len(),
+                    is_expanded: events_expanded,
+                    depth,
+                    action: SidebarSectionAction::ConnectionSection {
+                        conn_id: connection.id,
+                        section: "events",
+                    },
+                    context_menu_section: Some("events"),
+                },
+                has_search,
+            );
+
+            if include_events_section && events_expanded {
+                let object_schema = self.current_schema_for_virtual_rows(database_name.as_deref());
+                for event_name in &filtered_events {
+                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                        element_id: format!("event-{}-{}", connection.id, event_name),
+                        icon: SidebarRowIcon::Event,
+                        label: (*event_name).clone(),
+                        depth: depth + 1,
+                        kind: SidebarLeafKind::MetadataObject {
+                            conn_id: connection.id,
+                            object_name: (*event_name).clone(),
+                            object_schema: object_schema.clone(),
+                            database_name: database_name.clone(),
+                            object_type: "events",
+                        },
+                    }));
+                    *matched_leaf_rows += 1;
+                }
+            }
+        }
+
         let include_queries_section = Self::push_section_row(
             rows,
             SectionRow {
@@ -2369,6 +2945,7 @@ impl ConnectionSidebar {
         let filtered_triggers = self.filter_by_search(&schema.triggers);
         let filtered_functions = self.filter_by_search(&schema.functions);
         let filtered_procedures = self.filter_by_search(&schema.procedures);
+        let filtered_events = self.filter_by_search(&schema.events);
         let filtered_queries: Vec<_> = connection
             .queries
             .iter()
@@ -2385,6 +2962,7 @@ impl ConnectionSidebar {
             schema.functions_expanded || (has_search && !filtered_functions.is_empty());
         let procedures_expanded =
             schema.procedures_expanded || (has_search && !filtered_procedures.is_empty());
+        let events_expanded = schema.events_expanded || (has_search && !filtered_events.is_empty());
         let queries_expanded =
             connection.queries_expanded || (has_search && !filtered_queries.is_empty());
 
@@ -2437,6 +3015,14 @@ impl ConnectionSidebar {
                         },
                     }));
                     *matched_leaf_rows += 1;
+                    self.append_table_detail_rows(
+                        rows,
+                        connection.id,
+                        Some(database_name.clone()),
+                        self.current_schema_for_virtual_rows(Some(&database_name)),
+                        table_name,
+                        depth + 2,
+                    );
                 }
             }
         }
@@ -2704,6 +3290,51 @@ impl ConnectionSidebar {
             }
         }
 
+        if connection.object_capabilities.supports_events {
+            let include_events_section = Self::push_section_row(
+                rows,
+                SectionRow {
+                    element_id: format!("events-header-{}-{}", connection.id, database_name),
+                    icon: SidebarRowIcon::Event,
+                    label: "Events".to_string(),
+                    total_count: schema.events.len(),
+                    filtered_count: filtered_events.len(),
+                    is_expanded: events_expanded,
+                    depth,
+                    action: SidebarSectionAction::DatabaseSection {
+                        conn_id: connection.id,
+                        database_name: database_name.clone(),
+                        section: "events",
+                    },
+                    context_menu_section: Some("events"),
+                },
+                has_search,
+            );
+
+            if include_events_section && events_expanded {
+                let object_schema = self.current_schema_for_virtual_rows(Some(&database_name));
+                for event_name in &filtered_events {
+                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                        element_id: format!(
+                            "event-{}-{}-{}",
+                            connection.id, database_name, event_name
+                        ),
+                        icon: SidebarRowIcon::Event,
+                        label: (*event_name).clone(),
+                        depth: depth + 1,
+                        kind: SidebarLeafKind::MetadataObject {
+                            conn_id: connection.id,
+                            object_name: (*event_name).clone(),
+                            object_schema: object_schema.clone(),
+                            database_name: Some(database_name.clone()),
+                            object_type: "events",
+                        },
+                    }));
+                    *matched_leaf_rows += 1;
+                }
+            }
+        }
+
         let include_queries_section = Self::push_section_row(
             rows,
             SectionRow {
@@ -2772,17 +3403,21 @@ impl ConnectionSidebar {
         } = row;
         let theme = cx.theme();
         let row_background = Hsla::transparent_black();
-        let row_selected_background = theme.list_active;
-        let row_hover_background = theme.list_hover;
-        let subtle_action_border = theme.border.opacity(0.6);
+        let row_selected_background = theme.sidebar_accent.opacity(0.18);
+        let row_hover_background = theme.sidebar_accent.opacity(0.08);
+        let subtle_action_border = theme.sidebar_border.opacity(0.5);
         let is_selected = self.selected_connection == Some(conn_id);
+        let foreground = if is_selected {
+            theme.sidebar_accent_foreground
+        } else {
+            theme.sidebar_foreground
+        };
         let db_icon = self.db_icon_for_virtual_rows(&db_type);
         let db_logo = self.db_logo_for_virtual_rows(&db_type);
         let conn_id_for_row_click = conn_id;
         let conn_id_for_right_click = conn_id;
         let conn_id_for_new_query = conn_id;
         let conn_id_for_disconnect = conn_id;
-        let conn_id_for_connect = conn_id;
 
         h_flex()
             .id(SharedString::from(format!("conn-{conn_id}")))
@@ -2790,8 +3425,9 @@ impl ConnectionSidebar {
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
             .px_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
+            .text_color(foreground)
             .bg(if is_selected {
                 row_selected_background
             } else {
@@ -2862,7 +3498,7 @@ impl ConnectionSidebar {
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
-                                .hover(|el| el.bg(theme.accent.opacity(0.15)))
+                                .hover(|el| el.bg(theme.sidebar_accent.opacity(0.1)))
                                 .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
                                     cx.stop_propagation();
                                     cx.emit(ConnectionSidebarEvent::NewQuery(
@@ -2885,7 +3521,7 @@ impl ConnectionSidebar {
                                 .items_center()
                                 .justify_center()
                                 .cursor_pointer()
-                                .hover(|el| el.bg(theme.danger.opacity(0.15)))
+                                .hover(|el| el.bg(theme.danger.opacity(0.1)))
                                 .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
                                     cx.stop_propagation();
                                     cx.emit(ConnectionSidebarEvent::Disconnect(
@@ -2911,30 +3547,6 @@ impl ConnectionSidebar {
                                 .bg(theme.primary.opacity(0.6))
                                 .child(body_small("...").color(theme.primary_foreground)),
                         )
-                    })
-                    .when(!is_connected && !is_connecting, |this| {
-                        this.child(
-                            div()
-                                .id(SharedString::from(format!("conn-connect-{conn_id}")))
-                                .size_4()
-                                .border_1()
-                                .border_color(subtle_action_border)
-                                .bg(theme.primary)
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .cursor_pointer()
-                                .hover(|el| el.bg(theme.primary.opacity(0.9)))
-                                .on_click(cx.listener(move |_this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    cx.emit(ConnectionSidebarEvent::Connect(conn_id_for_connect));
-                                }))
-                                .child(
-                                    Icon::new(IconName::Plus)
-                                        .size_3()
-                                        .text_color(theme.primary_foreground),
-                                ),
-                        )
                     }),
             )
             .into_any_element()
@@ -2951,15 +3563,16 @@ impl ConnectionSidebar {
         } = row;
         let database_name_for_click = database_name.clone();
         let theme = cx.theme();
+        let row_hover_background = theme.sidebar_accent.opacity(0.08);
         h_flex()
             .id(SharedString::from(format!(
                 "db-node-{conn_id}-{database_name}"
             )))
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .pl(px(20.0))
+            .pl(Self::sidebar_indent(1))
             .pr_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
             .text_xs()
             .text_color(if is_expanded || is_active {
@@ -2968,7 +3581,7 @@ impl ConnectionSidebar {
                 theme.muted_foreground.opacity(0.5)
             })
             .cursor_pointer()
-            .hover(|this| this.bg(theme.list_hover))
+            .hover(move |this| this.bg(row_hover_background))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.toggle_database_expand(conn_id, &database_name_for_click, cx);
             }))
@@ -3007,6 +3620,7 @@ impl ConnectionSidebar {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let theme = cx.theme();
+        let row_hover_background = theme.sidebar_accent.opacity(0.08);
         h_flex()
             .id(SharedString::from(format!(
                 "schema-node-{}-{}",
@@ -3014,9 +3628,9 @@ impl ConnectionSidebar {
             )))
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .pl(px(32.0))
+            .pl(Self::sidebar_indent(2))
             .pr_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
             .text_xs()
             .text_color(if row.is_expanded {
@@ -3025,7 +3639,7 @@ impl ConnectionSidebar {
                 theme.muted_foreground.opacity(0.5)
             })
             .cursor_pointer()
-            .hover(|this| this.bg(theme.list_hover))
+            .hover(move |this| this.bg(row_hover_background))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 if row.has_database_schema {
                     this.toggle_db_section(row.conn_id, &row.database_name, "schema", cx);
@@ -3062,11 +3676,12 @@ impl ConnectionSidebar {
         let action_for_context = action;
         let theme = cx.theme();
         let has_search = !self.search_query.is_empty();
-        let indent = px(8.0 + depth as f32 * 12.0);
+        let indent = Self::sidebar_indent(depth);
+        let row_hover_background = theme.sidebar_accent.opacity(0.08);
         let text_color = if is_expanded {
-            theme.foreground
-        } else {
             theme.muted_foreground
+        } else {
+            theme.muted_foreground.opacity(0.65)
         };
         let icon = self.sidebar_row_icon(&row_icon, theme.muted_foreground);
 
@@ -3076,12 +3691,12 @@ impl ConnectionSidebar {
             .h(px(SIDEBAR_ROW_HEIGHT))
             .pl(indent)
             .pr_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
             .text_xs()
             .text_color(text_color)
             .cursor_pointer()
-            .hover(|this| this.bg(theme.list_hover))
+            .hover(move |this| this.bg(row_hover_background))
             .on_click(
                 cx.listener(move |this, _: &ClickEvent, _, cx| match &action_for_click {
                     SidebarSectionAction::RedisDatabases { conn_id } => {
@@ -3097,6 +3712,7 @@ impl ConnectionSidebar {
                             "triggers" => this.toggle_triggers_expand(*conn_id, cx),
                             "functions" => this.toggle_functions_expand(*conn_id, cx),
                             "procedures" => this.toggle_procedures_expand(*conn_id, cx),
+                            "events" => this.toggle_events_expand(*conn_id, cx),
                             "queries" => this.toggle_queries_expand(*conn_id, cx),
                             _ => {}
                         }
@@ -3192,11 +3808,37 @@ impl ConnectionSidebar {
         } = row;
         let kind_for_click = kind.clone();
         let kind_for_context = kind;
+        let table_toggle = if let SidebarLeafKind::Table {
+            conn_id,
+            menu_table_name,
+            object_schema,
+            database_name,
+            ..
+        } = &kind_for_click
+        {
+            let key = Self::table_key(
+                *conn_id,
+                database_name.clone(),
+                object_schema.clone(),
+                menu_table_name.clone(),
+            );
+            Some((
+                *conn_id,
+                database_name.clone(),
+                object_schema.clone(),
+                menu_table_name.clone(),
+                self.expanded_table_keys.contains(&key),
+            ))
+        } else {
+            None
+        };
         let theme = cx.theme();
-        let indent = px(8.0 + depth as f32 * 12.0);
+        let indent = Self::sidebar_indent(depth);
         let is_active = self.is_leaf_item_active(&element_id);
+        let active_background = theme.sidebar_accent.opacity(0.14);
+        let hover_background = theme.sidebar_accent.opacity(0.08);
         let text_color = if is_active {
-            theme.foreground
+            theme.sidebar_accent_foreground
         } else {
             theme.muted_foreground
         };
@@ -3209,12 +3851,51 @@ impl ConnectionSidebar {
             .h(px(SIDEBAR_ROW_HEIGHT))
             .pl(indent)
             .pr_2()
-            .gap_1p5()
+            .gap_2()
             .items_center()
             .text_sm()
             .text_color(text_color)
+            .when(is_active, |this| this.bg(active_background))
             .cursor_pointer()
-            .hover(|this| this.bg(theme.list_hover))
+            .hover(move |this| {
+                if is_active {
+                    this.bg(active_background)
+                } else {
+                    this.bg(hover_background)
+                }
+            })
+            .when_some(table_toggle, |this, toggle| {
+                let (conn_id, database_name, object_schema, table_name, is_expanded) = toggle;
+                this.child(
+                    div()
+                        .id(SharedString::from(format!(
+                            "table-toggle-{conn_id}-{table_name}"
+                        )))
+                        .size_3()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .cursor_pointer()
+                        .child(
+                            Icon::new(if is_expanded {
+                                IconName::ChevronDown
+                            } else {
+                                IconName::ChevronRight
+                            })
+                            .size_3(),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.toggle_table_details(
+                                conn_id,
+                                database_name.clone(),
+                                object_schema.clone(),
+                                table_name.clone(),
+                                cx,
+                            );
+                        })),
+                )
+            })
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                 this.set_active_leaf_item(Some(element_id_for_click.clone()), cx);
                 match &kind_for_click {
@@ -3275,6 +3956,22 @@ impl ConnectionSidebar {
                         procedure_name: procedure_name.clone(),
                         object_schema: object_schema.clone(),
                     }),
+                    SidebarLeafKind::MetadataObject {
+                        conn_id,
+                        object_name,
+                        object_schema,
+                        database_name,
+                        object_type,
+                    } => cx.emit(ConnectionSidebarEvent::OpenGenericObjectDefinition {
+                        connection_id: *conn_id,
+                        object_ref: ObjectsPanelObjectRef::new(
+                            Self::normalized_manifest_object_type(object_type),
+                            object_name.clone(),
+                        )
+                        .with_database_option(database_name.clone())
+                        .with_schema_option(object_schema.clone()),
+                    }),
+                    SidebarLeafKind::TableChildSummary => {}
                     SidebarLeafKind::Query {
                         conn_id,
                         query_id,
@@ -3291,6 +3988,15 @@ impl ConnectionSidebar {
                     } => cx.emit(ConnectionSidebarEvent::OpenRedisDatabase {
                         connection_id: *conn_id,
                         database_index: *database_index,
+                    }),
+                    SidebarLeafKind::DocumentCollection {
+                        conn_id,
+                        database_name,
+                        collection_name,
+                    } => cx.emit(ConnectionSidebarEvent::OpenDocumentCollection {
+                        connection_id: *conn_id,
+                        database_name: database_name.clone(),
+                        collection_name: collection_name.clone(),
                     }),
                 }
             }))
@@ -3378,6 +4084,23 @@ impl ConnectionSidebar {
                             window,
                             cx,
                         ),
+                        SidebarLeafKind::MetadataObject {
+                            conn_id,
+                            object_name,
+                            object_schema,
+                            database_name,
+                            object_type,
+                        } => this.show_metadata_object_context_menu(
+                            *conn_id,
+                            object_name.clone(),
+                            object_schema.clone(),
+                            database_name.clone(),
+                            object_type.to_string(),
+                            event.position,
+                            window,
+                            cx,
+                        ),
+                        SidebarLeafKind::TableChildSummary => {}
                         SidebarLeafKind::Query {
                             conn_id,
                             query_id,
@@ -3401,6 +4124,7 @@ impl ConnectionSidebar {
                             window,
                             cx,
                         ),
+                        SidebarLeafKind::DocumentCollection { .. } => {}
                     }
                 }),
             )
@@ -3419,7 +4143,7 @@ impl ConnectionSidebar {
 
     fn render_loading_virtual_row(&self, row: LoadingRow, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
-        let indent = px(8.0 + row.depth as f32 * 12.0);
+        let indent = Self::sidebar_indent(row.depth);
         h_flex()
             .id(SharedString::from(row.element_id))
             .w_full()
@@ -3442,10 +4166,10 @@ impl ConnectionSidebar {
         h_flex()
             .w_full()
             .h(px(SIDEBAR_ROW_HEIGHT))
-            .px_3()
+            .px_2()
             .items_center()
             .text_sm()
-            .text_color(theme.muted_foreground)
+            .text_color(theme.muted_foreground.opacity(0.75))
             .child(format!("No objects match \"{}\"", row.query))
             .into_any_element()
     }
@@ -3495,7 +4219,7 @@ impl Render for ConnectionSidebar {
             .size_full()
             .bg(theme.sidebar)
             .border_r_1()
-            .border_color(theme.border)
+            .border_color(theme.sidebar_border)
             .font_family(cx.theme().font_family.clone())
             // Search input - only show when there are connections
             .when_some(search_input_state, |this, input_state| {
@@ -3503,14 +4227,12 @@ impl Render for ConnectionSidebar {
                     div()
                         .w_full()
                         .px_2()
-                        .py_1()
-                        .border_b_1()
-                        .border_color(theme.border)
+                        .pt_2()
+                        .pb_1()
                         .child(
                             Input::new(&input_state)
                                 .small()
                                 .w_full()
-                                .appearance(false)
                                 .cleanable(true)
                                 .prefix(
                                     Icon::new(IconName::Search)
@@ -3610,7 +4332,7 @@ impl Render for ConnectionSidebar {
                                 )
                                 .flex_grow()
                                 .size_full()
-                                .pr(px(16.0))
+                                .pl_2()
                                 .track_scroll(&self.scroll_handle)
                                 .with_sizing_behavior(ListSizingBehavior::Auto)
                                 .into_any_element(),
@@ -3625,10 +4347,7 @@ impl Render for ConnectionSidebar {
                                 .right_0()
                                 .bottom_0()
                                 .w(px(16.0))
-                                .child(
-                                    Scrollbar::vertical(&self.scroll_handle)
-                                        .scrollbar_show(ScrollbarShow::Always),
-                                ),
+                                .child(Scrollbar::vertical(&self.scroll_handle)),
                         )
                     }),
             )
@@ -3643,6 +4362,7 @@ impl Render for ConnectionSidebar {
             .children(self.section_context_menu.clone())
             .children(self.materialized_view_context_menu.clone())
             .children(self.redis_db_context_menu.clone())
+            .children(self.metadata_object_context_menu.clone())
     }
 }
 
@@ -3701,5 +4421,88 @@ impl Panel for ConnectionSidebar {
 
     fn closable(&self, _cx: &App) -> bool {
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ConnectionSidebar;
+    use crate::widgets::sidebar::types::SidebarDatabaseInfo;
+
+    #[test]
+    fn sidebar_groups_postgres_metadata_sections_by_schema() {
+        let schema_names = vec!["audit".to_string(), "public".to_string()];
+        let groups = ConnectionSidebar::group_schema_sections_for_rows(
+            &["audit.events".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &["audit.nightly_rollup".to_string()],
+            &["audit.audit_id_seq".to_string()],
+            &["public.email_address".to_string()],
+            &["audit.audit_event".to_string()],
+            &["postgis".to_string()],
+            &schema_names,
+            Some("public"),
+        )
+        .expect("schema names should force grouped sidebar rows");
+
+        let audit = groups
+            .iter()
+            .find(|(schema_name, _)| schema_name == "audit")
+            .map(|(_, group)| group)
+            .expect("audit schema should be grouped");
+        assert_eq!(audit.tables, vec!["events".to_string()]);
+        assert_eq!(audit.events, vec!["nightly_rollup".to_string()]);
+        assert_eq!(audit.sequences, vec!["audit_id_seq".to_string()]);
+        assert_eq!(audit.types, vec!["audit_event".to_string()]);
+
+        let public = groups
+            .iter()
+            .find(|(schema_name, _)| schema_name == "public")
+            .map(|(_, group)| group)
+            .expect("public schema should be grouped");
+        assert_eq!(public.domains, vec!["email_address".to_string()]);
+        assert_eq!(public.extensions, vec!["postgis".to_string()]);
+    }
+
+    #[test]
+    fn unloaded_expanded_database_without_loading_does_not_render_loading_row() {
+        let database = SidebarDatabaseInfo {
+            name: "postgres".to_string(),
+            size_bytes: None,
+            is_active: false,
+            is_expanded: true,
+            is_loading: false,
+            schema: None,
+            collections: Vec::new(),
+            collections_expanded: false,
+            collections_loading: false,
+        };
+
+        assert!(!ConnectionSidebar::should_render_database_loading(
+            &database
+        ));
+        assert!(ConnectionSidebar::should_skip_unloaded_database(&database));
+    }
+
+    #[test]
+    fn loading_database_renders_loading_row() {
+        let database = SidebarDatabaseInfo {
+            name: "postgres".to_string(),
+            size_bytes: None,
+            is_active: false,
+            is_expanded: true,
+            is_loading: true,
+            schema: None,
+            collections: Vec::new(),
+            collections_expanded: false,
+            collections_loading: false,
+        };
+
+        assert!(ConnectionSidebar::should_render_database_loading(&database));
+        assert!(!ConnectionSidebar::should_skip_unloaded_database(&database));
     }
 }

@@ -6,8 +6,25 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{DatabaseObject, DropTriggerOptions, DropViewOptions, ObjectType, SqlObjectName};
+use zqlz_connection::SidebarSection;
+use zqlz_core::{
+    ObjectType, connection_is_mysql_compatible, connection_is_postgres, validate_view_name,
+};
+use zqlz_objects::{
+    DropTriggerStatementRequest, ObjectDefinitionRequest,
+    build_drop_trigger_statement as build_drop_trigger_statement_for_object,
+    build_drop_view_statement as build_drop_view_statement_for_object, build_duplicate_view_sql,
+    extract_trigger_name_from_create_statement,
+    extract_view_name_from_create_view as extract_view_name_from_create_view_from_objects,
+    fetch_object_definition, fetch_trigger_definition as fetch_trigger_definition_from_objects,
+    plan_trigger_replace_execution, plan_view_save_execution,
+};
 use zqlz_query::EditorObjectType;
+use zqlz_query::{
+    QueryConnectionCandidate, QueryDisplayContext, resolve_query_connection_selection,
+    run_execute_query_workflow,
+};
+use zqlz_sequence_designer::{SequenceDesign, SequenceDesignerEvent, SequenceDesignerPanel};
 use zqlz_trigger_designer::{
     DatabaseDialect as TriggerDialect, TriggerDesign, TriggerDesignerEvent, TriggerDesignerPanel,
 };
@@ -15,7 +32,7 @@ use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt,
     button::ButtonVariant,
     dialog::DialogButtonProps,
-    dock::{DockPlacement, PanelView},
+    dock::PanelView,
     input::{Input, InputState},
     notification::Notification,
     v_flex,
@@ -31,117 +48,13 @@ use zqlz_text_editor::{DocumentIdentity, TextDocument};
 use super::MainView;
 use super::rename_window::RenameWindow;
 
-/// Validates a view name and returns an error message if invalid.
-pub(in crate::main_view) fn validate_view_name(name: &str) -> Option<&'static str> {
-    let name = name.trim();
-
-    if name.is_empty() {
-        return Some("View name cannot be empty");
-    }
-
-    if name.len() > 128 {
-        return Some("View name is too long (max 128 characters)");
-    }
-
-    // Emptiness is already guarded above, so `next()` will always yield a char
-    let Some(first_char) = name.chars().next() else {
-        return Some("View name cannot be empty");
-    };
-    if !first_char.is_alphabetic() && first_char != '_' {
-        return Some("View name must start with a letter or underscore");
-    }
-
-    // Check for invalid characters (allow alphanumeric, underscore, and some databases allow $)
-    for c in name.chars() {
-        if !c.is_alphanumeric() && c != '_' && c != '$' {
-            return Some("View name contains invalid characters");
-        }
-    }
-
-    // Check for reserved SQL keywords (common ones)
-    let upper = name.to_uppercase();
-    let reserved = [
-        "SELECT",
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "CREATE",
-        "ALTER",
-        "TABLE",
-        "INDEX",
-        "VIEW",
-        "FROM",
-        "WHERE",
-        "AND",
-        "OR",
-        "NOT",
-        "NULL",
-        "TRUE",
-        "FALSE",
-        "ORDER",
-        "BY",
-        "GROUP",
-        "HAVING",
-        "LIMIT",
-        "OFFSET",
-        "JOIN",
-        "LEFT",
-        "RIGHT",
-        "INNER",
-        "OUTER",
-        "ON",
-        "AS",
-        "IN",
-        "IS",
-        "LIKE",
-        "BETWEEN",
-        "CASE",
-        "WHEN",
-        "THEN",
-        "ELSE",
-        "END",
-        "EXISTS",
-        "ALL",
-        "ANY",
-        "SOME",
-        "DISTINCT",
-        "UNION",
-        "EXCEPT",
-        "INTERSECT",
-        "INTO",
-        "VALUES",
-        "SET",
-        "DEFAULT",
-        "PRIMARY",
-        "KEY",
-        "FOREIGN",
-        "REFERENCES",
-        "UNIQUE",
-        "CHECK",
-        "CONSTRAINT",
-        "DATABASE",
-        "SCHEMA",
-        "GRANT",
-        "REVOKE",
-        "COMMIT",
-        "ROLLBACK",
-        "BEGIN",
-    ];
-    if reserved.contains(&upper.as_str()) {
-        return Some("View name is a reserved SQL keyword");
-    }
-
-    None
-}
-
 /// Fetches the full CREATE VIEW DDL of a view from the database.
 pub(in crate::main_view) async fn fetch_view_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     view_name: &str,
 ) -> Result<String, String> {
-    fetch_database_object_definition(connection, schema_name, view_name, ObjectType::View)
+    fetch_database_object_definition(connection, schema_name, view_name, ObjectType::View, None)
         .await
         .map_err(|error| format!("Failed to fetch view definition: {}", error))
 }
@@ -200,42 +113,8 @@ fn version_target_from_editor_object(
     })
 }
 
-fn object_type_label(object_type: ObjectType) -> &'static str {
-    match object_type {
-        ObjectType::Function => "Function",
-        ObjectType::Procedure => "Procedure",
-        ObjectType::Trigger => "Trigger",
-        ObjectType::View => "View",
-        ObjectType::Table => "Table",
-        ObjectType::Database => "Database",
-        ObjectType::Schema => "Schema",
-        ObjectType::MaterializedView => "Materialized view",
-        ObjectType::Index => "Index",
-        ObjectType::Constraint => "Constraint",
-        ObjectType::Sequence => "Sequence",
-        ObjectType::Type => "Type",
-    }
-}
-
-fn quote_identifier_for_connection(
-    connection: &Arc<dyn zqlz_core::Connection>,
-    identifier: &str,
-) -> String {
-    connection.quote_identifier(identifier)
-}
-
 fn is_postgres_dialect(connection: &Arc<dyn zqlz_core::Connection>) -> bool {
-    matches!(
-        connection.dialect_id(),
-        Some("postgres") | Some("postgresql")
-    )
-}
-
-fn supports_create_or_replace_view(connection: &Arc<dyn zqlz_core::Connection>) -> bool {
-    matches!(
-        connection.dialect_id(),
-        Some("postgres") | Some("postgresql") | Some("mysql") | Some("mariadb")
-    )
+    connection_is_postgres(connection.as_ref())
 }
 
 pub(in crate::main_view) fn build_drop_view_statement(
@@ -243,334 +122,26 @@ pub(in crate::main_view) fn build_drop_view_statement(
     view_name: &str,
     include_if_exists: bool,
 ) -> String {
-    connection
-        .drop_view_sql(
-            &SqlObjectName::new(view_name),
-            DropViewOptions {
-                if_exists: include_if_exists,
-                cascade: false,
-            },
-        )
-        .unwrap_or_else(|error| {
+    build_drop_view_statement_for_object(connection, view_name, include_if_exists).unwrap_or_else(
+        |error| {
             tracing::error!(
                 view = %view_name,
                 %error,
                 "Failed to build drop view SQL via driver"
             );
             String::new()
-        })
-}
-
-pub(in crate::main_view) fn build_rename_table_statement(
-    connection: &Arc<dyn zqlz_core::Connection>,
-    old_name: &str,
-    new_name: &str,
-) -> String {
-    connection
-        .rename_table_sql(&SqlObjectName::new(old_name), new_name)
-        .unwrap_or_else(|error| {
-            tracing::error!(
-                table = %old_name,
-                new_table = %new_name,
-                %error,
-                "Failed to build rename table SQL via driver"
-            );
-            String::new()
-        })
-}
-
-fn normalize_identifier_segment(segment: &str) -> String {
-    segment
-        .trim()
-        .trim_matches('"')
-        .trim_matches('`')
-        .trim_matches('[')
-        .trim_matches(']')
-        .to_string()
-}
-
-fn split_unquoted_schema_separator(identifier: &str) -> Option<usize> {
-    let mut in_double_quote = false;
-    let mut in_backtick_quote = false;
-    let mut in_bracket_quote = false;
-
-    let mut characters = identifier.char_indices().peekable();
-    while let Some((index, character)) = characters.next() {
-        if in_double_quote {
-            if character == '"' {
-                if matches!(characters.peek(), Some((_, '"'))) {
-                    characters.next();
-                } else {
-                    in_double_quote = false;
-                }
-            }
-            continue;
-        }
-
-        if in_backtick_quote {
-            if character == '`' {
-                if matches!(characters.peek(), Some((_, '`'))) {
-                    characters.next();
-                } else {
-                    in_backtick_quote = false;
-                }
-            }
-            continue;
-        }
-
-        if in_bracket_quote {
-            if character == ']' {
-                if matches!(characters.peek(), Some((_, ']'))) {
-                    characters.next();
-                } else {
-                    in_bracket_quote = false;
-                }
-            }
-            continue;
-        }
-
-        match character {
-            '"' => in_double_quote = true,
-            '`' => in_backtick_quote = true,
-            '[' => in_bracket_quote = true,
-            '.' => return Some(index),
-            _ => {}
-        }
-    }
-
-    None
-}
-
-fn split_schema_and_name(identifier: &str) -> (Option<String>, String) {
-    if let Some(dot_index) = split_unquoted_schema_separator(identifier) {
-        let schema = normalize_identifier_segment(&identifier[..dot_index]);
-        let name = normalize_identifier_segment(&identifier[dot_index + 1..]);
-        if !schema.is_empty() && !name.is_empty() {
-            return (Some(schema), name);
-        }
-    }
-
-    (None, normalize_identifier_segment(identifier))
-}
-
-fn find_keyword_position(haystack: &str, keyword: &str) -> Option<usize> {
-    let uppercase_haystack = haystack.to_uppercase();
-    let uppercase_keyword = keyword.to_uppercase();
-
-    for (index, _) in uppercase_haystack.match_indices(&uppercase_keyword) {
-        let before_is_boundary = if index == 0 {
-            true
-        } else {
-            let before = uppercase_haystack[..index].chars().next_back();
-            !matches!(before, Some(character) if character.is_ascii_alphanumeric() || character == '_')
-        };
-
-        if !before_is_boundary {
-            continue;
-        }
-
-        let after_index = index + uppercase_keyword.len();
-        let after_is_boundary = if after_index >= uppercase_haystack.len() {
-            true
-        } else {
-            let after = uppercase_haystack[after_index..].chars().next();
-            !matches!(after, Some(character) if character.is_ascii_alphanumeric() || character == '_')
-        };
-
-        if after_is_boundary {
-            return Some(index);
-        }
-    }
-
-    None
-}
-
-fn parse_identifier_end(remainder: &str) -> Option<usize> {
-    let mut in_double_quote = false;
-    let mut in_backtick_quote = false;
-    let mut in_bracket_quote = false;
-
-    let mut consumed = 0;
-    let mut characters = remainder.char_indices().peekable();
-    while let Some((index, character)) = characters.next() {
-        if in_double_quote {
-            consumed = index + character.len_utf8();
-            if character == '"' {
-                if matches!(characters.peek(), Some((_, '"'))) {
-                    if let Some((escaped_index, escaped_char)) = characters.next() {
-                        consumed = escaped_index + escaped_char.len_utf8();
-                    }
-                } else {
-                    in_double_quote = false;
-                }
-            }
-            continue;
-        }
-
-        if in_backtick_quote {
-            consumed = index + character.len_utf8();
-            if character == '`' {
-                if matches!(characters.peek(), Some((_, '`'))) {
-                    if let Some((escaped_index, escaped_char)) = characters.next() {
-                        consumed = escaped_index + escaped_char.len_utf8();
-                    }
-                } else {
-                    in_backtick_quote = false;
-                }
-            }
-            continue;
-        }
-
-        if in_bracket_quote {
-            consumed = index + character.len_utf8();
-            if character == ']' {
-                if matches!(characters.peek(), Some((_, ']'))) {
-                    if let Some((escaped_index, escaped_char)) = characters.next() {
-                        consumed = escaped_index + escaped_char.len_utf8();
-                    }
-                } else {
-                    in_bracket_quote = false;
-                }
-            }
-            continue;
-        }
-
-        match character {
-            '"' => {
-                in_double_quote = true;
-                consumed = index + character.len_utf8();
-            }
-            '`' => {
-                in_backtick_quote = true;
-                consumed = index + character.len_utf8();
-            }
-            '[' => {
-                in_bracket_quote = true;
-                consumed = index + character.len_utf8();
-            }
-            '(' | ';' => break,
-            character if character.is_whitespace() => break,
-            _ => consumed = index + character.len_utf8(),
-        }
-    }
-
-    (consumed > 0).then_some(consumed)
-}
-
-fn parse_view_identifier(definition: &str) -> Option<(String, usize, usize)> {
-    let trimmed = definition.trim_start();
-    let leading_whitespace_len = definition.len().saturating_sub(trimmed.len());
-
-    if !trimmed.to_uppercase().starts_with("CREATE") {
-        return None;
-    }
-
-    let create_body = &trimmed["CREATE".len()..];
-    let view_keyword_offset = find_keyword_position(create_body, "VIEW")?;
-    let view_keyword_start = "CREATE".len() + view_keyword_offset;
-    let mut remainder = &trimmed[view_keyword_start + "VIEW".len()..];
-    let mut cursor = view_keyword_start + "VIEW".len();
-
-    let remainder_trimmed = remainder.trim_start();
-    cursor += remainder.len().saturating_sub(remainder_trimmed.len());
-    remainder = remainder_trimmed;
-
-    if remainder.to_uppercase().starts_with("IF NOT EXISTS") {
-        remainder = &remainder["IF NOT EXISTS".len()..];
-        cursor += "IF NOT EXISTS".len();
-
-        let remainder_trimmed = remainder.trim_start();
-        cursor += remainder.len().saturating_sub(remainder_trimmed.len());
-        remainder = remainder_trimmed;
-    }
-
-    if remainder.is_empty() {
-        return None;
-    }
-
-    let identifier_end = parse_identifier_end(remainder)?;
-
-    let raw_identifier = remainder[..identifier_end].trim().to_string();
-    if raw_identifier.is_empty() {
-        return None;
-    }
-
-    let name_start = leading_whitespace_len + cursor;
-    let name_end = name_start + identifier_end;
-    Some((raw_identifier, name_start, name_end))
-}
-
-pub(in crate::main_view) fn replace_create_view_identifier(
-    definition: &str,
-    connection: &Arc<dyn zqlz_core::Connection>,
-    new_view_name: &str,
-) -> Option<String> {
-    let (existing_identifier, start, end) = parse_view_identifier(definition)?;
-    let (schema_name, _) = split_schema_and_name(&existing_identifier);
-
-    let replaced_identifier = if let Some(schema_name) = schema_name {
-        format!(
-            "{}.{}",
-            quote_identifier_for_connection(connection, &schema_name),
-            quote_identifier_for_connection(connection, new_view_name)
-        )
-    } else {
-        quote_identifier_for_connection(connection, new_view_name)
-    };
-
-    let mut updated = String::with_capacity(definition.len() + replaced_identifier.len());
-    updated.push_str(&definition[..start]);
-    updated.push_str(&replaced_identifier);
-    updated.push_str(&definition[end..]);
-    Some(updated)
-}
-
-fn extract_view_name_from_create_view(definition: &str) -> Option<(Option<String>, String)> {
-    let (identifier, _, _) = parse_view_identifier(definition)?;
-    let (schema_name, view_name) = split_schema_and_name(&identifier);
-    if view_name.is_empty() {
-        return None;
-    }
-    Some((schema_name, view_name))
+        },
+    )
 }
 
 fn trigger_dialect_for_connection(connection: &Arc<dyn zqlz_core::Connection>) -> TriggerDialect {
     if is_postgres_dialect(connection) {
         TriggerDialect::Postgres
-    } else if matches!(connection.dialect_id(), Some("mysql") | Some("mariadb")) {
+    } else if connection_is_mysql_compatible(connection.as_ref()) {
         TriggerDialect::Mysql
     } else {
         TriggerDialect::Sqlite
     }
-}
-
-fn build_drop_trigger_statement(
-    connection: &Arc<dyn zqlz_core::Connection>,
-    trigger_name: &str,
-    table_name: Option<&str>,
-) -> Result<String, String> {
-    let trigger_object = SqlObjectName::new(trigger_name);
-    let table_object = table_name.filter(|name| !name.is_empty()).map(|name| {
-        split_unquoted_schema_separator(name)
-            .map(|dot_index| {
-                SqlObjectName::with_namespace(
-                    normalize_identifier_segment(&name[..dot_index]),
-                    normalize_identifier_segment(&name[dot_index + 1..]),
-                )
-            })
-            .unwrap_or_else(|| SqlObjectName::new(normalize_identifier_segment(name)))
-    });
-
-    connection
-        .drop_trigger_sql(
-            &trigger_object,
-            table_object.as_ref(),
-            DropTriggerOptions {
-                if_exists: true,
-                cascade: is_postgres_dialect(connection),
-            },
-        )
-        .map_err(|error| error.to_string())
 }
 
 fn record_sql_object_version(
@@ -590,15 +161,53 @@ fn record_sql_object_version(
     Ok(())
 }
 
+fn split_sql_statements(sql: &str) -> Vec<String> {
+    let mut statements = Vec::new();
+    let mut current = String::new();
+    let mut in_single_quote = false;
+    let mut chars = sql.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        current.push(ch);
+        if ch == '\'' {
+            if in_single_quote && chars.peek() == Some(&'\'') {
+                current.push(chars.next().unwrap_or('\''));
+                continue;
+            }
+            in_single_quote = !in_single_quote;
+        } else if ch == ';' && !in_single_quote {
+            let statement = current.trim();
+            if !statement.is_empty() {
+                statements.push(statement.to_string());
+            }
+            current.clear();
+        }
+    }
+
+    let statement = current.trim();
+    if !statement.is_empty() {
+        statements.push(format!("{};", statement));
+    }
+
+    statements
+}
+
 /// Fetches the definition of a function from the database.
 async fn fetch_function_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     function_name: &str,
+    signature: Option<&str>,
 ) -> Result<String, String> {
-    fetch_database_object_definition(connection, schema_name, function_name, ObjectType::Function)
-        .await
-        .map_err(|error| format!("Failed to fetch function definition: {}", error))
+    fetch_database_object_definition(
+        connection,
+        schema_name,
+        function_name,
+        ObjectType::Function,
+        signature,
+    )
+    .await
+    .map_err(|error| format!("Failed to fetch function definition: {}", error))
 }
 
 /// Fetches the definition of a stored procedure from the database.
@@ -606,15 +215,116 @@ async fn fetch_procedure_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     procedure_name: &str,
+    signature: Option<&str>,
 ) -> Result<String, String> {
     fetch_database_object_definition(
         connection,
         schema_name,
         procedure_name,
         ObjectType::Procedure,
+        signature,
     )
     .await
     .map_err(|error| format!("Failed to fetch procedure definition: {}", error))
+}
+
+async fn fetch_sequence_definition(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
+    sequence_name: &str,
+) -> Result<String, String> {
+    fetch_database_object_definition(
+        connection,
+        schema_name,
+        sequence_name,
+        ObjectType::Sequence,
+        None,
+    )
+    .await
+    .map_err(|error| format!("Failed to fetch sequence definition: {}", error))
+}
+
+async fn fetch_sequence_design(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
+    sequence_name: &str,
+) -> Result<SequenceDesign, String> {
+    if !connection_is_postgres(connection.as_ref()) {
+        return Err("Sequence designer is only available for PostgreSQL".to_string());
+    }
+
+    let schema = schema_name.unwrap_or("public");
+    let result = connection
+        .query(
+            "SELECT s.sequenceowner, s.data_type::text, s.start_value, s.min_value, s.max_value,
+                    s.increment_by, s.cycle, s.cache_size, s.last_value,
+                    dep_ns.nspname, dep_cls.relname, dep_att.attname,
+                    obj_description(seq_cls.oid, 'pg_class')
+             FROM pg_catalog.pg_sequences s
+             JOIN pg_catalog.pg_class seq_cls ON seq_cls.relname = s.sequencename
+             JOIN pg_catalog.pg_namespace seq_ns
+                  ON seq_ns.oid = seq_cls.relnamespace AND seq_ns.nspname = s.schemaname
+             LEFT JOIN pg_catalog.pg_depend dep
+                  ON dep.objid = seq_cls.oid AND dep.deptype = 'a'
+             LEFT JOIN pg_catalog.pg_class dep_cls ON dep_cls.oid = dep.refobjid
+             LEFT JOIN pg_catalog.pg_namespace dep_ns ON dep_ns.oid = dep_cls.relnamespace
+             LEFT JOIN pg_catalog.pg_attribute dep_att
+                  ON dep_att.attrelid = dep_cls.oid AND dep_att.attnum = dep.refobjsubid
+             WHERE s.schemaname = $1 AND s.sequencename = $2
+             LIMIT 1",
+            &[
+                zqlz_core::Value::String(schema.to_string()),
+                zqlz_core::Value::String(sequence_name.to_string()),
+            ],
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+
+    let row = result
+        .rows
+        .first()
+        .ok_or_else(|| format!("Sequence '{}.{}' not found", schema, sequence_name))?;
+
+    let owned_by_table = row.get(10).and_then(|value| value.as_str()).map(|table| {
+        row.get(9)
+            .and_then(|value| value.as_str())
+            .map(|schema| format!("{}.{}", schema, table))
+            .unwrap_or_else(|| table.to_string())
+    });
+
+    Ok(SequenceDesign {
+        schema: Some(schema.to_string()),
+        name: sequence_name.to_string(),
+        owner: row
+            .get(0)
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        data_type: row
+            .get(1)
+            .and_then(|value| value.as_str())
+            .unwrap_or("bigint")
+            .to_string(),
+        start_value: row.get(2).and_then(|value| value.as_i64()).unwrap_or(1),
+        min_value: row.get(3).and_then(|value| value.as_i64()),
+        max_value: row.get(4).and_then(|value| value.as_i64()),
+        increment_by: row.get(5).and_then(|value| value.as_i64()).unwrap_or(1),
+        cycle: row
+            .get(6)
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false),
+        cache_size: row.get(7).and_then(|value| value.as_i64()).unwrap_or(1),
+        current_value: row.get(8).and_then(|value| value.as_i64()),
+        owned_by_table,
+        owned_by_column: row
+            .get(11)
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        comment: row
+            .get(12)
+            .and_then(|value| value.as_str())
+            .map(str::to_string),
+        is_new: false,
+    })
 }
 
 async fn fetch_database_object_definition(
@@ -622,33 +332,16 @@ async fn fetch_database_object_definition(
     schema_name: Option<&str>,
     object_name: &str,
     object_type: ObjectType,
+    signature: Option<&str>,
 ) -> Result<String, String> {
-    let Some(schema_introspection) = connection.as_schema_introspection() else {
-        return Err("This connection does not support schema introspection".to_string());
-    };
-
-    let object = DatabaseObject {
-        object_type,
-        schema: normalize_schema_name(schema_name),
-        name: object_name.to_string(),
-    };
-
-    schema_introspection
-        .generate_ddl(&object)
-        .await
-        .map_err(|error| {
-            let error_text = error.to_string();
-            if matches!(object_type, ObjectType::Function | ObjectType::Procedure)
-                && connection.dialect_id() == Some("sqlite")
-            {
-                return format!(
-                    "{} definitions are not supported by the '{}' driver",
-                    object_type_label(object_type),
-                    connection.dialect_id().unwrap_or("unknown")
-                );
-            }
-            error_text
-        })
+    fetch_object_definition(
+        connection,
+        &ObjectDefinitionRequest::new(object_type, object_name)
+            .with_schema(normalize_schema_name(schema_name))
+            .with_signature(signature.map(ToOwned::to_owned)),
+    )
+    .await
+    .map_err(|error| error.to_string())
 }
 
 struct ObjectEditorConnection {
@@ -753,13 +446,17 @@ impl MainView {
                     let document_context = editor.read(cx).document_context(cx);
                     let is_dirty = editor.read(cx).is_dirty(cx);
                     let display_name = editor.read(cx).name();
+                    let draft_text = editor.read(cx).content(cx).to_string();
                     this.refresh_workspace_document_state(
                         editor_id,
                         document_context,
                         is_dirty,
                         display_name,
+                        Some(draft_text),
                         cx,
                     );
+                    this.pin_dirty_preview_tab(is_dirty, cx);
+                    this.refresh_workspace_window_title(window, cx);
                 }
             }
         });
@@ -770,17 +467,19 @@ impl MainView {
         let document_context = query_editor.read(cx).document_context(cx);
         let is_dirty = query_editor.read(cx).is_dirty(cx);
         let current_display_name = query_editor.read(cx).name();
+        let draft_text = query_editor.read(cx).content(cx).to_string();
         self.refresh_workspace_document_state(
             editor_id,
             document_context,
             is_dirty,
             current_display_name,
+            Some(draft_text),
             cx,
         );
 
         let query_editor_panel: Arc<dyn PanelView> = Arc::new(query_editor);
-        self.dock_area.update(cx, |area, cx| {
-            area.add_panel(query_editor_panel, DockPlacement::Center, None, window, cx);
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.add_center_item(query_editor_panel, window, cx);
         });
     }
 
@@ -801,24 +500,33 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         // Get the driver name and connection name for dialect-specific queries
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let view_name_for_spawn = view_name.clone();
-        let dock_area = self.dock_area.downgrade();
-
         // Format the editor title to include [View] indicator and connection name
         let editor_title = format!("[View] {} ({})", view_name, connection_name);
 
@@ -834,7 +542,6 @@ impl MainView {
                             object_schema.clone(),
                         );
 
-                        let _ = dock_area;
                         _ = this.update(cx, |main_view, cx| {
                             main_view.open_workspace_object_editor(
                                 ObjectEditorDefinition {
@@ -888,17 +595,28 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let schema_service = app_state.schema_service.clone();
 
@@ -942,7 +660,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -1036,7 +763,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -1135,55 +871,41 @@ impl MainView {
                         let source_view_name = source_view_name.clone();
 
                         cx.spawn(async move |cx| {
-                            // First, fetch the original view definition
-                            match fetch_view_definition(
+                            match build_duplicate_view_sql(
                                 &connection,
-                                None,
-                                &source_view_name,
+                                &zqlz_objects::DuplicateViewRequest::new(
+                                    &source_view_name,
+                                    &new_view_name,
+                                ),
                             )
-                            .await {
-                                Ok(definition) => {
-                                    let Some(create_sql) = replace_create_view_identifier(
-                                        &definition,
-                                        &connection,
-                                        &new_view_name,
-                                    ) else {
-                                        tracing::error!(
-                                            "Failed to parse source view DDL while duplicating '{}'",
-                                            source_view_name
+                            .await
+                            {
+                                Ok(create_sql) => match connection.execute(&create_sql, &[]).await {
+                                    Ok(_) => {
+                                        tracing::info!(
+                                            "View '{}' duplicated as '{}'",
+                                            source_view_name,
+                                            new_view_name
                                         );
-                                        return;
-                                    };
 
-                                    match connection.execute(&create_sql, &[]).await {
-                                        Ok(_) => {
-                                            tracing::info!(
-                                                "View '{}' duplicated as '{}'",
-                                                source_view_name,
-                                                new_view_name
-                                            );
+                                        // Invalidate schema cache so refresh works correctly
+                                        schema_service.invalidate_connection_cache(connection_id);
 
-                                            // Invalidate schema cache so refresh works correctly
-                                            schema_service.invalidate_connection_cache(connection_id);
-
-                                            let _ = cx.update_window(window_handle, |_, _window, cx| {
-                                                let _ = main_view.update(cx, |main_view, cx| {
-                                                    main_view.request_refresh(
-                                                        RefreshScope::ConnectionSurfaces(
-                                                            connection_id,
-                                                        ),
-                                                        cx,
-                                                    );
-                                                });
+                                        let _ = cx.update_window(window_handle, |_, _window, cx| {
+                                            let _ = main_view.update(cx, |main_view, cx| {
+                                                main_view.request_refresh(
+                                                    RefreshScope::ConnectionSurfaces(connection_id),
+                                                    cx,
+                                                );
                                             });
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("Failed to create duplicated view: {}", e);
-                                        }
+                                        });
                                     }
-                                }
+                                    Err(e) => {
+                                        tracing::error!("Failed to create duplicated view: {}", e);
+                                    }
+                                },
                                 Err(e) => {
-                                    tracing::error!("Failed to fetch source view definition: {}", e);
+                                    tracing::error!("Failed to duplicate view '{}': {}", source_view_name, e);
                                 }
                             }
                         })
@@ -1213,17 +935,24 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let driver_name = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| c.driver.clone())
-            .unwrap_or_else(|| "sqlite".to_string());
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
 
         RenameWindow::open_view(
             connection_id,
@@ -1233,12 +962,6 @@ impl MainView {
             cx.entity().downgrade(),
             cx,
         );
-    }
-
-    /// Copies view name to clipboard
-    pub(super) fn copy_view_name(&mut self, view_name: &str, cx: &mut Context<Self>) {
-        tracing::info!("Copy view name: {}", view_name);
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(view_name.to_string()));
     }
 
     /// Handle events from a database object editor (Views, Functions, Procedures, Triggers)
@@ -1285,6 +1008,12 @@ impl MainView {
                     );
                 }
             },
+            QueryEditorEvent::PreviewDdl {
+                object_type,
+                definition,
+            } => {
+                self.show_query_editor_ddl_preview(object_type, definition, window, cx);
+            }
             // For standard query execution events, delegate to the normal query handler
             QueryEditorEvent::ExecuteQuery {
                 sql, connection_id, ..
@@ -1317,12 +1046,24 @@ impl MainView {
             return;
         };
 
-        let Some(conn_id) = connection_id else {
+        let candidates: Vec<QueryConnectionCandidate> = app_state
+            .connection_service
+            .list_saved_connections()
+            .into_iter()
+            .map(|saved| QueryConnectionCandidate {
+                connection_id: saved.id,
+                connection_name: saved.name,
+                driver_name: saved.driver,
+                params: saved.params,
+            })
+            .collect();
+        let Some(selection) = resolve_query_connection_selection(connection_id, &candidates) else {
             tracing::warn!("No connection for view query");
             return;
         };
+        let conn_id = selection.connection_id;
 
-        let Some(connection) = app_state.connections.get(conn_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(conn_id) else {
             tracing::error!("Connection not found: {}", conn_id);
             return;
         };
@@ -1330,80 +1071,39 @@ impl MainView {
         let query_service = app_state.query_service.clone();
         let results_panel = self.results_panel.clone();
         let connection = connection.clone();
-
-        // Get connection info for display
-        let connection_info = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == conn_id);
-        let connection_name = connection_info.as_ref().map(|c| c.name.clone());
-        let database_name = connection_info.as_ref().and_then(|c| {
-            c.params
-                .get("database")
-                .or_else(|| c.params.get("path"))
-                .cloned()
-        });
+        let connection_name = Some(selection.connection_name);
+        let database_name = selection.default_database_name;
 
         results_panel.update(cx, |panel, cx| {
             panel.set_loading(true, cx);
         });
 
         cx.spawn_in(window, async move |this, cx| {
-            let service_execution = query_service.execute_query(connection, conn_id, &sql).await;
+            let query_outcome = run_execute_query_workflow(
+                query_service.as_ref(),
+                connection,
+                conn_id,
+                sql,
+                None,
+                QueryDisplayContext {
+                    connection_name,
+                    database_name,
+                },
+                chrono::Utc::now(),
+            )
+            .await;
 
-            let execution = match service_execution {
-                Ok(exec) => {
-                    let start_time = chrono::Utc::now()
-                        - chrono::Duration::milliseconds(exec.duration_ms as i64);
-                    let end_time = chrono::Utc::now();
+            if let Err(error) = results_panel.update_in(cx, |panel, window, cx| {
+                panel.set_execution(query_outcome.execution, window, cx);
+            }) {
+                tracing::warn!(%error, "failed to update results panel after view query execution");
+            }
 
-                    crate::components::QueryExecution {
-                        sql: exec.sql,
-                        start_time,
-                        end_time,
-                        duration_ms: exec.duration_ms,
-                        connection_name,
-                        database_name,
-                        statements: exec
-                            .statements
-                            .into_iter()
-                            .map(|s| crate::components::StatementResult {
-                                sql: s.sql,
-                                duration_ms: s.duration_ms,
-                                result: s.result,
-                                error: s.error,
-                                affected_rows: s.affected_rows,
-                            })
-                            .collect(),
-                    }
-                }
-                Err(e) => {
-                    let now = chrono::Utc::now();
-                    crate::components::QueryExecution {
-                        sql,
-                        start_time: now,
-                        end_time: now,
-                        duration_ms: 0,
-                        connection_name,
-                        database_name,
-                        statements: vec![crate::components::StatementResult {
-                            sql: String::new(),
-                            duration_ms: 0,
-                            result: None,
-                            error: Some(format!("Error: {}", e)),
-                            affected_rows: 0,
-                        }],
-                    }
-                }
-            };
-
-            _ = results_panel.update_in(cx, |panel, window, cx| {
-                panel.set_execution(execution, window, cx);
-            });
-
-            _ = this.update(cx, |view, cx| {
+            if let Err(error) = this.update(cx, |view, cx| {
                 view.refresh_query_history(cx);
-            });
+            }) {
+                tracing::warn!(%error, "failed to refresh query history after view query execution");
+            }
 
             anyhow::Ok(())
         })
@@ -1435,19 +1135,27 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let schema_service = app_state.schema_service.clone();
         let version_repository = self.version_repository.clone();
-        let trimmed_definition = definition.trim().to_string();
         let connection = connection.clone();
         let connection_sidebar = self.connection_sidebar.downgrade();
 
         let (view_schema_from_ddl, view_name_from_ddl) =
-            match extract_view_name_from_create_view(&trimmed_definition) {
+            match extract_view_name_from_create_view_from_objects(definition.trim()) {
                 Some(parsed) => parsed,
                 None => {
                     window.push_notification(
@@ -1477,6 +1185,20 @@ impl MainView {
             )
         };
 
+        let execution_plan = match plan_view_save_execution(
+            &connection,
+            &zqlz_objects::ViewSaveExecutionRequest::new(&view_name, definition, is_new),
+        ) {
+            Ok(plan) => plan,
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(format!("Failed to prepare view save: {}", error)),
+                    cx,
+                );
+                return;
+            }
+        };
+
         let version_target = SqlObjectVersionTarget {
             connection_id,
             object_type: DatabaseObjectType::View,
@@ -1485,37 +1207,27 @@ impl MainView {
         };
 
         cx.spawn_in(window, async move |_this, cx| {
-            if !is_new && !supports_create_or_replace_view(&connection) {
-                let drop_statement = build_drop_view_statement(&connection, &view_name, true);
-                if drop_statement.is_empty() {
-                    return anyhow::Ok(());
-                }
-                if let Err(error) = connection.execute(&drop_statement, &[]).await {
-                    tracing::error!(
-                        view = %view_name,
-                        %error,
-                        "Failed to drop existing view before save"
+            if let Some(drop_statement) = &execution_plan.drop_statement
+                && let Err(error) = connection.execute(drop_statement, &[]).await
+            {
+                tracing::error!(
+                    view = %view_name,
+                    %error,
+                    "Failed to drop existing view before save"
+                );
+                _ = cx.update(|window, cx| {
+                    window.push_notification(
+                        Notification::error(format!("Failed to save view '{}': {}", view_name, error)),
+                        cx,
                     );
-                    _ = cx.update(|window, cx| {
-                        window.push_notification(
-                            Notification::error(format!(
-                                "Failed to save view '{}': {}",
-                                view_name, error
-                            )),
-                            cx,
-                        );
-                    });
-                    return anyhow::Ok(());
-                }
+                });
+                return anyhow::Ok(());
             }
 
-            let executable_definition = if !is_new && supports_create_or_replace_view(&connection) {
-                connection.normalize_create_view_sql(&trimmed_definition)
-            } else {
-                trimmed_definition.clone()
-            };
-
-            match connection.execute(executable_definition.trim(), &[]).await {
+            match connection
+                .execute(execution_plan.executable_definition.trim(), &[])
+                .await
+            {
                 Ok(_) => {
                     tracing::info!("View '{}' saved successfully", view_name);
 
@@ -1527,7 +1239,7 @@ impl MainView {
                     if let Err(error) = record_sql_object_version(
                         &version_repository,
                         &version_target,
-                        trimmed_definition.clone(),
+                        execution_plan.stored_definition.clone(),
                         version_message,
                     ) {
                         tracing::error!(%error, view = %view_name, "Failed to store view version snapshot");
@@ -1546,7 +1258,7 @@ impl MainView {
                     });
 
                     _ = connection_sidebar.update(cx, |sidebar, cx| {
-                        sidebar.clear_section_loading(connection_id, "views", cx);
+                        sidebar.clear_section_loading(connection_id, SidebarSection::Views, cx);
                     });
 
                     _ = _this.update(cx, |main_view, cx| {
@@ -1600,7 +1312,16 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -1672,6 +1393,7 @@ impl MainView {
         connection_id: Uuid,
         function_name: String,
         object_schema: Option<String>,
+        signature: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1687,21 +1409,33 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let function_name_for_spawn = function_name.clone();
+        let signature_for_spawn = signature.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the function definition
@@ -1709,6 +1443,7 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &function_name_for_spawn,
+                signature_for_spawn.as_deref(),
             )
             .await
             {
@@ -1766,6 +1501,7 @@ impl MainView {
         connection_id: Uuid,
         procedure_name: String,
         object_schema: Option<String>,
+        signature: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1781,21 +1517,33 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let procedure_name_for_spawn = procedure_name.clone();
+        let signature_for_spawn = signature.clone();
 
         cx.spawn_in(window, async move |this, cx| {
             // Fetch the procedure definition
@@ -1803,6 +1551,7 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &procedure_name_for_spawn,
+                signature_for_spawn.as_deref(),
             )
             .await
             {
@@ -1854,6 +1603,306 @@ impl MainView {
         .detach();
     }
 
+    pub(super) fn open_sequence_definition(
+        &mut self,
+        connection_id: Uuid,
+        sequence_name: String,
+        object_schema: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            "Opening sequence definition: {} on connection {}",
+            sequence_name,
+            connection_id
+        );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
+
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("No AppState available");
+            return;
+        };
+
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
+            tracing::error!("Connection not found: {}", connection_id);
+            return;
+        };
+
+        let connection = connection.clone();
+        let sequence_name_for_spawn = sequence_name.clone();
+        let editor_title = format!("[Sequence] {}", sequence_name);
+
+        cx.spawn_in(window, async move |this, cx| {
+            match fetch_sequence_definition(
+                &connection,
+                object_schema.as_deref(),
+                &sequence_name_for_spawn,
+            )
+            .await
+            {
+                Ok(definition) => {
+                    cx.update(|window, cx| {
+                        _ = this.update(cx, |main_view, cx| {
+                            main_view.open_query_editor_with_content(
+                                editor_title.clone(),
+                                definition,
+                                None,
+                                Some(connection_id),
+                                window,
+                                cx,
+                            );
+                        });
+                    })?;
+                }
+                Err(error) => {
+                    tracing::error!("Failed to fetch sequence definition: {}", error);
+                    _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::error(format!("Failed to load sequence: {}", error)),
+                            cx,
+                        );
+                    });
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    pub(super) fn open_sequence_designer(
+        &mut self,
+        connection_id: Uuid,
+        sequence_name: Option<String>,
+        object_schema: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            "Open sequence designer: {:?} on connection {}",
+            sequence_name,
+            connection_id
+        );
+        let object_schema = normalize_schema_name(object_schema.as_deref());
+
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("No AppState available");
+            return;
+        };
+
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
+            tracing::error!("Connection not found: {}", connection_id);
+            return;
+        };
+
+        let connection = connection.clone();
+
+        if let Some(sequence_name) = sequence_name {
+            cx.spawn_in(window, async move |this, cx| {
+                let design =
+                    fetch_sequence_design(&connection, object_schema.as_deref(), &sequence_name)
+                        .await;
+
+                cx.update(|window, cx| {
+                    let design = match design {
+                        Ok(design) => design,
+                        Err(error) => {
+                            window.push_notification(
+                                Notification::error(format!(
+                                    "Failed to load sequence designer: {}",
+                                    error
+                                )),
+                                cx,
+                            );
+                            return;
+                        }
+                    };
+                    let panel =
+                        cx.new(|cx| SequenceDesignerPanel::edit(connection_id, design, window, cx));
+
+                    _ = this.update(cx, |main_view, cx| {
+                        let panel_clone = panel.clone();
+                        let subscription = cx.subscribe_in(&panel, window, {
+                            move |this, _panel, event: &SequenceDesignerEvent, window, cx| {
+                                this.handle_sequence_designer_event(
+                                    panel_clone.clone(),
+                                    event.clone(),
+                                    window,
+                                    cx,
+                                );
+                            }
+                        });
+                        main_view._subscriptions.push(subscription);
+                        main_view.workspace_controller.update(cx, |workspace, cx| {
+                            workspace.add_center_item(Arc::new(panel.clone()), window, cx);
+                        });
+                    });
+                })?;
+
+                anyhow::Ok(())
+            })
+            .detach();
+        } else {
+            let schema = object_schema.clone();
+            let panel = cx.new(|cx| SequenceDesignerPanel::new(connection_id, schema, window, cx));
+            let panel_clone = panel.clone();
+            let subscription = cx.subscribe_in(&panel, window, {
+                move |this, _panel, event: &SequenceDesignerEvent, window, cx| {
+                    this.handle_sequence_designer_event(
+                        panel_clone.clone(),
+                        event.clone(),
+                        window,
+                        cx,
+                    );
+                }
+            });
+            self._subscriptions.push(subscription);
+            self.workspace_controller.update(cx, |workspace, cx| {
+                workspace.add_center_item(Arc::new(panel.clone()), window, cx);
+            });
+        }
+    }
+
+    fn handle_sequence_designer_event(
+        &mut self,
+        panel: Entity<SequenceDesignerPanel>,
+        event: SequenceDesignerEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match event {
+            SequenceDesignerEvent::Save {
+                connection_id,
+                design,
+                is_new,
+                original_name: _,
+            } => {
+                self.save_sequence_from_designer(connection_id, design, is_new, panel, window, cx);
+            }
+            SequenceDesignerEvent::Cancel => {
+                let panel_arc: Arc<dyn PanelView> = Arc::new(panel);
+                self.workspace_controller.update(cx, |workspace, cx| {
+                    workspace.remove_center_item(panel_arc, window, cx);
+                });
+            }
+            SequenceDesignerEvent::PreviewDdl { design: _ } => {}
+        }
+    }
+
+    fn save_sequence_from_designer(
+        &mut self,
+        connection_id: Uuid,
+        design: SequenceDesign,
+        is_new: bool,
+        panel: Entity<SequenceDesignerPanel>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("No AppState available");
+            return;
+        };
+
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
+            tracing::error!("Connection not found: {}", connection_id);
+            return;
+        };
+
+        let ddl = design.to_ddl();
+        let sequence_name = design.name.clone();
+        let schema_service = app_state.schema_service.clone();
+        let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
+        let workspace_controller = self.workspace_controller.clone();
+        let version_repository = self.version_repository.clone();
+        let version_target = SqlObjectVersionTarget {
+            connection_id,
+            object_type: DatabaseObjectType::Sequence,
+            object_name: sequence_name.clone(),
+            object_schema: normalize_schema_name(design.schema.as_deref()),
+        };
+
+        cx.spawn_in(window, async move |_this, cx| {
+            let mut execution_result = Ok(());
+            for statement in split_sql_statements(&ddl) {
+                if let Err(error) = connection.execute(&statement, &[]).await {
+                    execution_result = Err(error);
+                    break;
+                }
+            }
+
+            match execution_result {
+                Ok(_) => {
+                    schema_service.invalidate_connection_cache(connection_id);
+                    let version_message = build_sql_object_version_message(
+                        DatabaseObjectType::Sequence,
+                        &sequence_name,
+                        is_new,
+                    );
+                    if let Err(error) = record_sql_object_version(
+                        &version_repository,
+                        &version_target,
+                        ddl.clone(),
+                        version_message,
+                    ) {
+                        tracing::error!(%error, sequence = %sequence_name, "Failed to store sequence version snapshot from designer");
+                    }
+                    cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::success(if is_new {
+                                format!("Sequence '{}' created", sequence_name)
+                            } else {
+                                format!("Sequence '{}' updated", sequence_name)
+                            }),
+                            cx,
+                        );
+                        workspace_controller.update(cx, |workspace, cx| {
+                            workspace.remove_center_item(panel_arc, window, cx);
+                        });
+                    })?;
+                }
+                Err(error) => {
+                    tracing::error!("Failed to save sequence: {}", error);
+                    cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::error(format!("Failed to save sequence: {}", error)),
+                            cx,
+                        );
+                    })?;
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
     // ============================================
     // Trigger management methods
     // ============================================
@@ -1864,6 +1913,7 @@ impl MainView {
         connection_id: Uuid,
         trigger_name: String,
         object_schema: Option<String>,
+        trigger_table_name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1879,21 +1929,33 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let connection = connection.clone();
         let schema_service = app_state.schema_service.clone();
         let trigger_name_for_spawn = trigger_name.clone();
+        let trigger_table_name_for_spawn = trigger_table_name.clone();
 
         let editor_title = format!("[Trigger] {} ({})", trigger_name, connection_name);
 
@@ -1902,6 +1964,7 @@ impl MainView {
                 &connection,
                 object_schema.as_deref(),
                 &trigger_name_for_spawn,
+                trigger_table_name_for_spawn.as_deref(),
             )
             .await
             {
@@ -1965,32 +2028,40 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        let (driver_name, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or_else(|| ("sqlite".to_string(), "Unknown".to_string()));
+        let driver_name = app_state
+            .connection_service
+            .get_saved_connection_driver(connection_id)
+            .unwrap_or_else(|| connection.driver_name().to_string());
+        let connection_name = app_state
+            .connection_service
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
 
         let schema_service = app_state.schema_service.clone();
 
         let object_type = EditorObjectType::new_trigger();
 
-        let template = if matches!(
-            connection.dialect_id(),
-            Some("postgres") | Some("postgresql")
-        ) {
+        let template = if connection_is_postgres(connection.as_ref()) {
             r#"CREATE OR REPLACE TRIGGER trigger_name
 AFTER INSERT ON table_name
 FOR EACH ROW
 EXECUTE FUNCTION trigger_function_name();"#
                 .to_string()
-        } else if matches!(connection.dialect_id(), Some("mysql") | Some("mariadb")) {
+        } else if connection_is_mysql_compatible(connection.as_ref()) {
             r#"CREATE TRIGGER trigger_name
 AFTER INSERT ON table_name
 FOR EACH ROW
@@ -2049,7 +2120,7 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -2103,10 +2174,10 @@ END;"#
                     let trigger_table_name = trigger_table_name_for_ok.clone();
 
                     cx.spawn(async move |cx| {
-                        let sql = match build_drop_trigger_statement(
+                        let sql = match build_drop_trigger_statement_for_object(
                             &connection,
-                            &trigger_name,
-                            trigger_table_name.as_deref(),
+                            &DropTriggerStatementRequest::new(&trigger_name)
+                                .with_table_name(trigger_table_name.clone()),
                         ) {
                             Ok(sql) => sql,
                             Err(error) => {
@@ -2146,6 +2217,7 @@ END;"#
         connection_id: Uuid,
         trigger_name: Option<String>,
         object_schema: Option<String>,
+        trigger_table_name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -2161,7 +2233,16 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -2169,22 +2250,10 @@ END;"#
         let dialect = trigger_dialect_for_connection(&connection);
 
         // Get available tables for the table dropdown
-        let schema_service = app_state.schema_service.clone();
-        let target_database = app_state
-            .connection_manager()
-            .get_saved(connection_id)
-            .and_then(|saved| saved.params.get("database").cloned())
-            .or_else(|| {
-                self.workspace_state
-                    .read(cx)
-                    .active_database()
-                    .map(str::to_owned)
-            });
-
+        let connection_service = app_state.connection_service.clone();
         if let Some(trigger_name) = trigger_name {
             // Editing an existing trigger - need to load its definition first
             let connection = connection.clone();
-            let dock_area = self.dock_area.downgrade();
             let trigger_name_for_spawn = trigger_name.clone();
 
             cx.spawn_in(window, async move |this, cx| {
@@ -2193,16 +2262,13 @@ END;"#
                     &connection,
                     object_schema.as_deref(),
                     &trigger_name_for_spawn,
+                    trigger_table_name.as_deref(),
                 )
                 .await;
 
-                // Get available tables
-                let tables = match schema_service
-                    .load_database_schema_for_database(
-                        connection.clone(),
-                        connection_id,
-                        target_database.as_deref(),
-                    )
+                // Get available tables and dialect-specific trigger metadata
+                let tables = match connection_service
+                    .load_schema_for_database(connection_id, target_database.as_deref())
                     .await
                 {
                     Ok(schema) => schema.tables,
@@ -2211,10 +2277,16 @@ END;"#
                         vec![]
                     }
                 };
+                let relation_columns = load_trigger_relation_columns(
+                    &connection,
+                    object_schema.as_deref(),
+                    trigger_table_name.as_deref(),
+                )
+                .await;
+                let postgres_functions =
+                    load_trigger_functions(&connection, object_schema.as_deref(), dialect).await;
 
                 cx.update(|window, cx| {
-                    // Parse the trigger definition to extract details
-                    // For now, create a basic design - the panel will show the raw SQL
                     let design = if let Ok(def) = &definition {
                         parse_trigger_definition(def, &trigger_name_for_spawn, dialect)
                     } else {
@@ -2227,6 +2299,8 @@ END;"#
                             connection_id,
                             design,
                             tables.clone(),
+                            relation_columns.clone(),
+                            postgres_functions.clone(),
                             window,
                             cx,
                         )
@@ -2246,20 +2320,10 @@ END;"#
                             }
                         });
                         main_view._subscriptions.push(subscription);
-                    });
-
-                    // Add to center dock
-                    if let Some(dock_area) = dock_area.upgrade() {
-                        dock_area.update(cx, |area, cx| {
-                            area.add_panel(
-                                Arc::new(panel.clone()),
-                                DockPlacement::Center,
-                                None,
-                                window,
-                                cx,
-                            );
+                        main_view.workspace_controller.update(cx, |workspace, cx| {
+                            workspace.add_center_item(Arc::new(panel.clone()), window, cx);
                         });
-                    }
+                    });
 
                     tracing::info!("Opened trigger designer for '{}'", trigger_name_for_spawn);
                 })?;
@@ -2269,16 +2333,12 @@ END;"#
             .detach();
         } else {
             // Creating a new trigger
-            let connection = connection.clone();
+            let connection_service = connection_service.clone();
 
             cx.spawn_in(window, async move |this, cx| {
-                // Get available tables
-                let tables = match schema_service
-                    .load_database_schema_for_database(
-                        connection.clone(),
-                        connection_id,
-                        target_database.as_deref(),
-                    )
+                // Get available tables and dialect-specific trigger metadata
+                let tables = match connection_service
+                    .load_schema_for_database(connection_id, target_database.as_deref())
                     .await
                 {
                     Ok(schema) => schema.tables,
@@ -2287,6 +2347,8 @@ END;"#
                         vec![]
                     }
                 };
+                let postgres_functions =
+                    load_trigger_functions(&connection, object_schema.as_deref(), dialect).await;
 
                 cx.update(|window, cx| {
                     let _design = TriggerDesign::new(dialect);
@@ -2297,6 +2359,8 @@ END;"#
                             connection_id,
                             dialect,
                             tables.clone(),
+                            Vec::new(),
+                            postgres_functions.clone(),
                             window,
                             cx,
                         )
@@ -2318,16 +2382,9 @@ END;"#
                         main_view._subscriptions.push(subscription);
                     });
 
-                    // Add to center dock
                     _ = this.update(cx, |main_view, cx| {
-                        main_view.dock_area.update(cx, |area, cx| {
-                            area.add_panel(
-                                Arc::new(panel.clone()),
-                                DockPlacement::Center,
-                                None,
-                                window,
-                                cx,
-                            );
+                        main_view.workspace_controller.update(cx, |workspace, cx| {
+                            workspace.add_center_item(Arc::new(panel.clone()), window, cx);
                         });
                     });
 
@@ -2372,10 +2429,9 @@ END;"#
                 );
             }
             TriggerDesignerEvent::Cancel => {
-                // Close the panel
                 let panel_arc: Arc<dyn PanelView> = Arc::new(panel);
-                self.dock_area.update(cx, |area, cx| {
-                    area.remove_panel(panel_arc, DockPlacement::Center, window, cx);
+                self.workspace_controller.update(cx, |workspace, cx| {
+                    workspace.remove_center_item(panel_arc, window, cx);
                 });
             }
             TriggerDesignerEvent::PreviewDdl { design: _ } => {
@@ -2405,7 +2461,7 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -2423,30 +2479,25 @@ END;"#
         };
 
         let panel_arc: Arc<dyn PanelView> = Arc::new(panel.clone());
-        let dock_area = self.dock_area.downgrade();
+        let workspace_controller = self.workspace_controller.clone();
 
         cx.spawn_in(window, async move |_this, cx| {
-            // If editing an existing trigger, drop it first (for SQLite/MySQL)
-            // Postgres uses CREATE OR REPLACE
-            if !is_new
-                && !is_postgres_dialect(&connection)
-                && let Some(orig_name) = &original_name
-            {
-                let drop_sql = match build_drop_trigger_statement(&connection, orig_name, None) {
-                    Ok(drop_sql) => drop_sql,
-                    Err(error) => {
-                        tracing::warn!(
-                            trigger = %orig_name,
-                            %error,
-                            "Unable to build trigger drop SQL"
-                        );
-                        return anyhow::Ok(());
-                    }
-                };
-                if let Err(e) = connection.execute(&drop_sql, &[]).await {
-                    tracing::warn!("Failed to drop old trigger: {}", e);
-                    // Continue anyway - the create might still work
+            let replace_plan = match plan_trigger_replace_execution(
+                &connection,
+                &zqlz_objects::TriggerReplacePlanRequest::new(is_new, original_name.clone()),
+            ) {
+                Ok(plan) => plan,
+                Err(error) => {
+                    tracing::warn!(trigger = %trigger_name, %error, "Unable to prepare trigger replace plan");
+                    return anyhow::Ok(());
                 }
+            };
+
+            if let Some(drop_sql) = replace_plan.drop_statement
+                && let Err(e) = connection.execute(&drop_sql, &[]).await
+            {
+                tracing::warn!("Failed to drop old trigger: {}", e);
+                // Continue anyway - the create might still work
             }
 
             // Execute the CREATE TRIGGER statement
@@ -2493,12 +2544,9 @@ END;"#
                             cx,
                         );
 
-                        // Close the panel
-                        if let Some(dock_area) = dock_area.upgrade() {
-                            dock_area.update(cx, |area, cx| {
-                                area.remove_panel(panel_arc, DockPlacement::Center, window, cx);
-                            });
-                        }
+                        workspace_controller.update(cx, |workspace, cx| {
+                            workspace.remove_center_item(panel_arc, window, cx);
+                        });
                     })?;
                 }
                 Err(e) => {
@@ -2543,6 +2591,12 @@ END;"#
                     cx,
                 );
             }
+            QueryEditorEvent::PreviewDdl {
+                object_type,
+                definition,
+            } => {
+                self.show_query_editor_ddl_preview(object_type, definition, window, cx);
+            }
             QueryEditorEvent::ExecuteQuery {
                 sql, connection_id, ..
             } => {
@@ -2584,7 +2638,7 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -2616,7 +2670,7 @@ END;"#
                         });
 
                         // Try to extract trigger name from CREATE TRIGGER statement
-                        let trigger_name = extract_trigger_name(&definition);
+                        let trigger_name = extract_trigger_name_from_create_statement(&definition);
                         if let Some(name) = trigger_name {
                             let version_target = SqlObjectVersionTarget {
                                 connection_id,
@@ -2678,22 +2732,24 @@ END;"#
             // For existing triggers, we need to drop and recreate
             // SQLite doesn't support CREATE OR REPLACE TRIGGER
             cx.spawn_in(window, async move |_this, cx| {
-                // For non-PostgreSQL databases, drop the trigger first
-                if !is_postgres_dialect(&connection) {
-                    let drop_sql = match build_drop_trigger_statement(&connection, &trigger_name, None) {
-                        Ok(drop_sql) => drop_sql,
-                        Err(error) => {
-                            tracing::warn!(
-                                trigger = %trigger_name,
-                                %error,
-                                "Unable to build trigger drop SQL"
-                            );
-                            return anyhow::Ok(());
-                        }
-                    };
-                    if let Err(e) = connection.execute(&drop_sql, &[]).await {
-                        tracing::warn!("Failed to drop trigger before recreate: {}", e);
+                let replace_plan = match plan_trigger_replace_execution(
+                    &connection,
+                    &zqlz_objects::TriggerReplacePlanRequest::new(
+                        false,
+                        Some(trigger_name.clone()),
+                    ),
+                ) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        tracing::warn!(trigger = %trigger_name, %error, "Unable to prepare trigger replace plan");
+                        return anyhow::Ok(());
                     }
+                };
+
+                if let Some(drop_sql) = replace_plan.drop_statement
+                    && let Err(e) = connection.execute(&drop_sql, &[]).await
+                {
+                    tracing::warn!("Failed to drop trigger before recreate: {}", e);
                 }
 
                 match connection.execute(&definition, &[]).await {
@@ -2803,7 +2859,7 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -2978,7 +3034,7 @@ END;"#
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
@@ -3040,25 +3096,13 @@ END;"#
                         for view_name in &view_names {
                             let new_name = format!("{}_copy", view_name);
 
-                            // Fetch the source view definition, then create with new name
-                            match fetch_view_definition(&connection, None, view_name).await {
-                                Ok(definition) => {
-                                    let Some(create_sql) = replace_create_view_identifier(
-                                        &definition,
-                                        &connection,
-                                        &new_name,
-                                    ) else {
-                                        let error_msg =
-                                            format!("'{}': failed to parse source DDL", view_name);
-                                        tracing::error!("Failed to duplicate view {}", error_msg);
-                                        if continue_on_error {
-                                            errors.push(error_msg);
-                                        } else {
-                                            return;
-                                        }
-                                        continue;
-                                    };
-
+                            match build_duplicate_view_sql(
+                                &connection,
+                                &zqlz_objects::DuplicateViewRequest::new(view_name, &new_name),
+                            )
+                            .await
+                            {
+                                Ok(create_sql) => {
                                     match connection.execute(&create_sql, &[]).await {
                                         Ok(_) => {
                                             tracing::info!(
@@ -3091,10 +3135,7 @@ END;"#
                                 }
                                 Err(e) => {
                                     let error_msg = format!("'{}': {}", view_name, e);
-                                    tracing::error!(
-                                        "Failed to fetch view definition {}",
-                                        error_msg
-                                    );
+                                    tracing::error!("Failed to duplicate view {}", error_msg);
 
                                     if continue_on_error {
                                         errors.push(error_msg);
@@ -3136,13 +3177,6 @@ END;"#
                 .confirm()
         });
     }
-
-    /// Copies multiple view names to clipboard
-    pub(super) fn copy_view_names(&mut self, view_names: &[String], cx: &mut Context<Self>) {
-        let text = view_names.join("\n");
-        tracing::info!("Copy {} view name(s) to clipboard", view_names.len());
-        cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-    }
 }
 
 /// Parses a trigger definition SQL into a TriggerDesign structure.
@@ -3152,57 +3186,62 @@ fn parse_trigger_definition(
     trigger_name: &str,
     dialect: TriggerDialect,
 ) -> TriggerDesign {
-    use zqlz_trigger_designer::{TriggerEvent, TriggerTiming};
-
-    let mut design = TriggerDesign::new(dialect);
+    let mut design =
+        TriggerDesign::from_sql(sql, dialect).unwrap_or_else(|| TriggerDesign::new(dialect));
     design.name = trigger_name.to_string();
     design.is_new = false;
-    design.body = sql.to_string();
-
-    let sql_upper = sql.to_uppercase();
-
-    // Try to parse timing
-    if sql_upper.contains("BEFORE") {
-        design.timing = TriggerTiming::Before;
-    } else if sql_upper.contains("AFTER") {
-        design.timing = TriggerTiming::After;
-    } else if sql_upper.contains("INSTEAD OF") {
-        design.timing = TriggerTiming::InsteadOf;
-    }
-
-    // Try to parse events (could be multiple for Postgres)
-    let mut events = Vec::new();
-    if sql_upper.contains("INSERT") {
-        events.push(TriggerEvent::Insert);
-    }
-    if sql_upper.contains("UPDATE") {
-        events.push(TriggerEvent::Update);
-    }
-    if sql_upper.contains("DELETE") {
-        events.push(TriggerEvent::Delete);
-    }
-    if !events.is_empty() {
-        design.events = events;
-    }
-
-    // Try to parse table name - look for "ON table_name" pattern
-    if let Some(on_pos) = sql_upper.find(" ON ") {
-        let after_on = &sql[on_pos + 4..];
-        // Find the end of the table name (space, newline, or FOR)
-        let end_pos = after_on
-            .find(|c: char| c.is_whitespace() || c == '(')
-            .unwrap_or(after_on.len());
-        let table_name = after_on[..end_pos]
-            .trim()
-            .trim_matches('"')
-            .trim_matches('`');
-        design.table_name = table_name.to_string();
-    }
-
-    // Try to parse FOR EACH ROW/STATEMENT
-    design.for_each_row = sql_upper.contains("FOR EACH ROW");
-
     design
+}
+
+async fn load_trigger_relation_columns(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
+    table_name: Option<&str>,
+) -> Vec<String> {
+    let Some(table_name) = table_name else {
+        return Vec::new();
+    };
+    let Some(schema) = connection.as_schema_introspection() else {
+        return Vec::new();
+    };
+
+    match schema.get_columns(schema_name, table_name).await {
+        Ok(columns) => columns.into_iter().map(|column| column.name).collect(),
+        Err(error) => {
+            tracing::warn!(table = %table_name, %error, "Failed to load trigger relation columns");
+            Vec::new()
+        }
+    }
+}
+
+async fn load_trigger_functions(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    schema_name: Option<&str>,
+    dialect: TriggerDialect,
+) -> Vec<String> {
+    if dialect != TriggerDialect::Postgres {
+        return Vec::new();
+    }
+    let Some(schema) = connection.as_schema_introspection() else {
+        return Vec::new();
+    };
+
+    match schema.list_functions(schema_name).await {
+        Ok(functions) => functions
+            .into_iter()
+            .filter(|function| function.return_type.eq_ignore_ascii_case("trigger"))
+            .map(|function| {
+                function
+                    .schema
+                    .map(|schema| format!("{schema}.{}", function.name))
+                    .unwrap_or(function.name)
+            })
+            .collect(),
+        Err(error) => {
+            tracing::warn!(%error, "Failed to load trigger functions");
+            Vec::new()
+        }
+    }
 }
 
 /// Fetches the definition of a trigger from the database.
@@ -3210,42 +3249,80 @@ async fn fetch_trigger_definition(
     connection: &Arc<dyn zqlz_core::Connection>,
     schema_name: Option<&str>,
     trigger_name: &str,
+    table_name: Option<&str>,
 ) -> Result<String, String> {
-    fetch_database_object_definition(connection, schema_name, trigger_name, ObjectType::Trigger)
-        .await
-        .map_err(|error| format!("Failed to fetch trigger definition: {}", error))
-}
+    if connection_is_postgres(connection.as_ref()) {
+        let Some(table_name) = table_name else {
+            return fetch_trigger_definition_from_objects(connection, schema_name, trigger_name)
+                .await
+                .map_err(|error| error.to_string());
+        };
+        let result = if let Some(schema_name) = schema_name {
+            connection
+                .query(
+                    "SELECT pg_catalog.pg_get_triggerdef(t.oid, true)
+                     FROM pg_catalog.pg_trigger t
+                     JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                     WHERE n.nspname = $1
+                       AND c.relname = $2
+                       AND t.tgname = $3
+                       AND NOT t.tgisinternal
+                     LIMIT 1",
+                    &[
+                        zqlz_core::Value::String(schema_name.to_string()),
+                        zqlz_core::Value::String(table_name.to_string()),
+                        zqlz_core::Value::String(trigger_name.to_string()),
+                    ],
+                )
+                .await
+        } else {
+            connection
+                .query(
+                    "SELECT pg_catalog.pg_get_triggerdef(t.oid, true)
+                     FROM pg_catalog.pg_trigger t
+                     JOIN pg_catalog.pg_class c ON c.oid = t.tgrelid
+                     JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                     WHERE c.relname = $1
+                       AND t.tgname = $2
+                       AND NOT t.tgisinternal
+                       AND n.nspname NOT IN ('pg_catalog', 'information_schema', 'pg_toast')
+                       AND n.nspname NOT LIKE 'pg_temp_%'
+                       AND n.nspname NOT LIKE 'pg_toast_temp_%'
+                     ORDER BY n.nspname
+                     LIMIT 1",
+                    &[
+                        zqlz_core::Value::String(table_name.to_string()),
+                        zqlz_core::Value::String(trigger_name.to_string()),
+                    ],
+                )
+                .await
+        };
 
-/// Extracts trigger name from a CREATE TRIGGER statement
-fn extract_trigger_name(definition: &str) -> Option<String> {
-    let upper = definition.to_uppercase();
-    let pos = upper.find("CREATE TRIGGER")?;
-    let after_create = &definition[pos + 14..];
-    let trimmed = after_create.trim_start();
-
-    // Handle "OR REPLACE" for PostgreSQL
-    let trimmed_upper = trimmed.to_uppercase();
-    let trimmed = if let Some(stripped) = trimmed_upper.strip_prefix("OR REPLACE") {
-        trimmed[trimmed.len() - stripped.len()..].trim_start()
-    } else if let Some(stripped) = trimmed_upper.strip_prefix("IF NOT EXISTS") {
-        trimmed[trimmed.len() - stripped.len()..].trim_start()
-    } else {
-        trimmed
-    };
-
-    // Extract the name (handle quoted identifiers)
-    if let Some(stripped) = trimmed.strip_prefix('"') {
-        let end = stripped.find('"')?;
-        Some(stripped[..end].to_string())
-    } else if let Some(stripped) = trimmed.strip_prefix('`') {
-        let end = stripped.find('`')?;
-        Some(stripped[..end].to_string())
-    } else if let Some(stripped) = trimmed.strip_prefix('[') {
-        let end = stripped.find(']')?;
-        Some(stripped[..end].to_string())
-    } else {
-        // Unquoted identifier - ends at whitespace
-        let end = trimmed.find(char::is_whitespace)?;
-        Some(trimmed[..end].to_string())
+        match result {
+            Ok(result) => {
+                if let Some(definition) = result
+                    .rows
+                    .first()
+                    .and_then(|row| row.get(0))
+                    .and_then(|value| value.as_str())
+                {
+                    return Ok(format!("{};", definition));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    trigger_name,
+                    table_name,
+                    schema_name = ?schema_name,
+                    "Failed exact trigger definition lookup; falling back to driver DDL generation"
+                );
+            }
+        }
     }
+
+    fetch_trigger_definition_from_objects(connection, schema_name, trigger_name)
+        .await
+        .map_err(|error| error.to_string())
 }

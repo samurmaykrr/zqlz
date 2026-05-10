@@ -45,3 +45,13 @@ fn redis_argument_position_does_not_fall_back_to_sql_noise() {
 
     assert!(completions.is_empty());
 }
+
+#[test]
+fn redis_completion_uses_command_tokenizer_for_quoted_tokens() {
+    let mut lsp = create_test_lsp_with_dialect(SqlDialect::Redis);
+    let text = Rope::from("ACL \"LI");
+    let completions = lsp.get_completions(&text, text.to_string().len());
+
+    let labels: Vec<_> = completions.iter().map(|item| item.label.as_str()).collect();
+    assert!(labels.contains(&"LIST"));
+}

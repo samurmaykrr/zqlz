@@ -358,6 +358,27 @@ mod split_statements_tests {
     }
 
     #[test]
+    fn test_split_statements_preserves_dollar_quoted_procedure_body() {
+        let sql = r#"
+            CREATE OR REPLACE PROCEDURE public.refresh_rollups()
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                DELETE FROM rollups;
+                INSERT INTO rollups SELECT 1;
+            END;
+            $$;
+            SELECT 1;
+        "#;
+        let statements = split_statements(sql);
+
+        assert_eq!(statements.len(), 2);
+        assert!(statements[0].contains("DELETE FROM rollups;"));
+        assert!(statements[0].contains("INSERT INTO rollups SELECT 1;"));
+        assert_eq!(statements[1], "SELECT 1");
+    }
+
+    #[test]
     fn test_split_statements_ignores_line_comments() {
         let sql = "SELECT 1; -- this is a comment; with semicolons\nSELECT 2";
         let statements = split_statements(sql);

@@ -33,6 +33,11 @@ impl TableViewerDelegate {
 
         let data_col = col - 1;
 
+        if !self.can_edit_cells() {
+            tracing::info!("Skipping cell edit: table has no stable row identity");
+            return;
+        }
+
         if self.disable_inline_edit {
             self.emit_edit_cell_event(actual_row, col, data_col, cx);
             return;

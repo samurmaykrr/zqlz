@@ -4,8 +4,10 @@
 //! database triggers across different database systems.
 
 mod manager;
+mod workflow;
 
 #[cfg(test)]
 mod tests;
 
 pub use manager::*;
+pub use workflow::*;

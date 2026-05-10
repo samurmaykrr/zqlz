@@ -5,7 +5,7 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors = ["ZQLZ Team"]
-default-run = "zqlz"
+default-run = "zqlz-editor"
 
 [lib]
 name = "zqlz_app"
@@ -13,12 +13,13 @@ path = "src/lib.rs"
 test = true
 
 [[bin]]
-name = "zqlz"
+name = "zqlz-editor"
 path = "src/main.rs"
 
 [dependencies]
 # GUI Framework
 gpui.workspace = true
+gpui_platform.workspace = true
 
 # Internal crates
 zqlz-ui.workspace = true
@@ -26,13 +27,16 @@ zqlz-core.workspace = true
 zqlz-schema-tools.workspace = true
 zqlz-connection.workspace = true
 zqlz-services.workspace = true
+zqlz-table-workflows.workspace = true
 zqlz-query.workspace = true
 zqlz-lsp.workspace = true
 zqlz-table-designer.workspace = true
 zqlz-trigger-designer.workspace = true
+zqlz-sequence-designer.workspace = true
 zqlz-schema.workspace = true
 zqlz-interchange.workspace = true
 zqlz-versioning.workspace = true
+zqlz-objects.workspace = true
 zqlz-templates.workspace = true
 zqlz-drivers.workspace = true
 zqlz-text-editor.workspace = true

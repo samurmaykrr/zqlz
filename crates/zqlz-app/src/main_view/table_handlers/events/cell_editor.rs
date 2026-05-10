@@ -11,8 +11,10 @@
 //! - Manage the full lifecycle of cell editing from user input to database persistence
 
 use gpui::*;
+use zqlz_core::DriverCategory;
 use zqlz_ui::widgets::{
-    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
+    notification::Notification, v_flex,
 };
 
 use crate::app::AppState;
@@ -62,13 +64,15 @@ impl MainView {
                 };
 
                 let table_service = app_state.table_service.clone();
+                let key_value_service = app_state.key_value_service.clone();
                 let table_name = cell_data.table_name.clone();
                 let column_name = cell_data.column_name.clone();
+                let success_column_name = column_name.clone();
                 let row_index = cell_data.row_index;
                 let col_index = cell_data.col_index;
                 let original_value = cell_data.current_value.clone();
-                let is_redis = connection.dialect_id() == Some("redis");
-                let schema_qualifier = if !is_redis {
+                let is_key_value = connection.driver_category() == DriverCategory::KeyValue;
+                let schema_qualifier = if !is_key_value {
                     source_viewer.as_ref().and_then(|v| {
                         v.read_with(cx, |viewer, _cx| {
                             let db = viewer.database_name();
@@ -91,35 +95,11 @@ impl MainView {
                 };
 
                 cx.spawn_in(window, async move |_this, cx| {
-                    // For Redis, we need to get the key type first, then call update_redis_key
-                    let update_result = if is_redis {
-                        // Query the key type
-                        let type_result = connection
-                            .query(&format!("TYPE {}", table_name), &[])
-                            .await;
-
-                        match type_result {
-                            Ok(result) => {
-                                let key_type = result
-                                    .rows
-                                    .first()
-                                    .and_then(|r| r.get_by_name("value"))
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("string")
-                                    .to_lowercase();
-
-                                table_service
-                                    .update_redis_key(
-                                        connection,
-                                        &table_name,
-                                        &key_type,
-                                        cell_update_data,
-                                    )
-                                    .await
-                                    .map_err(|e| anyhow::anyhow!("{}", e))
-                            }
-                            Err(e) => Err(anyhow::anyhow!("Failed to get key type: {}", e)),
-                        }
+                    let update_result = if is_key_value {
+                        key_value_service
+                            .update_key_cell(connection, &table_name, None, cell_update_data)
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))
                     } else {
                         table_service
                             .update_cell(connection, &table_name, schema_qualifier.as_deref(), cell_update_data)
@@ -141,6 +121,16 @@ impl MainView {
                                     );
                                 });
                             }
+
+                            _ = cx.update(|window, cx| {
+                                window.push_notification(
+                                    Notification::success(format!(
+                                        "Saved {}.{}",
+                                        table_name, success_column_name
+                                    )),
+                                    cx,
+                                );
+                            });
                         }
                         Err(e) => {
                             tracing::error!("Failed to update cell: {}", e);

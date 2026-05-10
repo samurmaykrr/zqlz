@@ -10,6 +10,7 @@ path = "src/text_editor.rs"
 [dependencies]
 # GUI Framework
 gpui.workspace = true
+gpui_platform.workspace = true
 zqlz-ui.workspace = true
 
 # Text buffer

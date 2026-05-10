@@ -3,10 +3,11 @@
 //! Shared data structures for filtering, sorting, column visibility, and profile management.
 
 use gpui::SharedString;
+use serde::{Deserialize, Serialize};
 use zqlz_core::Connection;
 
 /// Filter operators for WHERE clause generation
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum FilterOperator {
     // Equality operators
     #[default]
@@ -208,7 +209,7 @@ fn escape_like_value(value: &str) -> String {
 }
 
 /// A single filter condition
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FilterCondition {
     /// Unique ID for this filter row
     pub id: usize,
@@ -324,7 +325,7 @@ impl Default for FilterCondition {
 }
 
 /// Logical operator for combining filters
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum LogicalOperator {
     #[default]
     And,
@@ -355,7 +356,7 @@ impl LogicalOperator {
 }
 
 /// Sort direction
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum SortDirection {
     #[default]
     Ascending,
@@ -387,7 +388,7 @@ impl SortDirection {
 }
 
 /// A single sort criterion
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SortCriterion {
     /// Unique ID for this sort item
     pub id: usize,
@@ -431,7 +432,7 @@ fn escape_identifier_for_driver(identifier: &str, driver_name: &str) -> String {
 }
 
 /// Column visibility state
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ColumnVisibility {
     /// Column name
     pub name: String,

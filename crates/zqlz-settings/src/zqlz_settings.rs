@@ -76,6 +76,7 @@ pub struct ZqlzSettings {
     pub fonts: FontSettings,
     pub editor: EditorSettings,
     pub connections: ConnectionSettings,
+    pub workspace: WorkspaceSettings,
 }
 
 impl Global for ZqlzSettings {}
@@ -429,6 +430,7 @@ pub struct EditorSettings {
     pub lsp_enabled: bool,
     pub lsp_completions_enabled: bool,
     pub lsp_hover_enabled: bool,
+    pub hover_delay_ms: u32,
     pub lsp_diagnostics_enabled: bool,
     pub lsp_code_actions_enabled: bool,
     pub lsp_rename_enabled: bool,
@@ -480,6 +482,7 @@ impl Default for EditorSettings {
             lsp_enabled: true,
             lsp_completions_enabled: true,
             lsp_hover_enabled: true,
+            hover_delay_ms: 500,
             lsp_diagnostics_enabled: true,
             lsp_code_actions_enabled: true,
             lsp_rename_enabled: true,
@@ -550,6 +553,22 @@ impl Default for ConnectionSettings {
             pagination_mode: PaginationMode::PageBased,
             available_page_sizes: vec![100, 500, 1000, 5000, 10000],
             show_total_row_count: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkspaceSettings {
+    pub restore_tabs_on_startup: bool,
+    pub confirm_close_window: bool,
+}
+
+impl Default for WorkspaceSettings {
+    fn default() -> Self {
+        Self {
+            restore_tabs_on_startup: false,
+            confirm_close_window: true,
         }
     }
 }

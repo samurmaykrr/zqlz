@@ -924,6 +924,21 @@ mod tests {
             self.driver
         }
 
+        fn dialect_id(&self) -> Option<&'static str> {
+            match self.driver {
+                "postgresql" => Some("postgres"),
+                other => Some(other),
+            }
+        }
+
+        fn quote_identifier(&self, identifier: &str) -> String {
+            if self.driver == "mysql" {
+                format!("`{}`", identifier.replace('`', "``"))
+            } else {
+                format!("\"{}\"", identifier.replace('"', "\"\""))
+            }
+        }
+
         fn rename_table_sql(
             &self,
             table_name: &zqlz_core::SqlObjectName,

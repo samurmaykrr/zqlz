@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
-use zqlz_core::{ColumnMeta, ForeignKeyInfo, IndexInfo, ObjectsPanelData, TableInfo, TableType};
+use zqlz_core::{
+    ColumnMeta, ConstraintInfo, ForeignKeyInfo, IndexInfo, ObjectsPanelData, ObjectsPanelManifest,
+    TableInfo, TableType, TriggerInfo,
+};
 
 /// Database schema overview for UI
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -8,6 +11,8 @@ pub struct DatabaseSchema {
     pub table_infos: Vec<TableInfo>,
     /// Extended objects panel data (driver-specific columns and values)
     pub objects_panel_data: Option<ObjectsPanelData>,
+    /// Declarative behavior metadata for objects panel rendering and actions.
+    pub objects_panel_manifest: Option<ObjectsPanelManifest>,
     /// Table names (convenience accessor, derived from table_infos)
     pub tables: Vec<String>,
     pub views: Vec<String>,
@@ -15,6 +20,11 @@ pub struct DatabaseSchema {
     pub triggers: Vec<String>,
     pub functions: Vec<String>,
     pub procedures: Vec<String>,
+    pub events: Vec<String>,
+    pub sequences: Vec<String>,
+    pub domains: Vec<String>,
+    pub types: Vec<String>,
+    pub extensions: Vec<String>,
     pub table_indexes: std::collections::HashMap<String, Vec<IndexInfo>>,
     /// The database name this schema belongs to (e.g. "pagila")
     pub database_name: Option<String>,
@@ -32,6 +42,8 @@ pub struct TableDetails {
     pub columns: Vec<ColumnInfo>,
     pub indexes: Vec<IndexInfo>,
     pub foreign_keys: Vec<ForeignKeyInfo>,
+    pub constraints: Vec<ConstraintInfo>,
+    pub triggers: Vec<TriggerInfo>,
     pub primary_key_columns: Vec<String>,
     pub row_count: Option<usize>,
 }

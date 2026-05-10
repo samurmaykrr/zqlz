@@ -8,10 +8,12 @@
 use std::sync::Arc;
 
 use uuid::Uuid;
-use zqlz_connection::ConnectionManager;
-use zqlz_core::{Connection, DriverCategory};
+use zqlz_connection::{ConnectionManager, SidebarObjectCapabilities};
+use zqlz_core::{Connection, ConnectionScope, DocumentCollectionInfo, DriverCategory};
 
-use crate::{DatabaseSchema, SchemaService, ServiceError, ServiceResult};
+use crate::{
+    DatabaseSchema, DocumentService, KeyValueService, SchemaService, ServiceError, ServiceResult,
+};
 
 /// A refresh request for a connected data source.
 #[derive(Clone, Debug)]
@@ -25,6 +27,72 @@ pub struct RefreshRequest {
     /// When present, schema loading is performed against this explicit target
     /// instead of whatever the connection reports as its current default.
     pub target_database: Option<String>,
+    /// Whether to refresh the server database list as part of this request.
+    ///
+    /// Object/schema reloads should leave this false so a targeted schema refresh
+    /// cannot cascade into sidebar database-list churn.
+    pub refresh_database_list: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshIntent {
+    ConnectionsList,
+    ActiveConnectionSurfaces,
+    ConnectionSurfaces(Uuid),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SurfaceRefreshKind {
+    SidebarAndObjects,
+    ConnectionsList,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RefreshPlanStep {
+    RefreshConnectionsList,
+    RefreshConnectionSurfaces {
+        connection_id: Option<Uuid>,
+        kind: SurfaceRefreshKind,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RefreshPlan {
+    pub steps: Vec<RefreshPlanStep>,
+}
+
+impl RefreshPlan {
+    pub fn from_intent(intent: RefreshIntent, connected_connection_ids: &[Uuid]) -> Self {
+        let steps = match intent {
+            RefreshIntent::ConnectionsList => {
+                std::iter::once(RefreshPlanStep::RefreshConnectionsList)
+                    .chain(
+                        connected_connection_ids
+                            .iter()
+                            .copied()
+                            .map(|connection_id| RefreshPlanStep::RefreshConnectionSurfaces {
+                                connection_id: Some(connection_id),
+                                kind: SurfaceRefreshKind::ConnectionsList,
+                            }),
+                    )
+                    .collect()
+            }
+            RefreshIntent::ActiveConnectionSurfaces => {
+                vec![RefreshPlanStep::RefreshConnectionSurfaces {
+                    connection_id: None,
+                    kind: SurfaceRefreshKind::SidebarAndObjects,
+                }]
+            }
+            RefreshIntent::ConnectionSurfaces(connection_id) => {
+                vec![RefreshPlanStep::RefreshConnectionSurfaces {
+                    connection_id: Some(connection_id),
+                    kind: SurfaceRefreshKind::SidebarAndObjects,
+                }]
+            }
+        };
+
+        Self { steps }
+    }
 }
 
 /// The fully refreshed state for a connection.
@@ -41,8 +109,10 @@ pub struct ConnectionRefresh {
 pub enum ConnectionRefreshPayload {
     /// Refresh payload for SQL-like drivers.
     Relational(Box<RelationalConnectionRefresh>),
-    /// Refresh payload for Redis-like drivers.
-    Redis(RedisConnectionRefresh),
+    /// Refresh payload for key-value drivers.
+    KeyValue(KeyValueConnectionRefresh),
+    /// Refresh payload for document drivers.
+    Document(DocumentConnectionRefresh),
 }
 
 /// Refreshed metadata for relational-style connections.
@@ -55,19 +125,36 @@ pub struct RelationalConnectionRefresh {
     pub databases: Option<Vec<(String, Option<i64>)>>,
     /// Driver category used by UI components that vary their presentation.
     pub driver_category: DriverCategory,
+    /// Sidebar object capabilities resolved for this connection.
+    pub object_capabilities: SidebarObjectCapabilities,
 }
 
-/// Refreshed metadata for Redis-style connections.
+/// Refreshed metadata for key-value connections.
 #[derive(Clone, Debug)]
-pub struct RedisConnectionRefresh {
-    /// Redis databases keyed by index with their best-effort key counts.
+pub struct KeyValueConnectionRefresh {
+    /// Logical databases keyed by index with best-effort sizes/counts.
     pub databases: Vec<(u16, Option<i64>)>,
+    /// Sidebar object capabilities resolved for this connection.
+    pub object_capabilities: SidebarObjectCapabilities,
+}
+
+/// Refreshed metadata for document connections.
+#[derive(Clone, Debug)]
+pub struct DocumentConnectionRefresh {
+    /// Document database names with best-effort sizes.
+    pub databases: Vec<(String, Option<i64>)>,
+    /// Document collections loaded for available databases.
+    pub collections: Vec<DocumentCollectionInfo>,
+    /// Sidebar object capabilities resolved for this connection.
+    pub object_capabilities: SidebarObjectCapabilities,
 }
 
 /// Service responsible for refreshing connection-backed metadata.
 pub struct RefreshService {
     connection_manager: Arc<ConnectionManager>,
     schema_service: Arc<SchemaService>,
+    key_value_service: Arc<KeyValueService>,
+    document_service: Arc<DocumentService>,
 }
 
 impl RefreshService {
@@ -75,10 +162,14 @@ impl RefreshService {
     pub fn new(
         connection_manager: Arc<ConnectionManager>,
         schema_service: Arc<SchemaService>,
+        key_value_service: Arc<KeyValueService>,
+        document_service: Arc<DocumentService>,
     ) -> Self {
         Self {
             connection_manager,
             schema_service,
+            key_value_service,
+            document_service,
         }
     }
 
@@ -97,14 +188,25 @@ impl RefreshService {
                 .invalidate_connection_cache(request.connection_id);
         }
 
-        if connection.driver_name() == "redis" {
-            return self.refresh_redis(connection, request.connection_id).await;
+        match connection.driver_category() {
+            DriverCategory::KeyValue => {
+                return self
+                    .refresh_key_value(connection, request.connection_id)
+                    .await;
+            }
+            DriverCategory::Document => {
+                return self
+                    .refresh_document(connection, request.connection_id)
+                    .await;
+            }
+            _ => {}
         }
 
         self.refresh_relational(
             connection,
             request.connection_id,
             request.target_database.as_deref(),
+            request.refresh_database_list,
         )
         .await
     }
@@ -114,29 +216,64 @@ impl RefreshService {
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
         target_database: Option<&str>,
+        refresh_database_list: bool,
     ) -> ServiceResult<ConnectionRefresh> {
-        let driver_category = driver_category_for(connection.driver_name());
+        let driver_category = connection.driver_category();
+        let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
+        let requested_scope = target_database
+            .map(|database_name| ConnectionScope::Database(database_name.to_string()))
+            .unwrap_or(ConnectionScope::Default);
+        let resolved_scope = connection
+            .resolve_scope(requested_scope)
+            .await
+            .map_err(|error| ServiceError::ConnectionFailed(error.to_string()))?;
+        let schema_connection = if resolved_scope.requires_dedicated_connection {
+            let database_key =
+                resolved_scope
+                    .physical_database_key
+                    .as_deref()
+                    .ok_or_else(|| {
+                        ServiceError::ConnectionFailed(
+                            "Driver requested dedicated connection without database key"
+                                .to_string(),
+                        )
+                    })?;
+            self.connection_manager
+                .get_for_database(connection_id, database_key)
+                .await
+                .map_err(|error| ServiceError::ConnectionFailed(error.to_string()))?
+        } else {
+            connection.clone()
+        };
         let schema = self
             .schema_service
-            .load_database_schema_for_database(connection.clone(), connection_id, target_database)
+            .load_database_schema_for_database(
+                schema_connection.clone(),
+                connection_id,
+                resolved_scope.effective_database.as_deref(),
+            )
             .await?;
 
-        let databases = if let Some(schema_introspection) = connection.as_schema_introspection() {
-            match schema_introspection.list_databases().await {
-                Ok(databases) => Some(
-                    databases
-                        .into_iter()
-                        .map(|database| (database.name, database.size_bytes))
-                        .collect(),
-                ),
-                Err(error) => {
-                    tracing::warn!(
-                        connection_id = %connection_id,
-                        %error,
-                        "Failed to refresh database list while refreshing connection"
-                    );
-                    None
+        let databases = if refresh_database_list {
+            if let Some(schema_introspection) = connection.as_schema_introspection() {
+                match schema_introspection.list_databases().await {
+                    Ok(databases) => Some(
+                        databases
+                            .into_iter()
+                            .map(|database| (database.name, database.size_bytes))
+                            .collect(),
+                    ),
+                    Err(error) => {
+                        tracing::warn!(
+                            connection_id = %connection_id,
+                            %error,
+                            "Failed to refresh database list while refreshing connection"
+                        );
+                        None
+                    }
                 }
+            } else {
+                None
             }
         } else {
             None
@@ -148,47 +285,121 @@ impl RefreshService {
                 schema,
                 databases,
                 driver_category,
+                object_capabilities,
             })),
         })
     }
 
-    async fn refresh_redis(
+    async fn refresh_key_value(
         &self,
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
     ) -> ServiceResult<ConnectionRefresh> {
-        let schema_introspection = connection
-            .as_schema_introspection()
-            .ok_or(ServiceError::SchemaNotSupported)?;
+        let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
+        let databases = self.key_value_service.load_databases(connection).await?;
 
-        let databases = schema_introspection
-            .list_databases()
-            .await
-            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?
+        Ok(ConnectionRefresh {
+            connection_id,
+            payload: ConnectionRefreshPayload::KeyValue(KeyValueConnectionRefresh {
+                databases,
+                object_capabilities,
+            }),
+        })
+    }
+
+    async fn refresh_document(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+    ) -> ServiceResult<ConnectionRefresh> {
+        let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
+        let databases = self
+            .document_service
+            .list_databases(connection.clone())
+            .await?
             .into_iter()
-            .filter_map(|database| {
-                database
-                    .name
-                    .strip_prefix("db")
-                    .and_then(|value| value.parse::<u16>().ok())
-                    .map(|index| (index, database.size_bytes))
+            .collect::<Vec<_>>();
+        let mut collections = Vec::new();
+
+        for database in &databases {
+            match self
+                .document_service
+                .list_collections(connection.clone(), &database.name)
+                .await
+            {
+                Ok(database_collections) => collections.extend(database_collections),
+                Err(error) => {
+                    tracing::warn!(
+                        connection_id = %connection_id,
+                        database_name = %database.name,
+                        %error,
+                        "Failed to refresh document collections for database"
+                    );
+                }
+            }
+        }
+
+        let databases = databases
+            .into_iter()
+            .map(|database| {
+                (
+                    database.name,
+                    database
+                        .size_bytes
+                        .and_then(|size| i64::try_from(size).ok()),
+                )
             })
             .collect();
 
         Ok(ConnectionRefresh {
             connection_id,
-            payload: ConnectionRefreshPayload::Redis(RedisConnectionRefresh { databases }),
+            payload: ConnectionRefreshPayload::Document(DocumentConnectionRefresh {
+                databases,
+                collections,
+                object_capabilities,
+            }),
         })
     }
 }
 
-fn driver_category_for(driver_name: &str) -> DriverCategory {
-    match driver_name.to_ascii_lowercase().as_str() {
-        "redis" | "memcached" | "valkey" => DriverCategory::KeyValue,
-        "mongodb" | "couchdb" => DriverCategory::Document,
-        "influxdb" | "timescaledb" => DriverCategory::TimeSeries,
-        "neo4j" => DriverCategory::Graph,
-        "elasticsearch" => DriverCategory::Search,
-        _ => DriverCategory::Relational,
+#[cfg(test)]
+mod tests {
+    use super::{RefreshIntent, RefreshPlan, RefreshPlanStep, SurfaceRefreshKind};
+    use uuid::Uuid;
+
+    #[test]
+    fn refresh_plan_expands_connections_list_to_list_and_connected_surfaces() {
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        let plan = RefreshPlan::from_intent(RefreshIntent::ConnectionsList, &[first, second]);
+
+        assert_eq!(
+            plan.steps,
+            vec![
+                RefreshPlanStep::RefreshConnectionsList,
+                RefreshPlanStep::RefreshConnectionSurfaces {
+                    connection_id: Some(first),
+                    kind: SurfaceRefreshKind::ConnectionsList,
+                },
+                RefreshPlanStep::RefreshConnectionSurfaces {
+                    connection_id: Some(second),
+                    kind: SurfaceRefreshKind::ConnectionsList,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn refresh_plan_keeps_active_connection_unresolved_for_app_layer() {
+        let plan = RefreshPlan::from_intent(RefreshIntent::ActiveConnectionSurfaces, &[]);
+
+        assert_eq!(
+            plan.steps,
+            vec![RefreshPlanStep::RefreshConnectionSurfaces {
+                connection_id: None,
+                kind: SurfaceRefreshKind::SidebarAndObjects,
+            }]
+        );
     }
 }

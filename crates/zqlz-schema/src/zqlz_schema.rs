@@ -33,8 +33,9 @@ pub use statistics::{
 // Re-export widget types for convenience
 pub use widgets::{
     ColumnInfo, DatabaseSchemaData, DeleteSelected, ForeignKeyInfo, IndexInfo, NewObject,
-    ObjectsPanel, ObjectsPanelEvent, OpenSelected, SchemaDetails, SchemaDetailsPanel,
-    SchemaDetailsPanelEvent, SchemaNode, SchemaNodeType, SchemaTreeEvent, SchemaTreePanel,
+    ObjectDesignerPanel, ObjectDesignerPanelEvent, ObjectsPanel, ObjectsPanelEvent, OpenSelected,
+    SchemaDetails, SchemaDetailsPanel, SchemaDetailsPanelEvent, SchemaNode, SchemaNodeType,
+    SchemaTreeEvent, SchemaTreePanel,
 };
 
 // Re-export core schema types that users will cache

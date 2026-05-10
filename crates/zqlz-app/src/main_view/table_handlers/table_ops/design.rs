@@ -3,7 +3,7 @@
 use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::TableDetails;
+use zqlz_core::{ConnectionScope, TableDetails};
 use zqlz_ui::widgets::WindowExt;
 use zqlz_versioning::{DatabaseObjectType, make_object_id};
 
@@ -26,6 +26,30 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let Some(decision) =
+            self.decide_design_tables_workflow(connection_id, vec![table_name], window, cx)
+        else {
+            return;
+        };
+
+        let Some(request) = decision.requests.into_iter().next() else {
+            tracing::warn!(
+                connection_id = %connection_id,
+                "Single-table design request produced no workflow requests"
+            );
+            return;
+        };
+
+        self.open_table_designer(request.connection_id, request.table_name, window, cx);
+    }
+
+    fn open_table_designer(
+        &mut self,
+        connection_id: Uuid,
+        table_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         tracing::info!(
             "Design table: {} on connection {}",
             table_name,
@@ -37,27 +61,22 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
-        // Get the driver name directly from the connection
-        let driver_name = connection.driver_name().to_string();
-        let dialect = zqlz_table_designer::TableLoader::detect_dialect_from_driver(&driver_name);
+        let table_design_service = app_state.table_design_service.clone();
+
+        let dialect = table_design_service.dialect_for_connection(connection.as_ref());
         let connection = connection.clone();
         let table_name_clone = table_name.clone();
-        let dock_area = self.dock_area.downgrade();
 
         cx.spawn_in(window, async move |this, cx| {
             // Load table structure
-            match zqlz_table_designer::TableLoader::load_table(
-                connection,
-                None,
-                &table_name_clone,
-                dialect,
-            )
-            .await
+            match table_design_service
+                .load_table(connection, dialect, None, &table_name_clone)
+                .await
             {
                 Ok(design) => {
                     cx.update(|window, cx| {
@@ -89,20 +108,10 @@ impl MainView {
                                 }
                             });
                             main_view._subscriptions.push(subscription);
-                        });
-
-                        // Add to center dock
-                        if let Some(dock_area) = dock_area.upgrade() {
-                            dock_area.update(cx, |area, cx| {
-                                area.add_panel(
-                                    Arc::new(panel.clone()),
-                                    zqlz_ui::widgets::dock::DockPlacement::Center,
-                                    None,
-                                    window,
-                                    cx,
-                                );
+                            main_view.workspace_controller.update(cx, |workspace, cx| {
+                                workspace.add_center_item(Arc::new(panel.clone()), window, cx);
                             });
-                        }
+                        });
 
                         tracing::info!("Opened table designer for '{}'", table_name_clone);
                     })?;
@@ -124,8 +133,14 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        for table_name in table_names {
-            self.design_table(connection_id, table_name, window, cx);
+        let Some(decision) =
+            self.decide_design_tables_workflow(connection_id, table_names, window, cx)
+        else {
+            return;
+        };
+
+        for request in decision.requests {
+            self.open_table_designer(request.connection_id, request.table_name, window, cx);
         }
     }
 
@@ -153,22 +168,24 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
-            tracing::error!("Connection not found: {}", connection_id);
-            return;
-        };
+        let table_design_service = app_state.table_design_service.clone();
+        let connection_service = app_state.connection_service.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
-        let connection = connection.clone();
         let _connection_sidebar = self.connection_sidebar.clone();
         let table_name = design.table_name.clone();
         let object_schema = design.schema.clone();
         let version_repository = self.version_repository.clone();
-        let dock_area = self.dock_area.clone();
+        let workspace_controller = self.workspace_controller.clone();
 
         // Generate the DDL — CREATE for new tables, ALTER for existing
         let ddl_statements: Vec<String> = if is_new {
-            match zqlz_table_designer::DdlGenerator::generate_create_table(&design) {
-                Ok(ddl) => vec![ddl],
+            match table_design_service.generate_create_table_ddl(&design) {
+                Ok(ddl_statement) => vec![ddl_statement],
                 Err(e) => {
                     tracing::error!("Failed to generate CREATE TABLE DDL: {}", e);
                     window.push_notification(
@@ -193,7 +210,7 @@ impl MainView {
                 return;
             };
 
-            match zqlz_table_designer::DdlGenerator::generate_alter_table(&original, &design) {
+            match table_design_service.generate_alter_table_ddl(&original, &design) {
                 Ok(statements) => {
                     if statements.is_empty() {
                         window.push_notification(
@@ -221,6 +238,32 @@ impl MainView {
         };
 
         cx.spawn_in(window, async move |this, cx| {
+            let scope = target_database
+                .map(ConnectionScope::Database)
+                .unwrap_or(ConnectionScope::Default);
+            let resolved_connection = match connection_service
+                .resolve_connection(connection_id, scope)
+                .await
+            {
+                Ok(resolved_connection) => resolved_connection,
+                Err(error) => {
+                    tracing::error!(%error, "Failed to resolve table save connection");
+
+                    _ = cx.update(|window, cx| {
+                        window.push_notification(
+                            zqlz_ui::widgets::notification::Notification::error(format!(
+                                "Failed to save table '{}': {}",
+                                table_name, error
+                            )),
+                            cx,
+                        );
+                    });
+
+                    return anyhow::Ok(());
+                }
+            };
+            let connection = resolved_connection.connection;
+
             let pre_save_snapshot = if is_new {
                 None
             } else {
@@ -360,13 +403,8 @@ impl MainView {
                     cx,
                 );
 
-                dock_area.update(cx, |area, cx| {
-                    area.remove_panel(
-                        std::sync::Arc::new(panel),
-                        zqlz_ui::widgets::dock::DockPlacement::Center,
-                        window,
-                        cx,
-                    );
+                workspace_controller.update(cx, |workspace, cx| {
+                    workspace.remove_center_item(std::sync::Arc::new(panel), window, cx);
                 });
 
                 // Refresh both schema-backed surfaces through the shared coordinator.

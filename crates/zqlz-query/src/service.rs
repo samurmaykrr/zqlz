@@ -619,6 +619,7 @@ impl QueryService {
                 raw_output: None,
                 query_plan: None,
                 analyzed_plan: None,
+                provider_id: connection.dialect_id().map(ToString::to_string),
                 error: Some("No SQL statement to explain".to_string()),
                 connection_name: None,
                 database_name: None,
@@ -678,6 +679,7 @@ impl QueryService {
             raw_output,
             query_plan,
             analyzed_plan,
+            provider_id: connection.dialect_id().map(ToString::to_string),
             error,
             connection_name: None,
             database_name: None,
@@ -694,24 +696,9 @@ impl QueryService {
     ) -> Option<zqlz_analyzer::QueryAnalysis> {
         // Try to parse based on driver-declared parser behavior
         let parsed_plan = match connection.explain_parser_kind() {
-            ExplainParserKind::PostgreSql => {
-                // For PostgreSQL, try to parse the raw output as JSON
-                if let Some(raw) = raw_output {
-                    // PostgreSQL EXPLAIN output is typically a single row with JSON
-                    if let Some(first_row) = raw.rows.first() {
-                        if let Some(first_value) = first_row.values.first() {
-                            let json_str = first_value.to_string();
-                            parse_postgres_explain(&json_str).ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
+            ExplainParserKind::PostgreSql => raw_output
+                .and_then(Self::parse_postgres_query_result)
+                .or_else(|| query_plan.and_then(Self::parse_postgres_query_result)),
             ExplainParserKind::MySql => {
                 // For MySQL, try to parse the raw output as JSON
                 if let Some(raw) = raw_output {
@@ -770,6 +757,61 @@ impl QueryService {
         }
 
         lines.join("\n")
+    }
+
+    fn parse_postgres_query_result(
+        result: &zqlz_core::QueryResult,
+    ) -> Option<zqlz_analyzer::explain::QueryPlan> {
+        let first_value = result.rows.first().and_then(|row| row.values.first())?;
+
+        if let Some(plan) = Self::parse_postgres_json_value(first_value) {
+            return Some(plan);
+        }
+
+        let plan_text = result
+            .rows
+            .iter()
+            .filter_map(|row| row.values.first())
+            .map(Self::explain_value_to_text)
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        if plan_text.trim().is_empty() {
+            None
+        } else {
+            parse_postgres_explain(&plan_text).ok()
+        }
+    }
+
+    fn parse_postgres_json_value(value: &Value) -> Option<zqlz_analyzer::explain::QueryPlan> {
+        match value {
+            Value::Json(json) => parse_postgres_explain(&json.to_string()).ok(),
+            Value::String(text) => {
+                let trimmed = text.trim();
+                if trimmed.starts_with('[') || trimmed.starts_with('{') {
+                    parse_postgres_explain(trimmed).ok()
+                } else {
+                    None
+                }
+            }
+            _ => {
+                let text = value.to_string();
+                let trimmed = text.trim();
+                if trimmed.starts_with('[') || trimmed.starts_with('{') {
+                    parse_postgres_explain(trimmed).ok()
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    fn explain_value_to_text(value: &Value) -> String {
+        match value {
+            Value::Json(json) => json.to_string(),
+            Value::String(text) => text.clone(),
+            _ => value.to_string(),
+        }
     }
 
     /// Get the ExplainConfig for a connection based on its dialect

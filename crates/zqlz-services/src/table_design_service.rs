@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 use zqlz_core::Connection;
-use zqlz_table_designer::{DatabaseDialect, DdlGenerator, TableDesign};
+use zqlz_table_designer::{DatabaseDialect, DdlGenerator, TableDesign, TableLoader};
 
 use crate::error::{ServiceError, ServiceResult};
 
@@ -33,6 +33,20 @@ impl TableDesignService {
     /// Create a new table design service
     pub fn new() -> Self {
         Self
+    }
+
+    /// Resolve the table-designer dialect from a connection driver name.
+    ///
+    /// Keeping this mapping behind the service boundary prevents app handlers
+    /// from depending directly on table-designer loader helpers for workflow
+    /// decisions that are not UI-specific.
+    pub fn detect_dialect_from_driver(&self, driver_name: &str) -> DatabaseDialect {
+        TableLoader::detect_dialect_from_driver(driver_name)
+    }
+
+    /// Resolve the table-designer dialect from a live connection.
+    pub fn dialect_for_connection(&self, connection: &dyn Connection) -> DatabaseDialect {
+        self.detect_dialect_from_driver(connection.driver_name())
     }
 
     /// Load an existing table's structure for editing

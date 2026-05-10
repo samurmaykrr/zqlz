@@ -14,8 +14,8 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc};
 use zqlz_ui::widgets::{ActiveTheme, ThemeColor, ThemeMode, highlighter::HighlightTheme};
 
 use crate::{
-    CachedScrollbarBounds, CursorShapeStyle, Selection, TextEditor, VisibleWrapLayout,
-    buffer::Position, display_map::DisplayViewport, syntax::HighlightKind,
+    CursorShapeStyle, EditorAppearance, Selection, TextEditor, VisibleWrapLayout, buffer::Position,
+    display_map::DisplayViewport, scroll_state::CachedScrollbarBounds, syntax::HighlightKind,
 };
 
 /// The width of the cursor in pixels
@@ -27,9 +27,8 @@ const GUTTER_PADDING: Pixels = px(8.0);
 /// Width of the separator line between gutter and text content
 const GUTTER_SEPARATOR_WIDTH: Pixels = px(1.0);
 
-/// Dedicated horizontal zone reserved for fold chevrons, sitting between the
-/// right edge of the line-number text and the separator. This prevents the
-/// triangle from overlapping the digits regardless of how many digits are shown.
+/// Dedicated horizontal zone reserved for fold chevrons, before the line-number
+/// text. Line numbers stay next to the editor separator where users expect them.
 const FOLD_CHEVRON_ZONE: Pixels = px(14.0);
 
 /// Maximum number of completion items to show in the menu at once
@@ -252,6 +251,27 @@ struct CursorPixelLayout {
 }
 
 impl EditorElement {
+    fn gutter_padding(appearance: EditorAppearance) -> Pixels {
+        match appearance {
+            EditorAppearance::Default => GUTTER_PADDING,
+            EditorAppearance::QueryConsole => px(6.0),
+        }
+    }
+
+    fn fold_chevron_zone(appearance: EditorAppearance) -> Pixels {
+        match appearance {
+            EditorAppearance::Default => FOLD_CHEVRON_ZONE,
+            EditorAppearance::QueryConsole => px(12.0),
+        }
+    }
+
+    fn scrollbar_width(appearance: EditorAppearance) -> Pixels {
+        match appearance {
+            EditorAppearance::Default => px(6.0),
+            EditorAppearance::QueryConsole => px(4.0),
+        }
+    }
+
     fn chunk_text_runs(
         chunk: &crate::display_map::DisplayTextChunk,
         text_style: &ViewportTextStyleCacheKey,
@@ -633,6 +653,11 @@ impl EditorElement {
             .unwrap_or(colors.background)
     }
 
+    fn opaque_color(mut color: Hsla) -> Hsla {
+        color.a = 1.0;
+        color
+    }
+
     fn editor_foreground_color(active_theme: &HighlightTheme, colors: &ThemeColor) -> Hsla {
         active_theme
             .style
@@ -692,9 +717,13 @@ impl EditorElement {
         let active_color = Self::syntax_theme_color(kind, active_theme);
         let fallback_color = Self::syntax_theme_color(kind, fallback_theme);
         let default_palette_color = Self::default_syntax_palette_color(kind, colors);
+        let usable_palette_color = (default_palette_color.a > 0.0
+            && default_palette_color != default_text_color)
+            .then_some(default_palette_color);
 
         active_color
             .filter(|color| *color != default_text_color)
+            .or(usable_palette_color)
             .or(fallback_color.filter(|color| *color != default_text_color))
             .or(active_color)
             .or(fallback_color)
@@ -761,10 +790,12 @@ impl EditorElement {
         window: &mut Window,
         show_line_numbers: bool,
         show_folding: bool,
+        appearance: EditorAppearance,
     ) -> Pixels {
         if !show_line_numbers && !show_folding {
             return px(0.0);
         }
+        let gutter_padding = Self::gutter_padding(appearance);
 
         let line_number_width = if show_line_numbers {
             let max_line_number = total_lines.max(1);
@@ -783,13 +814,13 @@ impl EditorElement {
                     .text_system()
                     .shape_line(sample.into(), font_size, &[text_run], None);
 
-            shaped.width + GUTTER_PADDING * 2.0
+            shaped.width + gutter_padding * 2.0
         } else {
             px(0.0)
         };
 
         let fold_width = if show_folding {
-            FOLD_CHEVRON_ZONE
+            Self::fold_chevron_zone(appearance)
         } else {
             px(0.0)
         };
@@ -1029,6 +1060,7 @@ pub struct PrepaintState {
     block_widgets: Vec<BlockWidgetRenderData>,
     /// Fold chevron hit-rects and state for each visible foldable line.
     fold_chevrons: Vec<FoldChevronData>,
+    appearance: EditorAppearance,
 }
 
 struct HoverTooltipData {
@@ -1162,7 +1194,7 @@ impl Element for EditorElement {
     type PrepaintState = PrepaintState;
 
     fn id(&self) -> Option<ElementId> {
-        Some(ElementId::Name("text-editor".into()))
+        None
     }
 
     fn source_location(&self) -> Option<&'static std::panic::Location<'static>> {
@@ -1278,6 +1310,7 @@ impl Element for EditorElement {
         });
         let soft_wrap = document_snapshot.soft_wrap;
         let show_line_numbers = editor_snapshot.show_line_numbers;
+        let appearance = editor_snapshot.appearance;
         let show_folding = editor_snapshot.show_folding;
         let highlight_current_line = editor_snapshot.highlight_current_line;
         let relative_line_numbers = editor_snapshot.relative_line_numbers;
@@ -1355,6 +1388,7 @@ impl Element for EditorElement {
             window,
             show_line_numbers,
             show_folding,
+            appearance,
         );
 
         // Soft-wrap: compute the available text area width and wrap_width for shape_text
@@ -1467,17 +1501,32 @@ impl Element for EditorElement {
             gutter_width,
         };
 
-        // Push the gutter width and the element's bounds origin back to the
-        // editor so that mouse handlers can correctly convert pixel positions.
+        // Push the current frame geometry back to the editor so mouse handlers
+        // use the same position map that paint uses.
+        let mut cached_layout = crate::input_state::CachedEditorLayout::new(
+            f32::from(gutter_width),
+            char_width,
+            bounds.origin,
+            bounds.size,
+            line_height,
+            soft_wrap.then_some(effective_wrap_layout.clone()),
+        );
+        cached_layout.set_position_map(crate::input_state::EditorPositionMap::new(
+            bounds.origin,
+            bounds.size,
+            gutter_width,
+            line_height,
+            char_width,
+            scroll_offset,
+            horizontal_scroll_offset,
+            visible_range.clone(),
+            document_snapshot.display_snapshot.clone(),
+            soft_wrap.then_some(effective_wrap_layout.clone()),
+            cached_viewport_layout.shaped_lines.clone(),
+            cached_viewport_layout.wrapped_shaped_lines.clone(),
+        ));
         self.editor.update(cx, |editor, _cx| {
-            editor.update_cached_layout(crate::CachedEditorLayout {
-                gutter_width: f32::from(gutter_width),
-                char_width,
-                bounds_origin: bounds.origin,
-                bounds_size: bounds.size,
-                line_height,
-                wrap_layout: soft_wrap.then_some(effective_wrap_layout.clone()),
-            });
+            editor.update_cached_layout(cached_layout);
             editor.refresh_display_layout_settings();
         });
 
@@ -1514,10 +1563,9 @@ impl Element for EditorElement {
         let folded_lines_snap = fold_snapshot.folded_lines().clone();
 
         let chevron_size = line_height * 0.48;
-        // Center the chevron within the dedicated FOLD_CHEVRON_ZONE that sits between
-        // the line-number text and the separator — no overlap with digits possible.
-        let chevron_zone_origin =
-            bounds.origin.x + gutter_width - GUTTER_SEPARATOR_WIDTH - FOLD_CHEVRON_ZONE;
+        // Center the chevron in the left gutter affordance area. Keeping this
+        // before the line-number text leaves digits anchored near the code.
+        let chevron_zone_origin = bounds.origin.x + GUTTER_PADDING;
         let chevron_x = chevron_zone_origin + (FOLD_CHEVRON_ZONE - chevron_size) / 2.0;
 
         let mut fold_chevrons: Vec<FoldChevronData> = Vec::new();
@@ -2126,14 +2174,14 @@ impl Element for EditorElement {
         };
 
         // ── Scrollbar (feat-039) ──────────────────────────────────────────────
-        // Paint a minimal 6-px scrollbar on the right edge only when the content
+        // Paint a minimal scrollbar on the right edge only when the content
         // is taller than the viewport.
-        const SCROLLBAR_WIDTH: f32 = 6.0;
+        let scrollbar_width = Self::scrollbar_width(appearance);
         let scrollbar = if display_line_count > visible_range.len() {
-            let track_x = bounds.origin.x + bounds.size.width - px(SCROLLBAR_WIDTH);
+            let track_x = bounds.origin.x + bounds.size.width - scrollbar_width;
             let track = Bounds::new(
                 point(track_x, bounds.origin.y),
-                size(px(SCROLLBAR_WIDTH), bounds.size.height),
+                size(scrollbar_width, bounds.size.height),
             );
 
             // Thumb height proportional to the visible fraction
@@ -2147,7 +2195,7 @@ impl Element for EditorElement {
 
             let thumb = Bounds::new(
                 point(track_x, bounds.origin.y + thumb_y),
-                size(px(SCROLLBAR_WIDTH), thumb_height),
+                size(scrollbar_width, thumb_height),
             );
             Some(ScrollbarData { track, thumb })
         } else {
@@ -2304,11 +2352,11 @@ impl Element for EditorElement {
 
         // ── Context menu (feat-045) ────────────────────────────────────────────
         let context_menu = context_menu_snapshot.map(|(items, origin_x, origin_y, highlighted)| {
-            let item_height = line_height * 1.2;
+            let item_height = line_height.clamp(px(18.0), px(24.0)) * 1.35;
             let total_height: Pixels = items.iter().fold(px(8.0), |height, (_, is_sep, _)| {
                 height + if *is_sep { px(8.0) } else { item_height }
             });
-            let menu_width = px(180.0);
+            let menu_width = px(260.0);
             let margin = px(8.0);
             let max_x = (bounds.size.width - menu_width - margin).max(px(0.0));
             let max_y = (bounds.size.height - total_height - margin).max(px(0.0));
@@ -2330,11 +2378,9 @@ impl Element for EditorElement {
         // Push scrollbar geometry into the editor so that mouse handlers can
         // hit-test and drive scrollbar interaction without element-layer access.
         {
-            let cached = scrollbar.as_ref().map(|s| CachedScrollbarBounds {
-                track: s.track,
-                thumb: s.thumb,
-                display_line_count,
-            });
+            let cached = scrollbar
+                .as_ref()
+                .map(|s| CachedScrollbarBounds::new(s.track, s.thumb, display_line_count));
             self.editor.update(cx, |editor, _cx| {
                 editor.update_cached_scrollbar(cached);
             });
@@ -2381,6 +2427,7 @@ impl Element for EditorElement {
             inline_code_actions,
             block_widgets,
             fold_chevrons,
+            appearance,
         }
     }
 
@@ -2415,7 +2462,11 @@ impl Element for EditorElement {
         let active_line_background = Self::active_line_background_color(
             cx.theme().highlight_theme.as_ref(),
             &cx.theme().colors,
-        );
+        )
+        .opacity(match prepaint.appearance {
+            EditorAppearance::Default => 1.0,
+            EditorAppearance::QueryConsole => 0.72,
+        });
 
         // Paint background for the full editor area
         window.paint_quad(fill(prepaint.bounds, editor_background));
@@ -2429,17 +2480,22 @@ impl Element for EditorElement {
                 prepaint.bounds.size.height,
             ),
         );
-        // Gutter background – same as the editor background
-        window.paint_quad(fill(gutter_bounds, editor_background));
+        // Gutter background must be opaque so line numbers never bleed through
+        // translucent panels behind the editor.
+        let gutter_background = Self::opaque_color(editor_background);
+        window.paint_quad(fill(gutter_bounds, gutter_background));
 
-        // Paint line numbers right-aligned inside the gutter padding, excluding the chevron zone
+        // Paint line numbers right-aligned next to the separator. The fold
+        // chevron zone is on the left, so digits do not drift toward the edge.
         let fold_chevron_zone = if prepaint.show_folding {
-            FOLD_CHEVRON_ZONE
+            Self::fold_chevron_zone(prepaint.appearance)
         } else {
             px(0.0)
         };
+        let gutter_padding = Self::gutter_padding(prepaint.appearance);
+        let gutter_text_origin_x = prepaint.bounds.origin.x + gutter_padding + fold_chevron_zone;
         let gutter_text_area_width =
-            (gutter_width - GUTTER_SEPARATOR_WIDTH - fold_chevron_zone - GUTTER_PADDING * 2.0)
+            (gutter_width - GUTTER_SEPARATOR_WIDTH - fold_chevron_zone - gutter_padding * 2.0)
                 .max(px(0.0));
         for (slot_idx, gutter_line) in prepaint.gutter_lines.iter().enumerate() {
             let line_y = prepaint.bounds.origin.y
@@ -2473,8 +2529,7 @@ impl Element for EditorElement {
             }
 
             // Right-align: start so that the text ends at GUTTER_PADDING from separator
-            let text_x = prepaint.bounds.origin.x
-                + GUTTER_PADDING
+            let text_x = gutter_text_origin_x
                 + (gutter_text_area_width - gutter_line.shaped.width).max(px(0.0));
 
             _ = gutter_line.shaped.paint(
@@ -2507,7 +2562,14 @@ impl Element for EditorElement {
             size(GUTTER_SEPARATOR_WIDTH, prepaint.bounds.size.height),
         );
         if prepaint.gutter_width > px(0.0) {
-            window.paint_quad(fill(separator_bounds, cx.theme().colors.border));
+            let separator_opacity = match prepaint.appearance {
+                EditorAppearance::Default => 1.0,
+                EditorAppearance::QueryConsole => 0.45,
+            };
+            window.paint_quad(fill(
+                separator_bounds,
+                cx.theme().colors.border.opacity(separator_opacity),
+            ));
         }
 
         if let Some(sticky_header) = &prepaint.sticky_header {
@@ -2688,42 +2750,54 @@ impl Element for EditorElement {
         let text_origin_x =
             prepaint.bounds.origin.x + gutter_width - prepaint.horizontal_scroll_pixels;
         let origin_y = prepaint.bounds.origin.y;
+        let text_mask = Bounds::new(
+            point(
+                prepaint.bounds.origin.x + gutter_width,
+                prepaint.bounds.origin.y,
+            ),
+            size(
+                (prepaint.bounds.size.width - gutter_width).max(px(0.0)),
+                prepaint.bounds.size.height,
+            ),
+        );
 
-        if let Some(ref wrapped_lines) = prepaint.wrapped_shaped_lines {
-            for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
-                let y = prepaint
-                    .line_y_offsets
-                    .get(i)
-                    .copied()
-                    .unwrap_or(gpui::px(0.0));
-                let line_origin = point(text_origin_x, origin_y + y);
-                _ = wrapped_line.paint(
-                    line_origin,
-                    prepaint.line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
+        window.with_content_mask(Some(ContentMask { bounds: text_mask }), |window| {
+            if let Some(ref wrapped_lines) = prepaint.wrapped_shaped_lines {
+                for (i, wrapped_line) in wrapped_lines.iter().enumerate() {
+                    let y = prepaint
+                        .line_y_offsets
+                        .get(i)
+                        .copied()
+                        .unwrap_or(gpui::px(0.0));
+                    let line_origin = point(text_origin_x, origin_y + y);
+                    _ = wrapped_line.paint(
+                        line_origin,
+                        prepaint.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            } else {
+                for (index, shaped_line) in prepaint.shaped_lines.iter().enumerate() {
+                    let offset_y = prepaint
+                        .line_y_offsets
+                        .get(index)
+                        .copied()
+                        .unwrap_or(prepaint.line_height * (index as f32));
+                    let line_origin = point(text_origin_x, origin_y + offset_y);
+                    _ = shaped_line.paint(
+                        line_origin,
+                        prepaint.line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
             }
-        } else {
-            for (index, shaped_line) in prepaint.shaped_lines.iter().enumerate() {
-                let offset_y = prepaint
-                    .line_y_offsets
-                    .get(index)
-                    .copied()
-                    .unwrap_or(prepaint.line_height * (index as f32));
-                let line_origin = point(text_origin_x, origin_y + offset_y);
-                _ = shaped_line.paint(
-                    line_origin,
-                    prepaint.line_height,
-                    TextAlign::Left,
-                    None,
-                    window,
-                    cx,
-                );
-            }
-        }
+        });
 
         // Paint cursor if focused (already offset for gutter in prepaint)
         let cursor_is_solid =
@@ -3194,11 +3268,13 @@ impl EditorElement {
         // Push the menu's layout snapshot to the editor so `handle_mouse_down`
         // can hit-test clicks in window space without accessing element data.
         self.editor.update(cx, |editor, _cx| {
-            editor.update_cached_completion_menu_bounds(Some(crate::CachedCompletionMenuBounds {
-                bounds: menu_bounds,
-                item_height,
-                item_count,
-            }));
+            editor.update_cached_completion_menu_bounds(Some(
+                crate::overlay_state::CachedCompletionMenuBounds::new(
+                    menu_bounds,
+                    item_height,
+                    item_count,
+                ),
+            ));
         });
     }
 
@@ -3537,7 +3613,7 @@ impl EditorElement {
         let row_y = panel_y + padding;
         let (display, text_color): (String, Hsla) = if panel.query.is_empty() {
             (
-                format!("Go to line (1–{})…", panel.total_lines),
+                format!("Line[:column] (1-{})", panel.total_lines),
                 cx.theme().colors.muted_foreground,
             )
         } else {
@@ -3577,9 +3653,9 @@ impl EditorElement {
     /// Each enabled item is painted as a clickable row; disabled items are
     /// dimmed; separator items are thin horizontal rules.
     fn paint_context_menu(&self, menu: &ContextMenuRenderData, window: &mut Window, cx: &mut App) {
-        let item_height = menu.line_height * 1.2;
+        let item_height = menu.line_height.clamp(px(18.0), px(24.0)) * 1.35;
         let padding_x = px(12.0);
-        let font_size = menu.line_height * 0.82;
+        let font_size = menu.line_height.clamp(px(18.0), px(24.0)) * 0.82;
         let corner_radius = px(6.0);
         let menu_bounds = menu.bounds;
         let menu_width = menu_bounds.size.width;

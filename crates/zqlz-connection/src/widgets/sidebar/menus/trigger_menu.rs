@@ -17,6 +17,7 @@ use zqlz_ui::widgets::menu::{PopupMenu, PopupMenuItem};
 
 use crate::widgets::sidebar::{ConnectionSidebar, ConnectionSidebarEvent};
 
+use super::driver_object_menu::DriverObjectMenuContext;
 use super::state::ContextMenuState;
 
 impl ConnectionSidebar {
@@ -56,12 +57,29 @@ impl ConnectionSidebar {
         let sidebar_weak = cx.entity().downgrade();
         let trigger_for_menu = trigger_name.clone();
         let action_context = self.focus_handle.clone();
+        let driver_actions = self.driver_row_actions(conn_id, "trigger");
+        let driver_context = DriverObjectMenuContext {
+            connection_id: conn_id,
+            object_name: trigger_name.clone(),
+            object_schema: object_schema.clone(),
+            object_type: "trigger".to_string(),
+            database_name: None,
+        };
 
         if let Some(menu_state) = &self.trigger_context_menu {
             menu_state.update(cx, |state, cx| {
                 state.menu_subscription.take();
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
+                    if let Some(actions) = driver_actions.clone() {
+                        return Self::apply_driver_object_actions_to_menu(
+                            menu.action_context(action_context.clone()).max_h(px(400.0)),
+                            actions,
+                            driver_context.clone(),
+                            sidebar_weak.clone(),
+                        );
+                    }
+
                     let menu = menu
                         .action_context(action_context.clone())
                         .max_h(px(400.0))

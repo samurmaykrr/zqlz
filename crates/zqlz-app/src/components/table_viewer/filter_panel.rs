@@ -21,6 +21,7 @@ use crate::icons::ZqlzIcon;
 use super::filter_types::{
     ColumnSelectItem, FilterCondition, FilterOperator, SortCriterion, SortDirection,
 };
+use crate::workspace_state::{WorkspaceSessionFilterCondition, WorkspaceSessionSortCriterion};
 
 const CUSTOM_FILTER_TOOLTIP: &str = "Custom mode expects a SQL predicate fragment (omit WHERE). Examples: \"book_chapter_id = 'category-1'\", \"chapter_title LIKE '%startup%'\", \"deleted_at IS NULL\".";
 
@@ -560,6 +561,58 @@ impl FilterPanelState {
         self.sorts.clone()
     }
 
+    pub fn restore_criteria(
+        &mut self,
+        filters: &[WorkspaceSessionFilterCondition],
+        sorts: &[WorkspaceSessionSortCriterion],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.filters.clear();
+        self.sorts = sorts
+            .iter()
+            .map(|sort| SortCriterion {
+                id: sort.id,
+                column: sort.column.clone(),
+                direction: parse_sort_direction(&sort.direction),
+            })
+            .collect();
+        self.next_sort_id = self
+            .sorts
+            .iter()
+            .map(|sort| sort.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+
+        for filter in filters {
+            self.add_filter(window, cx);
+            if let Some(row) = self.filters.last_mut() {
+                row.condition = FilterCondition {
+                    id: filter.id,
+                    enabled: filter.enabled,
+                    column: filter.column.clone(),
+                    operator: parse_filter_operator(&filter.operator),
+                    value: filter.value.clone(),
+                    value2: filter.value2.clone(),
+                    custom_sql: filter.custom_sql.clone(),
+                    logical_operator: parse_logical_operator(&filter.logical_operator),
+                };
+            }
+        }
+        self.next_filter_id = self
+            .filters
+            .iter()
+            .map(|filter| filter.condition.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1)
+            .max(1);
+        self.is_dirty = false;
+        cx.notify();
+    }
+
     /// Check if there are any active filters or sorts
     pub fn has_criteria(&self) -> bool {
         !self.filters.is_empty() || !self.sorts.is_empty()
@@ -606,6 +659,46 @@ impl FilterPanelState {
         // Copy to clipboard
         cx.write_to_clipboard(gpui::ClipboardItem::new_string(where_clause.clone()));
         tracing::info!("Filter SQL copied to clipboard: {}", where_clause);
+    }
+}
+
+fn parse_filter_operator(value: &str) -> FilterOperator {
+    match value {
+        "NotEqual" => FilterOperator::NotEqual,
+        "LessThan" => FilterOperator::LessThan,
+        "LessThanOrEqual" => FilterOperator::LessThanOrEqual,
+        "GreaterThan" => FilterOperator::GreaterThan,
+        "GreaterThanOrEqual" => FilterOperator::GreaterThanOrEqual,
+        "Contains" => FilterOperator::Contains,
+        "DoesNotContain" => FilterOperator::DoesNotContain,
+        "BeginsWith" => FilterOperator::BeginsWith,
+        "DoesNotBeginWith" => FilterOperator::DoesNotBeginWith,
+        "EndsWith" => FilterOperator::EndsWith,
+        "DoesNotEndWith" => FilterOperator::DoesNotEndWith,
+        "IsNull" => FilterOperator::IsNull,
+        "IsNotNull" => FilterOperator::IsNotNull,
+        "IsEmpty" => FilterOperator::IsEmpty,
+        "IsNotEmpty" => FilterOperator::IsNotEmpty,
+        "IsBetween" => FilterOperator::IsBetween,
+        "IsNotBetween" => FilterOperator::IsNotBetween,
+        "IsInList" => FilterOperator::IsInList,
+        "IsNotInList" => FilterOperator::IsNotInList,
+        "Custom" => FilterOperator::Custom,
+        _ => FilterOperator::Equal,
+    }
+}
+
+fn parse_logical_operator(value: &str) -> super::filter_types::LogicalOperator {
+    match value {
+        "Or" => super::filter_types::LogicalOperator::Or,
+        _ => super::filter_types::LogicalOperator::And,
+    }
+}
+
+fn parse_sort_direction(value: &str) -> SortDirection {
+    match value {
+        "Descending" => SortDirection::Descending,
+        _ => SortDirection::Ascending,
     }
 }
 

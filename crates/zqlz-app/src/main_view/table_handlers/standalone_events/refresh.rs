@@ -4,13 +4,14 @@ use gpui::*;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::DriverCategory;
-use zqlz_services::{BrowseTableWithFiltersRequest, TableService};
+use zqlz_services::{
+    BrowseTableWithFiltersRequest, KeyValueService, LoadKeyValueDatabaseRowsRequest, TableService,
+};
 
 use crate::app::AppState;
 use crate::components::TableViewerEvent;
 use crate::components::TableViewerPanel;
 use crate::main_view::table_handlers_utils::conversion::resolve_schema_qualifier;
-use crate::main_view::table_handlers_utils::formatting::{format_bytes, format_ttl_seconds};
 use crate::main_view::table_handlers_utils::sql::{
     build_search_clause_for_columns, resolve_search_columns,
 };
@@ -43,6 +44,15 @@ struct RefreshKeyValueRequest {
     viewer: RefreshViewerRequest,
     table: RefreshTableRequest,
     connection: Arc<dyn zqlz_core::Connection>,
+    key_value_service: Arc<KeyValueService>,
+}
+
+fn parse_redis_database_index(database_name: Option<&str>, table_name: &str) -> u16 {
+    let source = database_name.unwrap_or(table_name);
+    source
+        .strip_prefix("db")
+        .and_then(|suffix| suffix.parse::<u16>().ok())
+        .unwrap_or(0)
 }
 
 pub(in crate::main_view) fn handle_refresh_table_event(
@@ -65,10 +75,13 @@ pub(in crate::main_view) fn handle_refresh_table_event(
         return;
     };
 
-    let Some(connection) = app_state.connections.get_for_database_cached(
-        connection_id,
-        viewer_entity.read(cx).database_name().as_deref(),
-    ) else {
+    let Some(connection) = app_state
+        .connection_service
+        .get_connection_for_database_cached(
+            connection_id,
+            viewer_entity.read(cx).database_name().as_deref(),
+        )
+    else {
         tracing::error!("Connection not found: {}", connection_id);
         return;
     };
@@ -76,12 +89,12 @@ pub(in crate::main_view) fn handle_refresh_table_event(
     let table_name = table_name.to_string();
     let connection = connection.clone();
     let connection_name = app_state
-        .connection_manager()
-        .get_saved(connection_id)
-        .map(|s| s.name.clone())
+        .connection_service
+        .get_saved_connection_name(connection_id)
         .unwrap_or_else(|| "Unknown".to_string());
 
     let table_service = app_state.table_service.clone();
+    let key_value_service = app_state.key_value_service.clone();
 
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
@@ -106,6 +119,7 @@ pub(in crate::main_view) fn handle_refresh_table_event(
                     viewer: viewer_request,
                     table: table_request,
                     connection,
+                    key_value_service,
                 },
                 viewer_entity,
                 window,
@@ -315,11 +329,12 @@ fn handle_refresh_sql_table(
                             })
                             .await;
                         match count_result {
-                            Ok((total, is_estimated)) => {
+                            Ok(Some((total, is_estimated))) => {
                                 if let Err(error) = viewer_entity.update(cx, |_viewer, cx| {
                                     cx.emit(TableViewerEvent::CountCompleted {
                                         connection_id,
                                         table_name: table_name.clone(),
+                                        database_name: database_name.clone(),
                                         request_generation,
                                         total_rows: total,
                                         is_estimated,
@@ -333,6 +348,7 @@ fn handle_refresh_sql_table(
                                     );
                                 }
                             }
+                            Ok(None) => {}
                             Err(e) => {
                                 tracing::warn!(
                                     "Background row count failed for {}: {}",
@@ -376,6 +392,7 @@ fn handle_refresh_keyvalue_table(
         viewer,
         table,
         connection,
+        key_value_service,
     } = request;
     let RefreshViewerRequest {
         connection_id,
@@ -383,177 +400,72 @@ fn handle_refresh_keyvalue_table(
         driver_category,
         request_generation,
     } = viewer;
-    let RefreshTableRequest { table_name, .. } = table;
+    let RefreshTableRequest {
+        table_name,
+        database_name,
+        ..
+    } = table;
+    let database_index = parse_redis_database_index(database_name.as_deref(), &table_name);
+    let is_database_view = database_name.as_deref() == Some(table_name.as_str());
 
     window
         .spawn(cx, async move |cx| {
             let refresh_table_name = table_name.clone();
-            let table_infos =
-                if let Some(schema_introspection) = connection.as_schema_introspection() {
-                    match schema_introspection.list_tables(None).await {
-                        Ok(tables) => tables,
-                        Err(e) => {
-                            tracing::error!("Failed to list keys: {}", e);
-                            if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
-                                if viewer.is_current_request(request_generation) {
-                                    viewer.set_loading(false, cx);
-                                }
-                                Ok::<(), anyhow::Error>(())
-                            }) {
-                                tracing::debug!(
-                                    "Failed to clear loading state for '{}': {}",
-                                    table_name,
-                                    error
-                                );
+            let query_result = if is_database_view {
+                match key_value_service
+                    .load_database_rows(
+                        connection,
+                        LoadKeyValueDatabaseRowsRequest { database_index },
+                    )
+                    .await
+                {
+                    Ok(outcome) => outcome.query_result,
+                    Err(error) => {
+                        tracing::error!("Failed to load key-value rows: {}", error);
+                        if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
+                            if viewer.is_current_request(request_generation) {
+                                viewer.set_loading(false, cx);
                             }
-                            return anyhow::Ok(());
+                            Ok::<(), anyhow::Error>(())
+                        }) {
+                            tracing::debug!(
+                                "Failed to clear loading state for '{}': {}",
+                                table_name,
+                                error
+                            );
                         }
+                        return anyhow::Ok(());
                     }
-                } else {
-                    tracing::error!("Connection does not support schema introspection");
-                    if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
-                        if viewer.is_current_request(request_generation) {
-                            viewer.set_loading(false, cx);
+                }
+            } else {
+                match key_value_service
+                    .browse_key(connection, &table_name, Some(1000))
+                    .await
+                {
+                    Ok(query_result) => query_result,
+                    Err(error) => {
+                        tracing::error!("Failed to load key-value entry: {}", error);
+                        if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
+                            if viewer.is_current_request(request_generation) {
+                                viewer.set_loading(false, cx);
+                            }
+                            Ok::<(), anyhow::Error>(())
+                        }) {
+                            tracing::debug!(
+                                "Failed to clear loading state for '{}': {}",
+                                table_name,
+                                error
+                            );
                         }
-                        Ok::<(), anyhow::Error>(())
-                    }) {
-                        tracing::debug!(
-                            "Failed to clear loading state for '{}': {}",
-                            table_name,
-                            error
-                        );
+                        return anyhow::Ok(());
                     }
-                    return anyhow::Ok(());
-                };
-
-            tracing::info!("Reloaded {} keys for key-value database", table_infos.len());
-
-            let columns = vec![
-                zqlz_core::ColumnMeta {
-                    name: "Key".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: false,
-                    ordinal: 0,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Key name".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Type".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: false,
-                    ordinal: 1,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Data type".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Value".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 2,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Value preview".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "Size".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 3,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Memory size".to_string()),
-                    enum_values: None,
-                },
-                zqlz_core::ColumnMeta {
-                    name: "TTL".to_string(),
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    ordinal: 4,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    auto_increment: false,
-                    default_value: None,
-                    comment: Some("Time to live".to_string()),
-                    enum_values: None,
-                },
-            ];
-
-            let column_names = vec![
-                "Key".to_string(),
-                "Type".to_string(),
-                "Value".to_string(),
-                "Size".to_string(),
-                "TTL".to_string(),
-            ];
-
-            let rows: Vec<zqlz_core::Row> = table_infos
-                .iter()
-                .map(|info| {
-                    let key_value_info = info.key_value_info.as_ref();
-
-                    let key = zqlz_core::Value::String(info.name.clone());
-
-                    let key_type = key_value_info
-                        .map(|kv| zqlz_core::Value::String(kv.key_type.clone()))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let value = key_value_info
-                        .and_then(|kv| kv.value_preview.as_ref())
-                        .map(|v| zqlz_core::Value::String(v.clone()))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let size = key_value_info
-                        .and_then(|kv| kv.size_bytes)
-                        .map(|bytes| zqlz_core::Value::String(format_bytes(bytes)))
-                        .unwrap_or(zqlz_core::Value::Null);
-
-                    let ttl = key_value_info
-                        .and_then(|kv| kv.ttl_seconds)
-                        .map(|ttl| {
-                            zqlz_core::Value::String(if ttl == -1 {
-                                "No TTL".to_string()
-                            } else if ttl == -2 {
-                                "Not Found".to_string()
-                            } else {
-                                format_ttl_seconds(ttl)
-                            })
-                        })
-                        .unwrap_or(zqlz_core::Value::String("No TTL".to_string()));
-
-                    zqlz_core::Row::new(column_names.clone(), vec![key, key_type, value, size, ttl])
-                })
-                .collect();
-
-            let total_rows = rows.len();
-
-            let query_result = zqlz_core::QueryResult {
-                id: uuid::Uuid::new_v4(),
-                columns,
-                rows,
-                total_rows: Some(total_rows as u64),
-                is_estimated_total: false,
-                affected_rows: 0,
-                execution_time_ms: 0,
-                warnings: vec![],
+                }
             };
+
+            tracing::info!(
+                "Reloaded {} keys for key-value database",
+                query_result.rows.len()
+            );
 
             if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                 if !viewer.is_current_request(request_generation) {
@@ -570,7 +482,7 @@ fn handle_refresh_keyvalue_table(
                     connection_id,
                     connection_name,
                     table_name,
-                    None,
+                    database_name,
                     true,
                     query_result,
                     driver_category,

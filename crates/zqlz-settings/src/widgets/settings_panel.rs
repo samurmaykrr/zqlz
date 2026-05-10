@@ -9,19 +9,112 @@ use crate::{
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
+    button::{Button, ButtonVariants},
     dock::{Panel, PanelEvent, TitleStyle},
     h_flex,
     input::{Input, InputEvent, InputState},
+    resizable::{h_resizable, resizable_panel},
     select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
-    slider::{Slider, SliderEvent, SliderState},
     switch::Switch,
-    v_flex, ActiveTheme, Sizable,
+    v_flex, ActiveTheme, Disableable, Icon, IconName, Sizable, StyledExt,
 };
 
 /// Events emitted by the settings panel
 #[derive(Clone, Debug)]
 pub enum SettingsPanelEvent {
     SettingsChanged,
+    BackRequested,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SettingsPageKey {
+    Appearance,
+    Fonts,
+    Editor,
+    Connections,
+}
+
+impl SettingsPageKey {
+    const ALL: [Self; 4] = [
+        Self::Appearance,
+        Self::Fonts,
+        Self::Editor,
+        Self::Connections,
+    ];
+
+    fn title(self) -> &'static str {
+        match self {
+            Self::Appearance => "Appearance",
+            Self::Fonts => "Fonts",
+            Self::Editor => "Editor",
+            Self::Connections => "Connections",
+        }
+    }
+
+    fn description(self) -> &'static str {
+        match self {
+            Self::Appearance => "Theme and surface behavior",
+            Self::Fonts => "UI and editor typography",
+            Self::Editor => "Editing, search, LSP, and AI",
+            Self::Connections => "Database connection behavior",
+        }
+    }
+
+    fn icon(self) -> IconName {
+        match self {
+            Self::Appearance => IconName::Palette,
+            Self::Fonts => IconName::ALargeSmall,
+            Self::Editor => IconName::Settings2,
+            Self::Connections => IconName::Cpu,
+        }
+    }
+}
+
+struct StepperOptions {
+    id: &'static str,
+    label: &'static str,
+    description: Option<&'static str>,
+    value: f32,
+    display_value: SharedString,
+    min: f32,
+    max: f32,
+    step: f32,
+}
+
+impl StepperOptions {
+    fn new(
+        id: &'static str,
+        label: &'static str,
+        value: f32,
+        display_value: impl Into<SharedString>,
+    ) -> Self {
+        Self {
+            id,
+            label,
+            description: None,
+            value,
+            display_value: display_value.into(),
+            min: 0.0,
+            max: 100.0,
+            step: 1.0,
+        }
+    }
+
+    fn description(mut self, description: &'static str) -> Self {
+        self.description = Some(description);
+        self
+    }
+
+    fn range(mut self, min: f32, max: f32) -> Self {
+        self.min = min;
+        self.max = max;
+        self
+    }
+
+    fn step(mut self, step: f32) -> Self {
+        self.step = step;
+        self
+    }
 }
 
 /// A custom select item for theme mode selection
@@ -271,6 +364,7 @@ impl SearchWrap {
 /// Settings panel for editing application settings
 pub struct SettingsPanel {
     focus_handle: FocusHandle,
+    selected_page: SettingsPageKey,
 
     // Appearance settings
     theme_mode_state: Entity<SelectState<SearchableVec<ThemeModeItem>>>,
@@ -279,15 +373,8 @@ pub struct SettingsPanel {
     scrollbar_state: Entity<SelectState<SearchableVec<ScrollbarItem>>>,
 
     // Font settings
-    ui_font_size_state: Entity<SliderState>,
-    ui_font_weight_state: Entity<SliderState>,
-    editor_font_size_state: Entity<SliderState>,
-    editor_font_weight_state: Entity<SliderState>,
     ui_font_state: Entity<SelectState<SearchableVec<FontItem>>>,
     editor_font_state: Entity<SelectState<SearchableVec<FontItem>>>,
-
-    // Editor settings - tab size slider
-    tab_size_state: Entity<SliderState>,
 
     // Cursor and selection settings
     cursor_blink_state: Entity<SelectState<SearchableVec<CursorBlinkItem>>>,
@@ -295,9 +382,6 @@ pub struct SettingsPanel {
 
     // Scroll behavior settings
     scroll_beyond_last_line_state: Entity<SelectState<SearchableVec<ScrollBeyondLastLineItem>>>,
-    vertical_scroll_margin_state: Entity<SliderState>,
-    horizontal_scroll_margin_state: Entity<SliderState>,
-    scroll_sensitivity_state: Entity<SliderState>,
 
     // Search behavior settings
     search_wrap_state: Entity<SelectState<SearchableVec<SearchWrapItem>>>,
@@ -305,7 +389,6 @@ pub struct SettingsPanel {
     // Inline suggestion settings
     inline_suggestions_provider_state:
         Entity<SelectState<SearchableVec<InlineSuggestionProviderItem>>>,
-    inline_suggestions_delay_state: Entity<SliderState>,
 
     // AI settings
     _ai_provider_state: Entity<SelectState<SearchableVec<AiProviderItem>>>,
@@ -332,15 +415,9 @@ impl SettingsPanel {
             light_theme,
             dark_theme,
             scrollbar_vis,
-            ui_font_size,
-            ui_font_weight,
-            editor_font_size,
-            editor_font_weight,
-            tab_size,
             ui_font_family,
             editor_font_family,
             inline_suggestions_provider,
-            inline_suggestions_delay_ms,
             ai_provider,
             _ai_api_key,
             // Cursor and selection settings
@@ -351,9 +428,6 @@ impl SettingsPanel {
             _relative_line_numbers,
             // Scroll behavior settings
             scroll_beyond_last_line,
-            vertical_scroll_margin,
-            horizontal_scroll_margin,
-            scroll_sensitivity,
             _autoscroll_on_clicks,
             // Search behavior settings
             search_wrap,
@@ -365,15 +439,9 @@ impl SettingsPanel {
                 settings.appearance.light_theme.clone(),
                 settings.appearance.dark_theme.clone(),
                 settings.appearance.show_scrollbars,
-                settings.fonts.ui_font_size,
-                settings.fonts.ui_font_weight,
-                settings.fonts.editor_font_size,
-                settings.fonts.editor_font_weight,
-                settings.editor.tab_size,
                 settings.fonts.ui_font_family.clone(),
                 settings.fonts.editor_font_family.clone(),
                 settings.editor.inline_suggestions_provider,
-                settings.editor.inline_suggestions_delay_ms,
                 settings.editor.ai_provider,
                 settings.editor.ai_api_key.clone(),
                 // Cursor and selection settings
@@ -384,9 +452,6 @@ impl SettingsPanel {
                 settings.editor.relative_line_numbers,
                 // Scroll behavior settings
                 settings.editor.scroll_beyond_last_line,
-                settings.editor.vertical_scroll_margin,
-                settings.editor.horizontal_scroll_margin,
-                settings.editor.scroll_sensitivity,
                 settings.editor.autoscroll_on_clicks,
                 // Search behavior settings
                 settings.editor.search_wrap,
@@ -495,48 +560,6 @@ impl SettingsPanel {
             .searchable(true)
         });
 
-        // Create slider states for font sizes
-        let ui_font_size_state = cx.new(|_| {
-            SliderState::new()
-                .min(10.0)
-                .max(24.0)
-                .step(1.0)
-                .default_value(ui_font_size)
-        });
-
-        let ui_font_weight_state = cx.new(|_| {
-            SliderState::new()
-                .min(100.0)
-                .max(900.0)
-                .step(100.0)
-                .default_value(ui_font_weight as f32)
-        });
-
-        let editor_font_size_state = cx.new(|_| {
-            SliderState::new()
-                .min(10.0)
-                .max(32.0)
-                .step(1.0)
-                .default_value(editor_font_size)
-        });
-
-        let editor_font_weight_state = cx.new(|_| {
-            SliderState::new()
-                .min(100.0)
-                .max(900.0)
-                .step(100.0)
-                .default_value(editor_font_weight as f32)
-        });
-
-        // Create tab size slider
-        let tab_size_state = cx.new(|_| {
-            SliderState::new()
-                .min(1.0)
-                .max(8.0)
-                .step(1.0)
-                .default_value(tab_size as f32)
-        });
-
         // Create cursor blink select
         let cursor_blink_items: Vec<CursorBlinkItem> = CursorBlink::all()
             .iter()
@@ -597,31 +620,6 @@ impl SettingsPanel {
             )
         });
 
-        // Create scroll margin sliders
-        let vertical_scroll_margin_state = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(20.0)
-                .step(1.0)
-                .default_value(vertical_scroll_margin as f32)
-        });
-
-        let horizontal_scroll_margin_state = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(20.0)
-                .step(1.0)
-                .default_value(horizontal_scroll_margin as f32)
-        });
-
-        let scroll_sensitivity_state = cx.new(|_| {
-            SliderState::new()
-                .min(0.1)
-                .max(5.0)
-                .step(0.1)
-                .default_value(scroll_sensitivity)
-        });
-
         // Create search wrap select
         let search_wrap_items: Vec<SearchWrapItem> = SearchWrap::all()
             .iter()
@@ -660,15 +658,6 @@ impl SettingsPanel {
                 window,
                 cx,
             )
-        });
-
-        // Create inline suggestions delay slider (0-1000ms)
-        let inline_suggestions_delay_state = cx.new(|_| {
-            SliderState::new()
-                .min(0.0)
-                .max(1000.0)
-                .step(50.0)
-                .default_value(inline_suggestions_delay_ms as f32)
         });
 
         // Create AI provider select
@@ -791,67 +780,6 @@ impl SettingsPanel {
         ));
 
         subscriptions.push(cx.subscribe(
-            &ui_font_size_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let fonts = Self::mutate_settings(cx, |settings| {
-                    settings.fonts.ui_font_size = value.end();
-                    settings.fonts.clone()
-                });
-                fonts.apply(cx);
-                this.mark_settings_changed(cx);
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &ui_font_weight_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let fonts = Self::mutate_settings(cx, |settings| {
-                    settings.fonts.ui_font_weight = value.end() as u16;
-                    settings.fonts.clone()
-                });
-                fonts.apply(cx);
-                this.mark_settings_changed(cx);
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &editor_font_size_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let fonts = Self::mutate_settings(cx, |settings| {
-                    settings.fonts.editor_font_size = value.end();
-                    settings.fonts.clone()
-                });
-                fonts.apply(cx);
-                this.mark_settings_changed(cx);
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &editor_font_weight_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                let fonts = Self::mutate_settings(cx, |settings| {
-                    settings.fonts.editor_font_weight = value.end() as u16;
-                    settings.fonts.clone()
-                });
-                fonts.apply(cx);
-                this.mark_settings_changed(cx);
-            },
-        ));
-
-        subscriptions.push(
-            cx.subscribe(&tab_size_state, |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                this.mutate_settings_and_emit(cx, |settings| {
-                    settings.editor.tab_size = value.end() as u32;
-                });
-            }),
-        );
-
-        subscriptions.push(cx.subscribe(
             &ui_font_state,
             |this, _, event: &SelectEvent<SearchableVec<FontItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
@@ -887,16 +815,6 @@ impl SettingsPanel {
                         settings.editor.inline_suggestions_provider = *value;
                     });
                 }
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &inline_suggestions_delay_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                this.mutate_settings_and_emit(cx, |settings| {
-                    settings.editor.inline_suggestions_delay_ms = value.end() as u32;
-                });
             },
         ));
 
@@ -964,36 +882,6 @@ impl SettingsPanel {
         ));
 
         subscriptions.push(cx.subscribe(
-            &vertical_scroll_margin_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                this.mutate_settings_and_emit(cx, |settings| {
-                    settings.editor.vertical_scroll_margin = value.end() as u32;
-                });
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &horizontal_scroll_margin_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                this.mutate_settings_and_emit(cx, |settings| {
-                    settings.editor.horizontal_scroll_margin = value.end() as u32;
-                });
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
-            &scroll_sensitivity_state,
-            |this, _, event: &SliderEvent, cx| {
-                let SliderEvent::Change(value) = event;
-                this.mutate_settings_and_emit(cx, |settings| {
-                    settings.editor.scroll_sensitivity = value.end();
-                });
-            },
-        ));
-
-        subscriptions.push(cx.subscribe(
             &search_wrap_state,
             |this, _, event: &SelectEvent<SearchableVec<SearchWrapItem>>, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
@@ -1006,29 +894,21 @@ impl SettingsPanel {
 
         Self {
             focus_handle: cx.focus_handle(),
+            selected_page: SettingsPageKey::Appearance,
             theme_mode_state,
             light_theme_state,
             dark_theme_state,
             scrollbar_state,
-            ui_font_size_state,
-            ui_font_weight_state,
-            editor_font_size_state,
-            editor_font_weight_state,
             ui_font_state,
             editor_font_state,
-            tab_size_state,
             // Cursor and selection settings
             cursor_blink_state,
             cursor_shape_state,
             // Scroll behavior settings
             scroll_beyond_last_line_state,
-            vertical_scroll_margin_state,
-            horizontal_scroll_margin_state,
-            scroll_sensitivity_state,
             // Search behavior settings
             search_wrap_state,
             inline_suggestions_provider_state,
-            inline_suggestions_delay_state,
             _ai_provider_state: ai_provider_state,
             ai_api_key_state,
             _subscriptions: subscriptions,
@@ -1058,30 +938,22 @@ impl SettingsPanel {
         self.mark_settings_changed(cx);
     }
 
-    fn render_section_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
-        let theme = cx.theme();
-        h_flex()
-            .w_full()
-            .py_2()
-            .px_3()
-            .border_b_1()
-            .border_color(theme.border)
-            .bg(theme.title_bar)
-            .child(
-                div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(theme.foreground)
-                    .child(title.to_string()),
-            )
+    fn render_group(
+        &self,
+        _title: &str,
+        _description: Option<&str>,
+        content: impl IntoElement,
+        _cx: &Context<Self>,
+    ) -> impl IntoElement {
+        v_flex().w_full().gap_4().child(content)
     }
 
     fn render_subsection_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
-        h_flex().w_full().py_1().px_3().child(
+        h_flex().w_full().pt_2().pb_1().child(
             div()
                 .text_xs()
-                .font_weight(FontWeight::MEDIUM)
+                .font_medium()
                 .text_color(theme.muted_foreground)
                 .child(title.to_string()),
         )
@@ -1097,31 +969,31 @@ impl SettingsPanel {
         let theme = cx.theme();
         h_flex()
             .w_full()
-            .min_h(px(44.0))
-            .px_3()
+            .min_h(px(40.0))
             .gap_4()
-            .items_center()
+            .items_start()
             .justify_between()
             .child(
                 v_flex()
                     .flex_1()
+                    .max_w(relative(0.6))
                     .gap_0p5()
                     .child(
                         div()
                             .text_sm()
-                            .text_color(theme.foreground)
+                            .text_color(theme.group_box_foreground)
                             .child(label.to_string()),
                     )
                     .when_some(description, |this, desc| {
                         this.child(
                             div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(theme.muted_foreground)
                                 .child(desc.to_string()),
                         )
                     }),
             )
-            .child(div().w(px(200.0)).flex_shrink_0().child(control))
+            .child(div().w(px(220.0)).flex_shrink_0().child(control))
     }
 
     fn render_toggle_row(
@@ -1142,10 +1014,9 @@ impl SettingsPanel {
         let panel_row = panel.clone();
         h_flex()
             .w_full()
-            .min_h(px(44.0))
-            .px_3()
+            .min_h(px(40.0))
             .gap_4()
-            .items_center()
+            .items_start()
             .justify_between()
             // Make the entire row clickable so there are no dead zones between
             // the label text and the switch control.
@@ -1161,26 +1032,26 @@ impl SettingsPanel {
             .child(
                 v_flex()
                     .flex_1()
+                    .max_w(relative(0.6))
                     .gap_0p5()
                     .child(
                         div()
                             .text_sm()
-                            .text_color(theme.foreground)
+                            .text_color(theme.group_box_foreground)
                             .child(label.to_string()),
                     )
                     .when_some(description, |this, desc| {
                         this.child(
                             div()
-                                .text_xs()
+                                .text_sm()
                                 .text_color(theme.muted_foreground)
                                 .child(desc.to_string()),
                         )
                     }),
             )
-            .child(
-                Switch::new(id)
-                    .checked(checked)
-                    .on_click(move |new_checked, window, cx| {
+            .child(h_flex().w(px(220.0)).flex_shrink_0().justify_end().child(
+                Switch::new(id).small().checked(checked).on_click(
+                    move |new_checked, window, cx| {
                         on_change(*new_checked, window, cx);
                         if let Err(error) = panel.update(cx, |this, cx| {
                             this.mark_settings_changed(cx);
@@ -1190,38 +1061,150 @@ impl SettingsPanel {
                                 "Failed to emit settings change from toggle switch click"
                             );
                         }
+                    },
+                ),
+            ))
+    }
+
+    fn render_stepper_row(
+        &self,
+        options: StepperOptions,
+        on_change: impl Fn(f32, &mut App) + 'static,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        self.render_setting_row(
+            options.label,
+            options.description,
+            self.render_stepper_control(options, on_change, cx),
+            cx,
+        )
+    }
+
+    fn render_stepper_control(
+        &self,
+        options: StepperOptions,
+        on_change: impl Fn(f32, &mut App) + 'static,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
+        let on_change = std::rc::Rc::new(on_change);
+        let decrement = on_change.clone();
+        let increment = on_change;
+        let panel = cx.entity().downgrade();
+        let panel_for_increment = panel.clone();
+        let min = options.min;
+        let max = options.max;
+        let step = options.step;
+        let value = options.value;
+
+        h_flex()
+            .w_full()
+            .justify_between()
+            .items_center()
+            .gap_2()
+            .child(
+                Button::new(format!("{}-minus", options.id))
+                    .secondary()
+                    .outline()
+                    .small()
+                    .compact()
+                    .icon(IconName::Minus)
+                    .disabled(value <= min)
+                    .on_click(move |_, _, cx| {
+                        let next = (value - step).clamp(min, max);
+                        decrement(next, cx);
+                        if let Err(error) = panel.update(cx, |this, cx| {
+                            this.mark_settings_changed(cx);
+                        }) {
+                            tracing::warn!(%error, "Failed to emit settings change from stepper");
+                        }
+                    }),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .text_center()
+                    .text_sm()
+                    .text_color(cx.theme().group_box_foreground)
+                    .child(options.display_value),
+            )
+            .child(
+                Button::new(format!("{}-plus", options.id))
+                    .secondary()
+                    .outline()
+                    .small()
+                    .compact()
+                    .icon(IconName::Plus)
+                    .disabled(value >= max)
+                    .on_click(move |_, _, cx| {
+                        let next = (value + step).clamp(min, max);
+                        increment(next, cx);
+                        if let Err(error) = panel_for_increment.update(cx, |this, cx| {
+                            this.mark_settings_changed(cx);
+                        }) {
+                            tracing::warn!(%error, "Failed to emit settings change from stepper");
+                        }
                     }),
             )
     }
 
     fn render_appearance_section(&self, cx: &Context<Self>) -> impl IntoElement {
-        v_flex()
-            .w_full()
-            .child(self.render_section_header("Appearance", cx))
-            .child(self.render_setting_row(
-                "Theme Mode",
-                Some("Choose between light, dark, or system theme"),
-                Select::new(&self.theme_mode_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Light Theme",
-                Some("Theme used when in light mode"),
-                Select::new(&self.light_theme_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Dark Theme",
-                Some("Theme used when in dark mode"),
-                Select::new(&self.dark_theme_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Scrollbar",
-                Some("When to show scrollbars"),
-                Select::new(&self.scrollbar_state).small(),
-                cx,
-            ))
+        let settings = ZqlzSettings::global(cx);
+
+        self.render_group(
+            "Appearance",
+            Some("Theme and surface behavior"),
+            v_flex()
+                .w_full()
+                .gap_4()
+                .child(self.render_setting_row(
+                    "Theme Mode",
+                    Some("Choose between light, dark, or system theme"),
+                    Select::new(&self.theme_mode_state).small(),
+                    cx,
+                ))
+                .child(self.render_setting_row(
+                    "Light Theme",
+                    Some("Theme used when in light mode"),
+                    Select::new(&self.light_theme_state).small(),
+                    cx,
+                ))
+                .child(self.render_setting_row(
+                    "Dark Theme",
+                    Some("Theme used when in dark mode"),
+                    Select::new(&self.dark_theme_state).small(),
+                    cx,
+                ))
+                .child(self.render_setting_row(
+                    "Scrollbar",
+                    Some("When to show scrollbars"),
+                    Select::new(&self.scrollbar_state).small(),
+                    cx,
+                ))
+                .child(self.render_subsection_header("Startup & Close", cx))
+                .child(self.render_toggle_row(
+                    "restore-tabs-on-startup",
+                    "Restore Tabs on Startup",
+                    Some("Reopen saved query and viewer tabs when the app starts"),
+                    settings.workspace.restore_tabs_on_startup,
+                    |checked, _, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.workspace.restore_tabs_on_startup = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "confirm-close-window",
+                    "Confirm Close Window",
+                    Some("Ask before closing the workspace window"),
+                    settings.workspace.confirm_close_window,
+                    |checked, _, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.workspace.confirm_close_window = checked;
+                    },
+                    cx,
+                )),
+            cx,
+        )
     }
 
     fn render_fonts_section(&self, cx: &Context<Self>) -> impl IntoElement {
@@ -1243,417 +1226,677 @@ impl SettingsPanel {
             }
         };
 
-        v_flex()
-            .w_full()
-            .child(self.render_section_header("Fonts", cx))
-            .child(self.render_setting_row(
-                "UI Font",
-                Some("Font family for UI elements"),
-                Select::new(&self.ui_font_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "UI Font Size",
-                Some(&format!("{}px", settings.fonts.ui_font_size as i32)),
-                Slider::new(&self.ui_font_size_state),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "UI Font Weight",
-                Some(&get_weight_label(settings.fonts.ui_font_weight)),
-                Slider::new(&self.ui_font_weight_state),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Editor Font",
-                Some("Font family for the query editor"),
-                Select::new(&self.editor_font_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Editor Font Size",
-                Some(&format!("{}px", settings.fonts.editor_font_size as i32)),
-                Slider::new(&self.editor_font_size_state),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Editor Font Weight",
-                Some(&get_weight_label(settings.fonts.editor_font_weight)),
-                Slider::new(&self.editor_font_weight_state),
-                cx,
-            ))
+        self.render_group(
+            "Fonts",
+            Some("UI and editor typography"),
+            v_flex()
+                .w_full()
+                .gap_4()
+                .child(self.render_setting_row(
+                    "UI Font",
+                    Some("Font family for UI elements"),
+                    Select::new(&self.ui_font_state).small(),
+                    cx,
+                ))
+                .child(
+                    self.render_stepper_row(
+                        StepperOptions::new(
+                            "ui-font-size",
+                            "UI Font Size",
+                            settings.fonts.ui_font_size,
+                            format!("{}px", settings.fonts.ui_font_size as i32),
+                        )
+                        .description("Font size for UI elements")
+                        .range(10.0, 24.0),
+                        |value, cx| {
+                            let fonts = Self::mutate_settings(cx, |settings| {
+                                settings.fonts.ui_font_size = value;
+                                settings.fonts.clone()
+                            });
+                            fonts.apply(cx);
+                        },
+                        cx,
+                    ),
+                )
+                .child(
+                    self.render_stepper_row(
+                        StepperOptions::new(
+                            "ui-font-weight",
+                            "UI Font Weight",
+                            settings.fonts.ui_font_weight as f32,
+                            get_weight_label(settings.fonts.ui_font_weight),
+                        )
+                        .description("Font weight for UI elements")
+                        .range(100.0, 900.0)
+                        .step(100.0),
+                        |value, cx| {
+                            let fonts = Self::mutate_settings(cx, |settings| {
+                                settings.fonts.ui_font_weight = value as u16;
+                                settings.fonts.clone()
+                            });
+                            fonts.apply(cx);
+                        },
+                        cx,
+                    ),
+                )
+                .child(self.render_setting_row(
+                    "Editor Font",
+                    Some("Font family for the query editor"),
+                    Select::new(&self.editor_font_state).small(),
+                    cx,
+                ))
+                .child(
+                    self.render_stepper_row(
+                        StepperOptions::new(
+                            "editor-font-size",
+                            "Editor Font Size",
+                            settings.fonts.editor_font_size,
+                            format!("{}px", settings.fonts.editor_font_size as i32),
+                        )
+                        .description("Font size for the query editor")
+                        .range(10.0, 32.0),
+                        |value, cx| {
+                            let fonts = Self::mutate_settings(cx, |settings| {
+                                settings.fonts.editor_font_size = value;
+                                settings.fonts.clone()
+                            });
+                            fonts.apply(cx);
+                        },
+                        cx,
+                    ),
+                )
+                .child(
+                    self.render_stepper_row(
+                        StepperOptions::new(
+                            "editor-font-weight",
+                            "Editor Font Weight",
+                            settings.fonts.editor_font_weight as f32,
+                            get_weight_label(settings.fonts.editor_font_weight),
+                        )
+                        .description("Font weight for the query editor")
+                        .range(100.0, 900.0)
+                        .step(100.0),
+                        |value, cx| {
+                            let fonts = Self::mutate_settings(cx, |settings| {
+                                settings.fonts.editor_font_weight = value as u16;
+                                settings.fonts.clone()
+                            });
+                            fonts.apply(cx);
+                        },
+                        cx,
+                    ),
+                ),
+            cx,
+        )
     }
 
     fn render_editor_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = ZqlzSettings::global(cx);
 
-        v_flex()
-            .w_full()
-            .child(self.render_section_header("Editor", cx))
-            .child(self.render_setting_row(
-                "Tab Size",
-                Some(&format!("{} spaces", settings.editor.tab_size)),
-                Slider::new(&self.tab_size_state),
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "insert-spaces",
-                "Insert Spaces",
-                Some("Use spaces instead of tabs"),
-                settings.editor.insert_spaces,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.insert_spaces = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "show-line-numbers",
-                "Show Line Numbers",
-                Some("Display line numbers in the editor"),
-                settings.editor.show_line_numbers,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.show_line_numbers = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "word-wrap",
-                "Word Wrap",
-                Some("Wrap long lines to fit the editor width"),
-                settings.editor.word_wrap,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.word_wrap = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "highlight-current-line",
-                "Highlight Current Line",
-                Some("Highlight the line containing the cursor"),
-                settings.editor.highlight_current_line,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.highlight_current_line = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "inline-diagnostics",
-                "Inline Diagnostics",
-                Some("Show inline diagnostics and hover details"),
-                settings.editor.show_inline_diagnostics,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.show_inline_diagnostics = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "auto-indent",
-                "Auto Indent",
-                Some("Automatically indent new lines"),
-                settings.editor.auto_indent,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.auto_indent = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "bracket-matching",
-                "Bracket Matching",
-                Some("Highlight matching brackets"),
-                settings.editor.bracket_matching,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.bracket_matching = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "highlight-enabled",
-                "Syntax Highlighting",
-                Some("Enable SQL syntax highlighting"),
-                settings.editor.highlight_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.highlight_enabled = checked;
-                },
-                cx,
-            ))
-            // Cursor & Selection settings subsection
-            .child(self.render_subsection_header("Cursor & Selection", cx))
-            .child(self.render_setting_row(
-                "Cursor Blink",
-                Some("Cursor blink behavior"),
-                Select::new(&self.cursor_blink_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Cursor Shape",
-                Some("Cursor shape in the editor"),
-                Select::new(&self.cursor_shape_state).small(),
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "selection-highlight",
-                "Selection Highlight",
-                Some("Highlight other selections containing the cursor"),
-                settings.editor.selection_highlight,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.selection_highlight = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "rounded-selection",
-                "Rounded Selection",
-                Some("Use rounded corners for selections"),
-                settings.editor.rounded_selection,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.rounded_selection = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "relative-line-numbers",
-                "Relative Line Numbers",
-                Some("Show line numbers relative to cursor position"),
-                settings.editor.relative_line_numbers,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.relative_line_numbers = checked;
-                },
-                cx,
-            ))
-            // Scroll settings subsection
-            .child(self.render_subsection_header("Scroll", cx))
-            .child(self.render_setting_row(
-                "Scroll Beyond Last Line",
-                Some("Allow scrolling past the end of the document"),
-                Select::new(&self.scroll_beyond_last_line_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Vertical Scroll Margin",
-                Some(&format!("{} lines", settings.editor.vertical_scroll_margin)),
-                Slider::new(&self.vertical_scroll_margin_state),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Horizontal Scroll Margin",
-                Some(&format!(
-                    "{} lines",
-                    settings.editor.horizontal_scroll_margin
+        self.render_group(
+            "Editor",
+            Some("Editing, search, LSP, and AI"),
+            v_flex()
+                .w_full()
+                .gap_4()
+                .child(
+                    self.render_stepper_row(
+                        StepperOptions::new(
+                            "tab-size",
+                            "Tab Size",
+                            settings.editor.tab_size as f32,
+                            format!("{} spaces", settings.editor.tab_size),
+                        )
+                        .description("Spaces inserted for each tab stop")
+                        .range(1.0, 8.0),
+                        |value, cx| {
+                            let settings = ZqlzSettings::global_mut(cx);
+                            settings.editor.tab_size = value as u32;
+                        },
+                        cx,
+                    ),
+                )
+                .child(self.render_toggle_row(
+                    "insert-spaces",
+                    "Insert Spaces",
+                    Some("Use spaces instead of tabs"),
+                    settings.editor.insert_spaces,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.insert_spaces = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "show-line-numbers",
+                    "Show Line Numbers",
+                    Some("Display line numbers in the editor"),
+                    settings.editor.show_line_numbers,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.show_line_numbers = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "word-wrap",
+                    "Word Wrap",
+                    Some("Wrap long lines to fit the editor width"),
+                    settings.editor.word_wrap,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.word_wrap = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "highlight-current-line",
+                    "Highlight Current Line",
+                    Some("Highlight the line containing the cursor"),
+                    settings.editor.highlight_current_line,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.highlight_current_line = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "inline-diagnostics",
+                    "Inline Diagnostics",
+                    Some("Show inline diagnostics and hover details"),
+                    settings.editor.show_inline_diagnostics,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.show_inline_diagnostics = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "auto-indent",
+                    "Auto Indent",
+                    Some("Automatically indent new lines"),
+                    settings.editor.auto_indent,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.auto_indent = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "bracket-matching",
+                    "Bracket Matching",
+                    Some("Highlight matching brackets"),
+                    settings.editor.bracket_matching,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.bracket_matching = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "highlight-enabled",
+                    "Syntax Highlighting",
+                    Some("Enable SQL syntax highlighting"),
+                    settings.editor.highlight_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.highlight_enabled = checked;
+                    },
+                    cx,
+                ))
+                // Cursor & Selection settings subsection
+                .child(self.render_subsection_header("Cursor & Selection", cx))
+                .child(self.render_setting_row(
+                    "Cursor Blink",
+                    Some("Cursor blink behavior"),
+                    Select::new(&self.cursor_blink_state).small(),
+                    cx,
+                ))
+                .child(self.render_setting_row(
+                    "Cursor Shape",
+                    Some("Cursor shape in the editor"),
+                    Select::new(&self.cursor_shape_state).small(),
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "selection-highlight",
+                    "Selection Highlight",
+                    Some("Highlight other selections containing the cursor"),
+                    settings.editor.selection_highlight,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.selection_highlight = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "rounded-selection",
+                    "Rounded Selection",
+                    Some("Use rounded corners for selections"),
+                    settings.editor.rounded_selection,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.rounded_selection = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "relative-line-numbers",
+                    "Relative Line Numbers",
+                    Some("Show line numbers relative to cursor position"),
+                    settings.editor.relative_line_numbers,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.relative_line_numbers = checked;
+                    },
+                    cx,
+                ))
+                // Scroll settings subsection
+                .child(self.render_subsection_header("Scroll", cx))
+                .child(self.render_setting_row(
+                    "Scroll Beyond Last Line",
+                    Some("Allow scrolling past the end of the document"),
+                    Select::new(&self.scroll_beyond_last_line_state).small(),
+                    cx,
+                ))
+                .child(
+                    self.render_setting_row(
+                        "Vertical Scroll Margin",
+                        Some("Minimum visible lines above and below cursor"),
+                        self.render_stepper_control(
+                            StepperOptions::new(
+                                "vertical-scroll-margin",
+                                "Vertical Scroll Margin",
+                                settings.editor.vertical_scroll_margin as f32,
+                                format!("{} lines", settings.editor.vertical_scroll_margin),
+                            )
+                            .range(0.0, 20.0),
+                            |value, cx| {
+                                let settings = ZqlzSettings::global_mut(cx);
+                                settings.editor.vertical_scroll_margin = value as u32;
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                )
+                .child(
+                    self.render_setting_row(
+                        "Horizontal Scroll Margin",
+                        Some("Minimum visible columns around cursor"),
+                        self.render_stepper_control(
+                            StepperOptions::new(
+                                "horizontal-scroll-margin",
+                                "Horizontal Scroll Margin",
+                                settings.editor.horizontal_scroll_margin as f32,
+                                format!("{} columns", settings.editor.horizontal_scroll_margin),
+                            )
+                            .range(0.0, 20.0),
+                            |value, cx| {
+                                let settings = ZqlzSettings::global_mut(cx);
+                                settings.editor.horizontal_scroll_margin = value as u32;
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                )
+                .child(
+                    self.render_setting_row(
+                        "Scroll Sensitivity",
+                        Some("Mouse wheel and trackpad scroll multiplier"),
+                        self.render_stepper_control(
+                            StepperOptions::new(
+                                "scroll-sensitivity",
+                                "Scroll Sensitivity",
+                                settings.editor.scroll_sensitivity,
+                                format!("{:.1}x", settings.editor.scroll_sensitivity),
+                            )
+                            .range(0.1, 5.0)
+                            .step(0.1),
+                            |value, cx| {
+                                let settings = ZqlzSettings::global_mut(cx);
+                                settings.editor.scroll_sensitivity = (value * 10.0).round() / 10.0;
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                )
+                .child(self.render_toggle_row(
+                    "autoscroll-on-clicks",
+                    "Autoscroll on Clicks",
+                    Some("Automatically scroll to keep cursor visible when clicking"),
+                    settings.editor.autoscroll_on_clicks,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.autoscroll_on_clicks = checked;
+                    },
+                    cx,
+                ))
+                // Search settings subsection
+                .child(self.render_subsection_header("Search", cx))
+                .child(self.render_setting_row(
+                    "Search Wrap",
+                    Some("Wrap around when searching"),
+                    Select::new(&self.search_wrap_state).small(),
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "use-smartcase-search",
+                    "Smart Case",
+                    Some("Ignore case unless search contains uppercase"),
+                    settings.editor.use_smartcase_search,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.use_smartcase_search = checked;
+                    },
+                    cx,
+                ))
+                // LSP (Language Server) settings subsection
+                .child(self.render_subsection_header("Language Server (LSP)", cx))
+                .child(self.render_toggle_row(
+                    "lsp-enabled",
+                    "Enable LSP",
+                    Some("Enable Language Server Protocol features"),
+                    settings.editor.lsp_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "lsp-completions",
+                    "Completions",
+                    Some("Enable auto-completion suggestions"),
+                    settings.editor.lsp_completions_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_completions_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "lsp-hover",
+                    "Hover",
+                    Some("Show hover information on hover"),
+                    settings.editor.lsp_hover_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_hover_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(
+                    self.render_setting_row(
+                        "Hover Delay",
+                        Some("Delay before hover information appears"),
+                        self.render_stepper_control(
+                            StepperOptions::new(
+                                "hover-delay",
+                                "Hover Delay",
+                                settings.editor.hover_delay_ms as f32,
+                                format!("{}ms", settings.editor.hover_delay_ms),
+                            )
+                            .range(0.0, 2_000.0)
+                            .step(50.0),
+                            |value, cx| {
+                                let settings = ZqlzSettings::global_mut(cx);
+                                settings.editor.hover_delay_ms = value as u32;
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                )
+                .child(self.render_toggle_row(
+                    "lsp-diagnostics",
+                    "Diagnostics",
+                    Some("Show inline errors and warnings"),
+                    settings.editor.lsp_diagnostics_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_diagnostics_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "lsp-code-actions",
+                    "Code Actions",
+                    Some("Enable quick fixes and refactorings"),
+                    settings.editor.lsp_code_actions_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_code_actions_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "lsp-rename",
+                    "Rename",
+                    Some("Enable symbol rename refactoring"),
+                    settings.editor.lsp_rename_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.lsp_rename_enabled = checked;
+                    },
+                    cx,
+                ))
+                // Inline suggestions subsection
+                .child(self.render_subsection_header("Inline Suggestions", cx))
+                .child(self.render_toggle_row(
+                    "inline-suggestions",
+                    "Enable Inline Suggestions",
+                    Some("Show inline code completions as you type"),
+                    settings.editor.inline_suggestions_enabled,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.inline_suggestions_enabled = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_setting_row(
+                    "Suggestion Provider",
+                    Some("Source for inline suggestions"),
+                    Select::new(&self.inline_suggestions_provider_state).small(),
+                    cx,
+                ))
+                .child(
+                    self.render_setting_row(
+                        "Suggestion Delay",
+                        Some("Delay before showing inline suggestions"),
+                        self.render_stepper_control(
+                            StepperOptions::new(
+                                "inline-suggestions-delay",
+                                "Suggestion Delay",
+                                settings.editor.inline_suggestions_delay_ms as f32,
+                                format!("{}ms", settings.editor.inline_suggestions_delay_ms),
+                            )
+                            .range(0.0, 1000.0)
+                            .step(50.0),
+                            |value, cx| {
+                                let settings = ZqlzSettings::global_mut(cx);
+                                settings.editor.inline_suggestions_delay_ms = value as u32;
+                            },
+                            cx,
+                        ),
+                        cx,
+                    ),
+                )
+                // AI settings subsection
+                .child(self.render_subsection_header("AI Completion", cx))
+                .child(self.render_setting_row(
+                    "API Key",
+                    Some("API key for AI provider (leave empty to use default)"),
+                    Input::new(&self.ai_api_key_state).mask_toggle().small(),
+                    cx,
+                ))
+                // Display settings subsection
+                .child(self.render_subsection_header("Display", cx))
+                .child(self.render_toggle_row(
+                    "show-gutter-diagnostics",
+                    "Show Gutter Diagnostics",
+                    Some("Display diagnostic indicators in the gutter"),
+                    settings.editor.show_gutter_diagnostics,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.show_gutter_diagnostics = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "show-folding",
+                    "Show Folding",
+                    Some("Display code folding controls in the gutter"),
+                    settings.editor.show_folding,
+                    |checked, _window, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.editor.show_folding = checked;
+                    },
+                    cx,
                 )),
-                Slider::new(&self.horizontal_scroll_margin_state),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Scroll Sensitivity",
-                Some(&format!("{:.1}x", settings.editor.scroll_sensitivity)),
-                Slider::new(&self.scroll_sensitivity_state),
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "autoscroll-on-clicks",
-                "Autoscroll on Clicks",
-                Some("Automatically scroll to keep cursor visible when clicking"),
-                settings.editor.autoscroll_on_clicks,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.autoscroll_on_clicks = checked;
-                },
-                cx,
-            ))
-            // Search settings subsection
-            .child(self.render_subsection_header("Search", cx))
-            .child(self.render_setting_row(
-                "Search Wrap",
-                Some("Wrap around when searching"),
-                Select::new(&self.search_wrap_state).small(),
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "use-smartcase-search",
-                "Smart Case",
-                Some("Ignore case unless search contains uppercase"),
-                settings.editor.use_smartcase_search,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.use_smartcase_search = checked;
-                },
-                cx,
-            ))
-            // LSP (Language Server) settings subsection
-            .child(self.render_subsection_header("Language Server (LSP)", cx))
-            .child(self.render_toggle_row(
-                "lsp-enabled",
-                "Enable LSP",
-                Some("Enable Language Server Protocol features"),
-                settings.editor.lsp_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "lsp-completions",
-                "Completions",
-                Some("Enable auto-completion suggestions"),
-                settings.editor.lsp_completions_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_completions_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "lsp-hover",
-                "Hover",
-                Some("Show hover information on hover"),
-                settings.editor.lsp_hover_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_hover_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "lsp-diagnostics",
-                "Diagnostics",
-                Some("Show inline errors and warnings"),
-                settings.editor.lsp_diagnostics_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_diagnostics_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "lsp-code-actions",
-                "Code Actions",
-                Some("Enable quick fixes and refactorings"),
-                settings.editor.lsp_code_actions_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_code_actions_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "lsp-rename",
-                "Rename",
-                Some("Enable symbol rename refactoring"),
-                settings.editor.lsp_rename_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.lsp_rename_enabled = checked;
-                },
-                cx,
-            ))
-            // Inline suggestions subsection
-            .child(self.render_subsection_header("Inline Suggestions", cx))
-            .child(self.render_toggle_row(
-                "inline-suggestions",
-                "Enable Inline Suggestions",
-                Some("Show inline code completions as you type"),
-                settings.editor.inline_suggestions_enabled,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.inline_suggestions_enabled = checked;
-                },
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Suggestion Provider",
-                Some("Source for inline suggestions"),
-                Select::new(&self.inline_suggestions_provider_state).small(),
-                cx,
-            ))
-            .child(self.render_setting_row(
-                "Suggestion Delay",
-                Some(&format!(
-                    "{}ms delay before showing suggestions",
-                    settings.editor.inline_suggestions_delay_ms
-                )),
-                Slider::new(&self.inline_suggestions_delay_state),
-                cx,
-            ))
-            // AI settings subsection
-            .child(self.render_subsection_header("AI Completion", cx))
-            .child(self.render_setting_row(
-                "API Key",
-                Some("API key for AI provider (leave empty to use default)"),
-                Input::new(&self.ai_api_key_state).mask_toggle().small(),
-                cx,
-            ))
-            // Display settings subsection
-            .child(self.render_subsection_header("Display", cx))
-            .child(self.render_toggle_row(
-                "show-gutter-diagnostics",
-                "Show Gutter Diagnostics",
-                Some("Display diagnostic indicators in the gutter"),
-                settings.editor.show_gutter_diagnostics,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.show_gutter_diagnostics = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "show-folding",
-                "Show Folding",
-                Some("Display code folding controls in the gutter"),
-                settings.editor.show_folding,
-                |checked, _window, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.editor.show_folding = checked;
-                },
-                cx,
-            ))
+            cx,
+        )
     }
 
     fn render_connections_section(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = ZqlzSettings::global(cx);
 
+        self.render_group(
+            "Connections",
+            Some("Database connection behavior"),
+            v_flex()
+                .w_full()
+                .gap_4()
+                .child(self.render_toggle_row(
+                    "auto-commit",
+                    "Auto Commit",
+                    Some("Automatically commit after each query"),
+                    settings.connections.auto_commit,
+                    |checked, _, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.connections.auto_commit = checked;
+                    },
+                    cx,
+                ))
+                .child(self.render_toggle_row(
+                    "fetch-schema-on-connect",
+                    "Fetch Schema on Connect",
+                    Some("Automatically load database schema when connecting"),
+                    settings.connections.fetch_schema_on_connect,
+                    |checked, _, cx| {
+                        let settings = ZqlzSettings::global_mut(cx);
+                        settings.connections.fetch_schema_on_connect = checked;
+                    },
+                    cx,
+                )),
+            cx,
+        )
+    }
+
+    fn render_sidebar(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
         v_flex()
+            .size_full()
+            .bg(theme.sidebar)
+            .border_r_1()
+            .border_color(theme.sidebar_border)
+            .p_2()
+            .gap_1()
+            .child(self.render_sidebar_back(cx))
+            .children(
+                SettingsPageKey::ALL
+                    .into_iter()
+                    .map(|page| self.render_sidebar_item(page, cx)),
+            )
+    }
+
+    fn render_sidebar_back(&self, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+
+        h_flex()
+            .id("settings-sidebar-back")
             .w_full()
-            .child(self.render_section_header("Connections", cx))
-            .child(self.render_toggle_row(
-                "auto-commit",
-                "Auto Commit",
-                Some("Automatically commit after each query"),
-                settings.connections.auto_commit,
-                |checked, _, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.connections.auto_commit = checked;
-                },
-                cx,
-            ))
-            .child(self.render_toggle_row(
-                "fetch-schema-on-connect",
-                "Fetch Schema on Connect",
-                Some("Automatically load database schema when connecting"),
-                settings.connections.fetch_schema_on_connect,
-                |checked, _, cx| {
-                    let settings = ZqlzSettings::global_mut(cx);
-                    settings.connections.fetch_schema_on_connect = checked;
-                },
-                cx,
-            ))
+            .h_8()
+            .px_2()
+            .gap_2()
+            .cursor_pointer()
+            .text_color(theme.sidebar_foreground)
+            .hover(|this| this.bg(theme.sidebar_accent.opacity(0.08)))
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let panel = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if let Err(error) = panel.update(cx, |_this, cx| {
+                        cx.emit(SettingsPanelEvent::BackRequested);
+                    }) {
+                        tracing::warn!(%error, "Failed to request settings page close");
+                    }
+                }
+            })
+            .child(Icon::new(IconName::ChevronLeft).small())
+            .child(div().text_sm().child("Back"))
+    }
+
+    fn render_sidebar_item(&self, page: SettingsPageKey, cx: &Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let selected = self.selected_page == page;
+        let foreground = if selected {
+            theme.sidebar_accent_foreground
+        } else {
+            theme.sidebar_foreground
+        };
+
+        h_flex()
+            .id(format!("settings-sidebar-item-{}", page.title()))
+            .w_full()
+            .h_8()
+            .px_2()
+            .gap_2()
+            .cursor_pointer()
+            .text_color(foreground)
+            .when(selected, |this| this.bg(theme.sidebar_accent.opacity(0.18)))
+            .when(!selected, |this| {
+                this.hover(|this| this.bg(theme.sidebar_accent.opacity(0.08)))
+            })
+            .on_mouse_down(gpui::MouseButton::Left, {
+                let panel = cx.entity().downgrade();
+                move |_, _, cx| {
+                    if let Err(error) = panel.update(cx, |this, cx| {
+                        this.selected_page = page;
+                        cx.notify();
+                    }) {
+                        tracing::warn!(%error, "Failed to update selected settings page");
+                    }
+                }
+            })
+            .child(Icon::new(page.icon()).small().text_color(foreground))
+            .child(
+                div()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .text_sm()
+                    .text_color(foreground)
+                    .child(page.title().to_string()),
+            )
+    }
+
+    fn render_active_page(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        match self.selected_page {
+            SettingsPageKey::Appearance => self.render_appearance_section(cx).into_any_element(),
+            SettingsPageKey::Fonts => self.render_fonts_section(cx).into_any_element(),
+            SettingsPageKey::Editor => self.render_editor_section(cx).into_any_element(),
+            SettingsPageKey::Connections => self.render_connections_section(cx).into_any_element(),
+        }
     }
 }
 
 impl Render for SettingsPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let selected_page = self.selected_page;
 
         v_flex()
             .id("settings-panel")
@@ -1661,11 +1904,51 @@ impl Render for SettingsPanel {
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
-            .overflow_y_scroll()
-            .child(self.render_appearance_section(cx))
-            .child(self.render_fonts_section(cx))
-            .child(self.render_editor_section(cx))
-            .child(self.render_connections_section(cx))
+            .child(
+                h_resizable("settings-panel-layout")
+                    .child(
+                        resizable_panel()
+                            .size(px(240.0))
+                            .size_range(px(180.0)..px(320.0))
+                            .child(self.render_sidebar(cx)),
+                    )
+                    .child(
+                        resizable_panel().child(
+                            v_flex()
+                                .id("settings-page-scroll")
+                                .size_full()
+                                .overflow_y_scroll()
+                                .child(
+                                    v_flex()
+                                        .w_full()
+                                        .px_6()
+                                        .py_4()
+                                        .gap_4()
+                                        .child(
+                                            v_flex()
+                                                .gap_1()
+                                                .pb_1()
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .font_medium()
+                                                        .text_color(theme.foreground)
+                                                        .child(selected_page.title().to_string()),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .text_sm()
+                                                        .text_color(theme.muted_foreground)
+                                                        .child(
+                                                            selected_page.description().to_string(),
+                                                        ),
+                                                ),
+                                        )
+                                        .child(self.render_active_page(cx)),
+                                ),
+                        ),
+                    ),
+            )
     }
 }
 

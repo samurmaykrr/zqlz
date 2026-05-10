@@ -46,3 +46,28 @@ fn test_schema_cache_has_columns() {
     assert!(location_cols.iter().any(|c| c.name == "location_id"));
     assert!(location_cols.iter().any(|c| c.name == "location_name"));
 }
+
+#[test]
+fn schema_metadata_preserves_resolved_database_and_schema_labels() {
+    let mut lsp = create_test_lsp();
+    lsp.schema_cache.database_name = Some("erp_lab".to_string());
+    lsp.schema_cache.schema_name = Some("zqlz_audit".to_string());
+    lsp.schema_cache.schema_names = vec![
+        "public".to_string(),
+        "zqlz_audit".to_string(),
+        "crm".to_string(),
+    ];
+
+    let metadata = lsp.get_schema_for_metadata();
+
+    assert_eq!(metadata.database_name.as_deref(), Some("erp_lab"));
+    assert_eq!(metadata.schema_name.as_deref(), Some("zqlz_audit"));
+    assert_eq!(
+        metadata.schema_names,
+        vec![
+            "public".to_string(),
+            "zqlz_audit".to_string(),
+            "crm".to_string()
+        ]
+    );
+}

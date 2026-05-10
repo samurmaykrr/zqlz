@@ -27,6 +27,7 @@ pub enum QueryTabsPanelEvent {
     ExecuteQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         params: Option<QueryExecutionParams>,
         editor_index: usize,
     },
@@ -34,6 +35,7 @@ pub enum QueryTabsPanelEvent {
     ExecuteSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         params: Option<QueryExecutionParams>,
         editor_index: usize,
     },
@@ -41,12 +43,14 @@ pub enum QueryTabsPanelEvent {
     ExplainQuery {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         editor_index: usize,
     },
     /// User requested to explain selection or current statement
     ExplainSelection {
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         editor_index: usize,
     },
     /// User requested to cancel the currently executing query
@@ -131,11 +135,13 @@ impl QueryTabsPanel {
                     QueryEditorEvent::ExecuteQuery {
                         sql,
                         connection_id,
+                        database_name,
                         params,
                     } => {
                         cx.emit(QueryTabsPanelEvent::ExecuteQuery {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            database_name: database_name.clone(),
                             params: params.clone(),
                             editor_index,
                         });
@@ -143,26 +149,38 @@ impl QueryTabsPanel {
                     QueryEditorEvent::ExecuteSelection {
                         sql,
                         connection_id,
+                        database_name,
                         params,
                     } => {
                         cx.emit(QueryTabsPanelEvent::ExecuteSelection {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            database_name: database_name.clone(),
                             params: params.clone(),
                             editor_index,
                         });
                     }
-                    QueryEditorEvent::ExplainQuery { sql, connection_id } => {
+                    QueryEditorEvent::ExplainQuery {
+                        sql,
+                        connection_id,
+                        database_name,
+                    } => {
                         cx.emit(QueryTabsPanelEvent::ExplainQuery {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            database_name: database_name.clone(),
                             editor_index,
                         });
                     }
-                    QueryEditorEvent::ExplainSelection { sql, connection_id } => {
+                    QueryEditorEvent::ExplainSelection {
+                        sql,
+                        connection_id,
+                        database_name,
+                    } => {
                         cx.emit(QueryTabsPanelEvent::ExplainSelection {
                             sql: sql.clone(),
                             connection_id: *connection_id,
+                            database_name: database_name.clone(),
                             editor_index,
                         });
                     }

@@ -6,9 +6,9 @@ use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use zqlz_core::Connection;
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Root, Sizable,
@@ -25,9 +25,12 @@ use zqlz_ui::widgets::{
 };
 
 const EXPORT_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
-const EXPORT_TABLE_ROW_HEIGHT: f32 = 34.0;
+const EXPORT_TABLE_ROW_HEIGHT: f32 = 38.0;
+const EXPORT_TABLE_CHECKBOX_WIDTH: f32 = 44.0;
+const EXPORT_TABLE_NAME_WIDTH: f32 = 260.0;
 const EXPORT_COLUMN_ROW_HEIGHT: f32 = 34.0;
 const EXPORT_LOG_ROW_HEIGHT: f32 = 22.0;
+const EXPORT_PROGRESS_TICK_MS: u64 = 200;
 
 use super::types::*;
 use crate::{
@@ -80,6 +83,24 @@ struct TimestampItem {
 
 impl SelectItem for TimestampItem {
     type Value = TimestampFormat;
+
+    fn title(&self) -> SharedString {
+        self.label.clone()
+    }
+
+    fn value(&self) -> &Self::Value {
+        &self.value
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DateOrderItem {
+    value: DateOrder,
+    label: SharedString,
+}
+
+impl SelectItem for DateOrderItem {
+    type Value = DateOrder;
 
     fn title(&self) -> SharedString {
         self.label.clone()
@@ -175,6 +196,30 @@ impl SelectItem for FormatItem {
     }
 }
 
+#[derive(Clone, Debug, Default)]
+struct ExportProgressSnapshot {
+    current_object: String,
+    total_objects: usize,
+    completed_objects: usize,
+    rows_exported: u64,
+    total_rows: Option<u64>,
+    message: Option<String>,
+    log_level: LogLevel,
+}
+
+fn sanitize_profile_filename(name: &str) -> String {
+    let sanitized = name
+        .chars()
+        .map(|c| if c.is_alphanumeric() { c } else { '_' })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('_');
+    if trimmed.is_empty() {
+        "export_profile".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
 /// Export Wizard Panel
 pub struct ExportWizard {
     focus_handle: FocusHandle,
@@ -200,7 +245,10 @@ pub struct ExportWizard {
     field_delimiter_state: Entity<SelectState<SearchableVec<DelimiterItem<FieldDelimiter>>>>,
     text_qualifier_state: Entity<SelectState<SearchableVec<DelimiterItem<TextQualifier>>>>,
     binary_encoding_state: Entity<SelectState<SearchableVec<DelimiterItem<BinaryEncoding>>>>,
+    date_order_state: Entity<SelectState<SearchableVec<DateOrderItem>>>,
     decimal_input_state: Entity<InputState>,
+    date_delimiter_input_state: Entity<InputState>,
+    time_delimiter_input_state: Entity<InputState>,
 
     // Virtualized list scroll handles
     table_scroll_handle: UniformListScrollHandle,
@@ -214,6 +262,11 @@ pub struct ExportWizard {
 }
 
 impl EventEmitter<ExportWizardEvent> for ExportWizard {}
+
+pub struct ExportWizardHandle {
+    pub wizard: Entity<ExportWizard>,
+    pub window: AnyWindowHandle,
+}
 
 impl ExportWizard {
     pub fn new(
@@ -395,9 +448,36 @@ impl ExportWizard {
             )
         });
 
+        let date_order_items: Vec<DateOrderItem> = DateOrder::all()
+            .iter()
+            .map(|date_order| DateOrderItem {
+                value: *date_order,
+                label: date_order.display_name().into(),
+            })
+            .collect();
+        let date_order_index = date_order_items
+            .iter()
+            .position(|item| item.value == initial_state.csv_options.date_order);
+        let date_order_state = cx.new(|cx| {
+            SelectState::new(
+                SearchableVec::new(date_order_items),
+                date_order_index.map(|i| zqlz_ui::widgets::IndexPath::default().row(i)),
+                window,
+                cx,
+            )
+        });
+
         let decimal_input_state = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(initial_state.csv_options.decimal_symbol.clone())
+        });
+        let date_delimiter_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_state.csv_options.date_delimiter.clone())
+        });
+        let time_delimiter_input_state = cx.new(|cx| {
+            InputState::new(window, cx)
+                .default_value(initial_state.csv_options.time_delimiter.clone())
         });
 
         // Subscribe to select changes
@@ -482,6 +562,16 @@ impl ExportWizard {
         ));
 
         subscriptions.push(cx.subscribe(
+            &date_order_state,
+            |this, _, event: &SelectEvent<SearchableVec<DateOrderItem>>, cx| {
+                if let SelectEvent::Confirm(Some(value)) = event {
+                    this.state.csv_options.date_order = *value;
+                    cx.notify();
+                }
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
             &folder_input_state,
             |this, state, event: &InputEvent, cx| {
                 if let InputEvent::Change = event {
@@ -503,6 +593,28 @@ impl ExportWizard {
             },
         ));
 
+        subscriptions.push(cx.subscribe(
+            &date_delimiter_input_state,
+            |this, state, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = state.read(cx).value();
+                    this.state.csv_options.date_delimiter = value.to_string();
+                    cx.notify();
+                }
+            },
+        ));
+
+        subscriptions.push(cx.subscribe(
+            &time_delimiter_input_state,
+            |this, state, event: &InputEvent, cx| {
+                if let InputEvent::Change = event {
+                    let value = state.read(cx).value();
+                    this.state.csv_options.time_delimiter = value.to_string();
+                    cx.notify();
+                }
+            },
+        ));
+
         Self {
             focus_handle: cx.focus_handle(),
             state: initial_state,
@@ -517,7 +629,10 @@ impl ExportWizard {
             field_delimiter_state,
             text_qualifier_state,
             binary_encoding_state,
+            date_order_state,
             decimal_input_state,
+            date_delimiter_input_state,
+            time_delimiter_input_state,
             table_scroll_handle: UniformListScrollHandle::new(),
             column_scroll_handle: UniformListScrollHandle::new(),
             log_scroll_handle: UniformListScrollHandle::new(),
@@ -531,7 +646,7 @@ impl ExportWizard {
         initial_state: ExportWizardState,
         connection: Option<Arc<dyn Connection>>,
         cx: &mut App,
-    ) {
+    ) -> Task<anyhow::Result<ExportWizardHandle>> {
         let window_options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::centered(size(px(800.0), px(600.0)), cx)),
@@ -542,18 +657,25 @@ impl ExportWizard {
         };
 
         cx.spawn(async move |cx| {
-            cx.open_window(window_options, |window, cx| {
+            let mut wizard_entity = None;
+            let window_handle = cx.open_window(window_options, |window, cx| {
                 window.activate_window();
                 window.set_window_title("Export Wizard");
 
                 let wizard = cx.new(|cx| ExportWizard::new(initial_state, connection, window, cx));
+                wizard_entity = Some(wizard.clone());
 
                 cx.new(|cx| Root::new(wizard, window, cx))
             })?;
 
-            Ok::<_, anyhow::Error>(())
+            let wizard = wizard_entity
+                .ok_or_else(|| anyhow::anyhow!("Export wizard window did not open"))?;
+
+            Ok(ExportWizardHandle {
+                wizard,
+                window: window_handle.into(),
+            })
         })
-        .detach();
     }
 
     /// Get the current wizard state
@@ -574,9 +696,17 @@ impl ExportWizard {
         cx: &mut Context<Self>,
     ) {
         self.state.tables = tables;
+        self.state.tables_loading = false;
+        self.state.tables_load_error = None;
         self.state.table_selection_validation_error = None;
         self.state.field_selection_validation_error = None;
         self.update_table_select(window, cx);
+        cx.notify();
+    }
+
+    pub fn set_tables_load_error(&mut self, message: impl Into<String>, cx: &mut Context<Self>) {
+        self.state.tables_loading = false;
+        self.state.tables_load_error = Some(message.into());
         cx.notify();
     }
 
@@ -612,6 +742,16 @@ impl ExportWizard {
                 name: t.table_name.clone().into(),
             })
             .collect();
+
+        if !self
+            .state
+            .tables
+            .get(self.state.selected_table_index)
+            .is_some_and(|table| table.selected)
+        {
+            self.state.selected_table_index =
+                table_items.first().map(|item| item.index).unwrap_or(0);
+        }
 
         self.table_select_state.update(cx, |state, cx| {
             state.set_items(SearchableVec::new(table_items), window, cx);
@@ -652,6 +792,12 @@ impl ExportWizard {
     }
 
     fn can_navigate_to_step(&mut self, target_step: ExportWizardStep) -> bool {
+        if self.state.tables_loading {
+            self.state.table_selection_validation_error =
+                Some("Wait for table metadata to finish loading.".to_string());
+            return false;
+        }
+
         let steps = ExportWizardStep::all();
         let Some(current_position) = steps
             .iter()
@@ -691,6 +837,10 @@ impl ExportWizard {
             return Some("Step navigation is disabled while export is running".into());
         }
 
+        if self.state.tables_loading {
+            return Some("Table metadata is still loading".into());
+        }
+
         let steps = ExportWizardStep::all();
         let current_step = self.state.current_step;
 
@@ -727,38 +877,47 @@ impl ExportWizard {
     }
 
     /// Toggle selection for a specific table
-    fn toggle_table_selection(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn toggle_table_selection(
+        &mut self,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(table) = self.state.tables.get_mut(index) {
             table.selected = !table.selected;
             self.state.table_selection_validation_error = None;
+            self.update_table_select(window, cx);
             cx.notify();
         }
     }
 
     /// Select all tables
-    fn select_all_tables(&mut self, cx: &mut Context<Self>) {
+    fn select_all_tables(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for table in &mut self.state.tables {
             table.selected = true;
         }
         self.state.table_selection_validation_error = None;
+        self.update_table_select(window, cx);
         cx.notify();
     }
 
     /// Deselect all tables
-    fn deselect_all_tables(&mut self, cx: &mut Context<Self>) {
+    fn deselect_all_tables(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         for table in &mut self.state.tables {
             table.selected = false;
         }
         self.state.table_selection_validation_error = None;
+        self.update_table_select(window, cx);
         cx.notify();
     }
 
     /// Select only the specified table (deselect all others)
-    fn select_only_table(&mut self, index: usize, cx: &mut Context<Self>) {
+    fn select_only_table(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) {
         for (i, table) in self.state.tables.iter_mut().enumerate() {
             table.selected = i == index;
         }
         self.state.table_selection_validation_error = None;
+        self.update_table_select(window, cx);
         cx.notify();
     }
 
@@ -828,9 +987,19 @@ impl ExportWizard {
         cx.notify();
     }
 
+    fn toggle_zero_padding_date(&mut self, cx: &mut Context<Self>) {
+        self.state.csv_options.zero_padding_date = !self.state.csv_options.zero_padding_date;
+        cx.notify();
+    }
+
     /// Toggle schema-only export (excludes all data rows, exports DDL only)
     fn toggle_include_data(&mut self, cx: &mut Context<Self>) {
         self.state.include_data = !self.state.include_data;
+        cx.notify();
+    }
+
+    fn toggle_include_sequences(&mut self, cx: &mut Context<Self>) {
+        self.state.include_sequences = !self.state.include_sequences;
         cx.notify();
     }
 
@@ -926,6 +1095,8 @@ impl ExportWizard {
         self.state.is_complete = false;
         self.state.progress = 0.0;
         self.state.log_messages.clear();
+        self.state.stats = ExportStats::default();
+        self.state.last_export_error = None;
         self.export_start_time = Some(Instant::now());
 
         let format_name = self.state.export_format.display_name();
@@ -935,17 +1106,119 @@ impl ExportWizard {
         cx.emit(ExportWizardEvent::StartExport);
         cx.notify();
 
+        let progress_snapshot = Arc::new(Mutex::new(ExportProgressSnapshot {
+            total_objects: self.state.selected_tables().len(),
+            ..Default::default()
+        }));
+        self.start_progress_ticker(progress_snapshot.clone(), cx);
+
         match self.state.export_format {
             ExportFormat::Udif | ExportFormat::UdifCompressed => {
-                self.start_udif_export(connection, cx);
+                self.start_udif_export(connection, progress_snapshot, cx);
             }
             ExportFormat::Csv => {
-                self.start_csv_export(connection, cx);
+                self.start_csv_export(connection, progress_snapshot, cx);
             }
         }
     }
 
-    fn start_udif_export(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
+    fn start_progress_ticker(
+        &mut self,
+        progress_snapshot: Arc<Mutex<ExportProgressSnapshot>>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this, cx| {
+            let mut last_message: Option<String> = None;
+
+            loop {
+                cx.background_executor()
+                    .timer(Duration::from_millis(EXPORT_PROGRESS_TICK_MS))
+                    .await;
+
+                let snapshot = match progress_snapshot.lock() {
+                    Ok(snapshot) => snapshot.clone(),
+                    Err(error) => {
+                        tracing::warn!("Export progress snapshot lock poisoned: {}", error);
+                        ExportProgressSnapshot::default()
+                    }
+                };
+
+                let keep_running = this.update(cx, |this, cx| {
+                    if !this.state.is_exporting {
+                        return false;
+                    }
+
+                    if let Some(start) = this.export_start_time {
+                        this.state.stats.elapsed_seconds = start.elapsed().as_secs_f64();
+                    }
+
+                    if !snapshot.current_object.is_empty() {
+                        this.state.stats.current_object = snapshot.current_object.clone();
+                    }
+
+                    if snapshot.total_rows.is_some() {
+                        this.state.stats.total_rows = snapshot.total_rows.unwrap_or(0);
+                    } else if snapshot.total_objects > 0 {
+                        this.state.stats.total_rows = snapshot.total_objects as u64;
+                    }
+
+                    this.state.stats.processed_rows = if snapshot.total_rows.is_some() {
+                        snapshot.rows_exported
+                    } else {
+                        snapshot.completed_objects as u64
+                    };
+
+                    if let Some(message) = &snapshot.message
+                        && last_message.as_ref() != Some(message)
+                    {
+                        this.state.add_log(snapshot.log_level, message.clone());
+                        last_message = Some(message.clone());
+                    }
+
+                    let elapsed_progress = this
+                        .export_start_time
+                        .map(|start| (start.elapsed().as_secs_f32() / 12.0).min(0.90))
+                        .unwrap_or(0.0);
+                    let object_progress = if snapshot.total_objects > 0 {
+                        let row_progress = snapshot
+                            .total_rows
+                            .filter(|total_rows| *total_rows > 0)
+                            .map(|total_rows| {
+                                (snapshot.rows_exported as f32 / total_rows as f32).clamp(0.0, 1.0)
+                            })
+                            .unwrap_or(0.0);
+                        ((snapshot.completed_objects as f32 + row_progress)
+                            / snapshot.total_objects as f32)
+                            .clamp(0.0, 0.96)
+                    } else {
+                        0.0
+                    };
+
+                    this.state.progress = this
+                        .state
+                        .progress
+                        .max(object_progress)
+                        .max(elapsed_progress);
+                    cx.notify();
+                    true
+                });
+
+                if !matches!(keep_running, Ok(true)) {
+                    break;
+                }
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn start_udif_export(
+        &mut self,
+        connection: Arc<dyn Connection>,
+        progress_snapshot: Arc<Mutex<ExportProgressSnapshot>>,
+        cx: &mut Context<Self>,
+    ) {
         let export_state = self.state.clone();
         let driver_name = connection.driver_name().to_string();
 
@@ -955,6 +1228,8 @@ impl ExportWizard {
             include_data: export_state.include_data,
             include_indexes: export_state.include_indexes,
             include_foreign_keys: export_state.include_foreign_keys,
+            include_sequences: export_state.include_sequences,
+            continue_on_error: export_state.csv_options.continue_on_error,
             include_tables: export_state
                 .tables
                 .iter()
@@ -985,17 +1260,21 @@ impl ExportWizard {
         let output_filename = export_state.output_filename.clone();
         let export_format = export_state.export_format;
 
-        // Use shared atomic for progress tracking
-        let rows_exported = Arc::new(AtomicU64::new(0));
-        let rows_exported_clone = rows_exported.clone();
-
         cx.spawn(async move |this, cx| {
             let exporter = GenericExporter::new(connection, &driver_name);
 
             // Create progress callback
             let progress_callback: crate::exporter::ExportProgressCallback =
                 Box::new(move |progress: ExportProgress| {
-                    rows_exported_clone.store(progress.rows_exported, Ordering::SeqCst);
+                    if let Ok(mut snapshot) = progress_snapshot.lock() {
+                        snapshot.current_object = progress.current_table.unwrap_or_default();
+                        snapshot.total_objects = progress.total_tables;
+                        snapshot.completed_objects = progress.tables_completed;
+                        snapshot.rows_exported = progress.rows_exported;
+                        snapshot.total_rows = progress.total_rows;
+                        snapshot.message = progress.message;
+                        snapshot.log_level = LogLevel::Info;
+                    }
                 });
 
             let result = exporter
@@ -1077,24 +1356,28 @@ impl ExportWizard {
                             });
                         }
                         Err(e) => {
+                            let error = e.clone();
                             _ = this.update(cx, |this, cx| {
                                 this.state.is_exporting = false;
+                                this.state.last_export_error = Some(error.clone());
                                 this.state.add_log(
                                     LogLevel::Error,
-                                    format!("Failed to write file: {}", e),
+                                    format!("Failed to write file: {}", error),
                                 );
-                                cx.emit(ExportWizardEvent::ExportFailed(e));
+                                cx.emit(ExportWizardEvent::ExportFailed(error));
                                 cx.notify();
                             });
                         }
                     }
                 }
                 Err(e) => {
+                    let error = e.to_string();
                     _ = this.update(cx, |this, cx| {
                         this.state.is_exporting = false;
+                        this.state.last_export_error = Some(error.clone());
                         this.state
-                            .add_log(LogLevel::Error, format!("Export failed: {}", e));
-                        cx.emit(ExportWizardEvent::ExportFailed(e.to_string()));
+                            .add_log(LogLevel::Error, format!("Export failed: {}", error));
+                        cx.emit(ExportWizardEvent::ExportFailed(error));
                         cx.notify();
                     });
                 }
@@ -1105,22 +1388,33 @@ impl ExportWizard {
         .detach();
     }
 
-    fn start_csv_export(&mut self, connection: Arc<dyn Connection>, cx: &mut Context<Self>) {
+    fn start_csv_export(
+        &mut self,
+        connection: Arc<dyn Connection>,
+        progress_snapshot: Arc<Mutex<ExportProgressSnapshot>>,
+        cx: &mut Context<Self>,
+    ) {
         let export_state = self.state.clone();
         let driver_name = connection.driver_name().to_string();
 
         // Use shared atomic counters for progress tracking from the callback
         let rows_exported = Arc::new(AtomicU64::new(0));
-        let current_table_idx = Arc::new(AtomicU64::new(0));
         let rows_exported_clone = rows_exported.clone();
-        let current_table_idx_clone = current_table_idx.clone();
 
         cx.spawn(async move |this, cx| {
             // Create progress callback that updates shared atomics
             let progress_callback: Box<dyn Fn(CsvExportProgress) + Send + Sync> =
                 Box::new(move |progress: CsvExportProgress| {
                     rows_exported_clone.store(progress.rows_exported, Ordering::SeqCst);
-                    current_table_idx_clone.store(progress.table_index as u64, Ordering::SeqCst);
+                    if let Ok(mut snapshot) = progress_snapshot.lock() {
+                        snapshot.current_object = progress.current_table;
+                        snapshot.total_objects = progress.total_tables;
+                        snapshot.completed_objects = progress.table_index.saturating_sub(1);
+                        snapshot.rows_exported = progress.rows_exported;
+                        snapshot.total_rows = progress.total_rows;
+                        snapshot.message = Some(progress.message);
+                        snapshot.log_level = progress.log_level;
+                    }
                 });
 
             let exporter = CsvExporter::new(connection, export_state)
@@ -1173,11 +1467,13 @@ impl ExportWizard {
                     });
                 }
                 Err(e) => {
+                    let error = e.to_string();
                     _ = this.update(cx, |this, cx| {
                         this.state.is_exporting = false;
+                        this.state.last_export_error = Some(error.clone());
                         this.state
-                            .add_log(LogLevel::Error, format!("Export failed: {}", e));
-                        cx.emit(ExportWizardEvent::ExportFailed(e.to_string()));
+                            .add_log(LogLevel::Error, format!("Export failed: {}", error));
+                        cx.emit(ExportWizardEvent::ExportFailed(error));
                         cx.notify();
                     });
                 }
@@ -1186,6 +1482,259 @@ impl ExportWizard {
             anyhow::Ok(())
         })
         .detach();
+    }
+
+    fn show_help(&self, window: &mut Window, cx: &mut Context<Self>) {
+        let message = "Export wizard steps:\n\n1. Select tables and output folder.\n2. Choose fields for selected tables only.\n3. Set UDIF or CSV options.\n4. Start export and watch live progress.\n\nProfiles:\n- Save updates the currently opened/saved profile.\n- Save As... writes a new profile JSON.\n- Open... loads profile settings into the wizard.\n\nFallbacks:\n- Continue on error keeps exporting remaining tables when one table fails.\n- Retry No Sequences skips sequence current-value lookup.\n- Retry Data Only skips schema, indexes, foreign keys, and sequences.\n\nCSV options:\n- Delimiters control row, field, date, time, and decimal formatting.\n- Text qualifier wraps values and escapes matching quotes.\n- Zero padding date controls date sample style.\n\nProgress uses driver callbacks when row counts are known and estimated progress while long database operations are running.";
+        let receiver = window.prompt(PromptLevel::Info, message, None, &["OK"], cx);
+        cx.spawn(async move |_this, _cx| {
+            let _ = receiver.await;
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn copy_last_error(&mut self, cx: &mut Context<Self>) {
+        if let Some(error) = self.state.last_export_error.clone() {
+            cx.write_to_clipboard(ClipboardItem::new_string(error));
+            self.state
+                .add_log(LogLevel::Info, "Copied export error to clipboard");
+            cx.notify();
+        }
+    }
+
+    fn copy_log_messages(&mut self, cx: &mut Context<Self>) {
+        let log = self
+            .state
+            .log_messages
+            .iter()
+            .map(ExportLogMessage::format)
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !log.is_empty() {
+            cx.write_to_clipboard(ClipboardItem::new_string(log));
+            self.state
+                .add_log(LogLevel::Info, "Copied export log to clipboard");
+            cx.notify();
+        }
+    }
+
+    fn profile_dir() -> Option<PathBuf> {
+        dirs::config_dir().map(|config_dir| config_dir.join("zqlz").join("export_profiles"))
+    }
+
+    fn retry_without_sequences(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.include_sequences = false;
+        self.state.add_log(
+            LogLevel::Warning,
+            "Retrying without sequence current values",
+        );
+        self.start_export(window, cx);
+    }
+
+    fn retry_data_only(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.state.include_schema = false;
+        self.state.include_indexes = false;
+        self.state.include_foreign_keys = false;
+        self.state.include_sequences = false;
+        self.state.include_data = true;
+        self.state
+            .add_log(LogLevel::Warning, "Retrying as data-only export");
+        self.start_export(window, cx);
+    }
+
+    fn default_profile_path(&self) -> Option<PathBuf> {
+        let profile_name = self.state.current_profile_name.clone().unwrap_or_else(|| {
+            let now = chrono::Local::now();
+            format!("Export Profile {}", now.format("%Y-%m-%d %H:%M:%S"))
+        });
+        let filename = format!("{}.json", sanitize_profile_filename(&profile_name));
+        Self::profile_dir().map(|profile_dir| profile_dir.join(filename))
+    }
+
+    fn save_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(profile_path) = self.state.current_profile_path.clone() {
+            self.write_profile(profile_path, cx);
+        } else {
+            self.save_profile_as(window, cx);
+        }
+    }
+
+    fn save_profile_as(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        let Some(default_path) = self.default_profile_path() else {
+            self.state
+                .add_log(LogLevel::Error, "Could not resolve config directory");
+            cx.notify();
+            return;
+        };
+
+        let receiver = cx.prompt_for_new_path(&default_path, None);
+        cx.spawn(async move |this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                _ => return anyhow::Ok(()),
+            };
+
+            this.update(cx, |this, cx| {
+                this.write_profile(path, cx);
+            })?;
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn write_profile(&mut self, profile_path: PathBuf, cx: &mut Context<Self>) {
+        let profile_name = profile_path
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .map(|name| name.replace('_', " "))
+            .unwrap_or_else(|| "Export Profile".to_string());
+        let profile = ExportProfile::from_state(profile_name.clone(), &self.state);
+
+        let save_result = profile_path
+            .parent()
+            .ok_or_else(|| "Profile path has no parent directory".to_string())
+            .and_then(|profile_dir| {
+                std::fs::create_dir_all(profile_dir).map_err(|error| error.to_string())
+            })
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                serde_json::to_string_pretty(&profile).map_err(|error| error.to_string())
+            })
+            .and_then(|json| {
+                std::fs::write(&profile_path, json).map_err(|error| error.to_string())
+            });
+
+        match save_result {
+            Ok(()) => {
+                self.state.current_profile_path = Some(profile_path.clone());
+                self.state.current_profile_name = Some(profile_name);
+                self.state.add_log(
+                    LogLevel::Success,
+                    format!("Saved profile: {}", profile_path.display()),
+                );
+                cx.emit(ExportWizardEvent::SaveProfile(profile));
+                cx.notify();
+            }
+            Err(error) => {
+                self.state.add_log(
+                    LogLevel::Error,
+                    format!("Failed to save profile: {}", error),
+                );
+                cx.notify();
+            }
+        }
+    }
+
+    fn open_profile(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let receiver = cx.prompt_for_paths(gpui::PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Open Export Profile".into()),
+        });
+        let window_handle = window.window_handle();
+
+        cx.spawn(async move |this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.first() {
+                    Some(path) => path.clone(),
+                    None => return anyhow::Ok(()),
+                },
+                _ => return anyhow::Ok(()),
+            };
+
+            let json = match std::fs::read_to_string(&path) {
+                Ok(json) => json,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.state.add_log(
+                            LogLevel::Error,
+                            format!("Failed to read profile: {}", error),
+                        );
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+
+            let profile = match serde_json::from_str::<ExportProfile>(&json) {
+                Ok(profile) => profile,
+                Err(error) => {
+                    this.update(cx, |this, cx| {
+                        this.state.add_log(
+                            LogLevel::Error,
+                            format!("Failed to parse profile: {}", error),
+                        );
+                        cx.notify();
+                    })?;
+                    return anyhow::Ok(());
+                }
+            };
+
+            window_handle.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| {
+                    this.apply_profile(profile, path, window, cx);
+                })
+            })??;
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    fn apply_profile(
+        &mut self,
+        profile: ExportProfile,
+        path: PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.encoding = profile.encoding;
+        self.state.add_timestamp = profile.add_timestamp;
+        self.state.timestamp_format = profile.timestamp_format;
+        self.state.custom_timestamp_format = profile.custom_timestamp_format;
+        self.state.csv_options = profile.csv_options;
+        self.state.current_profile_path = Some(path);
+        self.state.current_profile_name = Some(profile.name.clone());
+
+        self.encoding_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.encoding, window, cx);
+        });
+        self.timestamp_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.timestamp_format, window, cx);
+        });
+        self.record_delimiter_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.csv_options.record_delimiter, window, cx);
+        });
+        self.field_delimiter_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.csv_options.field_delimiter, window, cx);
+        });
+        self.text_qualifier_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.csv_options.text_qualifier, window, cx);
+        });
+        self.binary_encoding_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.csv_options.binary_encoding, window, cx);
+        });
+        self.date_order_state.update(cx, |state, cx| {
+            state.set_selected_value(&self.state.csv_options.date_order, window, cx);
+        });
+        self.decimal_input_state.update(cx, |input, cx| {
+            input.set_value(self.state.csv_options.decimal_symbol.clone(), window, cx);
+        });
+        self.date_delimiter_input_state.update(cx, |input, cx| {
+            input.set_value(self.state.csv_options.date_delimiter.clone(), window, cx);
+        });
+        self.time_delimiter_input_state.update(cx, |input, cx| {
+            input.set_value(self.state.csv_options.time_delimiter.clone(), window, cx);
+        });
+
+        self.state.add_log(
+            LogLevel::Success,
+            format!("Opened profile: {}", profile.name),
+        );
+        cx.notify();
     }
 
     fn close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1264,6 +1813,8 @@ impl ExportWizard {
     fn render_step_1_table_selection(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let table_selection_validation_error = self.state.table_selection_validation_error.clone();
+        let tables_load_error = self.state.tables_load_error.clone();
+        let tables_loading = self.state.tables_loading;
 
         // Clone states needed for handlers
         let folder_input = self.folder_input_state.clone();
@@ -1344,11 +1895,11 @@ impl ExportWizard {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("You can specify the export file(s) name."),
+                    .child("Select source tables and review generated export file names."),
             )
             // Table list
             .child(
-                div()
+                v_flex()
                     .flex_1()
                     .w_full()
                     .border_1()
@@ -1356,7 +1907,39 @@ impl ExportWizard {
                     .rounded_md()
                     .bg(theme.background)
                     .overflow_hidden()
-                    .child(self.render_table_list(cx)),
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .h(px(30.0))
+                            .px_2()
+                            .gap_3()
+                            .items_center()
+                            .border_b_1()
+                            .border_color(theme.border)
+                            .bg(theme.secondary)
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(
+                                div()
+                                    .w(px(EXPORT_TABLE_CHECKBOX_WIDTH))
+                                    .flex_shrink_0()
+                                    .child("Use"),
+                            )
+                            .child(
+                                div()
+                                    .w(px(EXPORT_TABLE_NAME_WIDTH))
+                                    .flex_shrink_0()
+                                    .child("Table"),
+                            )
+                            .child(div().flex_1().child("Output file")),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .w_full()
+                            .overflow_hidden()
+                            .child(self.render_table_list(cx)),
+                    ),
             )
             // Format row
             .child(
@@ -1419,12 +2002,32 @@ impl ExportWizard {
                         .child(div().text_sm().text_color(theme.danger).child(error)),
                 )
             })
+            .when(tables_loading, |this| {
+                this.child(
+                    h_flex().gap_2().items_center().child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("Loading table metadata..."),
+                    ),
+                )
+            })
+            .when_some(tables_load_error, |this, error| {
+                this.child(
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(div().text_sm().text_color(theme.danger).child(error)),
+                )
+            })
     }
 
     fn render_table_list(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let tables = Arc::new(self.state.tables.clone());
         let table_count = tables.len();
+        let tables_loading = self.state.tables_loading;
+        let tables_load_error = self.state.tables_load_error.clone();
         let view = cx.entity().clone();
         div()
             .w_full()
@@ -1439,22 +2042,22 @@ impl ExportWizard {
                     menu.when_some(row_idx, |menu, idx| {
                         menu.item(PopupMenuItem::new("Select Only This").on_click({
                             let view = view_for_container_menu.clone();
-                            window.listener_for(&view, move |this, _, _, cx| {
-                                this.select_only_table(idx, cx);
+                            window.listener_for(&view, move |this, _, window, cx| {
+                                this.select_only_table(idx, window, cx);
                             })
                         }))
                         .separator()
                     })
                     .item(PopupMenuItem::new("Select All").on_click({
                         let view = view_for_container_menu.clone();
-                        window.listener_for(&view, |this, _, _, cx| {
-                            this.select_all_tables(cx);
+                        window.listener_for(&view, |this, _, window, cx| {
+                            this.select_all_tables(window, cx);
                         })
                     }))
                     .item(PopupMenuItem::new("Deselect All").on_click({
                         let view = view_for_container_menu.clone();
-                        window.listener_for(&view, |this, _, _, cx| {
-                            this.deselect_all_tables(cx);
+                        window.listener_for(&view, |this, _, window, cx| {
+                            this.deselect_all_tables(window, cx);
                         })
                     }))
                 }
@@ -1510,6 +2113,8 @@ impl ExportWizard {
                                                         .gap_3()
                                                         .items_center()
                                                         .cursor_pointer()
+                                                        .border_b_1()
+                                                        .border_color(theme.border)
                                                         .hover(|style| style.bg(theme.list_active))
                                                         .on_mouse_down(
                                                             gpui::MouseButton::Right,
@@ -1520,18 +2125,27 @@ impl ExportWizard {
                                                                 });
                                                             },
                                                         )
-                                                        .on_click(move |_, _, cx| {
+                                                        .on_click(move |_, window, cx| {
                                                             view_for_click.update(cx, |this, cx| {
-                                                                this.toggle_table_selection(index, cx);
+                                                                this.toggle_table_selection(index, window, cx);
                                                             });
                                                         })
                                                         .child(
-                                                            Checkbox::new(format!("table-{}", index))
-                                                                .checked(selected),
+                                                            div()
+                                                                .w(px(EXPORT_TABLE_CHECKBOX_WIDTH))
+                                                                .flex_shrink_0()
+                                                                .child(
+                                                                    Checkbox::new(format!("table-{}", index))
+                                                                        .checked(selected),
+                                                                ),
                                                         )
                                                         .child(
                                                             div()
-                                                                .w(px(180.0))
+                                                                .w(px(EXPORT_TABLE_NAME_WIDTH))
+                                                                .flex_shrink_0()
+                                                                .overflow_hidden()
+                                                                .whitespace_nowrap()
+                                                                .text_ellipsis()
                                                                 .text_sm()
                                                                 .text_color(theme.foreground)
                                                                 .child(table_name),
@@ -1539,6 +2153,10 @@ impl ExportWizard {
                                                         .child(
                                                             div()
                                                                 .flex_1()
+                                                                .min_w_0()
+                                                                .overflow_hidden()
+                                                                .whitespace_nowrap()
+                                                                .text_ellipsis()
                                                                 .text_sm()
                                                                 .text_color(theme.muted_foreground)
                                                                 .child(output_filename),
@@ -1564,12 +2182,30 @@ impl ExportWizard {
                                 .size_full()
                                 .justify_center()
                                 .items_center()
-                                .child(
+                                .gap_2()
+                                .child({
+                                    let message = if tables_loading {
+                                        "Loading table metadata..."
+                                    } else if tables_load_error.is_some() {
+                                        "Could not load table metadata"
+                                    } else {
+                                        "No tables available"
+                                    };
+
                                     div()
                                         .text_sm()
                                         .text_color(theme.muted_foreground)
-                                        .child("No tables available"),
-                                ),
+                                        .child(message)
+                                })
+                                .when_some(tables_load_error, |this, error| {
+                                    this.child(
+                                        div()
+                                            .max_w(px(520.0))
+                                            .text_sm()
+                                            .text_color(theme.danger)
+                                            .child(error),
+                                    )
+                                }),
                         )
                     })
                     .child(
@@ -1800,129 +2436,230 @@ impl ExportWizard {
     fn render_step_3_csv_options(&self, cx: &Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         let format_opts = &self.state.csv_options;
+        let sample = self.csv_format_sample();
 
         v_flex()
             .w_full()
             .h_full()
             .overflow_y_scrollbar()
-            .gap_3()
             .p_4()
-            // Description
             .child(
-                div()
-                    .text_sm()
-                    .text_color(theme.foreground)
-                    .child("You can define some additional options."),
-            )
-            // UDIF-only options: shown when the format is not CSV
-            .when(self.state.export_format != ExportFormat::Csv, |this| {
-                this.child(self.render_section_header("UDIF Options", cx))
+                v_flex()
+                    .w_full()
+                    .max_w(px(720.0))
+                    .mx_auto()
+                    .gap_4()
+                    // Description
                     .child(
-                        v_flex().w_full().gap_2().child(
-                            Checkbox::new("schema-only")
-                                // Checkbox is checked when data is *excluded* (schema-only)
-                                .checked(!self.state.include_data)
-                                .label("Schema only (no data)")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_include_data(cx);
-                                })),
-                        ),
+                        div()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .child("You can define some additional options."),
                     )
-            })
-            // Append & Continue on error (CSV only)
-            .when(self.state.export_format == ExportFormat::Csv, |this| {
-                this.child(
-                    v_flex()
-                        .w_full()
-                        .gap_2()
-                        .child(
-                            Checkbox::new("append")
-                                .checked(format_opts.append)
-                                .label("Append")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_append(cx);
-                                })),
+                    // UDIF-only options: shown when the format is not CSV
+                    .when(self.state.export_format != ExportFormat::Csv, |this| {
+                        this.child(self.render_section_header("UDIF Options", cx))
+                            .child(
+                                v_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new("schema-only")
+                                            // Checkbox is checked when data is *excluded* (schema-only)
+                                            .checked(!self.state.include_data)
+                                            .label("Schema only (no data)")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_include_data(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Checkbox::new("include-sequences")
+                                            .checked(self.state.include_sequences)
+                                            .label("Include sequence current values")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_include_sequences(cx);
+                                            })),
+                                    ),
+                            )
+                    })
+                    // Append & Continue on error (CSV only)
+                    .when(self.state.export_format == ExportFormat::Csv, |this| {
+                        this.child(
+                            v_flex()
+                                .w_full()
+                                .gap_2()
+                                .child(
+                                    Checkbox::new("append")
+                                        .checked(format_opts.append)
+                                        .label("Append")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_append(cx);
+                                        })),
+                                )
+                                .child(
+                                    Checkbox::new("continue-on-error")
+                                        .checked(format_opts.continue_on_error)
+                                        .label("Continue on error")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.toggle_continue_on_error(cx);
+                                        })),
+                                ),
                         )
-                        .child(
-                            Checkbox::new("continue-on-error")
-                                .checked(format_opts.continue_on_error)
-                                .label("Continue on error")
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.toggle_continue_on_error(cx);
-                                })),
-                        ),
-                )
-            })
-            // File Formats section
-            // File Formats section (CSV only)
-            .when(self.state.export_format == ExportFormat::Csv, |this| {
-                this.child(self.render_section_header("File Formats", cx))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_2()
+                    })
+                    // File Formats section
+                    // File Formats section (CSV only)
+                    .when(self.state.export_format == ExportFormat::Csv, |this| {
+                        this.child(self.render_section_header("File Formats", cx))
                             .child(
-                                Checkbox::new("include-headers")
-                                    .checked(format_opts.include_headers)
-                                    .label("Include column titles")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_include_headers(cx);
-                                    })),
+                                v_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new("include-headers")
+                                            .checked(format_opts.include_headers)
+                                            .label("Include column titles")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_include_headers(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        self.render_format_row(
+                                            "Record Delimiter:",
+                                            Select::new(&self.record_delimiter_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        self.render_format_row(
+                                            "Field Delimiter:",
+                                            Select::new(&self.field_delimiter_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        self.render_format_row(
+                                            "Text Qualifier:",
+                                            Select::new(&self.text_qualifier_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    ),
                             )
+                            // Data Formats section
+                            .child(self.render_section_header("Data Formats", cx))
                             .child(
-                                self.render_format_row(
-                                    "Record Delimiter:",
-                                    Select::new(&self.record_delimiter_state)
-                                        .small()
-                                        .w(px(180.0)),
-                                    cx,
-                                ),
+                                v_flex()
+                                    .w_full()
+                                    .gap_2()
+                                    .child(
+                                        Checkbox::new("blank-if-zero")
+                                            .checked(format_opts.blank_if_zero)
+                                            .label("Blank if zero")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_blank_if_zero(cx);
+                                            })),
+                                    )
+                                    .child(
+                                        Checkbox::new("zero-padding-date")
+                                            .checked(format_opts.zero_padding_date)
+                                            .label("Zero padding date")
+                                            .on_click(cx.listener(|this, _, _, cx| {
+                                                this.toggle_zero_padding_date(cx);
+                                            })),
+                                    )
+                                    .child(self.render_format_row(
+                                        "Date Order:",
+                                        Select::new(&self.date_order_state).small().w(px(180.0)),
+                                        cx,
+                                    ))
+                                    .child(
+                                        self.render_format_row(
+                                            "Date Delimiter:",
+                                            Input::new(&self.date_delimiter_input_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        self.render_format_row(
+                                            "Time Delimiter:",
+                                            Input::new(&self.time_delimiter_input_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    )
+                                    .child(self.render_format_row(
+                                        "Decimal Symbol:",
+                                        Input::new(&self.decimal_input_state).small().w(px(180.0)),
+                                        cx,
+                                    ))
+                                    .child(
+                                        self.render_format_row(
+                                            "Binary Data Encoding:",
+                                            Select::new(&self.binary_encoding_state)
+                                                .small()
+                                                .w(px(180.0)),
+                                            cx,
+                                        ),
+                                    )
+                                    .child(
+                                        div()
+                                            .mt_2()
+                                            .p_2()
+                                            .border_1()
+                                            .border_color(theme.border)
+                                            .rounded_md()
+                                            .bg(theme.secondary)
+                                            .text_xs()
+                                            .font_family(theme.mono_font_family.clone())
+                                            .text_color(theme.foreground)
+                                            .child(sample),
+                                    ),
                             )
-                            .child(
-                                self.render_format_row(
-                                    "Field Delimiter:",
-                                    Select::new(&self.field_delimiter_state)
-                                        .small()
-                                        .w(px(180.0)),
-                                    cx,
-                                ),
-                            )
-                            .child(self.render_format_row(
-                                "Text Qualifier:",
-                                Select::new(&self.text_qualifier_state).small().w(px(180.0)),
-                                cx,
-                            )),
-                    )
-                    // Data Formats section
-                    .child(self.render_section_header("Data Formats", cx))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .gap_2()
-                            .child(
-                                Checkbox::new("blank-if-zero")
-                                    .checked(format_opts.blank_if_zero)
-                                    .label("Blank if zero")
-                                    .on_click(cx.listener(|this, _, _, cx| {
-                                        this.toggle_blank_if_zero(cx);
-                                    })),
-                            )
-                            .child(self.render_format_row(
-                                "Decimal Symbol:",
-                                Input::new(&self.decimal_input_state).small().w(px(80.0)),
-                                cx,
-                            ))
-                            .child(
-                                self.render_format_row(
-                                    "Binary Data Encoding:",
-                                    Select::new(&self.binary_encoding_state)
-                                        .small()
-                                        .w(px(180.0)),
-                                    cx,
-                                ),
-                            ),
-                    )
-            })
+                    }),
+            )
+    }
+
+    fn csv_format_sample(&self) -> String {
+        let options = &self.state.csv_options;
+        let date = match (options.date_order, options.zero_padding_date) {
+            (DateOrder::Dmy, true) => format!(
+                "24{}08{}2026",
+                options.date_delimiter, options.date_delimiter
+            ),
+            (DateOrder::Dmy, false) => format!(
+                "24{}8{}2026",
+                options.date_delimiter, options.date_delimiter
+            ),
+            (DateOrder::Mdy, true) => format!(
+                "08{}24{}2026",
+                options.date_delimiter, options.date_delimiter
+            ),
+            (DateOrder::Mdy, false) => format!(
+                "8{}24{}2026",
+                options.date_delimiter, options.date_delimiter
+            ),
+            (DateOrder::Ymd, true) => format!(
+                "2026{}08{}24",
+                options.date_delimiter, options.date_delimiter
+            ),
+            (DateOrder::Ymd, false) => format!(
+                "2026{}8{}24",
+                options.date_delimiter, options.date_delimiter
+            ),
+        };
+        let delimiter = options.field_delimiter.value();
+        format!(
+            "Sample: id{delimiter}name{delimiter}created_at\n1{delimiter}Ada{delimiter}{date} 14{}05{}09",
+            options.time_delimiter, options.time_delimiter
+        )
     }
 
     fn render_section_header(&self, title: &str, cx: &Context<Self>) -> impl IntoElement {
@@ -1964,6 +2701,7 @@ impl ExportWizard {
         let stats = &self.state.stats;
         let messages = Arc::new(self.state.log_messages.clone());
         let message_count = messages.len();
+        let last_error = self.state.last_export_error.clone();
 
         v_flex()
             .w_full()
@@ -1975,15 +2713,34 @@ impl ExportWizard {
             .child(
                 div()
                     .text_sm()
-                    .text_color(theme.foreground)
+                    .text_color(if last_error.is_some() {
+                        theme.danger
+                    } else {
+                        theme.foreground
+                    })
                     .child(if self.state.is_complete {
                         "Export completed successfully."
+                    } else if last_error.is_some() {
+                        "Export failed. Copy the error or retry with a fallback below."
                     } else if self.state.is_exporting {
                         "Exporting data..."
                     } else {
                         "We have gathered all information the wizard needs to export your data. Click the Start button to begin exporting."
                     }),
             )
+            .when_some(last_error, |this, error| {
+                this.child(
+                    div()
+                        .w_full()
+                        .p_2()
+                        .border_1()
+                        .border_color(theme.danger)
+                        .rounded_md()
+                        .text_sm()
+                        .text_color(theme.danger)
+                        .child(error),
+                )
+            })
             // Statistics
             .child(
                 v_flex()
@@ -2158,6 +2915,7 @@ impl Render for ExportWizard {
         let step = self.state.current_step;
         let is_exporting = self.state.is_exporting;
         let is_complete = self.state.is_complete;
+        let tables_loading = self.state.tables_loading;
 
         // Render step content first (before borrowing theme)
         // This allows mutable borrows for step renderers that need cx.listener
@@ -2188,6 +2946,38 @@ impl Render for ExportWizard {
 
         let start_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
             this.start_export(window, cx);
+        });
+
+        let help_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.show_help(window, cx);
+        });
+
+        let save_profile_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.save_profile(window, cx);
+        });
+
+        let save_profile_as_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.save_profile_as(window, cx);
+        });
+
+        let open_profile_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.open_profile(window, cx);
+        });
+
+        let copy_error_handler = cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.copy_last_error(cx);
+        });
+
+        let copy_log_handler = cx.listener(|this, _: &ClickEvent, _, cx| {
+            this.copy_log_messages(cx);
+        });
+
+        let retry_without_sequences_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.retry_without_sequences(window, cx);
+        });
+
+        let retry_data_only_handler = cx.listener(|this, _: &ClickEvent, window, cx| {
+            this.retry_data_only(window, cx);
         });
 
         // Separate handlers needed for conditional buttons (can't clone listeners)
@@ -2237,18 +3027,88 @@ impl Render for ExportWizard {
                     .child(
                         h_flex()
                             .gap_2()
-                            .child(Button::new("help").child("?").ghost().small())
+                            .child(
+                                Button::new("help")
+                                    .child("?")
+                                    .ghost()
+                                    .small()
+                                    .on_click(help_handler),
+                            )
                             .child(
                                 Button::new("save-profile")
-                                    .child("Save Profile")
+                                    .child("Save")
                                     .ghost()
-                                    .small(),
-                            ),
+                                    .small()
+                                    .disabled(is_exporting)
+                                    .on_click(save_profile_handler),
+                            )
+                            .child(
+                                Button::new("save-profile-as")
+                                    .child("Save As...")
+                                    .ghost()
+                                    .small()
+                                    .disabled(is_exporting)
+                                    .on_click(save_profile_as_handler),
+                            )
+                            .child(
+                                Button::new("open-profile")
+                                    .child("Open...")
+                                    .ghost()
+                                    .small()
+                                    .disabled(is_exporting)
+                                    .on_click(open_profile_handler),
+                            )
+                            .when_some(self.state.current_profile_name.clone(), |this, name| {
+                                this.child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .max_w(px(180.0))
+                                        .overflow_hidden()
+                                        .whitespace_nowrap()
+                                        .text_ellipsis()
+                                        .child(name),
+                                )
+                            }),
                     )
                     // Right side: Navigation buttons
                     .child(
                         h_flex()
                             .gap_2()
+                            .when(
+                                step == ExportWizardStep::Progress
+                                    && self.state.last_export_error.is_some(),
+                                |this| {
+                                    this.child(
+                                        Button::new("copy-error")
+                                            .child("Copy Error")
+                                            .ghost()
+                                            .small()
+                                            .on_click(copy_error_handler),
+                                    )
+                                    .child(
+                                        Button::new("copy-log")
+                                            .child("Copy Log")
+                                            .ghost()
+                                            .small()
+                                            .on_click(copy_log_handler),
+                                    )
+                                    .child(
+                                        Button::new("retry-no-sequences")
+                                            .child("Retry No Sequences")
+                                            .ghost()
+                                            .small()
+                                            .on_click(retry_without_sequences_handler),
+                                    )
+                                    .child(
+                                        Button::new("retry-data-only")
+                                            .child("Retry Data Only")
+                                            .ghost()
+                                            .small()
+                                            .on_click(retry_data_only_handler),
+                                    )
+                                },
+                            )
                             .when(step == ExportWizardStep::Progress && is_complete, |this| {
                                 this.child(
                                     Button::new("open-folder")
@@ -2290,7 +3150,7 @@ impl Render for ExportWizard {
                                     .child("Next")
                                     .primary()
                                     .small()
-                                    .disabled(!step.can_go_next() || is_exporting)
+                                    .disabled(!step.can_go_next() || is_exporting || tables_loading)
                                     .on_click(next_handler),
                             )
                             .when(step == ExportWizardStep::Progress, |this| {
@@ -2308,7 +3168,7 @@ impl Render for ExportWizard {
                                             .child("Start")
                                             .small()
                                             .primary()
-                                            .disabled(is_exporting)
+                                            .disabled(is_exporting || tables_loading)
                                             .on_click(start_handler),
                                     )
                                 }

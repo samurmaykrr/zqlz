@@ -608,6 +608,7 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     let mut current = String::new();
     let mut in_string = false;
     let mut string_char = '"';
+    let mut dollar_quote_tag: Option<String> = None;
     let mut in_line_comment = false;
     let mut in_block_comment = false;
     let chars: Vec<char> = sql.chars().collect();
@@ -621,6 +622,18 @@ pub fn split_statements(sql: &str) -> Vec<String> {
         } else {
             None
         };
+
+        if let Some(tag) = dollar_quote_tag.clone() {
+            if chars_match(&chars, i, &tag) {
+                current.push_str(&tag);
+                dollar_quote_tag = None;
+                i += tag.len();
+            } else {
+                current.push(c);
+                i += 1;
+            }
+            continue;
+        }
 
         // Handle line comments
         if !in_string && !in_block_comment && c == '-' && next == Some('-') {
@@ -656,6 +669,16 @@ pub fn split_statements(sql: &str) -> Vec<String> {
                 continue;
             }
             i += 1;
+            continue;
+        }
+
+        if !in_string
+            && c == '$'
+            && let Some(tag) = read_dollar_quote_tag(&chars, i)
+        {
+            current.push_str(&tag);
+            dollar_quote_tag = Some(tag.clone());
+            i += tag.len();
             continue;
         }
 
@@ -705,4 +728,34 @@ pub fn split_statements(sql: &str) -> Vec<String> {
     }
 
     statements
+}
+
+fn read_dollar_quote_tag(chars: &[char], start: usize) -> Option<String> {
+    let mut tag = String::from("$");
+    let mut index = start + 1;
+
+    while index < chars.len() {
+        let c = chars[index];
+        if c == '$' {
+            tag.push(c);
+            return Some(tag);
+        }
+        if index == start + 1 && c.is_ascii_digit() {
+            return None;
+        }
+        if !(c == '_' || c.is_ascii_alphanumeric()) {
+            return None;
+        }
+        tag.push(c);
+        index += 1;
+    }
+
+    None
+}
+
+fn chars_match(chars: &[char], start: usize, needle: &str) -> bool {
+    needle
+        .chars()
+        .enumerate()
+        .all(|(offset, c)| chars.get(start + offset) == Some(&c))
 }

@@ -5,6 +5,7 @@ use gpui::*;
 use std::cell::RefCell;
 use std::rc::Rc;
 use uuid::Uuid;
+use zqlz_core::KeyValueDeleteRequest;
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, checkbox::Checkbox,
     dialog::DialogButtonProps, v_flex,
@@ -40,12 +41,13 @@ impl MainView {
             return;
         };
 
-        let Some(connection) = app_state.connections.get(connection_id) else {
+        let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
             tracing::error!("Connection not found: {}", connection_id);
             return;
         };
 
         let connection = connection.clone();
+        let key_value_service = app_state.key_value_service.clone();
         let continue_on_error = Rc::new(RefCell::new(false));
 
         let title = if is_multi {
@@ -62,6 +64,7 @@ impl MainView {
 
         window.open_dialog(cx, move |dialog, _window, cx| {
             let connection = connection.clone();
+            let key_value_service = key_value_service.clone();
             let key_names = key_names.clone();
             let continue_on_error = continue_on_error.clone();
             let continue_on_error_for_ok = continue_on_error.clone();
@@ -108,41 +111,32 @@ impl MainView {
                 )
                 .on_ok(move |_, _window, cx| {
                     let connection = connection.clone();
+                    let key_value_service = key_value_service.clone();
                     let key_names = key_names.clone();
                     let continue_on_error = *continue_on_error_for_ok.borrow();
 
                     cx.spawn(async move |_cx| {
-                        let mut errors: Vec<String> = Vec::new();
-                        let mut deleted_keys: Vec<String> = Vec::new();
+                        let delete_outcome = key_value_service
+                            .delete_keys(
+                                connection,
+                                KeyValueDeleteRequest {
+                                    key_names: key_names.clone(),
+                                    continue_on_error,
+                                },
+                            )
+                            .await;
 
-                        for key_name in &key_names {
-                            let cmd = format!("DEL {}", key_name);
-                            match connection.execute(&cmd, &[]).await {
-                                Ok(_) => {
-                                    tracing::info!("Key '{}' deleted successfully", key_name);
-                                    deleted_keys.push(key_name.clone());
-                                }
-                                Err(e) => {
-                                    let error_msg = format!("'{}': {}", key_name, e);
-                                    tracing::error!("Failed to delete key {}", error_msg);
-
-                                    if continue_on_error {
-                                        errors.push(error_msg);
-                                    } else {
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-
-                        if errors.is_empty() {
-                            tracing::info!("Deleted {} key(s)", deleted_keys.len());
+                        if delete_outcome.errors.is_empty() {
+                            tracing::info!(
+                                "Deleted {} key(s)",
+                                delete_outcome.deleted_key_names.len()
+                            );
                         } else {
                             tracing::warn!(
                                 "Deleted {} of {} keys. Errors: {}",
-                                deleted_keys.len(),
+                                delete_outcome.deleted_key_names.len(),
                                 key_names.len(),
-                                errors.join("; ")
+                                delete_outcome.errors.join("; ")
                             );
                         }
                     })

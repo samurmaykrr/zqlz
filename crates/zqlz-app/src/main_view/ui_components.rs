@@ -5,7 +5,7 @@ use std::time::Duration;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, Sizable, TitleBar, ZqlzIcon,
+    ActiveTheme, Icon, IconName, Sizable, ZqlzIcon,
     animation::cubic_bezier,
     button::{Button, ButtonVariants},
     caption, h_flex,
@@ -15,9 +15,7 @@ use zqlz_ui::widgets::{
 use crate::actions::NewQuery;
 use crate::app::AppState;
 use crate::components::InspectorView;
-
-#[cfg(not(target_os = "macos"))]
-use crate::AppMenuBarGlobal;
+use crate::workspace::workspace_title_bar;
 
 use super::MainView;
 
@@ -32,8 +30,8 @@ impl MainView {
             panel.set_active_view(view, cx);
         });
 
-        self.dock_area.update(cx, |area, cx| {
-            area.activate_panel(
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.reveal_panel(
                 "InspectorPanel",
                 zqlz_ui::widgets::dock::DockPlacement::Right,
                 window,
@@ -47,12 +45,10 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let active_table_viewer = self.dock_area.read(cx).active_panel(cx).and_then(|panel| {
-            panel
-                .view()
-                .downcast::<crate::components::TableViewerPanel>()
-                .ok()
-        });
+        let active_table_viewer = self
+            .workspace_controller
+            .read(cx)
+            .active_center_view::<crate::components::TableViewerPanel>(cx);
 
         if let Some(viewer) = active_table_viewer {
             viewer.update(cx, |viewer, cx| {
@@ -140,27 +136,11 @@ impl MainView {
     }
     /// Render the title bar with menu items
     pub(super) fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        // On Windows/Linux, include the AppMenuBar in the title bar
-        #[cfg(not(target_os = "macos"))]
-        let app_menu_bar = cx.try_global::<AppMenuBarGlobal>().map(|g| g.0.clone());
-
-        #[cfg(not(target_os = "macos"))]
-        {
-            TitleBar::new()
-                .child(app_menu_bar.unwrap_or_else(|| {
-                    // Fallback: create a new AppMenuBar if not found
-                    zqlz_ui::widgets::menu::AppMenuBar::new(cx)
-                }))
-                .child(self.render_title_bar_buttons(cx))
-                .child(self.render_title_bar_settings(cx))
-        }
-
-        #[cfg(target_os = "macos")]
-        {
-            TitleBar::new()
-                .child(self.render_title_bar_buttons(cx))
-                .child(self.render_title_bar_settings(cx))
-        }
+        workspace_title_bar(
+            self.render_title_bar_buttons(cx).into_any_element(),
+            self.render_title_bar_settings(cx).into_any_element(),
+            cx,
+        )
     }
 
     fn render_title_bar_buttons(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -174,6 +154,7 @@ impl MainView {
                     .small()
                     .label("+ Connection")
                     .on_click(cx.listener(|this, _, window, cx| {
+                        this.show_settings_page = false;
                         this.open_new_connection_dialog(window, cx);
                     })),
             )
@@ -184,6 +165,7 @@ impl MainView {
                     .label("+ Query")
                     .on_click(cx.listener(|this, _, window, cx| {
                         tracing::info!("New query button clicked");
+                        this.show_settings_page = false;
                         this.handle_new_query(&NewQuery, window, cx);
                     })),
             )
@@ -194,9 +176,14 @@ impl MainView {
             Button::new("settings")
                 .ghost()
                 .small()
-                .label("Settings")
+                .icon(IconName::Settings2)
                 .on_click(cx.listener(|this, _, window, cx| {
-                    this.open_settings_panel(window, cx);
+                    if this.show_settings_page {
+                        this.show_settings_page = false;
+                        cx.notify();
+                    } else {
+                        this.open_settings_panel(window, cx);
+                    }
                 })),
         )
     }
@@ -209,14 +196,14 @@ impl MainView {
         let muted_fg = theme.muted_foreground;
 
         let connection_count = if let Some(app_state) = cx.try_global::<AppState>() {
-            app_state.saved_connections().len()
+            app_state.connection_service.list_saved_connections().len()
         } else {
             0
         };
 
         let connected_status = if let Some(id) = self.active_connection_id(cx) {
             if let Some(app_state) = cx.try_global::<AppState>() {
-                if app_state.is_connected(id) {
+                if app_state.connection_service.is_connection_active(id) {
                     "Connected"
                 } else {
                     "Disconnected"

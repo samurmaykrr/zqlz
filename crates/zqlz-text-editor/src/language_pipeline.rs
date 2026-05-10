@@ -1,12 +1,72 @@
 use crate::{
-    AnchoredCodeAction, AnchoredInlayHint, Bias, Cursor, Diagnostic, DiagnosticLevel,
-    EditorInlayHint, FoldRegion, Highlight, HighlightKind, Position, SyntaxHighlighter,
-    SyntaxRefreshStrategy, SyntaxSnapshot, TextBuffer, buffer::Change, detect_folds,
-    detect_folds_in_range,
+    Anchor, Bias, Cursor, EditorInlayHint, FoldRegion, Highlight, HighlightKind, InlayHintKind,
+    InlayHintSide, Position, SyntaxHighlighter, SyntaxRefreshStrategy, SyntaxSnapshot, TextBuffer,
+    buffer::Change, detect_folds, detect_folds_in_range,
 };
 use gpui::Task;
 use lsp_types::CodeActionOrCommand;
 use std::sync::Arc;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchoredInlayHint {
+    pub anchor: Anchor,
+    pub label: String,
+    pub side: InlayHintSide,
+    pub kind: Option<InlayHintKind>,
+    pub padding_left: bool,
+    pub padding_right: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AnchoredCodeAction {
+    pub line: usize,
+    pub label: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct Diagnostic {
+    pub line: usize,
+    pub column: usize,
+    pub end_line: Option<usize>,
+    pub end_column: Option<usize>,
+    pub message: String,
+    pub severity: DiagnosticLevel,
+    pub source: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DiagnosticLevel {
+    Error,
+    Warning,
+    Info,
+    Hint,
+}
+
+impl From<Option<lsp_types::DiagnosticSeverity>> for DiagnosticLevel {
+    fn from(severity: Option<lsp_types::DiagnosticSeverity>) -> Self {
+        match severity {
+            Some(lsp_types::DiagnosticSeverity::ERROR) => Self::Error,
+            Some(lsp_types::DiagnosticSeverity::WARNING) => Self::Warning,
+            Some(lsp_types::DiagnosticSeverity::INFORMATION) => Self::Info,
+            Some(lsp_types::DiagnosticSeverity::HINT) => Self::Hint,
+            _ => Self::Error,
+        }
+    }
+}
+
+impl From<lsp_types::Diagnostic> for Diagnostic {
+    fn from(diagnostic: lsp_types::Diagnostic) -> Self {
+        Self {
+            line: diagnostic.range.start.line as usize,
+            column: diagnostic.range.start.character as usize,
+            end_line: Some(diagnostic.range.end.line as usize),
+            end_column: Some(diagnostic.range.end.character as usize),
+            message: diagnostic.message,
+            severity: diagnostic.severity.into(),
+            source: diagnostic.source,
+        }
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FoldInvalidation {
@@ -50,6 +110,7 @@ pub struct SyntaxParseToken {
 
 pub struct LanguagePipelineState {
     syntax_highlighter: Option<SyntaxHighlighter>,
+    syntax_language_profile: &'static str,
     syntax_snapshot: SyntaxSnapshot,
     syntax_generation: u64,
     syntax_parse_task: Task<anyhow::Result<()>>,
@@ -83,6 +144,7 @@ impl LanguagePipelineState {
 
         Self {
             syntax_highlighter,
+            syntax_language_profile: "sql",
             syntax_snapshot: SyntaxSnapshot::empty(0),
             syntax_generation: 0,
             syntax_parse_task: Task::ready(Ok(())),
@@ -143,6 +205,23 @@ impl LanguagePipelineState {
 
     pub fn has_syntax_highlighting(&self) -> bool {
         self.syntax_highlighter.is_some()
+    }
+
+    pub fn syntax_language_profile(&self) -> &'static str {
+        self.syntax_language_profile
+    }
+
+    pub fn set_syntax_language_profile(&mut self, language_profile: &'static str) -> bool {
+        if self.syntax_language_profile == language_profile {
+            return false;
+        }
+
+        self.syntax_language_profile = language_profile;
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.set_language_profile(language_profile);
+        }
+        self.bump_syntax_parse_generation();
+        true
     }
 
     pub fn syntax_generation(&self) -> u64 {
@@ -213,6 +292,8 @@ impl LanguagePipelineState {
     }
 
     pub fn restore_syntax_highlighter(&mut self, highlighter: SyntaxHighlighter) {
+        let mut highlighter = highlighter;
+        highlighter.set_language_profile(self.syntax_language_profile);
         self.syntax_highlighter = Some(highlighter);
     }
 

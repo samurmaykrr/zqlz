@@ -6,9 +6,10 @@ use std::sync::Arc;
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
     DialectInfo, DriverCapabilities, Result, ZqlzError,
+    security::{SshAuthMethod, SshTunnelConfig},
 };
 
-use crate::PostgresConnection;
+use crate::{PostgresConnectOptions, PostgresConnection, PostgresSshTunnel};
 
 /// PostgreSQL database driver
 pub struct PostgresDriver;
@@ -89,18 +90,39 @@ impl DatabaseDriver for PostgresDriver {
         let ssl_ca_cert = config.get_string("ssl_ca_cert");
         let ssl_client_cert = config.get_string("ssl_client_cert");
         let ssl_client_key = config.get_string("ssl_client_key");
+        validate_ssl_config(&ssl_mode, ssl_ca_cert.as_deref())?;
 
-        let conn = PostgresConnection::connect(
-            &host,
-            port,
-            &database,
-            user.as_deref(),
-            password.as_deref(),
-            &ssl_mode,
-            ssl_ca_cert.as_deref(),
-            ssl_client_cert.as_deref(),
-            ssl_client_key.as_deref(),
-        )
+        let connect_timeout_seconds = parse_optional_u64(config, "connect_timeout")?;
+        let application_name = config
+            .get_string("application_name")
+            .filter(|value| !value.is_empty());
+        let search_path = config
+            .get_string("search_path")
+            .filter(|value| !value.is_empty());
+        let keepalive = parse_bool(config, "keepalive", true);
+        let ssh_tunnel = build_ssh_tunnel(config, &host, port)?;
+        let (connect_host, connect_port) = if let Some(tunnel) = ssh_tunnel.as_ref() {
+            ("127.0.0.1".to_string(), tunnel.local_port())
+        } else {
+            (host.clone(), port)
+        };
+
+        let conn = PostgresConnection::connect(PostgresConnectOptions {
+            host: connect_host,
+            port: connect_port,
+            database: database.clone(),
+            user,
+            password,
+            ssl_mode: ssl_mode.clone(),
+            ssl_ca_cert,
+            ssl_client_cert,
+            ssl_client_key,
+            connect_timeout_seconds,
+            application_name,
+            search_path,
+            keepalive,
+            ssh_tunnel,
+        })
         .await
         .map_err(|e| {
             tracing::error!(error = %e, "failed to connect to PostgreSQL database");
@@ -214,7 +236,7 @@ impl DatabaseDriver for PostgresDriver {
                     .row_group(10)
                     .tab("ssl"),
                 // Advanced tab fields
-                ConnectionField::text("connect_timeout", "Connect Timeout (seconds)")
+                ConnectionField::number("connect_timeout", "Connect Timeout (seconds)")
                     .placeholder("10")
                     .default_value("10")
                     .help_text("Maximum time to wait for connection")
@@ -232,7 +254,232 @@ impl DatabaseDriver for PostgresDriver {
                     .default_value("true")
                     .help_text("Send TCP keepalive packets to maintain connection")
                     .tab("advanced"),
+                ConnectionField::boolean("ssh_enabled", "Use SSH Tunnel")
+                    .default_value("false")
+                    .tab("ssh"),
+                ConnectionField::text("ssh_host", "SSH Host")
+                    .placeholder("bastion.example.com")
+                    .width(0.7)
+                    .row_group(20)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_port", "SSH Port")
+                    .placeholder("22")
+                    .default_value("22")
+                    .width(0.3)
+                    .row_group(20)
+                    .tab("ssh"),
+                ConnectionField::text("ssh_username", "SSH Username")
+                    .width(0.5)
+                    .row_group(21)
+                    .tab("ssh"),
+                ConnectionField::select(
+                    "ssh_auth_method",
+                    "SSH Auth Method",
+                    vec![
+                        ConnectionFieldOption::new("password", "Password"),
+                        ConnectionFieldOption::new("private_key", "Private Key"),
+                        ConnectionFieldOption::new("agent", "Agent"),
+                    ],
+                )
+                .default_value("password")
+                .width(0.5)
+                .row_group(21)
+                .tab("ssh"),
+                ConnectionField::password("ssh_password", "SSH Password").tab("ssh"),
+                ConnectionField::file_path("ssh_private_key", "SSH Private Key")
+                    .placeholder("~/.ssh/id_rsa")
+                    .with_extensions(vec!["pem", "key"])
+                    .width(0.5)
+                    .row_group(22)
+                    .tab("ssh"),
+                ConnectionField::password("ssh_private_key_passphrase", "SSH Key Passphrase")
+                    .width(0.5)
+                    .row_group(22)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_timeout_seconds", "SSH Timeout (seconds)")
+                    .default_value("30")
+                    .width(0.5)
+                    .row_group(23)
+                    .tab("ssh"),
+                ConnectionField::number("ssh_keepalive_seconds", "SSH Keepalive (seconds)")
+                    .default_value("0")
+                    .width(0.5)
+                    .row_group(23)
+                    .tab("ssh"),
             ],
         }
+    }
+}
+
+fn build_ssh_tunnel(
+    config: &ConnectionConfig,
+    remote_host: &str,
+    remote_port: u16,
+) -> Result<Option<PostgresSshTunnel>> {
+    if !parse_bool(config, "ssh_enabled", false) {
+        return Ok(None);
+    }
+
+    let ssh_config = build_ssh_config(config)?;
+    PostgresSshTunnel::new(&ssh_config, remote_host, remote_port)
+        .map(Some)
+        .map_err(|error| {
+            ZqlzError::Connection(format!("Failed to establish SSH tunnel: {}", error))
+        })
+}
+
+fn validate_ssl_config(ssl_mode: &str, ssl_ca_cert: Option<&str>) -> Result<()> {
+    if matches!(
+        ssl_mode.to_ascii_lowercase().as_str(),
+        "verify-ca" | "verify_ca" | "verify-full" | "verify_full"
+    ) && ssl_ca_cert.filter(|value| !value.is_empty()).is_none()
+    {
+        return Err(ZqlzError::Configuration(
+            "PostgreSQL SSL verify modes require a CA certificate".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+fn build_ssh_config(config: &ConnectionConfig) -> Result<SshTunnelConfig> {
+    let host = required_param(config, "ssh_host")?;
+    let username = required_param(config, "ssh_username")?;
+    let port = parse_optional_u16(config, "ssh_port")?.unwrap_or(22);
+    let timeout_seconds = parse_optional_u64(config, "ssh_timeout_seconds")?.unwrap_or(30) as u32;
+    let keepalive_seconds =
+        parse_optional_u64(config, "ssh_keepalive_seconds")?.unwrap_or(0) as u32;
+
+    let auth = match config
+        .get_string("ssh_auth_method")
+        .unwrap_or_else(|| "password".to_string())
+        .as_str()
+    {
+        "password" => SshAuthMethod::password(required_param(config, "ssh_password")?),
+        "private_key" => {
+            let key = required_param(config, "ssh_private_key")?;
+            let passphrase = config
+                .get_string("ssh_private_key_passphrase")
+                .filter(|value| !value.is_empty());
+            SshAuthMethod::PrivateKey {
+                path: key.into(),
+                passphrase,
+            }
+        }
+        "agent" => SshAuthMethod::agent(),
+        value => {
+            return Err(ZqlzError::Configuration(format!(
+                "Invalid SSH auth method: {}",
+                value
+            )));
+        }
+    };
+
+    let ssh_config = SshTunnelConfig {
+        host,
+        port,
+        username,
+        auth,
+        timeout_seconds,
+        keepalive_seconds,
+    };
+    ssh_config.validate()?;
+    Ok(ssh_config)
+}
+
+fn required_param(config: &ConnectionConfig, key: &str) -> Result<String> {
+    config
+        .get_string(key)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| ZqlzError::Configuration(format!("{} is required", key)))
+}
+
+fn parse_bool(config: &ConnectionConfig, key: &str, default: bool) -> bool {
+    config
+        .get_string(key)
+        .map(|value| {
+            matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
+fn parse_optional_u16(config: &ConnectionConfig, key: &str) -> Result<Option<u16>> {
+    config
+        .get_string(key)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u16>()
+                .map_err(|_| ZqlzError::Configuration(format!("{} must be a whole number", key)))
+        })
+        .transpose()
+}
+
+fn parse_optional_u64(config: &ConnectionConfig, key: &str) -> Result<Option<u64>> {
+    config
+        .get_string(key)
+        .filter(|value| !value.is_empty())
+        .map(|value| {
+            value
+                .parse::<u64>()
+                .map_err(|_| ZqlzError::Configuration(format!("{} must be a whole number", key)))
+        })
+        .transpose()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zqlz_core::DatabaseDriver;
+
+    #[test]
+    fn postgres_schema_has_ssl_ssh_and_advanced_fields() {
+        let schema = PostgresDriver::new().connection_field_schema();
+        let field = |id: &str| schema.fields.iter().find(|field| field.id == id).unwrap();
+
+        assert_eq!(field("ssl_mode").tab.as_deref(), Some("ssl"));
+        assert_eq!(field("connect_timeout").tab.as_deref(), Some("advanced"));
+        assert_eq!(
+            field("application_name").default_value.as_deref(),
+            Some("ZQLZ")
+        );
+        assert_eq!(field("keepalive").default_value.as_deref(), Some("true"));
+        assert_eq!(field("ssh_enabled").tab.as_deref(), Some("ssh"));
+        assert_eq!(
+            field("ssh_auth_method").default_value.as_deref(),
+            Some("password")
+        );
+    }
+
+    #[test]
+    fn postgres_ssh_enabled_requires_host_and_user() {
+        let config = ConnectionConfig::new("postgres", "test").with_param("ssh_enabled", "true");
+
+        let error = build_ssh_config(&config).unwrap_err();
+
+        assert!(error.to_string().contains("ssh_host is required"));
+    }
+
+    #[test]
+    fn postgres_advanced_params_parse() {
+        let config = ConnectionConfig::new("postgres", "test")
+            .with_param("connect_timeout", "15")
+            .with_param("keepalive", "false");
+
+        assert_eq!(
+            parse_optional_u64(&config, "connect_timeout").unwrap(),
+            Some(15)
+        );
+        assert!(!parse_bool(&config, "keepalive", true));
+    }
+
+    #[test]
+    fn postgres_verify_ssl_requires_ca() {
+        let error = validate_ssl_config("verify-full", None).unwrap_err();
+
+        assert!(error.to_string().contains("CA certificate"));
     }
 }

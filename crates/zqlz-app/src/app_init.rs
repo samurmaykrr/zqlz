@@ -7,9 +7,7 @@ use gpui::{App, AppContext};
 use zqlz_ui::widgets::dock::register_panel;
 
 use crate::app::AppState;
-use crate::components::{
-    ConnectionSidebar, QueryTabsPanel, ResultsPanel, SchemaDetailsPanel, SettingsPanel,
-};
+use crate::components::{ConnectionSidebar, QueryTabsPanel, ResultsPanel, SchemaDetailsPanel};
 
 /// Register all ZQLZ panels with the PanelRegistry
 pub fn register_panels(cx: &mut App) {
@@ -48,14 +46,5 @@ pub fn register_panels(cx: &mut App) {
         cx,
         "SchemaDetailsPanel",
         |_dock_area, _state, _info, _window, cx| Box::new(cx.new(SchemaDetailsPanel::new)),
-    );
-
-    // Register SettingsPanel
-    register_panel(
-        cx,
-        "SettingsPanel",
-        |_dock_area, _state, _info, window, cx| {
-            Box::new(cx.new(|cx| SettingsPanel::new(window, cx)))
-        },
     );
 }

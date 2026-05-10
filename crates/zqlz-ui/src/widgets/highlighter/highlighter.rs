@@ -646,7 +646,7 @@ impl SyntaxHighlighter {
     /// # Example
     ///
     /// ```no_run
-    /// use gpui_component::highlighter::{HighlightTheme, SyntaxHighlighter};
+    /// use zqlz_ui::widgets::highlighter::{HighlightTheme, SyntaxHighlighter};
     /// use ropey::Rope;
     ///
     /// let code = "fn main() {\n    println!(\"Hello\");\n}";

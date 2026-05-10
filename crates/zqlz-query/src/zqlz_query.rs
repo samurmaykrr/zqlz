@@ -7,8 +7,10 @@ pub mod ai_completion;
 pub mod batch;
 mod engine;
 mod error;
+mod execution_workflows;
 mod history;
 pub mod parameters;
+mod saved_queries;
 mod schema_metadata;
 mod service;
 #[cfg(test)]
@@ -18,19 +20,38 @@ pub mod widgets;
 
 pub use engine::{DestructiveOperationType, DestructiveOperationWarning, QueryEngine};
 pub use error::{QueryServiceError, QueryServiceResult};
+pub use execution_workflows::{
+    ExplainExecutionOutcome, NormalizedQueryExecutionRequest, QueryConnectionCandidate,
+    QueryConnectionOption, QueryConnectionSelection, QueryConnectionSwitchPlan,
+    QueryConnectionSwitchPlanningOutcome, QueryConnectionSwitchResolution,
+    QueryDatabaseSelectionPlan, QueryDisplayContext, QueryEditorSwitcherSelection,
+    QueryExecutionOutcome, QuerySqlSource, QueryWorkflowDispatch, QueryWorkflowOutcome,
+    QueryWorkflowRequest, build_explain_execution_outcome, build_query_editor_switcher_selection,
+    build_query_execution_outcome, default_database_label_for_connection, execute_explain_request,
+    execute_query_request, normalize_query_execution_request, plan_query_connection_switch,
+    plan_query_database_selection, resolve_query_connection_selection,
+    resolve_query_connection_switch, resolve_query_editor_open_connection,
+    resolve_workflow_connection_id, run_execute_query_workflow, run_explain_query_workflow,
+    run_query_workflow, should_refresh_connection_surfaces_for_database_selection,
+};
 pub use history::{HistoryPersistence, QueryHistory, QueryHistoryEntry};
+pub use saved_queries::{
+    SavedQueryOperation, SavedQueryRecord, SavedQueryStore, SavedQueryWorkflowError,
+    SavedQueryWorkflowOutcome, SavedQueryWorkflowRequest, create_saved_query, delete_saved_query,
+    load_saved_queries_for_connection, load_saved_query, rename_saved_query,
+    run_saved_query_workflow, update_saved_query_sql,
+};
 pub use service::QueryService;
 // Note: view_models types are superseded by widgets types for UI consumption
 pub use view_models::StatementExecution;
 // Re-export widgets for convenient access
 pub use widgets::{
-    AcceptCompletion, AcceptInlineSuggestion, CancelCompletion, DiagnosticInfo,
-    DiagnosticInfoSeverity, DismissInlineSuggestion, EditorMode, EditorObjectType, ExplainResult,
+    DiagnosticInfo, DiagnosticInfoSeverity, EditorMode, EditorObjectType, ExplainResult,
     FormatQuery, NextProblem, PreviousProblem, ProblemEntry, ProblemSeverity, ProblemsPanel,
     ProblemsPanelEvent, QueryEditor, QueryEditorEvent, QueryExecution, QueryExecutionParams,
     QueryHistoryPanel, QueryHistoryPanelEvent, QueryTabsPanel, QueryTabsPanelEvent, ResultsPanel,
     ResultsPanelEvent, SaveQuery, SaveQueryAs, ShowCodeActions, ShowHover, StatementResult,
-    ToggleProblemsPanel, TriggerCompletion, TriggerParameterHints,
+    ToggleProblemsPanel, TriggerParameterHints,
 };
 
 // Re-export batch execution types

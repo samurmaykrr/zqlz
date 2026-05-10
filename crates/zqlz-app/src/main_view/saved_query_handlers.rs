@@ -4,6 +4,7 @@
 
 use gpui::prelude::FluentBuilder;
 use gpui::*;
+use std::collections::HashSet;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
@@ -18,34 +19,15 @@ use zqlz_ui::widgets::{
 
 use crate::app::AppState;
 use crate::components::{ConnectionSidebar, QueryEditor};
-use crate::storage::SavedQuery;
 use zqlz_connection::SavedQueryInfo;
+use zqlz_query::{
+    QueryConnectionCandidate, SavedQueryOperation, SavedQueryWorkflowError,
+    SavedQueryWorkflowOutcome, SavedQueryWorkflowRequest, build_query_editor_switcher_selection,
+    run_saved_query_workflow,
+};
 use zqlz_text_editor::{DocumentIdentity, TextDocument};
 
 use super::MainView;
-
-/// Validates a query name and returns an error message if invalid.
-fn validate_query_name(name: &str) -> Option<&'static str> {
-    let name = name.trim();
-
-    if name.is_empty() {
-        return Some("Query name cannot be empty");
-    }
-
-    if name.len() > 128 {
-        return Some("Query name is too long (max 128 characters)");
-    }
-
-    // Query names can be more permissive than SQL identifiers
-    // But we still want to disallow some problematic characters
-    for c in name.chars() {
-        if c == '/' || c == '\\' || c == '\0' || c == '\n' || c == '\r' {
-            return Some("Query name contains invalid characters");
-        }
-    }
-
-    None
-}
 
 fn rename_open_saved_query_editors(
     query_editors: &[WeakEntity<QueryEditor>],
@@ -69,6 +51,17 @@ fn rename_open_saved_query_editors(
     }
 }
 
+fn find_open_saved_query_editor(
+    query_editors: &[WeakEntity<QueryEditor>],
+    query_id: Uuid,
+    cx: &App,
+) -> Option<Entity<QueryEditor>> {
+    query_editors.iter().find_map(|query_editor| {
+        let query_editor = query_editor.upgrade()?;
+        (query_editor.read(cx).saved_query_id() == Some(query_id)).then_some(query_editor)
+    })
+}
+
 pub(super) fn save_query_for_editor(
     editor: WeakEntity<QueryEditor>,
     sql: String,
@@ -78,40 +71,33 @@ pub(super) fn save_query_for_editor(
     window: &mut Window,
     cx: &mut App,
 ) -> Result<Uuid, String> {
-    let query_name = query_name.trim().to_string();
-
-    if let Some(err) = validate_query_name(&query_name) {
-        return Err(err.to_string());
-    }
-
     let Some(app_state) = cx.try_global::<AppState>() else {
         return Err("Application state not available".to_string());
     };
 
-    let storage = &app_state.storage;
-    match storage.query_name_exists(connection_id, &query_name) {
-        Ok(true) => {
-            return Err("A query with this name already exists".to_string());
-        }
-        Ok(false) => {}
-        Err(error) => {
-            tracing::error!(%error, "Failed to check query name");
-            return Err("Failed to check query name".to_string());
-        }
-    }
+    match run_saved_query_workflow(
+        app_state.storage.as_ref(),
+        SavedQueryWorkflowRequest::Create {
+            name: query_name,
+            connection_id,
+            sql,
+        },
+    )
+    .and_then(SavedQueryWorkflowOutcome::into_created)
+    {
+        Ok(saved_query) => {
+            let query_id = saved_query.id;
+            let query_name = saved_query.name;
 
-    let saved_query = SavedQuery::new(query_name.clone(), connection_id, sql);
-    let query_id = saved_query.id;
-
-    match storage.save_query(&saved_query) {
-        Ok(()) => {
-            _ = editor.update(cx, |editor, cx| {
+            if let Err(error) = editor.update(cx, |editor, cx| {
                 editor.set_saved_query_id(Some(query_id), cx);
                 editor.set_name(&query_name, cx);
                 editor.mark_clean(cx);
-            });
+            }) {
+                tracing::warn!(%error, %query_id, "failed to update query editor after save");
+            }
 
-            _ = sidebar_weak.update(cx, |sidebar, cx| {
+            if let Err(error) = sidebar_weak.update(cx, |sidebar, cx| {
                 sidebar.add_saved_query(
                     connection_id,
                     SavedQueryInfo {
@@ -120,7 +106,9 @@ pub(super) fn save_query_for_editor(
                     },
                     cx,
                 );
-            });
+            }) {
+                tracing::warn!(%error, %query_id, "failed to refresh sidebar after query save");
+            }
 
             window.push_notification(
                 Notification::success(format!("Query '{}' saved", query_name)),
@@ -130,8 +118,11 @@ pub(super) fn save_query_for_editor(
             Ok(query_id)
         }
         Err(error) => {
-            tracing::error!(%error, "Failed to save query");
-            Err(format!("Failed to save: {}", error))
+            if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                tracing::error!(%storage_error, "failed to save query");
+            }
+
+            Err(error.user_message(SavedQueryOperation::Create))
         }
     }
 }
@@ -143,27 +134,42 @@ pub(super) fn update_saved_query_for_editor(
     window: &mut Window,
     cx: &mut App,
 ) {
+    if let Err(error_message) = try_update_saved_query_for_editor(query_id, sql, editor, cx) {
+        window.push_notification(Notification::error(error_message), cx);
+    }
+}
+
+pub(super) fn try_update_saved_query_for_editor(
+    query_id: Uuid,
+    sql: String,
+    editor: WeakEntity<QueryEditor>,
+    cx: &mut App,
+) -> Result<(), String> {
     let Some(app_state) = cx.try_global::<AppState>() else {
-        window.push_notification(Notification::error("Application state not available"), cx);
-        return;
+        return Err("Application state not available".to_string());
     };
 
-    match app_state.storage.update_query_sql(query_id, &sql) {
+    match run_saved_query_workflow(
+        app_state.storage.as_ref(),
+        SavedQueryWorkflowRequest::UpdateSql { query_id, sql },
+    )
+    .and_then(SavedQueryWorkflowOutcome::into_updated)
+    {
         Ok(()) => {
-            tracing::info!("Query updated successfully");
-
-            _ = editor.update(cx, |editor, cx| {
+            if let Err(error) = editor.update(cx, |editor, cx| {
                 editor.mark_clean(cx);
-            });
+            }) {
+                tracing::warn!(%error, %query_id, "failed to mark editor clean after save");
+            }
 
-            window.push_notification(Notification::success("Query saved"), cx);
+            Ok(())
         }
         Err(error) => {
-            tracing::error!(%error, "Failed to update query");
-            window.push_notification(
-                Notification::error(format!("Failed to save: {}", error)),
-                cx,
-            );
+            if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                tracing::error!(%storage_error, "failed to update query");
+            }
+
+            Err(error.user_message(SavedQueryOperation::Update))
         }
     }
 }
@@ -183,10 +189,8 @@ impl MainView {
             .try_global::<AppState>()
             .and_then(|state| {
                 state
-                    .saved_connections()
-                    .into_iter()
-                    .find(|c| c.id == connection_id)
-                    .map(|c| c.name.clone())
+                    .connection_service
+                    .get_saved_connection_name(connection_id)
             })
             .unwrap_or_else(|| "Unknown".to_string());
 
@@ -270,15 +274,6 @@ impl MainView {
                     .on_ok(move |_, _window, cx| {
                         let query_name = name_input.read(cx).text().to_string().trim().to_string();
 
-                        // Validate name
-                        if let Some(err) = validate_query_name(&query_name) {
-                            error_message_for_ok.update(cx, |msg, cx| {
-                                *msg = Some(err.to_string());
-                                cx.notify();
-                            });
-                            return false;
-                        }
-
                         match save_query_for_editor(
                             editor_weak.clone(),
                             sql.clone(),
@@ -332,22 +327,31 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.prune_closed_query_editors();
+
+        if let Some(editor) = find_open_saved_query_editor(&self.query_editors, query_id, cx) {
+            self.activate_existing_query_editor(&editor, window, cx);
+            return;
+        }
+
         let Some(app_state) = cx.try_global::<AppState>() else {
             window.push_notification(Notification::error("Application state not available"), cx);
             return;
         };
 
-        // Load the query
-        let query = match app_state.storage.load_query(query_id) {
-            Ok(Some(q)) => q,
-            Ok(None) => {
-                window.push_notification(Notification::error("Query not found"), cx);
-                return;
-            }
-            Err(e) => {
-                tracing::error!("Failed to load query: {}", e);
+        let query = match run_saved_query_workflow(
+            app_state.storage.as_ref(),
+            SavedQueryWorkflowRequest::Load { query_id },
+        )
+        .and_then(SavedQueryWorkflowOutcome::into_loaded)
+        {
+            Ok(record) => record,
+            Err(error) => {
+                if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                    tracing::error!(%storage_error, %query_id, "failed to load saved query");
+                }
                 window.push_notification(
-                    Notification::error(format!("Failed to load query: {}", e)),
+                    Notification::error(error.user_message(SavedQueryOperation::Load)),
                     cx,
                 );
                 return;
@@ -386,13 +390,18 @@ impl MainView {
         };
 
         let schema_service = app_state.schema_service.clone();
-        let connection = app_state.connections.get(connection_id);
-        let (driver_type, connection_name) = app_state
-            .saved_connections()
-            .into_iter()
-            .find(|c| c.id == connection_id)
-            .map(|c| (c.driver.clone(), c.name.clone()))
-            .unwrap_or((String::new(), String::from("Unknown")));
+        let connection = app_state.connection_service.get_connection(connection_id);
+        let (driver_type, connection_name) =
+            MainView::resolve_editor_open_connection_metadata(Some(connection_id), app_state)
+                .map(|(_connection, driver_name, connection_name)| (driver_name, connection_name))
+                .or_else(|| {
+                    app_state
+                        .connection_service
+                        .get_saved_connection(connection_id)
+                        .ok()
+                        .map(|saved| (saved.driver, saved.name))
+                })
+                .unwrap_or((String::new(), String::from("Unknown")));
 
         // Create an EditorId in WorkspaceState to track this editor
         let editor_id = self.create_workspace_editor(Some(connection_id), name.clone(), cx);
@@ -430,7 +439,11 @@ impl MainView {
             editor
         });
 
-        Some(self.finalize_query_editor_open(query_editor, name, editor_id, window, cx))
+        let query_editor =
+            self.finalize_query_editor_open(query_editor, name, editor_id, window, cx);
+        self.refresh_saved_query_editor_switchers(&query_editor, cx);
+
+        Some(query_editor)
     }
 
     /// Delete a saved query
@@ -476,7 +489,12 @@ impl MainView {
                         return true;
                     };
 
-                    match app_state.storage.delete_query(query_id) {
+                    match run_saved_query_workflow(
+                        app_state.storage.as_ref(),
+                        SavedQueryWorkflowRequest::Delete { query_id },
+                    )
+                    .and_then(SavedQueryWorkflowOutcome::into_deleted)
+                    {
                         Ok(()) => {
                             tracing::info!("Query '{}' deleted successfully", query_name);
                             window.push_notification(
@@ -485,14 +503,25 @@ impl MainView {
                             );
 
                             // Update sidebar to remove the deleted query
-                            _ = sidebar_weak.update(cx, |sidebar, cx| {
+                            if let Err(error) = sidebar_weak.update(cx, |sidebar, cx| {
                                 sidebar.remove_saved_query(connection_id, query_id, cx);
-                            });
+                            }) {
+                                tracing::warn!(
+                                    %error,
+                                    %connection_id,
+                                    %query_id,
+                                    "failed to remove deleted query from sidebar"
+                                );
+                            }
                         }
-                        Err(e) => {
-                            tracing::error!("Failed to delete query: {}", e);
+                        Err(error) => {
+                            if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                                tracing::error!(%storage_error, "failed to delete query");
+                            }
                             window.push_notification(
-                                Notification::error(format!("Failed to delete: {}", e)),
+                                Notification::error(
+                                    error.user_message(SavedQueryOperation::Delete),
+                                ),
                                 cx,
                             );
                         }
@@ -583,15 +612,6 @@ impl MainView {
                             return true;
                         }
 
-                        // Validate name
-                        if let Some(err) = validate_query_name(&new_name) {
-                            error_message_for_ok.update(cx, |msg, cx| {
-                                *msg = Some(err.to_string());
-                                cx.notify();
-                            });
-                            return false;
-                        }
-
                         let Some(app_state) = cx.try_global::<AppState>() else {
                             error_message_for_ok.update(cx, |msg, cx| {
                                 *msg = Some("Application state not available".to_string());
@@ -600,32 +620,16 @@ impl MainView {
                             return false;
                         };
 
-                        // Check if new name already exists
-                        match app_state
-                            .storage
-                            .query_name_exists(connection_id, &new_name)
+                        match run_saved_query_workflow(
+                            app_state.storage.as_ref(),
+                            SavedQueryWorkflowRequest::Rename {
+                                query_id,
+                                connection_id,
+                                new_name: new_name.clone(),
+                            },
+                        )
+                        .and_then(SavedQueryWorkflowOutcome::into_renamed)
                         {
-                            Ok(true) => {
-                                error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg =
-                                        Some("A query with this name already exists".to_string());
-                                    cx.notify();
-                                });
-                                return false;
-                            }
-                            Ok(false) => {}
-                            Err(e) => {
-                                tracing::error!("Failed to check query name: {}", e);
-                                error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg = Some("Failed to check query name".to_string());
-                                    cx.notify();
-                                });
-                                return false;
-                            }
-                        }
-
-                        // Rename the query
-                        match app_state.storage.rename_query(query_id, &new_name) {
                             Ok(()) => {
                                 tracing::info!("Query renamed to '{}'", new_name);
                                 window.push_notification(
@@ -634,14 +638,21 @@ impl MainView {
                                 );
 
                                 // Update sidebar to reflect the new name
-                                _ = sidebar_weak.update(cx, |sidebar, cx| {
+                                if let Err(error) = sidebar_weak.update(cx, |sidebar, cx| {
                                     sidebar.rename_saved_query(
                                         connection_id,
                                         query_id,
                                         new_name.clone(),
                                         cx,
                                     );
-                                });
+                                }) {
+                                    tracing::warn!(
+                                        %error,
+                                        %connection_id,
+                                        %query_id,
+                                        "failed to update sidebar after query rename"
+                                    );
+                                }
 
                                 rename_open_saved_query_editors(
                                     &open_query_editors,
@@ -652,10 +663,12 @@ impl MainView {
 
                                 true
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to rename query: {}", e);
+                            Err(error) => {
+                                if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                                    tracing::error!(%storage_error, "failed to rename query");
+                                }
                                 error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg = Some(format!("Failed to rename: {}", e));
+                                    *msg = Some(error.user_message(SavedQueryOperation::Rename));
                                     cx.notify();
                                 });
                                 false
@@ -675,21 +688,84 @@ impl MainView {
         &self,
         connection_id: Uuid,
         cx: &App,
-    ) -> Vec<SavedQuery> {
+    ) -> Vec<zqlz_query::SavedQueryRecord> {
         let Some(app_state) = cx.try_global::<AppState>() else {
             return Vec::new();
         };
 
-        match app_state.storage.load_queries_for_connection(connection_id) {
+        match run_saved_query_workflow(
+            app_state.storage.as_ref(),
+            SavedQueryWorkflowRequest::LoadForConnection { connection_id },
+        )
+        .and_then(SavedQueryWorkflowOutcome::into_loaded_for_connection)
+        {
             Ok(queries) => queries,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to load queries for connection {}: {}",
-                    connection_id,
-                    e
-                );
+            Err(error) => {
+                if let SavedQueryWorkflowError::Storage(storage_error) = &error {
+                    tracing::error!(
+                        "Failed to load queries for connection {}: {}",
+                        connection_id,
+                        storage_error
+                    );
+                } else {
+                    tracing::error!(
+                        "Failed to load queries for connection {}: {}",
+                        connection_id,
+                        error
+                    );
+                }
                 Vec::new()
             }
         }
+    }
+
+    pub(super) fn refresh_saved_query_editor_switchers(
+        &self,
+        query_editor: &Entity<QueryEditor>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            return;
+        };
+
+        let candidates: Vec<QueryConnectionCandidate> = app_state
+            .connection_service
+            .list_saved_connections()
+            .into_iter()
+            .map(|saved| QueryConnectionCandidate {
+                connection_id: saved.id,
+                connection_name: saved.name,
+                driver_name: saved.driver,
+                params: saved.params,
+            })
+            .collect();
+        let active_connection_ids_set: HashSet<Uuid> = app_state
+            .connection_service
+            .list_active_connections()
+            .into_iter()
+            .collect();
+        let active_connection_ids: Vec<Uuid> = app_state
+            .connection_service
+            .list_saved_connections()
+            .into_iter()
+            .filter(|saved| active_connection_ids_set.contains(&saved.id))
+            .map(|saved| saved.id)
+            .collect();
+        let selected_connection_id = query_editor.read(cx).connection_id();
+        let switcher_selection = build_query_editor_switcher_selection(
+            selected_connection_id,
+            &candidates,
+            &active_connection_ids,
+        );
+        let available_connections = switcher_selection
+            .available_connections
+            .into_iter()
+            .map(|option| (option.connection_id, option.connection_name))
+            .collect();
+
+        query_editor.update(cx, |editor, cx| {
+            editor.set_available_connections(available_connections, cx);
+            editor.set_current_database(switcher_selection.selected_default_database_name, cx);
+        });
     }
 }

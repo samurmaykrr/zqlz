@@ -8,7 +8,9 @@ mod common;
 
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, ObjectType, TableType, Value};
+use zqlz_core::{
+    Connection, ConnectionScope, ObjectType, ResolvedConnectionScope, TableType, Value,
+};
 use zqlz_services::SchemaService;
 
 use common::{mock_single_value_result, mysql_connection, postgres_connection, MockConnection};
@@ -98,6 +100,187 @@ async fn mysql_explicit_target_database_skips_select_database_query() {
     );
 }
 
+#[tokio::test]
+async fn mysql_explicit_target_database_clears_stale_objects_panel_cache() {
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("should load initial schema");
+
+    assert!(
+        service
+            .get_cached_objects_panel_rows_for_kind(conn_id, "table")
+            .is_some(),
+        "baseline schema load should populate the per-kind objects panel cache"
+    );
+
+    let schema = service
+        .load_database_schema_for_database(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            Some("analytics_db"),
+        )
+        .await
+        .expect("should load targeted schema");
+
+    assert_eq!(schema.database_name.as_deref(), Some("analytics_db"));
+    assert!(
+        service
+            .get_cached_objects_panel_rows_by_kind(conn_id)
+            .is_none(),
+        "explicit target-database loads should not leave stale cached rows behind"
+    );
+}
+
+#[tokio::test]
+async fn mysql_explicit_target_database_preserves_object_detail_caches_for_reloaded_schema() {
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("should load initial schema");
+
+    let initial_details = service
+        .get_table_details(connection.clone(), conn_id, "users", None)
+        .await
+        .expect("should load initial table details");
+    let initial_column_names: Vec<String> = initial_details
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+    let initial_ddl = service
+        .get_or_generate_ddl(&connection, conn_id, "users", None, Some(ObjectType::Table))
+        .await
+        .expect("should generate initial DDL");
+
+    let cached_get_columns_count = conn.get_columns_count();
+    let cached_generate_ddl_count = conn.generate_ddl_count();
+
+    service
+        .load_database_schema_for_database(connection.clone(), conn_id, Some("analytics_db"))
+        .await
+        .expect("should load targeted schema");
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("should reload the default schema after target switch");
+
+    let reloaded_details = service
+        .get_table_details(connection.clone(), conn_id, "users", None)
+        .await
+        .expect("should reuse cached table details after schema reload");
+    let reloaded_ddl = service
+        .get_or_generate_ddl(&connection, conn_id, "users", None, Some(ObjectType::Table))
+        .await
+        .expect("should reuse cached DDL after schema reload");
+
+    let reloaded_column_names: Vec<String> = reloaded_details
+        .columns
+        .iter()
+        .map(|column| column.name.clone())
+        .collect();
+
+    assert_eq!(reloaded_details.name, initial_details.name);
+    assert_eq!(reloaded_details.table_type, initial_details.table_type);
+    assert_eq!(reloaded_column_names, initial_column_names);
+    assert_eq!(reloaded_ddl, initial_ddl);
+    assert_eq!(
+        conn.get_columns_count(),
+        cached_get_columns_count,
+        "targeted database switches should not evict cached table details for the reloaded schema"
+    );
+    assert_eq!(
+        conn.generate_ddl_count(),
+        cached_generate_ddl_count,
+        "targeted database switches should not evict cached DDL for the reloaded schema"
+    );
+}
+
+#[tokio::test]
+async fn load_database_schema_preserves_manifest_coverage_provenance_on_cache_hit() {
+    let conn = mysql_connection("telemetry_cache_hit_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("initial schema load should succeed");
+    assert_eq!(
+        service
+            .cache()
+            .get_objects_panel_manifest_has_driver_manifest(conn_id),
+        Some(true),
+        "initial load should cache driver-manifest provenance for later cache hits"
+    );
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("cached schema load should succeed");
+
+    assert_eq!(
+        service
+            .cache()
+            .get_objects_panel_manifest_has_driver_manifest(conn_id),
+        Some(true),
+        "cache hit should preserve driver-manifest provenance for telemetry reuse"
+    );
+}
+
+#[tokio::test]
+async fn load_objects_panel_data_for_kind_reuses_cached_schema() {
+    let conn = mysql_connection("kind_scoped_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    let first = service
+        .load_objects_panel_data_for_kind(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            None,
+            "table",
+            None,
+        )
+        .await
+        .expect("kind-scoped load should succeed");
+
+    assert!(
+        first.rows.iter().all(|row| row.object_kind_id() == "table"),
+        "kind-scoped load should only return rows for the requested kind"
+    );
+
+    let query_count_after_first_load = conn.query_count();
+
+    let second = service
+        .load_objects_panel_data_for_kind(
+            conn.clone() as Arc<dyn Connection>,
+            conn_id,
+            None,
+            "table",
+            None,
+        )
+        .await
+        .expect("cached kind-scoped load should succeed");
+
+    assert_eq!(second.rows.len(), first.rows.len());
+    assert_eq!(
+        conn.query_count(),
+        query_count_after_first_load,
+        "cached kind-scoped loads should not issue additional schema queries"
+    );
+}
+
 // ============ PostgreSQL Driver Path Tests ============
 
 #[tokio::test]
@@ -136,6 +319,42 @@ async fn postgres_queries_current_database_and_schema() {
         log.iter().any(|q| q.contains("current_schema()")),
         "should query current_schema() for PostgreSQL. Log: {:?}",
         log
+    );
+}
+
+#[tokio::test]
+async fn postgres_full_schema_load_uses_all_schema_scope() {
+    let conn = postgres_connection("erp_lab", "public");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("should load schema");
+
+    assert_eq!(
+        conn.list_tables_schemas().first(),
+        Some(&None),
+        "PostgreSQL sidebar/object-panel full loads must query all user schemas"
+    );
+}
+
+#[tokio::test]
+async fn postgres_tables_only_bootstrap_uses_all_schema_scope() {
+    let conn = postgres_connection("erp_lab", "public");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_tables_only(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("should load tables");
+
+    assert_eq!(
+        conn.list_tables_schemas(),
+        vec![None],
+        "PostgreSQL bootstrap loads must not be scoped to public"
     );
 }
 
@@ -588,6 +807,10 @@ impl Connection for NoSchemaConnection {
         Ok("SELECT 0 as total_queries".to_string())
     }
 
+    fn should_use_ddl_column_fallback(&self, table_type: TableType, _error_message: &str) -> bool {
+        table_type == TableType::VirtualTable
+    }
+
     async fn update_cell(&self, _request: zqlz_core::CellUpdateRequest) -> zqlz_core::Result<u64> {
         Ok(0)
     }
@@ -811,6 +1034,129 @@ async fn ddl_cache_is_scoped_by_schema() {
 }
 
 #[tokio::test]
+async fn invalidate_connection_cache_clears_generated_ddl_cache() {
+    let conn = mysql_connection("ddl_invalidation_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+
+    let initial_generate_ddl_count = conn.generate_ddl_count();
+
+    let ddl = service
+        .get_or_generate_ddl(&connection, conn_id, "users", None, Some(ObjectType::Table))
+        .await
+        .expect("initial DDL generation");
+
+    assert!(ddl.contains("CREATE TABLE"));
+    assert_eq!(
+        conn.generate_ddl_count(),
+        initial_generate_ddl_count + 1,
+        "the first DDL lookup should invoke the connection"
+    );
+
+    let cached_ddl = service
+        .get_or_generate_ddl(&connection, conn_id, "users", None, Some(ObjectType::Table))
+        .await
+        .expect("cached DDL lookup");
+
+    assert_eq!(cached_ddl, ddl);
+    assert_eq!(
+        conn.generate_ddl_count(),
+        initial_generate_ddl_count + 1,
+        "the second DDL lookup should reuse the cache"
+    );
+
+    service.invalidate_connection_cache(conn_id);
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema reload after invalidation");
+
+    let reloaded_ddl = service
+        .get_or_generate_ddl(&connection, conn_id, "users", None, Some(ObjectType::Table))
+        .await
+        .expect("reloaded DDL generation");
+
+    assert_eq!(reloaded_ddl, ddl);
+    assert_eq!(
+        conn.generate_ddl_count(),
+        initial_generate_ddl_count + 2,
+        "invalidating and reloading the connection should force DDL regeneration"
+    );
+}
+
+#[tokio::test]
+async fn invalidate_connection_cache_clears_table_details_cache() {
+    let conn = mysql_connection("table_details_invalidation_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+
+    let initial_details = service
+        .get_table_details(connection.clone(), conn_id, "users", None)
+        .await
+        .expect("initial table details");
+
+    let initial_get_columns_count = conn.get_columns_count();
+
+    assert!(
+        service
+            .peek_table_details_cache(conn_id, "users", None)
+            .is_some(),
+        "table details should be cached after the first lookup"
+    );
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service
+            .peek_table_details_cache(conn_id, "users", None)
+            .is_none(),
+        "refresh invalidation should clear cached table details"
+    );
+    assert!(
+        service.get_all_cached_table_details(conn_id).is_none(),
+        "refresh invalidation should also clear the aggregate table-details cache view"
+    );
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema reload after invalidation");
+
+    let reloaded_details = service
+        .get_table_details(connection, conn_id, "users", None)
+        .await
+        .expect("reloaded table details");
+
+    assert_eq!(
+        reloaded_details.columns.len(),
+        initial_details.columns.len()
+    );
+    assert!(
+        conn.get_columns_count() > initial_get_columns_count,
+        "table details should be regenerated after refresh invalidation"
+    );
+    assert!(
+        service
+            .peek_table_details_cache(conn_id, "users", None)
+            .is_some(),
+        "table details should be cached again after reload"
+    );
+}
+
+#[tokio::test]
 async fn get_table_details_falls_back_for_sqlite_virtual_tables() {
     let conn = Arc::new(SqliteVirtualTableFallbackConnection);
     let service = SchemaService::new();
@@ -914,6 +1260,274 @@ async fn get_cached_tables_returns_none_after_invalidation() {
     assert!(service.get_cached_tables(conn_id).is_none());
 }
 
+// ============ get_cached_view_names Tests ============
+
+#[tokio::test]
+async fn get_cached_view_names_returns_none_after_invalidation_and_reloads() {
+    let conn = mysql_connection("cached_views_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("initial load should succeed");
+
+    let initial_view_names = service
+        .get_cached_view_names(conn_id)
+        .expect("view names should be cached after the initial load");
+
+    assert_eq!(initial_view_names, vec!["active_users".to_string()]);
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service.get_cached_view_names(conn_id).is_none(),
+        "refresh invalidation should clear cached view names"
+    );
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("reload after invalidation should succeed");
+
+    let reloaded_view_names = service
+        .get_cached_view_names(conn_id)
+        .expect("view names should be cached again after reload");
+
+    assert_eq!(
+        reloaded_view_names, initial_view_names,
+        "refresh reload should repopulate the same cached view names"
+    );
+}
+
+#[tokio::test]
+async fn refresh_invalidation_clears_kind_scoped_objects_panel_cache() {
+    let conn = mysql_connection("refresh_kind_cache_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("initial load should succeed");
+
+    let cached_table_rows = service.get_cached_objects_panel_rows_for_kind(conn_id, "table");
+    assert!(
+        cached_table_rows
+            .as_ref()
+            .is_some_and(|rows| !rows.is_empty()),
+        "table kind rows should be cached after initial schema load"
+    );
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service
+            .get_cached_objects_panel_rows_for_kind(conn_id, "table")
+            .is_none(),
+        "kind-scoped objects panel cache should be cleared after refresh invalidation"
+    );
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("reload after invalidation should succeed");
+
+    let recached_table_rows = service.get_cached_objects_panel_rows_for_kind(conn_id, "table");
+    assert!(
+        recached_table_rows
+            .as_ref()
+            .is_some_and(|rows| !rows.is_empty()),
+        "table kind rows should be repopulated after refresh-driven reload"
+    );
+}
+
+#[tokio::test]
+async fn refresh_reload_keeps_manifest_and_kind_cache_coherent() {
+    let conn = mysql_connection("refresh_manifest_rows_coherence_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    let initial_schema = service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("initial load should succeed");
+
+    let initial_manifest_kind_ids: std::collections::HashSet<String> = initial_schema
+        .objects_panel_manifest
+        .as_ref()
+        .expect("initial schema should include objects panel manifest")
+        .object_kinds
+        .iter()
+        .map(|kind| kind.id.clone())
+        .collect();
+    assert!(
+        !initial_manifest_kind_ids.is_empty(),
+        "initial schema should expose at least one manifest kind"
+    );
+
+    let initial_row_kind_ids: std::collections::HashSet<String> = initial_schema
+        .objects_panel_data
+        .as_ref()
+        .expect("initial schema should include objects panel rows")
+        .rows
+        .iter()
+        .map(|row| row.object_kind_id().to_string())
+        .collect();
+    assert!(
+        initial_row_kind_ids
+            .iter()
+            .all(|kind_id| initial_manifest_kind_ids.contains(kind_id)),
+        "every loaded row kind should be declared by the manifest"
+    );
+
+    let initial_cached_rows_by_kind = service
+        .get_cached_objects_panel_rows_by_kind(conn_id)
+        .expect("kind cache should be available after initial load");
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service
+            .get_cached_objects_panel_rows_by_kind(conn_id)
+            .is_none(),
+        "kind cache should be cleared by refresh invalidation"
+    );
+
+    let reloaded_schema = service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("reload after invalidation should succeed");
+
+    let reloaded_manifest_kind_ids: std::collections::HashSet<String> = reloaded_schema
+        .objects_panel_manifest
+        .as_ref()
+        .expect("reloaded schema should include objects panel manifest")
+        .object_kinds
+        .iter()
+        .map(|kind| kind.id.clone())
+        .collect();
+    assert_eq!(
+        reloaded_manifest_kind_ids, initial_manifest_kind_ids,
+        "refresh reload should keep the same manifest kind taxonomy for stable introspection"
+    );
+
+    let reloaded_cached_rows_by_kind = service
+        .get_cached_objects_panel_rows_by_kind(conn_id)
+        .expect("kind cache should be repopulated after reload");
+
+    assert!(
+        reloaded_cached_rows_by_kind
+            .keys()
+            .all(|kind_id| reloaded_manifest_kind_ids.contains(kind_id)),
+        "reloaded kind cache should only contain kinds declared in the reloaded manifest"
+    );
+
+    let initial_kind_counts: std::collections::HashMap<String, usize> = initial_cached_rows_by_kind
+        .iter()
+        .map(|(kind_id, rows)| (kind_id.clone(), rows.len()))
+        .collect();
+    let reloaded_kind_counts: std::collections::HashMap<String, usize> =
+        reloaded_cached_rows_by_kind
+            .iter()
+            .map(|(kind_id, rows)| (kind_id.clone(), rows.len()))
+            .collect();
+
+    assert_eq!(
+        reloaded_kind_counts, initial_kind_counts,
+        "refresh reload should preserve per-kind row counts for stable source data"
+    );
+}
+
+#[tokio::test]
+async fn refresh_invalidation_clears_objects_panel_manifest_and_data_cache() {
+    let conn = mysql_connection("refresh_objects_panel_manifest_cache_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("initial load should succeed");
+
+    let initial_objects_panel_data = service
+        .cache()
+        .get_objects_panel_data(conn_id)
+        .expect("objects panel data should be cached after initial load");
+    let initial_objects_panel_manifest = service
+        .cache()
+        .get_objects_panel_manifest(conn_id)
+        .expect("objects panel manifest should be cached after initial load");
+    let initial_kind_ids: std::collections::BTreeSet<String> = initial_objects_panel_manifest
+        .object_kinds
+        .iter()
+        .map(|kind| kind.id.clone())
+        .collect();
+    let initial_row_kind_ids: std::collections::BTreeSet<String> = initial_objects_panel_data
+        .rows
+        .iter()
+        .map(|row| row.object_kind_id().to_string())
+        .collect();
+
+    assert!(
+        initial_row_kind_ids.is_subset(&initial_kind_ids),
+        "cached objects panel data should only include kinds declared by the cached manifest"
+    );
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service.cache().get_objects_panel_data(conn_id).is_none(),
+        "objects panel data cache should be cleared by refresh invalidation"
+    );
+    assert!(
+        service
+            .cache()
+            .get_objects_panel_manifest(conn_id)
+            .is_none(),
+        "objects panel manifest cache should be cleared by refresh invalidation"
+    );
+
+    service
+        .load_database_schema(conn.clone() as Arc<dyn Connection>, conn_id)
+        .await
+        .expect("reload after invalidation should succeed");
+
+    let reloaded_objects_panel_data = service
+        .cache()
+        .get_objects_panel_data(conn_id)
+        .expect("objects panel data should be repopulated after reload");
+    let reloaded_objects_panel_manifest = service
+        .cache()
+        .get_objects_panel_manifest(conn_id)
+        .expect("objects panel manifest should be repopulated after reload");
+    let reloaded_kind_ids: std::collections::BTreeSet<String> = reloaded_objects_panel_manifest
+        .object_kinds
+        .iter()
+        .map(|kind| kind.id.clone())
+        .collect();
+    let reloaded_row_kind_ids: std::collections::BTreeSet<String> = reloaded_objects_panel_data
+        .rows
+        .iter()
+        .map(|row| row.object_kind_id().to_string())
+        .collect();
+
+    assert_eq!(
+        reloaded_kind_ids, initial_kind_ids,
+        "refresh reload should preserve the cached manifest taxonomy"
+    );
+    assert_eq!(
+        reloaded_row_kind_ids, initial_row_kind_ids,
+        "refresh reload should repopulate the same cached objects panel row kinds"
+    );
+    assert_eq!(
+        reloaded_objects_panel_data.rows.len(),
+        initial_objects_panel_data.rows.len(),
+        "refresh reload should repopulate the same number of cached objects panel rows"
+    );
+}
+
 // ============ Empty Database Tests ============
 
 #[tokio::test]
@@ -948,6 +1562,52 @@ struct EmptyDatabaseConnection {
 impl Connection for EmptyDatabaseConnection {
     fn driver_name(&self) -> &str {
         &self.driver
+    }
+
+    async fn resolve_scope(
+        &self,
+        scope: ConnectionScope,
+    ) -> zqlz_core::Result<ResolvedConnectionScope> {
+        let mut resolved = ResolvedConnectionScope::default_scope();
+        resolved.requested_scope = scope.clone();
+
+        match scope {
+            ConnectionScope::Default => {
+                resolved.normalized_scope = ConnectionScope::Default;
+                let database_name = self.current_database_name().await?;
+                resolved.effective_database = database_name.clone();
+                resolved.effective_namespace = database_name.clone();
+                resolved.introspection_scope = database_name;
+            }
+            ConnectionScope::Database(database_name)
+            | ConnectionScope::Namespace(database_name) => {
+                let database_name = database_name.trim().to_string();
+                resolved.normalized_scope = ConnectionScope::Database(database_name.clone());
+                resolved.effective_database = Some(database_name.clone());
+                resolved.effective_namespace = Some(database_name.clone());
+                resolved.introspection_scope = Some(database_name);
+            }
+            ConnectionScope::KeyValueDatabase(index) => {
+                resolved.normalized_scope = ConnectionScope::KeyValueDatabase(index);
+            }
+        }
+
+        Ok(resolved)
+    }
+
+    async fn current_database_name(&self) -> zqlz_core::Result<Option<String>> {
+        let result = self.query("SELECT DATABASE()", &[]).await?;
+        Ok(result.rows.first().and_then(|row| {
+            row.values.first().and_then(|value| match value {
+                Value::String(value) => Some(value.clone()),
+                Value::Null => None,
+                other => Some(other.to_string()),
+            })
+        }))
+    }
+
+    async fn current_namespace_name(&self) -> zqlz_core::Result<Option<String>> {
+        self.current_database_name().await
     }
 
     async fn execute(
@@ -1166,6 +1826,10 @@ impl Connection for EmptyDatabaseConnection {
         Ok("SELECT 0 as total_queries".to_string())
     }
 
+    fn should_use_ddl_column_fallback(&self, _table_type: TableType, _error_message: &str) -> bool {
+        true
+    }
+
     async fn update_cell(&self, _request: zqlz_core::CellUpdateRequest) -> zqlz_core::Result<u64> {
         Ok(0)
     }
@@ -1313,6 +1977,10 @@ struct SqliteVirtualTableFallbackConnection;
 impl Connection for SqliteVirtualTableFallbackConnection {
     fn driver_name(&self) -> &str {
         "sqlite"
+    }
+
+    fn should_use_ddl_column_fallback(&self, _table_type: TableType, _error_message: &str) -> bool {
+        true
     }
 
     async fn execute(

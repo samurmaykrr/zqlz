@@ -474,6 +474,9 @@ pub enum TableViewerEvent {
     CountCompleted {
         connection_id: Uuid,
         table_name: String,
+        /// Database scope that issued the count request (None for drivers without
+        /// multi-database context).
+        database_name: Option<String>,
         /// The load generation that scheduled this count.
         request_generation: u64,
         /// The total row count (exact or estimated)

@@ -38,9 +38,13 @@
 //!
 //! Toggle: Cmd/Ctrl + J or via toolbar button
 
+mod command_palette_helpers;
 mod connection_handlers;
 mod connection_window;
 mod event_handlers;
+mod object_designer_handlers;
+mod objects_panel_action_helpers;
+mod query_facade;
 mod query_handlers;
 mod refresh;
 mod rename_window;
@@ -48,15 +52,21 @@ mod saved_query_handlers;
 mod tab_menu;
 pub(crate) mod table_handlers;
 mod table_handlers_utils;
+mod table_workflow_adapter;
 mod ui_components;
+mod versioning_facade;
 mod versioning_handlers;
 mod view_handlers;
 use gpui::*;
-use std::sync::Arc;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::Arc,
+};
 use uuid::Uuid;
-use zqlz_settings::{ThemeModePreference, WorkspaceId, ZqlzSettings, load_layout, save_layout};
+use zqlz_services::{RefreshIntent, RefreshPlan, RefreshPlanStep, SurfaceRefreshKind};
+use zqlz_settings::{ThemeModePreference, WorkspaceId, ZqlzSettings, load_layout};
 use zqlz_ui::widgets::{
-    dock::{DockArea, DockAreaState, DockEvent, DockItem, DockPlacement, PanelStyle, PanelView},
+    dock::{DockArea, DockEvent, DockItem, DockPlacement, PanelStyle, PanelView},
     v_flex,
 };
 use zqlz_versioning::{
@@ -71,8 +81,10 @@ use crate::components::{
     ProblemEntry, ProblemSeverity, ProblemsPanel, ProblemsPanelEvent, QueryHistoryPanel,
     ResultsPanel, ResultsPanelEvent, SchemaDetailsPanel, SettingsPanel,
 };
+use crate::workspace::WorkspaceController;
 use crate::workspace_state::{
-    DiagnosticSeverity, EditorDiagnostic, RefreshScope, WorkspaceState, WorkspaceStateEvent,
+    DiagnosticSeverity, EditorDiagnostic, RefreshScope, WorkspaceSession,
+    WorkspaceSessionViewerKind, WorkspaceState, WorkspaceStateEvent,
 };
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
 
@@ -104,6 +116,7 @@ pub enum MainViewEvent {
 /// Main application view orchestrating the 4-panel dock system.
 pub struct MainView {
     focus_handle: FocusHandle,
+    workspace_controller: Entity<WorkspaceController>,
     /// Centralized workspace state - single source of truth for UI state
     workspace_state: Entity<WorkspaceState>,
     dock_area: Entity<DockArea>,
@@ -122,14 +135,12 @@ pub struct MainView {
     inspector_panel: Entity<InspectorPanel>,
     /// Settings panel - stored persistently to listen for settings changes
     settings_panel: Option<Entity<SettingsPanel>>,
-    // TODO: TemplateLibraryPanel
-    // template_library_panel: Entity<TemplateLibraryPanel>,
-    // TODO: ProjectManagerPanel
-    // project_manager_panel: Entity<ProjectManagerPanel>,
+    show_settings_page: bool,
     objects_panel: Entity<ObjectsPanel>,
-    workspace_id: WorkspaceId,
     tab_context_menu: Option<Entity<TabContextMenuState>>,
     query_editors: Vec<WeakEntity<crate::components::QueryEditor>>,
+    query_editor_subscriptions: HashMap<EntityId, Subscription>,
+    table_viewer_subscriptions: HashMap<EntityId, Subscription>,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_closing: bool,
     _command_palette_subscription: Option<Subscription>,
@@ -143,10 +154,49 @@ pub struct MainView {
     /// open_table_viewer call so that stale loads for a previous table are
     /// automatically cancelled when the user rapidly clicks another table.
     active_table_load_task: Option<Task<anyhow::Result<()>>>,
+    /// Monotonic ownership token for `active_table_load_task`.
+    ///
+    /// The open-viewer async flow only clears `active_table_load_task` when
+    /// the completion path still owns the latest token. This prevents an older
+    /// finishing task from clearing a newer in-flight task reference.
+    active_table_load_task_generation: u64,
+    restored_session_viewer_connections: HashSet<Uuid>,
     _subscriptions: Vec<Subscription>,
 }
 
 impl MainView {
+    fn refresh_workspace_window_title(&self, window: &mut Window, cx: &App) {
+        self.workspace_controller
+            .read(cx)
+            .refresh_window_title(window, cx);
+    }
+
+    fn pin_dirty_preview_tab(&self, is_dirty: bool, cx: &mut Context<Self>) {
+        if is_dirty {
+            self.workspace_controller
+                .update(cx, |workspace, cx| workspace.pin_active_preview_tab(cx));
+        }
+    }
+
+    fn activate_existing_query_editor(
+        &self,
+        editor: &Entity<crate::components::QueryEditor>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let panel_id = editor.entity_id();
+        self.workspace_controller.update(cx, |workspace, cx| {
+            workspace.activate_panel_by_id(panel_id, window, cx);
+        });
+        let focus_handle = editor.read(cx).editor_focus_handle(cx);
+        window.focus(&focus_handle, cx);
+    }
+
+    fn prune_closed_query_editors(&mut self) {
+        self.query_editors
+            .retain(|query_editor| query_editor.upgrade().is_some());
+    }
+
     /// Request a canonical refresh scope through workspace state so all refresh
     /// entry points converge into a single handling path.
     fn request_refresh(&mut self, scope: RefreshScope, cx: &mut Context<Self>) {
@@ -155,12 +205,56 @@ impl MainView {
         });
     }
 
+    fn refresh_intent_from_scope(scope: &RefreshScope) -> RefreshIntent {
+        match scope {
+            RefreshScope::ConnectionsList => RefreshIntent::ConnectionsList,
+            RefreshScope::ActiveConnectionSurfaces => RefreshIntent::ActiveConnectionSurfaces,
+            RefreshScope::ConnectionSurfaces(connection_id) => {
+                RefreshIntent::ConnectionSurfaces(*connection_id)
+            }
+        }
+    }
+
+    fn connected_sidebar_connection_ids(&self, cx: &App) -> Vec<Uuid> {
+        self.connection_sidebar
+            .read(cx)
+            .connections()
+            .iter()
+            .filter(|connection| connection.is_connected)
+            .map(|connection| connection.id)
+            .collect()
+    }
+
+    fn execute_refresh_plan(&mut self, plan: RefreshPlan, cx: &mut Context<Self>) {
+        for step in plan.steps {
+            match step {
+                RefreshPlanStep::RefreshConnectionsList => {
+                    self.refresh_connections_list_preserving_state(cx);
+                }
+                RefreshPlanStep::RefreshConnectionSurfaces {
+                    connection_id,
+                    kind,
+                } => {
+                    let target = connection_id
+                        .map(crate::main_view::refresh::RefreshTarget::Connection)
+                        .unwrap_or(crate::main_view::refresh::RefreshTarget::ActiveConnection);
+                    let options = match kind {
+                        SurfaceRefreshKind::SidebarAndObjects => {
+                            crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS
+                        }
+                        SurfaceRefreshKind::ConnectionsList => {
+                            crate::main_view::refresh::SurfaceRefreshOptions::CONNECTIONS_LIST
+                        }
+                    };
+                    self.refresh_connection_surfaces(target, options, cx);
+                }
+            }
+        }
+    }
+
     /// Creates a new MainView with the default 4-panel dock layout.
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let workspace_id = WorkspaceId::default_workspace();
-
-        // Create centralized workspace state
-        let workspace_state = cx.new(|_cx| WorkspaceState::new());
 
         let (_connection_manager, version_repository) = {
             let Some(app_state) = cx.try_global::<AppState>() else {
@@ -172,11 +266,39 @@ impl MainView {
             )
         };
 
+        let restore_session = ZqlzSettings::global(cx).workspace.restore_tabs_on_startup;
+        let persisted_session = if restore_session {
+            cx.try_global::<AppState>().and_then(|app_state| {
+                match app_state.storage.load_workspace_session() {
+                    Ok(session) => session,
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to load workspace session");
+                        None
+                    }
+                }
+            })
+        } else {
+            None
+        };
+
+        if !restore_session {
+            tracing::debug!("Workspace tab restore skipped by settings");
+        }
+        let restored_session = persisted_session.clone();
+
+        let workspace_state = cx.new(|_cx| {
+            if let Some(session) = persisted_session {
+                WorkspaceState::from_persisted_session(session)
+            } else {
+                WorkspaceState::new()
+            }
+        });
+
         let connection_sidebar = cx.new(|cx| {
             let mut sidebar = ConnectionSidebar::new(cx);
             // Load saved connections from AppState
             if let Some(app_state) = cx.try_global::<AppState>() {
-                let saved = app_state.saved_connections();
+                let saved = app_state.connection_service.list_saved_connections();
                 let entries: Vec<_> = saved
                     .into_iter()
                     .map(|s| ConnectionEntry::new(s.id, s.name, s.driver))
@@ -191,9 +313,6 @@ impl MainView {
         let cell_editor_panel = cx.new(|cx| CellEditorPanel::new(window, cx));
         let key_value_editor_panel = cx.new(|cx| KeyValueEditorPanel::new(window, cx));
         let query_history_panel = cx.new(|cx| QueryHistoryPanel::new(window, cx));
-        // TODO: Re-enable when ready
-        // let template_library_panel = cx.new(|cx| TemplateLibraryPanel::new(window, cx));
-        // let project_manager_panel = cx.new(|cx| ProjectManagerPanel::new(window, cx));
         let objects_panel = cx.new(|cx| ObjectsPanel::new(window, cx));
 
         let inspector_panel = cx.new(|cx| {
@@ -215,6 +334,9 @@ impl MainView {
         });
 
         let weak_dock_area = dock_area.downgrade();
+        let workspace_controller =
+            cx.new(|_| WorkspaceController::new(weak_dock_area.clone(), workspace_id.clone()));
+        crate::window_manager::register_main_workspace(window, workspace_controller.clone(), cx);
 
         let loaded_from_saved = if let Ok(Some(persisted)) = load_layout(&workspace_id) {
             tracing::info!("Loading saved dock layout");
@@ -288,13 +410,11 @@ impl MainView {
         });
 
         let dock_subscription = cx.subscribe_in(&dock_area, window, {
-            let dock_area = dock_area.downgrade();
-            move |this, _dock_area, event: &DockEvent, _window, cx| {
+            move |this, _dock_area, event: &DockEvent, window, cx| {
                 if let DockEvent::LayoutChanged = event {
+                    this.refresh_workspace_window_title(window, cx);
                     tracing::debug!("Dock layout changed, saving layout...");
-                    if let Some(dock_area) = dock_area.upgrade() {
-                        this.save_dock_layout(&dock_area, cx);
-                    }
+                    this.workspace_controller.read(cx).save_layout(cx);
                 }
             }
         });
@@ -323,19 +443,6 @@ impl MainView {
             }
         });
 
-        // TODO: Re-enable when ready
-        // let template_library_subscription = cx.subscribe_in(&template_library_panel, window, {
-        //     move |this, _panel, event: &TemplateLibraryEvent, window, cx| {
-        //         this.handle_template_library_event(event, window, cx);
-        //     }
-        // });
-
-        // let project_manager_subscription = cx.subscribe_in(&project_manager_panel, window, {
-        //     move |this, _panel, event: &ProjectManagerEvent, window, cx| {
-        //         this.handle_project_manager_event(event, window, cx);
-        //     }
-        // });
-
         let appearance_subscription = cx.observe_window_appearance(window, |_this, _window, cx| {
             let settings = ZqlzSettings::global(cx);
             if settings.appearance.theme_mode == ThemeModePreference::System {
@@ -344,18 +451,63 @@ impl MainView {
                 settings.apply(cx);
             }
         });
-
-        let tab_menu_subscription = dock_area.read(cx).center_tab_panel().map(|center_panel| {
-            cx.subscribe_in(&center_panel, window, {
-                move |this,
-                      _panel,
-                      event: &zqlz_ui::widgets::dock::TabContextMenuEvent,
-                      window,
-                      cx| {
-                    this.handle_tab_context_menu(event.tab_index, event.position, window, cx);
-                }
-            })
+        let window_activation_subscription = cx.observe_window_activation(window, {
+            move |_this, window, cx| {
+                crate::window_manager::mark_active_main_workspace(window, cx);
+            }
         });
+
+        let tab_menu_subscription =
+            workspace_controller
+                .read(cx)
+                .center_tab_panel(cx)
+                .map(|center_panel| {
+                    cx.subscribe_in(&center_panel, window, {
+                        move |this,
+                              _panel,
+                              event: &zqlz_ui::widgets::dock::TabContextMenuEvent,
+                              window,
+                              cx| {
+                            this.handle_tab_context_menu(
+                                event.tab_index,
+                                event.position,
+                                window,
+                                cx,
+                            );
+                        }
+                    })
+                });
+
+        let tab_close_request_subscription = workspace_controller
+            .read(cx)
+            .center_tab_panel(cx)
+            .map(|center_panel| {
+                cx.subscribe_in(&center_panel, window, {
+                    move |this,
+                          _panel,
+                          event: &zqlz_ui::widgets::dock::TabCloseRequestEvent,
+                          window,
+                          cx| {
+                        this.handle_tab_close_request(event.tab_index, window, cx);
+                    }
+                })
+            });
+
+        let tab_command_subscription =
+            workspace_controller
+                .read(cx)
+                .center_tab_panel(cx)
+                .map(|center_panel| {
+                    cx.subscribe_in(&center_panel, window, {
+                        move |this,
+                              _panel,
+                              event: &zqlz_ui::widgets::dock::TabCommandEvent,
+                              window,
+                              cx| {
+                            this.handle_tab_command(event.command, window, cx);
+                        }
+                    })
+                });
 
         // Subscribe to workspace state changes for centralized state management
         let workspace_state_subscription = cx.subscribe_in(&workspace_state, window, {
@@ -378,8 +530,9 @@ impl MainView {
             cx.notify();
         });
 
-        let main_view = Self {
+        let mut main_view = Self {
             focus_handle: cx.focus_handle(),
+            workspace_controller,
             workspace_state,
             dock_area,
             connection_sidebar,
@@ -391,12 +544,14 @@ impl MainView {
             key_value_editor_panel,
             inspector_panel,
             settings_panel: None,
+            show_settings_page: false,
             // template_library_panel,
             // project_manager_panel,
             objects_panel,
-            workspace_id,
             tab_context_menu: None,
             query_editors: Vec::new(),
+            query_editor_subscriptions: HashMap::new(),
+            table_viewer_subscriptions: HashMap::new(),
             command_palette: None,
             command_palette_closing: false,
             _command_palette_subscription: None,
@@ -404,6 +559,8 @@ impl MainView {
             version_history_panel: None,
             diff_viewer_panel: None,
             active_table_load_task: None,
+            active_table_load_task_generation: 0,
+            restored_session_viewer_connections: HashSet::new(),
             _subscriptions: vec![
                 sidebar_subscription,
                 results_panel_subscription,
@@ -415,29 +572,210 @@ impl MainView {
                 // template_library_subscription,
                 // project_manager_subscription,
                 appearance_subscription,
+                window_activation_subscription,
                 workspace_state_subscription,
                 problems_panel_subscription,
                 inspector_panel_observation,
             ]
             .into_iter()
             .chain(tab_menu_subscription)
+            .chain(tab_close_request_subscription)
+            .chain(tab_command_subscription)
             .collect(),
         };
 
+        main_view.refresh_workspace_window_title(window, cx);
+
+        if let Some(session) = restored_session {
+            main_view.restore_workspace_session_query_tabs(session.clone(), window, cx);
+            main_view.restore_workspace_session_viewer_tabs(session, None, window, cx);
+        }
+        main_view.persist_workspace_session(cx);
         main_view.refresh_query_history(cx);
 
         main_view
     }
 
-    /// Save the current dock layout to disk
-    fn save_dock_layout(&self, dock_area: &Entity<DockArea>, cx: &App) {
-        let state: DockAreaState = dock_area.read(cx).dump(cx);
+    fn persist_workspace_session(&self, cx: &App) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::warn!("skipped workspace session save because AppState is unavailable");
+            return;
+        };
 
-        if let Err(e) = save_layout(&self.workspace_id, &state) {
-            tracing::error!("Failed to save dock layout: {}", e);
-        } else {
-            tracing::debug!("Dock layout saved successfully");
+        let session = self.workspace_state.read(cx).persisted_session();
+        if let Err(error) = app_state.storage.save_workspace_session(&session) {
+            tracing::warn!(%error, "failed to save workspace session");
         }
+    }
+
+    fn clear_persisted_workspace_session(&self, cx: &App) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::warn!("skipped workspace session clear because AppState is unavailable");
+            return;
+        };
+
+        if let Err(error) = app_state
+            .storage
+            .save_workspace_session(&WorkspaceSession::default())
+        {
+            tracing::warn!(%error, "failed to clear workspace session");
+        }
+    }
+
+    fn should_persist_workspace_session(event: &WorkspaceStateEvent) -> bool {
+        matches!(
+            event,
+            WorkspaceStateEvent::ActiveConnectionChanged(_)
+                | WorkspaceStateEvent::ActiveDatabaseChanged(_)
+                | WorkspaceStateEvent::ActiveEditorChanged(_)
+                | WorkspaceStateEvent::EditorAdded(_)
+                | WorkspaceStateEvent::EditorRemoved(_)
+                | WorkspaceStateEvent::EditorStateChanged(_)
+                | WorkspaceStateEvent::ViewerTabsChanged
+        )
+    }
+
+    fn restore_workspace_session_query_tabs(
+        &mut self,
+        session: WorkspaceSession,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let mut active_editor = None;
+        let active_editor_id = session.active_editor_id;
+        let mut max_restored_editor_id = 0;
+
+        for tab in session.open_query_tabs {
+            max_restored_editor_id = max_restored_editor_id.max(tab.id.0);
+            let content = tab.draft_text.unwrap_or_default();
+            let editor = self.open_query_editor_with_content_for_editor_id(
+                query_handlers::QueryEditorContentOpenRequest {
+                    editor_id: tab.id,
+                    display_name: tab.display_name,
+                    content,
+                    file_path: tab.document_path,
+                    connection_id: tab.connection_id,
+                },
+                window,
+                cx,
+            );
+
+            if Some(tab.id) == active_editor_id {
+                active_editor = Some(editor);
+            }
+        }
+
+        if let Some(editor) = active_editor {
+            let focus_handle = editor.read(cx).editor_focus_handle(cx);
+            window.focus(&focus_handle, cx);
+            self.workspace_state.update(cx, |state, cx| {
+                state.set_active_editor(active_editor_id, cx);
+            });
+        }
+
+        self.query_counter = self.query_counter.max(max_restored_editor_id);
+    }
+
+    fn restore_workspace_session_viewer_tabs(
+        &mut self,
+        session: WorkspaceSession,
+        connection_filter: Option<Uuid>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let connection_service = cx
+            .try_global::<AppState>()
+            .map(|app_state| app_state.connection_service.clone());
+
+        for tab in session.open_viewer_tabs {
+            if connection_filter.is_some_and(|connection_id| tab.connection_id != connection_id) {
+                continue;
+            }
+
+            let Some(connection_service) = connection_service.as_ref() else {
+                tracing::warn!(
+                    connection_id = %tab.connection_id,
+                    "Skipped session viewer restore because AppState is unavailable"
+                );
+                continue;
+            };
+
+            if connection_service
+                .get_connection(tab.connection_id)
+                .is_none()
+            {
+                tracing::debug!(
+                    connection_id = %tab.connection_id,
+                    "Deferred session viewer restore until connection is active"
+                );
+                continue;
+            }
+
+            let restored_tab = tab.clone();
+            match tab.kind {
+                WorkspaceSessionViewerKind::Table {
+                    table_name,
+                    database_name,
+                    is_view,
+                    viewer_state,
+                } => {
+                    self.open_table_viewer_with_session_state(
+                        table_handlers::TableViewerSessionOpenRequest {
+                            connection_id: tab.connection_id,
+                            table_name,
+                            database_name,
+                            is_view,
+                            session_state: viewer_state,
+                        },
+                        window,
+                        cx,
+                    );
+                }
+                WorkspaceSessionViewerKind::RedisDatabase { database_index } => {
+                    self.open_redis_database(tab.connection_id, database_index, window, cx);
+                }
+                WorkspaceSessionViewerKind::RedisKey {
+                    database_index,
+                    key_name,
+                } => {
+                    self.open_redis_key(tab.connection_id, database_index, key_name, window, cx);
+                }
+                WorkspaceSessionViewerKind::Collection {
+                    database_name,
+                    collection_name,
+                    viewer_state,
+                } => {
+                    self.open_document_collection_viewer(
+                        tab.connection_id,
+                        database_name,
+                        collection_name,
+                        viewer_state,
+                        window,
+                        cx,
+                    );
+                }
+            }
+            self.workspace_state.update(cx, |state, cx| {
+                state.record_open_viewer_tab(restored_tab, cx);
+            });
+        }
+    }
+
+    pub(super) fn restore_workspace_session_viewer_tabs_for_connection(
+        &mut self,
+        connection_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .restored_session_viewer_connections
+            .insert(connection_id)
+        {
+            return;
+        }
+
+        let session = self.workspace_state.read(cx).persisted_session();
+        self.restore_workspace_session_viewer_tabs(session, Some(connection_id), window, cx);
     }
 
     /// Get the centralized workspace state
@@ -510,9 +848,13 @@ impl MainView {
         &mut self,
         event: &WorkspaceStateEvent,
         _objects_panel: &Entity<ObjectsPanel>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if Self::should_persist_workspace_session(event) {
+            self.persist_workspace_session(cx);
+        }
+
         match event {
             WorkspaceStateEvent::ActiveConnectionChanged(connection_id) => {
                 tracing::debug!(
@@ -542,6 +884,8 @@ impl MainView {
                     database_name
                 );
 
+                self.sync_active_query_editor_database_selection(database_name.clone(), window, cx);
+
                 if let Some(connection_id) = self.workspace_state.read(cx).active_connection_id() {
                     self.request_refresh(RefreshScope::ConnectionSurfaces(connection_id), cx);
                 }
@@ -550,42 +894,12 @@ impl MainView {
             WorkspaceStateEvent::RefreshRequested(scope) => {
                 tracing::debug!("MainView: handling RefreshRequested({:?})", scope);
 
-                match scope {
-                    RefreshScope::ConnectionsList => {
-                        self.refresh_connections_list_preserving_state(cx);
-
-                        let connected_connection_ids: Vec<Uuid> = self
-                            .connection_sidebar
-                            .read(cx)
-                            .connections()
-                            .iter()
-                            .filter(|connection| connection.is_connected)
-                            .map(|connection| connection.id)
-                            .collect();
-
-                        for connection_id in connected_connection_ids {
-                            self.refresh_connection_surfaces(
-                                crate::main_view::refresh::RefreshTarget::Connection(connection_id),
-                                crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                                cx,
-                            );
-                        }
-                    }
-                    RefreshScope::ActiveConnectionSurfaces => {
-                        self.refresh_connection_surfaces(
-                            crate::main_view::refresh::RefreshTarget::ActiveConnection,
-                            crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                            cx,
-                        );
-                    }
-                    RefreshScope::ConnectionSurfaces(connection_id) => {
-                        self.refresh_connection_surfaces(
-                            crate::main_view::refresh::RefreshTarget::Connection(*connection_id),
-                            crate::main_view::refresh::SurfaceRefreshOptions::SIDEBAR_AND_OBJECTS,
-                            cx,
-                        );
-                    }
-                }
+                let connected_connection_ids = self.connected_sidebar_connection_ids(cx);
+                let plan = RefreshPlan::from_intent(
+                    Self::refresh_intent_from_scope(scope),
+                    &connected_connection_ids,
+                );
+                self.execute_refresh_plan(plan, cx);
             }
 
             WorkspaceStateEvent::ConnectionStatusChanged { id, connected } => {
@@ -625,6 +939,11 @@ impl MainView {
                 cx.notify();
             }
 
+            WorkspaceStateEvent::QueryCancelled(editor_id) => {
+                tracing::debug!("MainView: query cancelled for {:?}", editor_id);
+                cx.notify();
+            }
+
             WorkspaceStateEvent::ActiveEditorChanged(editor_id) => {
                 tracing::debug!("MainView: active editor changed to {:?}", editor_id);
 
@@ -644,7 +963,15 @@ impl MainView {
                     // Set the active editor ID so problems are scoped correctly
                     panel.set_active_editor_id(editor_id.map(|id| id.0), cx);
                     // Update problems for the active editor
-                    panel.set_problems(diagnostics, cx);
+                    panel.set_problems(diagnostics.clone(), cx);
+                });
+
+                let problem_entries: Vec<ProblemEntry> = diagnostics
+                    .iter()
+                    .map(Self::convert_to_problem_entry)
+                    .collect();
+                self.problems_panel.update(cx, |panel, cx| {
+                    panel.update_problems(problem_entries, cx);
                 });
 
                 cx.notify();
@@ -764,7 +1091,12 @@ impl Render for MainView {
             .text_color(fg_color)
             .text_size(font_size)
             .on_action(cx.listener(Self::handle_open_settings))
+            .on_action(cx.listener(Self::handle_install_cli))
             .on_action(cx.listener(Self::handle_quit))
+            .on_action(cx.listener(Self::handle_new_window))
+            .on_action(cx.listener(Self::handle_close_window))
+            .on_action(cx.listener(Self::handle_minimize_window))
+            .on_action(cx.listener(Self::handle_zoom_window))
             .on_action(cx.listener(Self::handle_new_query))
             .on_action(cx.listener(Self::handle_new_connection))
             .on_action(cx.listener(Self::handle_refresh_connection))
@@ -780,6 +1112,7 @@ impl Render for MainView {
             .on_action(cx.listener(Self::handle_toggle_left_sidebar))
             .on_action(cx.listener(Self::handle_toggle_right_sidebar))
             .on_action(cx.listener(Self::handle_toggle_bottom_panel))
+            .on_action(cx.listener(Self::handle_toggle_all_docks))
             .on_action(cx.listener(Self::handle_focus_editor))
             .on_action(cx.listener(Self::handle_focus_results))
             .on_action(cx.listener(Self::handle_focus_sidebar))
@@ -788,10 +1121,21 @@ impl Render for MainView {
             // Tab navigation actions
             .on_action(cx.listener(Self::handle_activate_next_tab))
             .on_action(cx.listener(Self::handle_activate_prev_tab))
+            .on_action(cx.listener(Self::handle_navigate_tab_back))
+            .on_action(cx.listener(Self::handle_navigate_tab_forward))
+            .on_action(cx.listener(Self::handle_close_editor))
             .on_action(cx.listener(Self::handle_close_active_tab))
             .on_action(cx.listener(Self::handle_close_other_tabs))
             .on_action(cx.listener(Self::handle_close_tabs_to_right))
+            .on_action(cx.listener(Self::handle_close_tabs_to_left))
+            .on_action(cx.listener(Self::handle_close_clean_tabs))
             .on_action(cx.listener(Self::handle_close_all_tabs))
+            .on_action(cx.listener(Self::handle_move_tab_to_new_window))
+            .on_action(cx.listener(Self::handle_toggle_pin_active_tab))
+            .on_action(cx.listener(Self::handle_pin_tab))
+            .on_action(cx.listener(Self::handle_unpin_tab))
+            .on_action(cx.listener(Self::handle_mark_active_tab_as_preview))
+            .on_action(cx.listener(Self::handle_clear_active_tab_preview))
             .on_action(cx.listener(Self::handle_activate_tab_1))
             .on_action(cx.listener(Self::handle_activate_tab_2))
             .on_action(cx.listener(Self::handle_activate_tab_3))
@@ -806,13 +1150,16 @@ impl Render for MainView {
                 v_flex()
                     .size_full()
                     .child(self.render_title_bar(cx))
-                    .child(
-                        div()
-                            .flex_1()
-                            .w_full()
-                            .overflow_hidden()
-                            .child(self.dock_area.clone()),
-                    )
+                    .child(div().flex_1().w_full().overflow_hidden().child(
+                        if self.show_settings_page {
+                            self.settings_panel
+                                .clone()
+                                .map(|panel| panel.into_any_element())
+                                .unwrap_or_else(|| self.dock_area.clone().into_any_element())
+                        } else {
+                            self.dock_area.clone().into_any_element()
+                        },
+                    ))
                     .child(self.render_status_bar(cx)),
             )
             .children(dialog_layer)

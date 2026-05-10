@@ -9,6 +9,7 @@ use crate::components::{InspectorPanel, InspectorView, SchemaDetailsPanel};
 use crate::main_view::table_handlers_utils::conversion::{
     convert_to_schema_details, resolve_schema_qualifier,
 };
+use crate::workspace::WorkspaceController;
 
 pub(in crate::main_view) struct BecameActiveRequest {
     pub connection_id: Uuid,
@@ -20,7 +21,7 @@ pub(in crate::main_view) fn handle_became_active_event(
     request: BecameActiveRequest,
     schema_details_panel: Entity<SchemaDetailsPanel>,
     results_panel: Entity<ResultsPanel>,
-    dock_area: &Entity<zqlz_ui::widgets::dock::DockArea>,
+    workspace_controller: &Entity<WorkspaceController>,
     inspector_panel: &Entity<InspectorPanel>,
     window: &mut Window,
     cx: &mut App,
@@ -36,9 +37,8 @@ pub(in crate::main_view) fn handle_became_active_event(
         panel.set_problems(Vec::new(), cx);
     });
 
-    // Ensure Inspector panel is visible when a table becomes active
-    dock_area.update(cx, |area, cx| {
-        area.activate_panel(
+    workspace_controller.update(cx, |workspace, cx| {
+        workspace.reveal_panel(
             "InspectorPanel",
             zqlz_ui::widgets::dock::DockPlacement::Right,
             window,

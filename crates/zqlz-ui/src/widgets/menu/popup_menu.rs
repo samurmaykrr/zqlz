@@ -5,7 +5,7 @@ use crate::widgets::scroll::ScrollableElement;
 use crate::widgets::{ActiveTheme, ElementExt, Icon, IconName, Sizable as _, h_flex, v_flex};
 use crate::widgets::{Side, Size, StyledExt, kbd::Kbd};
 use gpui::{
-    Action, AnyElement, App, AppContext, Bounds, Context, Corner, DismissEvent, Edges, Entity,
+    Action, Anchor, AnyElement, App, AppContext, Bounds, Context, DismissEvent, Edges, Entity,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, KeyBinding,
     ParentElement, Pixels, Point, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
     Styled, WeakEntity, Window, anchored, div, prelude::FluentBuilder, px, rems,
@@ -291,7 +291,7 @@ pub struct PopupMenu {
     external_link_icon: bool,
     scroll_handle: ScrollHandle,
     // This will update on render
-    submenu_anchor: (Corner, Pixels),
+    submenu_anchor: (Anchor, Pixels),
 
     _subscriptions: Vec<Subscription>,
 }
@@ -313,7 +313,7 @@ impl PopupMenu {
             scroll_handle: ScrollHandle::default(),
             external_link_icon: true,
             size: Size::default(),
-            submenu_anchor: (Corner::TopLeft, Pixels::ZERO),
+            submenu_anchor: (Anchor::TopLeft, Pixels::ZERO),
             _subscriptions: vec![],
         }
     }
@@ -851,7 +851,7 @@ impl PopupMenu {
     }
 
     fn select_left(&mut self, _: &SelectLeft, window: &mut Window, cx: &mut Context<Self>) {
-        let handled = if matches!(self.submenu_anchor.0, Corner::TopLeft | Corner::BottomLeft) {
+        let handled = if matches!(self.submenu_anchor.0, Anchor::TopLeft | Anchor::BottomLeft) {
             self._unselect_submenu(window, cx)
         } else {
             self._select_submenu(window, cx)
@@ -872,7 +872,7 @@ impl PopupMenu {
     }
 
     fn select_right(&mut self, _: &SelectRight, window: &mut Window, cx: &mut Context<Self>) {
-        let handled = if matches!(self.submenu_anchor.0, Corner::TopLeft | Corner::BottomLeft) {
+        let handled = if matches!(self.submenu_anchor.0, Anchor::TopLeft | Anchor::BottomLeft) {
             self._select_submenu(window, cx)
         } else {
             self._unselect_submenu(window, cx)
@@ -943,8 +943,9 @@ impl PopupMenu {
         };
 
         match parent.read(cx).submenu_anchor.0 {
-            Corner::TopLeft | Corner::BottomLeft => Side::Left,
-            Corner::TopRight | Corner::BottomRight => Side::Right,
+            Anchor::TopLeft | Anchor::BottomLeft => Side::Left,
+            Anchor::TopRight | Anchor::BottomRight => Side::Right,
+            _ => Side::Left,
         }
     }
 
@@ -1092,16 +1093,16 @@ impl PopupMenu {
         let space_to_right = window_bounds.right() - (bounds.right() - px(8.));
         let space_to_left = (bounds.origin.x + px(8.)) - window_bounds.origin.x;
         let (anchor, left) = if space_to_right >= submenu_width || space_to_right >= space_to_left {
-            (Corner::TopLeft, bounds.size.width - px(8.))
+            (Anchor::TopLeft, bounds.size.width - px(8.))
         } else {
-            (Corner::TopRight, -px(16.))
+            (Anchor::TopRight, -px(16.))
         };
 
         let space_below = window_bounds.bottom() - selected_item_top;
         let space_above = selected_item_top - window_bounds.origin.y;
         let is_bottom_pos = submenu_height > space_below && space_above > space_below;
         self.submenu_anchor = if is_bottom_pos {
-            (anchor.other_side_corner_along(gpui::Axis::Vertical), left)
+            (anchor.other_side_along(gpui::Axis::Vertical), left)
         } else {
             (anchor, left)
         };
@@ -1293,7 +1294,7 @@ impl PopupMenu {
                     this.child({
                         let (anchor, left) = self.submenu_anchor;
                         let is_bottom_pos =
-                            matches!(anchor, Corner::BottomLeft | Corner::BottomRight);
+                            matches!(anchor, Anchor::BottomLeft | Anchor::BottomRight);
                         anchored()
                             .anchor(anchor)
                             .child(

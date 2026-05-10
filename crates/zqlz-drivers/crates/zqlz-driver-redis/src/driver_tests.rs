@@ -56,7 +56,7 @@ mod driver_capabilities_tests {
     fn test_redis_capabilities_transactions() {
         let driver = RedisDriver::new();
         let caps = driver.capabilities();
-        assert!(caps.supports_transactions);
+        assert!(!caps.supports_transactions);
         assert!(!caps.supports_savepoints);
     }
 
@@ -76,10 +76,10 @@ mod driver_capabilities_tests {
     fn test_redis_capabilities_special_features() {
         let driver = RedisDriver::new();
         let caps = driver.capabilities();
-        assert!(caps.supports_json); // RedisJSON
-        assert!(caps.supports_full_text_search); // RediSearch
+        assert!(!caps.supports_json); // RedisJSON is module-gated
+        assert!(!caps.supports_full_text_search); // RediSearch is module-gated
         assert!(caps.supports_multiple_databases); // SELECT 0-15
-        assert!(caps.supports_streaming); // Pub/Sub
+        assert!(!caps.supports_streaming); // No app-level Pub/Sub streaming surface yet
         assert!(caps.supports_ssl);
     }
 
@@ -165,7 +165,23 @@ mod connection_string_tests {
         config.password = Some("pass".to_string());
         let config = config.with_param("database", "3").with_param("tls", "true");
         let conn_str = driver.build_connection_string(&config);
-        assert_eq!(conn_str, "rediss://user:pass@redis.example.com:6380/3");
+        assert_eq!(
+            conn_str,
+            "rediss://user:pass@redis.example.com:6380/3#insecure"
+        );
+    }
+
+    #[test]
+    fn test_redis_connection_string_encodes_credentials() {
+        let driver = RedisDriver::new();
+        let mut config = ConnectionConfig::new("redis", "Test Redis");
+        config.username = Some("%user%".to_string());
+        config.password = Some("#@<>$".to_string());
+        let conn_str = driver.build_connection_string(&config);
+        assert_eq!(
+            conn_str,
+            "redis://%25user%25:%23%40%3C%3E%24@127.0.0.1:6379/0"
+        );
     }
 
     #[test]

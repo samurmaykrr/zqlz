@@ -1,5 +1,6 @@
 use super::context_menu_utils::{
-    ordered_unique_actual_rows_from_display_rows, pasted_text_for_selection_index,
+    TableContextMenuAction, ordered_unique_actual_rows_from_display_rows,
+    pasted_text_for_selection_index, table_context_menu_action_availability,
 };
 use super::*;
 
@@ -55,6 +56,16 @@ impl TableViewerDelegate {
             .map(|column| column.nullable || self.is_string_column(data_col_ix))
             .unwrap_or(false);
         let can_generate_uuid = self.can_generate_uuid_for_column(data_col_ix);
+        let edit_cells_available = table_context_menu_action_availability(
+            &self.data_editing_features,
+            TableContextMenuAction::EditCells,
+        )
+        .available;
+        let delete_rows_available = table_context_menu_action_availability(
+            &self.data_editing_features,
+            TableContextMenuAction::DeleteRows,
+        )
+        .available;
         let supports_relational_sql_actions =
             matches!(self.driver_category, DriverCategory::Relational);
 
@@ -103,7 +114,10 @@ impl TableViewerDelegate {
 
             PopupMenuItem::new(label)
                 .disabled(
-                    column_meta.is_none() || !can_set_empty_string || selected_rows_with_values.is_empty(),
+                    !edit_cells_available
+                        || column_meta.is_none()
+                        || !can_set_empty_string
+                        || selected_rows_with_values.is_empty(),
                 )
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
@@ -131,7 +145,12 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(column_meta.is_none() || !can_set_null || selected_rows_with_values.is_empty())
+                .disabled(
+                    !edit_cells_available
+                        || column_meta.is_none()
+                        || !can_set_null
+                        || selected_rows_with_values.is_empty(),
+                )
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if column_meta.is_some() {
                         let updates: Vec<(usize, Value)> = selected_rows_with_values
@@ -158,7 +177,10 @@ impl TableViewerDelegate {
 
             PopupMenuItem::new(label)
                 .disabled(
-                    column_meta.is_none() || !can_generate_uuid || selected_rows_with_values.is_empty(),
+                    !edit_cells_available
+                        || column_meta.is_none()
+                        || !can_generate_uuid
+                        || selected_rows_with_values.is_empty(),
                 )
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
@@ -189,7 +211,7 @@ impl TableViewerDelegate {
                 };
 
                 PopupMenuItem::new(label)
-                    .disabled(column_meta.is_none() || selected_count > 1)
+                    .disabled(!edit_cells_available || column_meta.is_none() || selected_count > 1)
                     .on_click({
                     let column_meta = column_meta.clone();
                     let current_value = current_value.clone();
@@ -240,7 +262,7 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(selected_count > 1)
+                .disabled(!edit_cells_available || selected_count > 1)
                 .on_click(window.listener_for(
                     &menu_entity,
                     move |_this, _, _, cx| {
@@ -335,7 +357,12 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(column_meta.is_none() || !can_cut || selected_rows_with_values.is_empty())
+                .disabled(
+                    !edit_cells_available
+                        || column_meta.is_none()
+                        || !can_cut
+                        || selected_rows_with_values.is_empty(),
+                )
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     let clipboard_text = if selected_cell_texts.len() > 1 {
                         selected_cell_texts.join("\n")
@@ -458,7 +485,11 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(column_meta.is_none() || selected_rows_with_values.is_empty())
+                .disabled(
+                    !edit_cells_available
+                        || column_meta.is_none()
+                        || selected_rows_with_values.is_empty(),
+                )
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(clipboard_item) = cx.read_from_clipboard()
                         && let Some(text) = clipboard_item.text()
@@ -500,7 +531,9 @@ impl TableViewerDelegate {
                 "Delete Row".to_string()
             };
 
-            PopupMenuItem::new(label).on_click(window.listener_for(
+            PopupMenuItem::new(label)
+                .disabled(!delete_rows_available)
+                .on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, window, cx| {
                     let rows = rows_to_delete.clone();

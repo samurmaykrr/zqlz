@@ -12,6 +12,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_command_palette::{CommandUsageEntry, CommandUsagePersistence};
 use zqlz_connection::SavedConnection;
@@ -20,6 +21,10 @@ use zqlz_internal_storage::rusqlite::{self, Connection, params};
 use zqlz_query::{HistoryPersistence, QueryHistoryEntry};
 use zqlz_templates::dbt::{ModelConfig, QuotingConfig};
 use zqlz_templates::project::{Model, ModelDependency, Project, SourceDefinition, SourceTable};
+
+use crate::workspace_state::WorkspaceSession;
+
+const WORKSPACE_SESSION_FILE_NAME: &str = "workspace_session.json";
 
 /// A saved query associated with a connection
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -38,20 +43,7 @@ pub struct SavedQuery {
     pub updated_at: DateTime<Utc>,
 }
 
-impl SavedQuery {
-    /// Create a new saved query
-    pub fn new(name: String, connection_id: Uuid, sql: String) -> Self {
-        let now = Utc::now();
-        Self {
-            id: Uuid::new_v4(),
-            name,
-            connection_id,
-            sql,
-            created_at: now,
-            updated_at: now,
-        }
-    }
-}
+impl SavedQuery {}
 
 /// Local storage manager using SQLite
 pub struct LocalStorage {
@@ -323,6 +315,41 @@ impl LocalStorage {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    fn workspace_session_path(&self) -> PathBuf {
+        self.storage
+            .path()
+            .parent()
+            .map(|parent| parent.join(WORKSPACE_SESSION_FILE_NAME))
+            .unwrap_or_else(|| PathBuf::from(WORKSPACE_SESSION_FILE_NAME))
+    }
+
+    pub fn save_workspace_session(&self, session: &WorkspaceSession) -> Result<()> {
+        let path = self.workspace_session_path();
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create workspace session directory {parent:?}")
+            })?;
+        }
+
+        let json = serde_json::to_string_pretty(session)
+            .context("Failed to serialize workspace session")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("Failed to write workspace session to {path:?}"))
+    }
+
+    pub fn load_workspace_session(&self) -> Result<Option<WorkspaceSession>> {
+        let path = self.workspace_session_path();
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let json = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read workspace session from {path:?}"))?;
+        serde_json::from_str(&json)
+            .map(Some)
+            .context("Failed to deserialize workspace session")
     }
 
     /// Persist a query history entry to the database.
@@ -711,6 +738,65 @@ impl CommandUsagePersistence for LocalStorage {
         if let Err(error) = self.clear_command_usage() {
             tracing::error!(%error, "Failed to clear command usage");
         }
+    }
+}
+
+impl zqlz_query::SavedQueryStore for LocalStorage {
+    fn query_name_exists(&self, connection_id: Uuid, name: &str) -> Result<bool> {
+        LocalStorage::query_name_exists(self, connection_id, name)
+    }
+
+    fn save_query(&self, query: &zqlz_query::SavedQueryRecord) -> Result<()> {
+        let saved_query = SavedQuery {
+            id: query.id,
+            name: query.name.clone(),
+            connection_id: query.connection_id,
+            sql: query.sql.clone(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        LocalStorage::save_query(self, &saved_query)
+    }
+
+    fn load_query(&self, query_id: Uuid) -> Result<Option<zqlz_query::SavedQueryRecord>> {
+        LocalStorage::load_query(self, query_id).map(|query| {
+            query.map(|query| zqlz_query::SavedQueryRecord {
+                id: query.id,
+                name: query.name,
+                connection_id: query.connection_id,
+                sql: query.sql,
+            })
+        })
+    }
+
+    fn update_query_sql(&self, query_id: Uuid, sql: &str) -> Result<()> {
+        LocalStorage::update_query_sql(self, query_id, sql)
+    }
+
+    fn rename_query(&self, query_id: Uuid, new_name: &str) -> Result<()> {
+        LocalStorage::rename_query(self, query_id, new_name)
+    }
+
+    fn delete_query(&self, query_id: Uuid) -> Result<()> {
+        LocalStorage::delete_query(self, query_id)
+    }
+
+    fn load_queries_for_connection(
+        &self,
+        connection_id: Uuid,
+    ) -> Result<Vec<zqlz_query::SavedQueryRecord>> {
+        LocalStorage::load_queries_for_connection(self, connection_id).map(|queries| {
+            queries
+                .into_iter()
+                .map(|query| zqlz_query::SavedQueryRecord {
+                    id: query.id,
+                    name: query.name,
+                    connection_id: query.connection_id,
+                    sql: query.sql,
+                })
+                .collect()
+        })
     }
 }
 
@@ -1769,5 +1855,106 @@ impl LocalStorage {
             params![source_id.to_string()],
         )?;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::workspace_state::{
+        EditorId, WorkspaceSessionQueryTab, WorkspaceSessionViewerKind, WorkspaceSessionViewerTab,
+    };
+    use std::path::PathBuf;
+
+    struct TestStorage {
+        storage: LocalStorage,
+        temp_dir: PathBuf,
+    }
+
+    impl Drop for TestStorage {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.temp_dir).ok();
+        }
+    }
+
+    fn test_storage() -> TestStorage {
+        let temp_dir = std::env::temp_dir().join(format!("zqlz-storage-test-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).expect("create temp dir");
+        let storage = LocalStorage {
+            storage: InternalStorage::open(temp_dir.join("storage.db")).expect("open temp storage"),
+        };
+        storage.initialize_schema().expect("initialize schema");
+
+        TestStorage { storage, temp_dir }
+    }
+
+    #[test]
+    fn load_workspace_session_returns_none_when_missing() {
+        let test_storage = test_storage();
+
+        let session = test_storage
+            .storage
+            .load_workspace_session()
+            .expect("load missing workspace session");
+
+        assert_eq!(session, None);
+    }
+
+    #[test]
+    fn workspace_session_roundtrips_through_config_file() {
+        let test_storage = test_storage();
+        let connection_id = Uuid::new_v4();
+        let session = WorkspaceSession {
+            active_connection_id: Some(connection_id),
+            active_database: Some("analytics".to_string()),
+            open_query_tabs: vec![WorkspaceSessionQueryTab {
+                id: EditorId(2),
+                display_name: "Revenue.sql".to_string(),
+                connection_id: Some(connection_id),
+                document_path: Some("/tmp/revenue.sql".to_string()),
+                draft_text: Some("select * from revenue".to_string()),
+            }],
+            open_viewer_tabs: vec![WorkspaceSessionViewerTab {
+                connection_id,
+                kind: WorkspaceSessionViewerKind::RedisKey {
+                    database_index: 0,
+                    key_name: "session:1".to_string(),
+                },
+            }],
+            active_editor_id: Some(EditorId(2)),
+        };
+
+        test_storage
+            .storage
+            .save_workspace_session(&session)
+            .expect("save workspace session");
+
+        let restored = test_storage
+            .storage
+            .load_workspace_session()
+            .expect("load workspace session");
+
+        assert_eq!(restored, Some(session));
+    }
+
+    #[test]
+    fn workspace_session_storage_uses_config_file() {
+        let test_storage = test_storage();
+        let session = WorkspaceSession::default();
+
+        test_storage
+            .storage
+            .save_workspace_session(&session)
+            .expect("save workspace session");
+
+        let stored_json =
+            std::fs::read_to_string(test_storage.temp_dir.join(WORKSPACE_SESSION_FILE_NAME))
+                .expect("read workspace session config file");
+
+        assert_eq!(
+            serde_json::from_str::<WorkspaceSession>(&stored_json)
+                .expect("deserialize workspace session config file"),
+            session
+        );
     }
 }

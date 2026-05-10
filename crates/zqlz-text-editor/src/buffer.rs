@@ -149,7 +149,16 @@ pub struct Change {
 pub struct RevisionEdit {
     pub start_revision: usize,
     pub end_revision: usize,
+    pub transaction_id: Option<TransactionId>,
     pub change: Change,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextTransaction {
+    pub id: TransactionId,
+    pub start_revision: usize,
+    pub end_revision: usize,
+    pub edits: Vec<RevisionEdit>,
 }
 
 impl RevisionEdit {
@@ -363,8 +372,92 @@ impl TextBuffer {
         }
     }
 
+    pub fn with_transaction<T>(
+        &mut self,
+        f: impl FnOnce(&mut Self, TransactionId) -> Result<T>,
+    ) -> Result<T> {
+        let transaction_id = self.start_transaction_at();
+        let result = f(self, transaction_id);
+        self.end_transaction_at(transaction_id);
+        result
+    }
+
     pub fn active_transaction(&self) -> Option<TransactionId> {
         self.active_transaction
+    }
+
+    pub fn transaction_edits(&self, transaction_id: TransactionId) -> Vec<RevisionEdit> {
+        self.edit_log
+            .iter()
+            .filter(|edit| edit.transaction_id == Some(transaction_id))
+            .cloned()
+            .collect()
+    }
+
+    pub fn transaction(&self, transaction_id: TransactionId) -> Option<TextTransaction> {
+        let edits = self.transaction_edits(transaction_id);
+        let start_revision = edits.first()?.start_revision;
+        let end_revision = edits.last()?.end_revision;
+
+        Some(TextTransaction {
+            id: transaction_id,
+            start_revision,
+            end_revision,
+            edits,
+        })
+    }
+
+    pub fn apply_changes(&mut self, changes: &[Change]) -> Result<TextTransaction> {
+        if changes.is_empty() {
+            return Err(anyhow!("Cannot apply an empty multi-edit transaction"));
+        }
+
+        if let Some(transaction_id) = self.active_transaction {
+            return Err(anyhow!(
+                "Cannot start multi-edit transaction while transaction {} is active",
+                transaction_id.0
+            ));
+        }
+
+        let snapshot = self.snapshot();
+        let transaction_id = self.start_transaction_at();
+
+        for change in changes {
+            if let Err(error) = self.apply_change(change) {
+                self.restore_snapshot(&snapshot);
+                self.end_transaction_at(transaction_id);
+                return Err(error);
+            }
+        }
+
+        self.end_transaction_at(transaction_id);
+        self.transaction(transaction_id).ok_or_else(|| {
+            anyhow!(
+                "Multi-edit transaction {} did not record any edits",
+                transaction_id.0
+            )
+        })
+    }
+
+    pub fn undo_transaction(&mut self, transaction: &TextTransaction) -> Result<TextTransaction> {
+        let inverse_changes = transaction
+            .edits
+            .iter()
+            .rev()
+            .map(|edit| edit.change.inverse())
+            .collect::<Vec<_>>();
+
+        self.apply_changes(&inverse_changes)
+    }
+
+    pub fn redo_transaction(&mut self, transaction: &TextTransaction) -> Result<TextTransaction> {
+        let changes = transaction
+            .edits
+            .iter()
+            .map(|edit| edit.change.clone())
+            .collect::<Vec<_>>();
+
+        self.apply_changes(&changes)
     }
 
     /// Returns the current monotonic revision for the buffer.
@@ -1131,6 +1224,7 @@ impl TextBuffer {
         self.edit_log.push(RevisionEdit {
             start_revision,
             end_revision: self.revision,
+            transaction_id: self.active_transaction,
             change: change.clone(),
         });
     }
@@ -1506,6 +1600,59 @@ mod tests {
     }
 
     #[test]
+    fn test_offset_position_round_trips_across_multiline_unicode_samples() {
+        let samples = [
+            "",
+            "single line",
+            "first\nsecond\nthird",
+            "emoji 🦀\nmultibyte café\n最后一行",
+            "trailing newline\n",
+            "\nleading newline",
+            "windows\r\nline\r\nend",
+        ];
+
+        for text in samples {
+            let buffer = TextBuffer::new(text);
+
+            for offset in text
+                .char_indices()
+                .map(|(offset, _)| offset)
+                .chain(std::iter::once(text.len()))
+            {
+                let position = buffer.offset_to_position(offset).unwrap();
+                assert_eq!(
+                    buffer.position_to_offset(position).unwrap(),
+                    offset,
+                    "offset/position round trip failed for {text:?} at byte offset {offset}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn test_snapshot_offset_position_round_trips_across_later_edits() {
+        let snapshot_text = "select 🦀\nfrom café\nwhere id = 1";
+        let mut buffer = TextBuffer::new(snapshot_text);
+        let snapshot = buffer.snapshot();
+
+        buffer.insert(0, "with t as ").unwrap();
+        buffer.delete(10..14).unwrap();
+
+        for offset in snapshot_text
+            .char_indices()
+            .map(|(offset, _)| offset)
+            .chain(std::iter::once(snapshot_text.len()))
+        {
+            let position = snapshot.offset_to_position(offset).unwrap();
+            assert_eq!(
+                snapshot.position_to_offset(position).unwrap(),
+                offset,
+                "snapshot round trip should remain tied to the captured text at byte offset {offset}"
+            );
+        }
+    }
+
+    #[test]
     fn test_clamp_position() {
         let buffer = TextBuffer::new("Hello\nWorld");
         assert_eq!(
@@ -1642,6 +1789,70 @@ mod tests {
     }
 
     #[test]
+    fn test_anchor_rebases_across_insert_delete_replace_sequence() {
+        let mut buffer = TextBuffer::new("alpha beta gamma");
+        let beta_start = buffer.anchor_before(6).unwrap();
+        let beta_end = buffer.anchor_after(10).unwrap();
+
+        buffer.insert(0, "SQL ").unwrap();
+        buffer.delete(10..15).unwrap();
+        buffer
+            .apply_change(&Change::replace(10, "gamma", "delta"))
+            .unwrap();
+
+        assert_eq!(buffer.text(), "SQL alpha delta");
+        assert_eq!(buffer.resolve_anchor_offset(beta_start).unwrap(), 10);
+        assert_eq!(buffer.resolve_anchor_offset(beta_end).unwrap(), 15);
+    }
+
+    #[test]
+    fn test_anchored_range_rebases_across_multi_edit_transaction() {
+        let mut buffer = TextBuffer::new("select beta from gamma");
+        let range = buffer
+            .anchored_range(7..11, Bias::Left, Bias::Right)
+            .unwrap();
+
+        let transaction = buffer
+            .apply_changes(&[
+                Change::insert(0, "with alpha as "),
+                Change::replace(26, "from", "join"),
+            ])
+            .unwrap();
+
+        assert_eq!(transaction.edits.len(), 2);
+        assert_eq!(buffer.text(), "with alpha as select beta join gamma");
+        assert_eq!(buffer.resolve_anchored_range(range).unwrap(), 21..25);
+        assert_eq!(
+            buffer.resolve_anchored_position_range(range).unwrap(),
+            Range::new(Position::new(0, 21), Position::new(0, 25))
+        );
+    }
+
+    #[test]
+    fn test_stale_snapshot_anchor_resolution_requires_current_buffer() {
+        let mut buffer = TextBuffer::new("alpha beta gamma");
+        let snapshot = buffer.snapshot();
+        let range = snapshot
+            .anchored_range(6..10, Bias::Left, Bias::Right)
+            .unwrap();
+
+        buffer
+            .apply_changes(&[
+                Change::replace(0, "alpha", "select"),
+                Change::insert(6, " distinct"),
+            ])
+            .unwrap();
+
+        assert!(snapshot.resolve_anchored_range(range).is_ok());
+        assert_eq!(buffer.resolve_anchored_range(range).unwrap(), 16..20);
+        assert!(
+            snapshot
+                .resolve_anchored_range(buffer.rebase_anchored_range(range).unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn test_snapshot_rebase_anchor_normalizes_to_snapshot_revision() {
         let snapshot = TextBuffer::new("hello").snapshot();
         let anchor = snapshot.anchor_after(5).unwrap();
@@ -1758,6 +1969,153 @@ mod tests {
         assert_eq!(buffer.active_transaction(), Some(transaction));
 
         buffer.end_transaction_at(transaction);
+        assert_eq!(buffer.active_transaction(), None);
+    }
+
+    #[test]
+    fn test_transaction_groups_revision_edits() {
+        let mut buffer = TextBuffer::new("hello");
+
+        let transaction_id = buffer
+            .with_transaction(|buffer, transaction_id| {
+                buffer.insert(5, " world")?;
+                buffer.delete(0..1)?;
+                Ok(transaction_id)
+            })
+            .unwrap();
+
+        let transaction = buffer.transaction(transaction_id).unwrap();
+        assert_eq!(transaction.id, transaction_id);
+        assert_eq!(transaction.start_revision, 0);
+        assert_eq!(transaction.end_revision, buffer.revision());
+        assert_eq!(transaction.edits.len(), 2);
+        assert!(
+            transaction
+                .edits
+                .iter()
+                .all(|edit| edit.transaction_id == Some(transaction_id))
+        );
+        assert_eq!(buffer.active_transaction(), None);
+    }
+
+    #[test]
+    fn test_apply_changes_groups_multi_edit_transaction() {
+        let mut buffer = TextBuffer::new("hello world");
+        let changes = vec![
+            Change::replace(0, "hello", "goodbye"),
+            Change::delete(8, "world"),
+            Change::insert(8, "buffer"),
+        ];
+
+        let transaction = buffer.apply_changes(&changes).unwrap();
+
+        assert_eq!(buffer.text(), "goodbye buffer");
+        assert_eq!(transaction.start_revision, 0);
+        assert_eq!(transaction.end_revision, 3);
+        assert_eq!(transaction.edits.len(), 3);
+        assert!(
+            transaction
+                .edits
+                .iter()
+                .all(|edit| { edit.transaction_id == Some(transaction.id) })
+        );
+        assert_eq!(buffer.active_transaction(), None);
+    }
+
+    #[test]
+    fn test_apply_changes_rolls_back_after_failed_edit() {
+        let mut buffer = TextBuffer::new("hello world");
+        let anchor = buffer.anchor_after(6).unwrap();
+        let changes = vec![Change::insert(5, ","), Change::delete(0, "mismatch")];
+
+        let result = buffer.apply_changes(&changes);
+
+        assert!(result.is_err());
+        assert_eq!(buffer.text(), "hello world");
+        assert_eq!(buffer.revision(), 0);
+        assert_eq!(buffer.active_transaction(), None);
+        assert_eq!(buffer.resolve_anchor_offset(anchor).unwrap(), 6);
+    }
+
+    #[test]
+    fn test_apply_changes_rejects_empty_transaction() {
+        let mut buffer = TextBuffer::new("hello");
+
+        let result = buffer.apply_changes(&[]);
+
+        assert!(result.is_err());
+        assert_eq!(buffer.text(), "hello");
+        assert_eq!(buffer.revision(), 0);
+    }
+
+    #[test]
+    fn test_undo_redo_transaction_replays_grouped_edits_atomically() {
+        let mut buffer = TextBuffer::new("hello world");
+        let transaction = buffer
+            .apply_changes(&[Change::insert(5, ","), Change::replace(7, "world", "zqlz")])
+            .unwrap();
+
+        assert_eq!(buffer.text(), "hello, zqlz");
+
+        let undo_transaction = buffer.undo_transaction(&transaction).unwrap();
+        assert_eq!(buffer.text(), "hello world");
+        assert_eq!(undo_transaction.edits.len(), 2);
+        assert!(
+            undo_transaction
+                .edits
+                .iter()
+                .all(|edit| edit.transaction_id == Some(undo_transaction.id))
+        );
+
+        let redo_transaction = buffer.redo_transaction(&transaction).unwrap();
+        assert_eq!(buffer.text(), "hello, zqlz");
+        assert_eq!(redo_transaction.edits.len(), 2);
+        assert!(
+            redo_transaction
+                .edits
+                .iter()
+                .all(|edit| edit.transaction_id == Some(redo_transaction.id))
+        );
+    }
+
+    #[test]
+    fn test_failed_transaction_undo_rolls_back_without_partial_edit() {
+        let mut buffer = TextBuffer::new("hello");
+        let transaction = TextTransaction {
+            id: TransactionId(999),
+            start_revision: 0,
+            end_revision: 2,
+            edits: vec![
+                RevisionEdit {
+                    start_revision: 0,
+                    end_revision: 1,
+                    transaction_id: Some(TransactionId(999)),
+                    change: Change::insert(5, "!"),
+                },
+                RevisionEdit {
+                    start_revision: 1,
+                    end_revision: 2,
+                    transaction_id: Some(TransactionId(999)),
+                    change: Change::delete(0, "mismatch"),
+                },
+            ],
+        };
+
+        let result = buffer.undo_transaction(&transaction);
+
+        assert!(result.is_err());
+        assert_eq!(buffer.text(), "hello");
+        assert_eq!(buffer.revision(), 0);
+        assert_eq!(buffer.active_transaction(), None);
+    }
+
+    #[test]
+    fn test_failed_transaction_closes_active_transaction() {
+        let mut buffer = TextBuffer::new("hello");
+
+        let result = buffer.with_transaction(|buffer, _transaction_id| buffer.delete(0..100));
+
+        assert!(result.is_err());
         assert_eq!(buffer.active_transaction(), None);
     }
 

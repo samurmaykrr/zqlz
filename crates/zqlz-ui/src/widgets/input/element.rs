@@ -10,7 +10,7 @@ use ropey::Rope;
 use smallvec::SmallVec;
 
 use crate::widgets::{
-    ActiveTheme as _, Colorize, PixelsExt, Root,
+    ActiveTheme as _, Colorize, Root,
     highlighter::DiagnosticSeverity,
     input::{RopeExt as _, blink_cursor::CURSOR_WIDTH, text_wrapper::LineLayout},
 };
