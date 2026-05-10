@@ -2,6 +2,9 @@ use gpui::{AnyElement, App, IntoElement, ParentElement};
 use zqlz_ui::widgets::TitleBar;
 
 #[cfg(not(target_os = "macos"))]
+use gpui::Action;
+
+#[cfg(not(target_os = "macos"))]
 use crate::AppMenuBarGlobal;
 
 pub fn workspace_title_bar(
