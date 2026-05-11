@@ -7,14 +7,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use zqlz_core::{
-    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnInfo, ColumnMeta, Connection,
-    ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency, DropTableOptions,
-    DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyAction,
-    ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities, IndexInfo,
-    ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef, ObjectsPanelRow, PrimaryKeyInfo,
-    ProcedureInfo, QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row,
-    SchemaInfo, SchemaIntrospection, SequenceInfo, SqlObjectName, StatementResult, TableDetails,
-    TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
+    BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnInfo, ColumnMeta,
+    Connection, ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
+    ForeignKeyAction, ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
+    IndexInfo, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef,
+    ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle, QueryResult,
+    ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaInfo, SchemaIntrospection,
+    SequenceInfo, SqlObjectName, StatementResult, TableDetails, TableInfo, TableType, Transaction,
+    TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
 };
 
 fn strip_pg_casts(expr: &str) -> String {
@@ -133,6 +134,21 @@ impl SqliteConnection {
         } else {
             TableType::Table
         }
+    }
+
+    async fn resolve_catalog_table_name(&self, requested_name: &str) -> Result<String> {
+        let tables = self.list_tables(None).await?;
+        if tables.iter().any(|table| table.name == requested_name) {
+            return Ok(requested_name.to_string());
+        }
+
+        if let Some((schema_name, relation_name)) = requested_name.split_once('.') {
+            if schema_name != "main" && tables.iter().any(|table| table.name == relation_name) {
+                return Ok(relation_name.to_string());
+            }
+        }
+
+        Ok(requested_name.to_string())
     }
 
     /// Open a SQLite database
@@ -833,6 +849,77 @@ impl Connection for SqliteConnection {
         })
     }
 
+    async fn update_cell(&self, request: CellUpdateRequest) -> Result<u64> {
+        let (where_clause, mut params) = match &request.row_identifier {
+            RowIdentifier::RowIndex(_) => {
+                return Err(ZqlzError::NotSupported(
+                    "Row index-based updates not supported by SQLite. Use primary key or full row identifier."
+                        .to_string(),
+                ));
+            }
+            RowIdentifier::PrimaryKey(primary_key_values) => {
+                let conditions = primary_key_values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (column_name, _))| {
+                        format!(
+                            "{} = {}",
+                            self.quote_identifier(column_name),
+                            self.format_bind_placeholder(index + 1)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let params = primary_key_values
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                (conditions.join(" AND "), params)
+            }
+            RowIdentifier::FullRow(row_values) => {
+                let mut next_param_index = 1usize;
+                let conditions = row_values
+                    .iter()
+                    .map(|(column_name, value)| {
+                        if value == &Value::Null {
+                            format!("{} IS NULL", self.quote_identifier(column_name))
+                        } else {
+                            let placeholder = self.format_bind_placeholder(next_param_index);
+                            next_param_index += 1;
+                            format!("{} = {}", self.quote_identifier(column_name), placeholder)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let params = row_values
+                    .iter()
+                    .filter(|(_, value)| value != &Value::Null)
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                (conditions.join(" AND "), params)
+            }
+        };
+
+        let table_name = self.quote_identifier(&request.table_name);
+        let column_name = self.quote_identifier(&request.column_name);
+        let sql = if let Some(new_value) = &request.new_value {
+            params.insert(0, new_value.clone());
+            format!(
+                "UPDATE {} SET {} = {} WHERE {}",
+                table_name,
+                column_name,
+                self.format_bind_placeholder(0),
+                where_clause
+            )
+        } else {
+            format!(
+                "UPDATE {} SET {} = NULL WHERE {}",
+                table_name, column_name, where_clause
+            )
+        };
+
+        let result = self.execute(&sql, &params).await?;
+        Ok(result.affected_rows)
+    }
+
     async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
         if table_name
             .namespace
@@ -1101,16 +1188,17 @@ impl SchemaIntrospection for SqliteConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_table(&self, _schema: Option<&str>, name: &str) -> Result<TableDetails> {
+        let name = self.resolve_catalog_table_name(name).await?;
         let tables = self.list_tables(None).await?;
         let info = tables
             .into_iter()
             .find(|t| t.name == name)
             .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
 
-        let columns = self.get_columns(None, name).await?;
-        let indexes = self.get_indexes(None, name).await?;
-        let foreign_keys = self.get_foreign_keys(None, name).await?;
-        let primary_key = self.get_primary_key(None, name).await?;
+        let columns = self.get_columns(None, &name).await?;
+        let indexes = self.get_indexes(None, &name).await?;
+        let foreign_keys = self.get_foreign_keys(None, &name).await?;
+        let primary_key = self.get_primary_key(None, &name).await?;
 
         Ok(TableDetails {
             info,
@@ -1125,12 +1213,13 @@ impl SchemaIntrospection for SqliteConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         tracing::trace!(table = %table, "fetching column information");
         let result = self
             .query(
                 &format!(
                     "PRAGMA table_info('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -1185,12 +1274,13 @@ impl SchemaIntrospection for SqliteConnection {
 
     #[tracing::instrument(skip(self))]
     async fn get_indexes(&self, _schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         tracing::trace!(table = %table, "fetching index information");
         let result = self
             .query(
                 &format!(
                     "PRAGMA index_list('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -1241,12 +1331,13 @@ impl SchemaIntrospection for SqliteConnection {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         tracing::trace!(table = %table, "fetching foreign key information");
         let result = self
             .query(
                 &format!(
                     "PRAGMA foreign_key_list('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -1389,11 +1480,19 @@ impl SchemaIntrospection for SqliteConnection {
 
     async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
         let sqlite_object_type = object_type_to_sqlite(&object.object_type)?;
+        let object_name = if matches!(
+            object.object_type,
+            ObjectType::Table | ObjectType::View | ObjectType::MaterializedView
+        ) {
+            self.resolve_catalog_table_name(&object.name).await?
+        } else {
+            object.name.clone()
+        };
         let result = self
             .query(
                 "SELECT sql FROM sqlite_master WHERE name = ? AND type = ?",
                 &[
-                    Value::String(object.name.clone()),
+                    Value::String(object_name.clone()),
                     Value::String(sqlite_object_type.to_string()),
                 ],
             )
@@ -1403,7 +1502,7 @@ impl SchemaIntrospection for SqliteConnection {
             .rows
             .first()
             .and_then(|row| row.get(0).and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .ok_or_else(|| ZqlzError::NotFound(format!("DDL not found for '{}'", object.name)))
+            .ok_or_else(|| ZqlzError::NotFound(format!("DDL not found for '{}'", object_name)))
     }
 
     async fn get_dependencies(&self, _object: &DatabaseObject) -> Result<Vec<Dependency>> {

@@ -84,6 +84,17 @@ fn clear_sidebar_section_loading_state(
     }
 }
 
+fn parse_connection_bool_param(value: Option<&String>, default: bool) -> bool {
+    value
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "true" | "1" | "yes" | "on"
+            )
+        })
+        .unwrap_or(default)
+}
+
 fn clear_sidebar_table_details_loading_state(
     sidebar: &WeakEntity<ConnectionSidebar>,
     key: SidebarTableKey,
@@ -681,6 +692,12 @@ impl MainView {
         // Known up-front from the saved config; used to pre-populate the sidebar
         // with the active database node before any async queries complete.
         let active_db_from_config = saved.params.get("database").cloned();
+        let load_schema_on_connect = parse_connection_bool_param(
+            saved.params.get("load_schema_on_connect"),
+            zqlz_settings::ZqlzSettings::global(cx)
+                .connections
+                .fetch_schema_on_connect,
+        );
 
         // Set connecting state immediately
         self.set_connection_connecting_state(id, true, cx);
@@ -756,23 +773,33 @@ impl MainView {
                         );
                     }
 
-                    // Step 3: Load schema in background (slow operation)
-                    tracing::info!("Starting background schema load for connection {}", conn_id);
+                    if load_schema_on_connect {
+                        // Step 3: Load schema in background (slow operation)
+                        tracing::info!(
+                            "Starting background schema load for connection {}",
+                            conn_id
+                        );
 
-                    run_connection_sidebar_bootstrap(
-                        connection_service.clone(),
-                        &sidebar,
-                        &objects_panel,
-                        &schema_details_panel,
-                        &this,
-                        conn_id,
-                        &connection_name,
-                        active_db_from_config.clone(),
-                        conn.driver_category() == DriverCategory::KeyValue,
-                        SidebarObjectCapabilities::for_connection(conn.as_ref()),
-                        cx,
-                    )
-                    .await;
+                        run_connection_sidebar_bootstrap(
+                            connection_service.clone(),
+                            &sidebar,
+                            &objects_panel,
+                            &schema_details_panel,
+                            &this,
+                            conn_id,
+                            &connection_name,
+                            active_db_from_config.clone(),
+                            conn.driver_category() == DriverCategory::KeyValue,
+                            SidebarObjectCapabilities::for_connection(conn.as_ref()),
+                            cx,
+                        )
+                        .await;
+                    } else {
+                        tracing::info!(
+                            connection_id = %conn_id,
+                            "Skipping schema load on connect"
+                        );
+                    }
                 }
                 Err(e) => {
                     tracing::error!("Failed to connect: {}", e);

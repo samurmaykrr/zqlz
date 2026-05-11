@@ -118,6 +118,10 @@ impl DatabaseDriver for TursoDriver {
                 ConnectionField::password("auth_token", "Auth Token")
                     .required()
                     .help_text("Create with `turso db tokens create <database>`"),
+                ConnectionField::boolean("load_schema_on_connect", "Load Schema on Connect")
+                    .default_value("true")
+                    .help_text("Fetch tables and objects immediately after connecting")
+                    .tab("advanced"),
             ],
         }
     }

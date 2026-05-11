@@ -1,18 +1,44 @@
 //! Turso remote connection implementation.
 
 use async_trait::async_trait;
+use std::future::Future;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use zqlz_core::{
-    BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnInfo, ColumnMeta, Connection,
-    ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency, DropTableOptions,
-    DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyAction,
-    ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities, IndexInfo,
-    ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef, ObjectsPanelRow, PrimaryKeyInfo,
-    ProcedureInfo, QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row,
-    SchemaInfo, SchemaIntrospection, SequenceInfo, SqlObjectName, StatementResult, TableDetails,
-    TableInfo, TableType, Transaction, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
+    BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnInfo, ColumnMeta,
+    Connection, ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
+    ForeignKeyAction, ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
+    IndexInfo, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef,
+    ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle, QueryResult,
+    ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaInfo, SchemaIntrospection,
+    SequenceInfo, SqlObjectName, StatementResult, TableDetails, TableInfo, TableType, Transaction,
+    TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
 };
+
+fn get_turso_runtime() -> &'static tokio::runtime::Runtime {
+    static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .thread_name("zqlz-turso-runtime")
+            .build()
+            .expect("Failed to create Tokio runtime for Turso driver")
+    })
+}
+
+async fn run_on_turso_runtime<T, F>(future: F) -> Result<T>
+where
+    T: Send + 'static,
+    F: Future<Output = Result<T>> + Send + 'static,
+{
+    get_turso_runtime()
+        .spawn(future)
+        .await
+        .map_err(|error| ZqlzError::Connection(format!("Turso runtime task failed: {}", error)))?
+}
 
 /// Cancel handle for Turso queries.
 pub struct TursoCancelHandle {
@@ -36,12 +62,15 @@ pub struct TursoConnection {
 
 impl TursoConnection {
     pub async fn connect(url: String, auth_token: String) -> Result<Self> {
-        let database = libsql::Builder::new_remote(url.clone(), auth_token)
-            .build()
-            .await
-            .map_err(|error| {
-                ZqlzError::Connection(format!("Failed to create Turso database: {}", error))
-            })?;
+        let database = run_on_turso_runtime(async move {
+            libsql::Builder::new_remote(url, auth_token)
+                .build()
+                .await
+                .map_err(|error| {
+                    ZqlzError::Connection(format!("Failed to create Turso database: {}", error))
+                })
+        })
+        .await?;
         let connection = database.connect().map_err(|error| {
             ZqlzError::Connection(format!("Failed to connect to Turso database: {}", error))
         })?;
@@ -61,6 +90,21 @@ impl TursoConnection {
         } else {
             Ok(())
         }
+    }
+
+    async fn resolve_catalog_table_name(&self, requested_name: &str) -> Result<String> {
+        let tables = self.list_tables(None).await?;
+        if tables.iter().any(|table| table.name == requested_name) {
+            return Ok(requested_name.to_string());
+        }
+
+        if let Some((schema_name, relation_name)) = requested_name.split_once('.') {
+            if schema_name != "main" && tables.iter().any(|table| table.name == relation_name) {
+                return Ok(relation_name.to_string());
+            }
+        }
+
+        Ok(requested_name.to_string())
     }
 
     fn sqlite_identifier_literal(identifier: &str) -> String {
@@ -85,40 +129,6 @@ impl TursoConnection {
         } else {
             TableType::Table
         }
-    }
-
-    async fn get_table_row_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM \"{}\"",
-            Self::sqlite_identifier_literal(table_name)
-        );
-        self.query_i64(&sql).await
-    }
-
-    async fn get_table_index_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM pragma_index_list('{}')",
-            Self::sqlite_string_literal(table_name)
-        );
-        self.query_i64(&sql).await.or(Ok(0))
-    }
-
-    async fn get_table_trigger_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}'",
-            Self::sqlite_string_literal(table_name)
-        );
-        self.query_i64(&sql).await.or(Ok(0))
-    }
-
-    async fn query_i64(&self, sql: &str) -> Result<i64> {
-        let result = self.query(sql, &[]).await?;
-        result
-            .rows
-            .first()
-            .and_then(|row| row.get(0))
-            .and_then(Value::as_i64)
-            .ok_or_else(|| ZqlzError::Query("Expected integer query result".into()))
     }
 
     async fn query_with_connection(
@@ -262,6 +272,15 @@ impl Connection for TursoConnection {
 
     fn quote_identifier(&self, identifier: &str) -> String {
         format!("\"{}\"", Self::sqlite_identifier_literal(identifier))
+    }
+
+    fn render_qualified_name(&self, object_name: &SqlObjectName) -> String {
+        match object_name.namespace.as_deref() {
+            Some("main") | None => self.quote_identifier(&object_name.name),
+            Some(namespace) => {
+                self.quote_identifier(&format!("{}.{}", namespace, object_name.name))
+            }
+        }
     }
 
     fn bind_placeholder_policy(&self) -> BindPlaceholderPolicy {
@@ -593,6 +612,77 @@ impl Connection for TursoConnection {
         table_type == TableType::VirtualTable
     }
 
+    async fn update_cell(&self, request: CellUpdateRequest) -> Result<u64> {
+        let (where_clause, mut params) = match &request.row_identifier {
+            RowIdentifier::RowIndex(_) => {
+                return Err(ZqlzError::NotSupported(
+                    "Row index-based updates not supported by Turso. Use primary key or full row identifier."
+                        .to_string(),
+                ));
+            }
+            RowIdentifier::PrimaryKey(primary_key_values) => {
+                let conditions = primary_key_values
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (column_name, _))| {
+                        format!(
+                            "{} = {}",
+                            self.quote_identifier(column_name),
+                            self.format_bind_placeholder(index + 1)
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                let params = primary_key_values
+                    .iter()
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                (conditions.join(" AND "), params)
+            }
+            RowIdentifier::FullRow(row_values) => {
+                let mut next_param_index = 1usize;
+                let conditions = row_values
+                    .iter()
+                    .map(|(column_name, value)| {
+                        if value == &Value::Null {
+                            format!("{} IS NULL", self.quote_identifier(column_name))
+                        } else {
+                            let placeholder = self.format_bind_placeholder(next_param_index);
+                            next_param_index += 1;
+                            format!("{} = {}", self.quote_identifier(column_name), placeholder)
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let params = row_values
+                    .iter()
+                    .filter(|(_, value)| value != &Value::Null)
+                    .map(|(_, value)| value.clone())
+                    .collect::<Vec<_>>();
+                (conditions.join(" AND "), params)
+            }
+        };
+
+        let table_name = self.quote_identifier(&request.table_name);
+        let column_name = self.quote_identifier(&request.column_name);
+        let sql = if let Some(new_value) = &request.new_value {
+            params.insert(0, new_value.clone());
+            format!(
+                "UPDATE {} SET {} = {} WHERE {}",
+                table_name,
+                column_name,
+                self.format_bind_placeholder(0),
+                where_clause
+            )
+        } else {
+            format!(
+                "UPDATE {} SET {} = NULL WHERE {}",
+                table_name, column_name, where_clause
+            )
+        };
+
+        let result = self.execute(&sql, &params).await?;
+        Ok(result.affected_rows)
+    }
+
     async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
         if table_name
             .namespace
@@ -621,19 +711,35 @@ impl Connection for TursoConnection {
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         self.ensure_not_closed()?;
-        Self::execute_with_connection(&self.connection, sql, params).await
+        let connection = self.connection.clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        run_on_turso_runtime(async move {
+            Self::execute_with_connection(&connection, &sql, &params).await
+        })
+        .await
     }
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
-        Self::query_with_connection(&self.connection, sql, params).await
+        let connection = self.connection.clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        run_on_turso_runtime(async move {
+            Self::query_with_connection(&connection, &sql, &params).await
+        })
+        .await
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
         self.ensure_not_closed()?;
-        let transaction = self.connection.transaction().await.map_err(|error| {
-            ZqlzError::Query(format!("Failed to begin Turso transaction: {}", error))
-        })?;
+        let connection = self.connection.clone();
+        let transaction = run_on_turso_runtime(async move {
+            connection.transaction().await.map_err(|error| {
+                ZqlzError::Query(format!("Failed to begin Turso transaction: {}", error))
+            })
+        })
+        .await?;
         Ok(Box::new(TursoTransaction {
             transaction: Some(transaction),
         }))
@@ -641,7 +747,12 @@ impl Connection for TursoConnection {
 
     async fn close(&self) -> Result<()> {
         self.closed.store(true, Ordering::SeqCst);
-        self.connection.reset().await;
+        let connection = self.connection.clone();
+        run_on_turso_runtime(async move {
+            connection.reset().await;
+            Ok(())
+        })
+        .await?;
         let _keep_database_alive = &self.database;
         Ok(())
     }
@@ -693,24 +804,17 @@ impl SchemaIntrospection for TursoConnection {
         for row in &result.rows {
             let name = row.get(0).and_then(Value::as_str).unwrap_or("").to_string();
             let table_type = Self::classify_sqlite_table_type(row.get(1).and_then(Value::as_str));
-            let row_count = if matches!(table_type, TableType::VirtualTable) {
-                None
-            } else {
-                self.get_table_row_count(&name).await.ok()
-            };
-            let index_count = self.get_table_index_count(&name).await.ok();
-            let trigger_count = self.get_table_trigger_count(&name).await.ok();
 
             tables.push(TableInfo {
                 name,
                 schema: Some("main".to_string()),
                 table_type,
                 owner: None,
-                row_count,
+                row_count: None,
                 size_bytes: None,
                 comment: None,
-                index_count,
-                trigger_count,
+                index_count: None,
+                trigger_count: None,
                 key_value_info: None,
             });
         }
@@ -741,15 +845,16 @@ impl SchemaIntrospection for TursoConnection {
     }
 
     async fn get_table(&self, _schema: Option<&str>, name: &str) -> Result<TableDetails> {
+        let name = self.resolve_catalog_table_name(name).await?;
         let tables = self.list_tables(None).await?;
         let info = tables
             .into_iter()
             .find(|table| table.name == name)
             .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-        let columns = self.get_columns(None, name).await?;
-        let indexes = self.get_indexes(None, name).await?;
-        let foreign_keys = self.get_foreign_keys(None, name).await?;
-        let primary_key = self.get_primary_key(None, name).await?;
+        let columns = self.get_columns(None, &name).await?;
+        let indexes = self.get_indexes(None, &name).await?;
+        let foreign_keys = self.get_foreign_keys(None, &name).await?;
+        let primary_key = self.get_primary_key(None, &name).await?;
 
         Ok(TableDetails {
             info,
@@ -763,11 +868,12 @@ impl SchemaIntrospection for TursoConnection {
     }
 
     async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         let result = self
             .query(
                 &format!(
                     "PRAGMA table_info('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -815,11 +921,12 @@ impl SchemaIntrospection for TursoConnection {
     }
 
     async fn get_indexes(&self, _schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         let result = self
             .query(
                 &format!(
                     "PRAGMA index_list('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -865,11 +972,12 @@ impl SchemaIntrospection for TursoConnection {
         _schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
+        let table = self.resolve_catalog_table_name(table).await?;
         let result = self
             .query(
                 &format!(
                     "PRAGMA foreign_key_list('{}')",
-                    Self::sqlite_string_literal(table)
+                    Self::sqlite_string_literal(&table)
                 ),
                 &[],
             )
@@ -981,11 +1089,19 @@ impl SchemaIntrospection for TursoConnection {
 
     async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
         let sqlite_object_type = object_type_to_sqlite(&object.object_type)?;
+        let object_name = if matches!(
+            object.object_type,
+            ObjectType::Table | ObjectType::View | ObjectType::MaterializedView
+        ) {
+            self.resolve_catalog_table_name(&object.name).await?
+        } else {
+            object.name.clone()
+        };
         let result = self
             .query(
                 "SELECT sql FROM sqlite_master WHERE name = ? AND type = ?",
                 &[
-                    Value::String(object.name.clone()),
+                    Value::String(object_name.clone()),
                     Value::String(sqlite_object_type.to_string()),
                 ],
             )
@@ -995,7 +1111,7 @@ impl SchemaIntrospection for TursoConnection {
             .rows
             .first()
             .and_then(|row| row.get(0).and_then(Value::as_str).map(str::to_string))
-            .ok_or_else(|| ZqlzError::NotFound(format!("DDL not found for '{}'", object.name)))
+            .ok_or_else(|| ZqlzError::NotFound(format!("DDL not found for '{}'", object_name)))
     }
 
     async fn get_dependencies(&self, _object: &DatabaseObject) -> Result<Vec<Dependency>> {
@@ -1048,32 +1164,11 @@ impl SchemaIntrospection for TursoConnection {
             } else {
                 TableType::View
             };
-            let row_count = if matches!(table_type, TableType::VirtualTable) {
-                "-".to_string()
-            } else {
-                self.get_table_row_count(&name)
-                    .await
-                    .ok()
-                    .map(|count| count.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            };
-            let index_count = self
-                .get_table_index_count(&name)
-                .await
-                .ok()
-                .map(|count| count.to_string())
-                .unwrap_or_else(|| "-".to_string());
-            let trigger_count = self
-                .get_table_trigger_count(&name)
-                .await
-                .ok()
-                .map(|count| count.to_string())
-                .unwrap_or_else(|| "-".to_string());
             let mut values = std::collections::BTreeMap::new();
             values.insert("name".to_string(), name.clone());
-            values.insert("row_count".to_string(), row_count);
-            values.insert("index_count".to_string(), index_count);
-            values.insert("trigger_count".to_string(), trigger_count);
+            values.insert("row_count".to_string(), "-".to_string());
+            values.insert("index_count".to_string(), "-".to_string());
+            values.insert("trigger_count".to_string(), "-".to_string());
             if matches!(table_type, TableType::VirtualTable) {
                 values.insert("type".to_string(), table_type.display_name().to_string());
             }

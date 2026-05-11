@@ -13,6 +13,24 @@ impl ConnectionSidebar {
         self.virtual_rows_dirty = true;
     }
 
+    fn schema_objects_from_connection(conn: &ConnectionEntry) -> SchemaObjects {
+        SchemaObjects {
+            tables: conn.tables.clone(),
+            views: conn.views.clone(),
+            materialized_views: conn.materialized_views.clone(),
+            triggers: conn.triggers.clone(),
+            functions: conn.functions.clone(),
+            procedures: conn.procedures.clone(),
+            events: conn.events.clone(),
+            sequences: conn.sequences.clone(),
+            domains: conn.domains.clone(),
+            types: conn.types.clone(),
+            extensions: conn.extensions.clone(),
+            schema_name: conn.schema_name.clone(),
+            schema_names: conn.schema_names.clone(),
+        }
+    }
+
     fn table_name_exists_in_schema(
         tables: &[String],
         key_schema_name: Option<&str>,
@@ -265,6 +283,26 @@ impl ConnectionSidebar {
             conn.schema_name = schema_name;
             conn.schema_names = schema_names;
             conn.tables_loading = false;
+
+            let active_database_name = conn
+                .databases
+                .iter()
+                .find(|database| database.is_active)
+                .map(|database| database.name.clone());
+            if let Some(active_database_name) = active_database_name {
+                let schema = Self::schema_objects_from_connection(conn);
+                if let Some(database) = conn
+                    .databases
+                    .iter_mut()
+                    .find(|database| database.name == active_database_name)
+                {
+                    database.is_loading = false;
+                    database.schema = Some(Self::database_schema_data_from_schema_objects(
+                        schema,
+                        database.schema.as_ref(),
+                    ));
+                }
+            }
         }
         self.invalidate_virtual_rows();
         cx.notify();
@@ -541,6 +579,24 @@ impl ConnectionSidebar {
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|c| c.id == id) {
             use std::collections::HashMap;
+            let single_database_name = if databases.len() == 1 {
+                databases.first().map(|(name, _)| name.clone())
+            } else {
+                None
+            };
+            let existing_active_database_name = conn
+                .databases
+                .iter()
+                .find(|database| database.is_active)
+                .map(|database| database.name.clone());
+            let effective_active_database = active_database
+                .map(ToOwned::to_owned)
+                .or(existing_active_database_name)
+                .or(single_database_name);
+            let active_schema = Self::database_schema_data_from_schema_objects(
+                Self::schema_objects_from_connection(conn),
+                None,
+            );
             let mut existing: HashMap<String, SidebarDatabaseInfo> = conn
                 .databases
                 .drain(..)
@@ -550,10 +606,14 @@ impl ConnectionSidebar {
             conn.databases = databases
                 .into_iter()
                 .map(|(name, size_bytes)| {
-                    let is_active = active_database.is_some_and(|a| a == name);
+                    let is_active = effective_active_database.as_deref() == Some(name.as_str());
                     if let Some(mut db) = existing.remove(&name) {
                         db.size_bytes = size_bytes;
                         db.is_active = is_active;
+                        if is_active && db.schema.is_none() {
+                            db.is_loading = false;
+                            db.schema = Some(active_schema.clone());
+                        }
                         db
                     } else {
                         SidebarDatabaseInfo {
@@ -562,7 +622,11 @@ impl ConnectionSidebar {
                             is_active,
                             is_expanded: false,
                             is_loading: false,
-                            schema: None,
+                            schema: if is_active {
+                                Some(active_schema.clone())
+                            } else {
+                                None
+                            },
                             collections: Vec::new(),
                             collections_expanded: false,
                             collections_loading: false,

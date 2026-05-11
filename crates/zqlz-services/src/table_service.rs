@@ -109,6 +109,42 @@ pub struct OpenViewerInitialLoadOutcome {
     pub schema_qualifier: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ResolvedRelationName {
+    table_name: String,
+    schema: Option<String>,
+}
+
+impl ResolvedRelationName {
+    fn new(table_name: impl Into<String>, schema: Option<String>) -> Self {
+        Self {
+            table_name: table_name.into(),
+            schema: schema
+                .map(|schema| schema.trim().to_string())
+                .filter(|schema| !schema.is_empty()),
+        }
+    }
+
+    fn schema_ref(&self) -> Option<&str> {
+        self.schema.as_deref()
+    }
+
+    fn to_sql_object_name(&self) -> SqlObjectName {
+        match self.schema_ref() {
+            Some(schema_name) => SqlObjectName::with_namespace(schema_name, &self.table_name),
+            None => SqlObjectName::new(&self.table_name),
+        }
+    }
+
+    fn to_raw_driver_table_name(&self) -> String {
+        match self.schema_ref() {
+            Some("main") => self.table_name.clone(),
+            Some(schema_name) => format!("{}.{}", schema_name, self.table_name),
+            None => self.table_name.clone(),
+        }
+    }
+}
+
 /// Build table-viewer metadata from loaded schema details.
 ///
 /// The app uses this to update table-viewer state while keeping schema-shaping
@@ -207,21 +243,21 @@ impl TableService {
             connection.as_ref(),
             database_name.as_deref(),
         );
-        let (resolved_table_name, resolved_schema) = self
-            .resolve_open_viewer_relation_reference(
+        let resolved_relation = self
+            .resolve_relation_reference(
                 connection.clone(),
                 &table_name,
                 schema_qualifier.as_deref(),
                 is_view,
             )
             .await;
-        let schema_ref = resolved_schema.as_deref();
+        let schema_ref = resolved_relation.schema_ref();
 
         let (mut browse_result, schema_result) = tokio::join!(
             async {
                 self.browse_table(
                     connection.clone(),
-                    &resolved_table_name,
+                    &resolved_relation.table_name,
                     schema_ref,
                     limit,
                     None,
@@ -233,7 +269,7 @@ impl TableService {
                     .get_table_details(
                         connection.clone(),
                         connection_id,
-                        &resolved_table_name,
+                        &resolved_relation.table_name,
                         schema_ref,
                     )
                     .await?;
@@ -241,7 +277,7 @@ impl TableService {
                     .get_or_generate_ddl(
                         &connection,
                         connection_id,
-                        &resolved_table_name,
+                        &resolved_relation.table_name,
                         schema_ref,
                         if is_view {
                             Some(zqlz_core::ObjectType::View)
@@ -276,33 +312,48 @@ impl TableService {
             browse_result,
             schema_result,
             used_schema_only_fallback,
-            schema_qualifier: resolved_schema.or(schema_qualifier),
+            schema_qualifier: resolved_relation.schema.or(schema_qualifier),
         }
     }
 
-    async fn resolve_open_viewer_relation_reference(
+    async fn resolve_relation_reference(
         &self,
         connection: Arc<dyn Connection>,
         table_name: &str,
         schema: Option<&str>,
         is_view: bool,
-    ) -> (String, Option<String>) {
-        let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
-        if embedded_schema.is_some() {
-            return (embedded_name, embedded_schema);
-        }
-
+    ) -> ResolvedRelationName {
         let Some(schema_introspection) = connection.as_schema_introspection() else {
-            return (embedded_name, None);
+            let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+            return ResolvedRelationName::new(embedded_name, embedded_schema);
         };
+        let known_schema_names = schema_introspection
+            .list_schemas()
+            .await
+            .map(|schemas| {
+                schemas
+                    .into_iter()
+                    .map(|schema| schema.name)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
 
         if !is_view {
             if let Ok(tables) = schema_introspection.list_tables(schema).await {
+                if let Some(table) = tables.iter().find(|table| table.name == table_name) {
+                    return ResolvedRelationName::new(table.name.clone(), table.schema.clone());
+                }
+
+                let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+                if is_known_schema_name(embedded_schema.as_deref(), &known_schema_names) {
+                    return ResolvedRelationName::new(embedded_name, embedded_schema);
+                }
+
                 if let Some(table) = tables
                     .into_iter()
                     .find(|table| relation_info_matches_name(&table.name, &embedded_name))
                 {
-                    return (
+                    return ResolvedRelationName::new(
                         relation_display_name(&table.name, &embedded_name),
                         table.schema,
                     );
@@ -311,11 +362,20 @@ impl TableService {
         }
 
         if let Ok(views) = schema_introspection.list_views(schema).await {
+            if let Some(view) = views.iter().find(|view| view.name == table_name) {
+                return ResolvedRelationName::new(view.name.clone(), view.schema.clone());
+            }
+
+            let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+            if is_known_schema_name(embedded_schema.as_deref(), &known_schema_names) {
+                return ResolvedRelationName::new(embedded_name, embedded_schema);
+            }
+
             if let Some(view) = views
                 .into_iter()
                 .find(|view| relation_info_matches_name(&view.name, &embedded_name))
             {
-                return (
+                return ResolvedRelationName::new(
                     relation_display_name(&view.name, &embedded_name),
                     view.schema,
                 );
@@ -324,11 +384,20 @@ impl TableService {
 
         if connection.supports_materialized_views() {
             if let Ok(views) = schema_introspection.list_materialized_views(schema).await {
+                if let Some(view) = views.iter().find(|view| view.name == table_name) {
+                    return ResolvedRelationName::new(view.name.clone(), view.schema.clone());
+                }
+
+                let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+                if is_known_schema_name(embedded_schema.as_deref(), &known_schema_names) {
+                    return ResolvedRelationName::new(embedded_name, embedded_schema);
+                }
+
                 if let Some(view) = views
                     .into_iter()
                     .find(|view| relation_info_matches_name(&view.name, &embedded_name))
                 {
-                    return (
+                    return ResolvedRelationName::new(
                         relation_display_name(&view.name, &embedded_name),
                         view.schema,
                     );
@@ -336,7 +405,8 @@ impl TableService {
             }
         }
 
-        (embedded_name, None)
+        let (embedded_schema, embedded_name) = resolve_table_reference(table_name, schema);
+        ResolvedRelationName::new(embedded_name, embedded_schema)
     }
 
     /// Create a new table service
@@ -386,7 +456,10 @@ impl TableService {
         } = request;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
-        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+        let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
 
         // Build WHERE clause (needed for both COUNT and SELECT)
         let where_clause = if where_clauses.is_empty() {
@@ -535,7 +608,11 @@ impl TableService {
         schema: Option<&str>,
         where_clauses: Vec<String>,
     ) -> ServiceResult<u64> {
-        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+        Self::ensure_relational_connection(connection.as_ref())?;
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+        let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -596,7 +673,11 @@ impl TableService {
             limit,
             pk_columns,
         } = request;
-        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+        Self::ensure_relational_connection(connection.as_ref())?;
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+        let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -715,7 +796,11 @@ impl TableService {
             total_rows,
             pk_columns,
         } = request;
-        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+        Self::ensure_relational_connection(connection.as_ref())?;
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+        let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
 
         let where_clause = if where_clauses.is_empty() {
             String::new()
@@ -853,8 +938,11 @@ impl TableService {
         schema: Option<&str>,
     ) -> ServiceResult<Option<(u64, bool)>> {
         Self::ensure_relational_connection(connection.as_ref())?;
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
         if connection.supports_fast_exact_count() {
-            let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+            let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
             let count_base_sql = format!("SELECT COUNT(*) FROM {}", qualified);
             let count_sql = connection.paginated_select_sql(&count_base_sql, 1, 0);
             let count_result = connection
@@ -877,11 +965,7 @@ impl TableService {
             return Ok(Some((total, false)));
         }
 
-        let (schema_name, table_name) = resolve_table_reference(table_name, schema);
-        let qualified_table_name = match schema_name {
-            Some(schema_name) => zqlz_core::SqlObjectName::with_namespace(schema_name, table_name),
-            None => zqlz_core::SqlObjectName::new(table_name),
-        };
+        let qualified_table_name = relation.to_sql_object_name();
 
         let estimated = connection
             .estimated_row_count(&qualified_table_name)
@@ -930,7 +1014,10 @@ impl TableService {
         Self::ensure_relational_connection(connection.as_ref())?;
         let limit = limit.unwrap_or(self.default_limit);
         let offset = offset.unwrap_or(0);
-        let qualified = Self::qualified_table_name(connection.as_ref(), table_name, schema);
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+        let qualified = Self::qualified_relation_name(connection.as_ref(), &relation);
 
         // Build safe SQL with proper identifier escaping
         let base_sql = format!("SELECT * FROM {}", qualified);
@@ -971,7 +1058,8 @@ impl TableService {
         } else {
             let estimate_conn = connection.clone();
             let data_future = connection.query(&data_sql, &[]);
-            let estimate_future = self.estimate_row_count(estimate_conn, table_name, schema);
+            let estimate_future =
+                self.estimate_row_count(estimate_conn, &relation.table_name, relation.schema_ref());
 
             let (data_result, estimate_result) = tokio::join!(data_future, estimate_future);
 
@@ -1031,9 +1119,12 @@ impl TableService {
     ) -> ServiceResult<()> {
         Self::ensure_relational_connection(connection.as_ref())?;
         tracing::debug!("Updating cell in table {}", table_name);
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
         // Build row identifier (use primary key if available)
         let row_identifier = self
-            .build_row_identifier(connection.clone(), table_name, &cell_data)
+            .build_row_identifier(connection.clone(), &relation, &cell_data)
             .await?;
 
         // Parse new value using the target column's type
@@ -1050,14 +1141,8 @@ impl TableService {
             Some(other) => Some(other.clone()),
         };
 
-        // Pass raw identifiers to the driver - each driver will handle escaping appropriately
-        let table_name_with_schema = match schema {
-            Some(s) => format!("{}.{}", s, table_name),
-            None => table_name.to_string(),
-        };
-
         let update_request = CellUpdateRequest {
-            table_name: table_name_with_schema,
+            table_name: relation.to_raw_driver_table_name(),
             column_name: cell_data.column_name.clone(),
             column_type: target_col_type.map(str::to_string),
             row_column_types: cell_data
@@ -1096,7 +1181,7 @@ impl TableService {
     async fn build_row_identifier(
         &self,
         connection: Arc<dyn Connection>,
-        table_name: &str,
+        relation: &ResolvedRelationName,
         cell_data: &CellUpdateData,
     ) -> ServiceResult<RowIdentifier> {
         let schema = connection
@@ -1104,7 +1189,10 @@ impl TableService {
             .ok_or(ServiceError::SchemaNotSupported)?;
 
         // Try to use primary key
-        if let Ok(Some(pk_info)) = schema.get_primary_key(None, table_name).await {
+        if let Ok(Some(pk_info)) = schema
+            .get_primary_key(relation.schema_ref(), &relation.table_name)
+            .await
+        {
             let pk_values: Vec<(String, Value)> = pk_info
                 .columns
                 .iter()
@@ -1307,52 +1395,15 @@ impl TableService {
         )
     }
 
-    /// Build a possibly schema-qualified table reference.
-    /// When `schema` is provided (e.g. a MySQL database name), the result is
-    /// `schema`.`table`; otherwise just the escaped table name.
-    fn qualified_table_name(
+    fn qualified_relation_name(
         connection: &dyn Connection,
-        table_name: &str,
-        schema: Option<&str>,
+        relation: &ResolvedRelationName,
     ) -> String {
-        let parsed = table_name
-            .split_once('.')
-            .and_then(|(schema_name, relation_name)| {
-                if schema_name.is_empty() || relation_name.is_empty() {
-                    None
-                } else {
-                    Some((schema_name, relation_name))
-                }
-            });
-
-        let (effective_schema, effective_table_name) = match (schema, parsed) {
-            // If both schema arg and table name include the same schema, avoid
-            // producing `<schema>."schema.table"`.
-            (Some(explicit_schema), Some((embedded_schema, embedded_table)))
-                if explicit_schema == embedded_schema =>
-            {
-                (Some(explicit_schema), embedded_table)
-            }
-            (None, Some((embedded_schema, embedded_table)))
-                if embedded_table.starts_with(&format!("{embedded_schema}.")) =>
-            {
-                let table_name = embedded_table
-                    .strip_prefix(&format!("{embedded_schema}."))
-                    .unwrap_or(embedded_table);
-                (Some(embedded_schema), table_name)
-            }
-            (Some(explicit_schema), _) => (Some(explicit_schema), table_name),
-            (None, Some((embedded_schema, embedded_table))) => {
-                (Some(embedded_schema), embedded_table)
-            }
-            (None, None) => (None, table_name),
-        };
-
-        match effective_schema {
+        match relation.schema_ref() {
             Some(schema_name) => connection.render_qualified_name(
-                &zqlz_core::SqlObjectName::with_namespace(schema_name, effective_table_name),
+                &zqlz_core::SqlObjectName::with_namespace(schema_name, &relation.table_name),
             ),
-            None => connection.quote_identifier(effective_table_name),
+            None => connection.quote_identifier(&relation.table_name),
         }
     }
 
@@ -1422,10 +1473,14 @@ impl TableService {
             ));
         }
 
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+
         let schema_columns =
             if let Some(schema_introspection) = connection.as_schema_introspection() {
                 schema_introspection
-                    .get_columns(schema, table_name)
+                    .get_columns(relation.schema_ref(), &relation.table_name)
                     .await
                     .map(|columns| {
                         columns
@@ -1512,7 +1567,7 @@ impl TableService {
 
         let sql = format!(
             "INSERT INTO {} ({}) VALUES ({})",
-            Self::qualified_table_name(connection.as_ref(), table_name, schema),
+            Self::qualified_relation_name(connection.as_ref(), &relation),
             columns.join(", "),
             placeholders.join(", ")
         );
@@ -1566,9 +1621,13 @@ impl TableService {
             .as_schema_introspection()
             .ok_or(ServiceError::SchemaNotSupported)?;
 
+        let relation = self
+            .resolve_relation_reference(connection.clone(), table_name, schema, false)
+            .await;
+
         // Try to get primary key
         let pk_info = schema_introspection
-            .get_primary_key(None, table_name)
+            .get_primary_key(relation.schema_ref(), &relation.table_name)
             .await
             .ok()
             .flatten();
@@ -1608,7 +1667,7 @@ impl TableService {
                 self.build_where_clause(connection.as_ref(), &row_identifier)?;
             let sql = format!(
                 "DELETE FROM {} WHERE {}",
-                Self::qualified_table_name(connection.as_ref(), table_name, schema),
+                Self::qualified_relation_name(connection.as_ref(), &relation),
                 where_clause
             );
 
@@ -2679,7 +2738,10 @@ impl TableService {
             limit,
         } = request;
 
-        let table_object_name = parse_sql_object_name(&table_name);
+        let relation = self
+            .resolve_relation_reference(connection.clone(), &table_name, None, false)
+            .await;
+        let table_object_name = relation.to_sql_object_name();
         let escaped_column = connection.quote_identifier(&column_name);
         let where_clause = format!("{} IS NOT NULL", escaped_column);
 
@@ -2731,24 +2793,24 @@ impl TableService {
             limit,
         } = request;
 
-        let (effective_schema, effective_table_name) = resolve_table_reference(
-            &referenced_table,
-            referenced_schema
-                .as_deref()
-                .map(str::trim)
-                .filter(|schema| !schema.is_empty()),
-        );
-
-        let table_object_name = match effective_schema.as_deref() {
-            Some(schema_name) => SqlObjectName::with_namespace(schema_name, &effective_table_name),
-            None => SqlObjectName::new(&effective_table_name),
-        };
+        let relation = self
+            .resolve_relation_reference(
+                connection.clone(),
+                &referenced_table,
+                referenced_schema
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|schema| !schema.is_empty()),
+                false,
+            )
+            .await;
+        let table_object_name = relation.to_sql_object_name();
 
         let label_column = self
             .best_fk_label_column(
                 connection.as_ref(),
-                effective_schema.as_deref(),
-                &effective_table_name,
+                relation.schema_ref(),
+                &relation.table_name,
                 &referenced_columns,
             )
             .await;
@@ -2967,20 +3029,6 @@ impl TableService {
     }
 }
 
-fn parse_sql_object_name(object_name: &str) -> SqlObjectName {
-    if object_name.contains('.') {
-        let mut parts = object_name.splitn(2, '.');
-        match (parts.next(), parts.next()) {
-            (Some(namespace), Some(name)) if !namespace.is_empty() && !name.is_empty() => {
-                SqlObjectName::with_namespace(namespace, name)
-            }
-            _ => SqlObjectName::new(object_name),
-        }
-    } else {
-        SqlObjectName::new(object_name)
-    }
-}
-
 fn resolve_table_reference(
     table_name: &str,
     schema_hint: Option<&str>,
@@ -3020,6 +3068,16 @@ fn relation_info_matches_name(catalog_name: &str, requested_name: &str) -> bool 
             .split_once('.')
             .map(|(_, relation_name)| relation_name == requested_name)
             .unwrap_or(false)
+}
+
+fn is_known_schema_name(schema_name: Option<&str>, known_schema_names: &[String]) -> bool {
+    let Some(schema_name) = schema_name else {
+        return false;
+    };
+
+    known_schema_names
+        .iter()
+        .any(|known_schema_name| known_schema_name == schema_name)
 }
 
 fn relation_display_name(catalog_name: &str, requested_name: &str) -> String {
@@ -3407,21 +3465,6 @@ mod tests {
     }
 
     #[test]
-    fn parse_sql_object_name_parses_qualified_and_unqualified_names() {
-        let qualified = parse_sql_object_name("public.users");
-        assert_eq!(qualified.namespace, Some("public".to_string()));
-        assert_eq!(qualified.name, "users");
-
-        let unqualified = parse_sql_object_name("users");
-        assert_eq!(unqualified.namespace, None);
-        assert_eq!(unqualified.name, "users");
-
-        let invalid_qualified = parse_sql_object_name("public.");
-        assert_eq!(invalid_qualified.namespace, None);
-        assert_eq!(invalid_qualified.name, "public.");
-    }
-
-    #[test]
     fn resolve_table_reference_prefers_embedded_namespace() {
         let (schema_name, table_name) = resolve_table_reference("public.users", Some("ignored"));
         assert_eq!(schema_name.as_deref(), Some("public"));
@@ -3444,6 +3487,28 @@ mod tests {
     }
 
     #[test]
+    fn resolved_relation_main_keeps_literal_dotted_name_for_raw_driver_request() {
+        let relation =
+            ResolvedRelationName::new("public.activity_communications", Some("main".to_string()));
+
+        assert_eq!(relation.table_name, "public.activity_communications");
+        assert_eq!(relation.schema_ref(), Some("main"));
+        assert_eq!(
+            relation.to_raw_driver_table_name(),
+            "public.activity_communications"
+        );
+    }
+
+    #[test]
+    fn resolved_relation_postgres_schema_stays_schema_qualified_for_raw_driver_request() {
+        let relation = ResolvedRelationName::new("users", Some("public".to_string()));
+
+        assert_eq!(relation.table_name, "users");
+        assert_eq!(relation.schema_ref(), Some("public"));
+        assert_eq!(relation.to_raw_driver_table_name(), "public.users");
+    }
+
+    #[test]
     fn relation_info_matches_qualified_catalog_name() {
         assert!(relation_info_matches_name(
             "public.active_customers",
@@ -3457,6 +3522,14 @@ mod tests {
             "public.inactive_customers",
             "active_customers"
         ));
+    }
+
+    #[test]
+    fn known_schema_check_rejects_unknown_embedded_schema() {
+        let schema_names = vec!["main".to_string()];
+
+        assert!(!is_known_schema_name(Some("public"), &schema_names));
+        assert!(is_known_schema_name(Some("main"), &schema_names));
     }
 
     #[test]

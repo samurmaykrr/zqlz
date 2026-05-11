@@ -445,6 +445,7 @@ impl CellEditorPanel {
                 | "longtext"
                 | "mediumtext"
                 | "tinytext"
+                | "dynamic"
                 | "enum"
                 | "set"
         )
@@ -2028,6 +2029,15 @@ mod tests {
         assert!(CellEditorPanel::should_reject_string_fallback(
             "TextArray",
             &Value::String("[not valid".to_string())
+        ));
+    }
+
+    #[test]
+    fn dynamic_columns_accept_string_values() {
+        assert!(CellEditorPanel::is_string_like_column("DYNAMIC"));
+        assert!(!CellEditorPanel::should_reject_string_fallback(
+            "DYNAMIC",
+            &Value::String("{\"en\":\"23\"}".to_string())
         ));
     }
 

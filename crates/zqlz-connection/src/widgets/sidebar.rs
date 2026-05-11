@@ -1168,9 +1168,15 @@ impl ConnectionSidebar {
         }
     }
 
-    fn split_schema_qualified_name_for_rows(name: &str) -> Option<(&str, &str)> {
+    fn split_schema_qualified_name_for_rows<'a>(
+        name: &'a str,
+        schema_names: &[String],
+    ) -> Option<(&'a str, &'a str)> {
         let (schema_name, object_name) = name.split_once('.')?;
         if schema_name.is_empty() || object_name.is_empty() {
+            return None;
+        }
+        if !schema_names.is_empty() && !schema_names.iter().any(|name| name == schema_name) {
             return None;
         }
 
@@ -1204,7 +1210,7 @@ impl ConnectionSidebar {
 
         for table_name in tables {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(table_name)
+                Self::split_schema_qualified_name_for_rows(table_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1223,7 +1229,7 @@ impl ConnectionSidebar {
 
         for view_name in views {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(view_name)
+                Self::split_schema_qualified_name_for_rows(view_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1242,7 +1248,7 @@ impl ConnectionSidebar {
 
         for view_name in materialized_views {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(view_name)
+                Self::split_schema_qualified_name_for_rows(view_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1261,7 +1267,7 @@ impl ConnectionSidebar {
 
         for trigger_name in triggers {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(trigger_name)
+                Self::split_schema_qualified_name_for_rows(trigger_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1280,7 +1286,7 @@ impl ConnectionSidebar {
 
         for function_name in functions {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(function_name)
+                Self::split_schema_qualified_name_for_rows(function_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1299,7 +1305,7 @@ impl ConnectionSidebar {
 
         for procedure_name in procedures {
             if let Some((schema_name, object_name)) =
-                Self::split_schema_qualified_name_for_rows(procedure_name)
+                Self::split_schema_qualified_name_for_rows(procedure_name, schema_names)
             {
                 saw_schema_qualified_name = true;
                 groups
@@ -1325,7 +1331,7 @@ impl ConnectionSidebar {
         ] {
             for object_name in objects {
                 if let Some((schema_name, object_name)) =
-                    Self::split_schema_qualified_name_for_rows(object_name)
+                    Self::split_schema_qualified_name_for_rows(object_name, schema_names)
                 {
                     saw_schema_qualified_name = true;
                     let group = groups.entry(schema_name.to_string()).or_default();
@@ -1915,6 +1921,17 @@ impl ConnectionSidebar {
                         }));
                     } else {
                         for table_name in &filtered_tables {
+                            let table_name_has_literal_dot = table_name.contains('.');
+                            let open_table_name = if table_name_has_literal_dot {
+                                (*table_name).clone()
+                            } else {
+                                format!("{}.{}", schema_name, table_name)
+                            };
+                            let object_schema = if table_name_has_literal_dot {
+                                None
+                            } else {
+                                Some(schema_name.clone())
+                            };
                             rows.push(SidebarVirtualRow::Leaf(LeafRow {
                                 element_id: format!(
                                     "table-{}-{}-{}",
@@ -1925,9 +1942,9 @@ impl ConnectionSidebar {
                                 depth: leaf_depth,
                                 kind: SidebarLeafKind::Table {
                                     conn_id: connection.id,
-                                    open_table_name: format!("{}.{}", schema_name, table_name),
+                                    open_table_name,
                                     menu_table_name: (*table_name).clone(),
-                                    object_schema: Some(schema_name.clone()),
+                                    object_schema,
                                     database_name: database_name.clone(),
                                 },
                             }));
@@ -1978,6 +1995,17 @@ impl ConnectionSidebar {
                         }));
                     } else {
                         for view_name in &filtered_views {
+                            let view_name_has_literal_dot = view_name.contains('.');
+                            let open_view_name = if view_name_has_literal_dot {
+                                (*view_name).clone()
+                            } else {
+                                format!("{}.{}", schema_name, view_name)
+                            };
+                            let object_schema = if view_name_has_literal_dot {
+                                None
+                            } else {
+                                Some(schema_name.clone())
+                            };
                             rows.push(SidebarVirtualRow::Leaf(LeafRow {
                                 element_id: format!(
                                     "view-{}-{}-{}",
@@ -1988,9 +2016,9 @@ impl ConnectionSidebar {
                                 depth: leaf_depth,
                                 kind: SidebarLeafKind::View {
                                     conn_id: connection.id,
-                                    open_view_name: format!("{}.{}", schema_name, view_name),
+                                    open_view_name,
                                     menu_view_name: (*view_name).clone(),
-                                    object_schema: Some(schema_name.clone()),
+                                    object_schema,
                                     database_name: database_name.clone(),
                                 },
                             }));
@@ -2038,6 +2066,12 @@ impl ConnectionSidebar {
                         }));
                     } else {
                         for view_name in &filtered_materialized_views {
+                            let view_name_has_literal_dot = view_name.contains('.');
+                            let open_view_name = if view_name_has_literal_dot {
+                                (*view_name).clone()
+                            } else {
+                                format!("{}.{}", schema_name, view_name)
+                            };
                             rows.push(SidebarVirtualRow::Leaf(LeafRow {
                                 element_id: format!(
                                     "matview-{}-{}-{}",
@@ -2048,7 +2082,7 @@ impl ConnectionSidebar {
                                 depth: leaf_depth,
                                 kind: SidebarLeafKind::MaterializedView {
                                     conn_id: connection.id,
-                                    open_view_name: format!("{}.{}", schema_name, view_name),
+                                    open_view_name,
                                     menu_view_name: (*view_name).clone(),
                                     database_name: database_name.clone(),
                                 },
@@ -4466,6 +4500,42 @@ mod tests {
             .expect("public schema should be grouped");
         assert_eq!(public.domains, vec!["email_address".to_string()]);
         assert_eq!(public.extensions, vec!["postgis".to_string()]);
+    }
+
+    #[test]
+    fn sidebar_does_not_split_sqlite_table_names_that_contain_dots() {
+        let schema_names = vec!["main".to_string()];
+        let groups = ConnectionSidebar::group_schema_sections_for_rows(
+            &["public.activity_communications".to_string()],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &[],
+            &schema_names,
+            Some("main"),
+        )
+        .expect("schema names should force grouped sidebar rows");
+
+        assert!(
+            groups
+                .iter()
+                .all(|(schema_name, _)| schema_name != "public")
+        );
+        let main = groups
+            .iter()
+            .find(|(schema_name, _)| schema_name == "main")
+            .map(|(_, group)| group)
+            .expect("main schema should be grouped");
+        assert_eq!(
+            main.tables,
+            vec!["public.activity_communications".to_string()]
+        );
     }
 
     #[test]
