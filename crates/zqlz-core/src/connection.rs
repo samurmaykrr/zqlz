@@ -361,6 +361,8 @@ pub enum ExplainParserKind {
     MySql,
     /// SQLite EXPLAIN QUERY PLAN text parser.
     Sqlite,
+    /// Driver exposes EXPLAIN output, but no normalized parser is available.
+    Raw,
     /// No parser available for this driver.
     None,
 }

@@ -309,10 +309,16 @@ fn parse_table_access(table: &Value) -> Result<PlanNode> {
 
     let node_type = mysql_access_type_to_node_type(access_type);
     let mut node = PlanNode::new(node_type);
+    node.description = Some(format!("{} access", access_type));
+    node.extra.insert(
+        "mysql_access_type".to_string(),
+        Value::String(access_type.to_string()),
+    );
 
     // Table name
     if let Some(name) = table.get("table_name").and_then(|v| v.as_str()) {
         node.relation = Some(name.to_string());
+        node.description = Some(format!("{} access on {}", access_type, name));
     }
 
     // Cost info
@@ -638,6 +644,11 @@ fn build_plan_from_rows(rows: &[TabularRow]) -> Result<PlanNode> {
         let mut node = PlanNode::new(node_type);
 
         node.relation = Some(row.table.clone());
+        node.description = Some(format!("{} access on {}", row.access_type, row.table));
+        node.extra.insert(
+            "mysql_access_type".to_string(),
+            Value::String(row.access_type.clone()),
+        );
 
         if let Some(ref key) = row.key
             && key != "NULL"

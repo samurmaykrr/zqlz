@@ -82,10 +82,21 @@ actions!(
 );
 
 pub fn init(cx: &mut App) {
+    #[cfg(target_os = "macos")]
     cx.bind_keys([
         KeyBinding::new("cmd-s", SaveDesign, Some("TableDesigner")),
         KeyBinding::new("cmd-z", Undo, Some("TableDesigner")),
         KeyBinding::new("cmd-shift-z", Redo, Some("TableDesigner")),
+        KeyBinding::new("up", SelectPreviousRow, Some("TableDesigner")),
+        KeyBinding::new("down", SelectNextRow, Some("TableDesigner")),
+    ]);
+
+    #[cfg(not(target_os = "macos"))]
+    cx.bind_keys([
+        KeyBinding::new("ctrl-s", SaveDesign, Some("TableDesigner")),
+        KeyBinding::new("ctrl-z", Undo, Some("TableDesigner")),
+        KeyBinding::new("ctrl-y", Redo, Some("TableDesigner")),
+        KeyBinding::new("ctrl-shift-z", Redo, Some("TableDesigner")),
         KeyBinding::new("up", SelectPreviousRow, Some("TableDesigner")),
         KeyBinding::new("down", SelectNextRow, Some("TableDesigner")),
     ]);

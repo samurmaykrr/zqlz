@@ -676,6 +676,9 @@ impl MainView {
                 source_viewer,
             });
             self.apply_open_viewer_sql_row_editor_update(row_data, None, None, window, cx);
+            self.key_value_editor_panel.update(cx, |editor, cx| {
+                editor.focus_first_editable_row_field(window, cx);
+            });
         } else {
             self.key_value_editor_panel.update(cx, |editor, cx| {
                 editor.new_row(

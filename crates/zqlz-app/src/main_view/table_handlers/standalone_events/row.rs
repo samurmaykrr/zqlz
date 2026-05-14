@@ -17,12 +17,8 @@ use zqlz_core::{
 };
 use zqlz_services::{CommitCellChange, CommitTableChangesRequest, RowInsertData};
 use zqlz_ui::widgets::{
-    ActiveTheme as _, Sizable, WindowExt,
-    button::ButtonVariants,
-    button::{Button, ButtonVariant},
-    dialog::DialogButtonProps,
-    notification::Notification,
-    v_flex,
+    ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
+    notification::Notification, v_flex,
 };
 
 use crate::app::AppState;
@@ -54,18 +50,14 @@ pub(in crate::main_view) fn handle_add_row_event(
         table_name
     );
 
-    let viewer_weak = viewer_entity.downgrade();
+    let mut new_row_added = false;
 
-    // Add row locally to pending changes instead of immediately inserting to database
-    // The row will be committed when user clicks "Commit Changes"
     viewer_entity.update(cx, |viewer, cx| {
         if let Some(table_state) = &viewer.table_state {
             table_state.update(cx, |table, cx| {
-                // Add the new row
                 table.delegate_mut().add_new_row();
+                new_row_added = true;
 
-                // Get the display row index for the new row
-                // (last row in filtered view, or last row if not filtering)
                 let display_row_idx = if table.delegate().is_filtering {
                     table
                         .delegate()
@@ -76,7 +68,6 @@ pub(in crate::main_view) fn handle_add_row_event(
                     table.delegate().rows.len().saturating_sub(1)
                 };
 
-                // Find the first editable column (skip auto-increment columns and the row number col 0)
                 let first_editable_col = table
                     .delegate()
                     .column_meta
@@ -86,14 +77,9 @@ pub(in crate::main_view) fn handle_add_row_event(
                     .map(|(i, _)| i + 1) // +1 because col 0 is the row number column
                     .unwrap_or(1);
 
-                // Scroll to the new row so it's visible
                 table.scroll_to_row(display_row_idx, cx);
-
-                // Select the first editable cell
                 table.start_cell_selection(display_row_idx, first_editable_col, cx);
                 table.set_selected_cell(display_row_idx, first_editable_col, cx);
-
-                // Auto-start editing so user can immediately type
                 table
                     .delegate_mut()
                     .start_editing(display_row_idx, first_editable_col, window, cx);
@@ -104,26 +90,11 @@ pub(in crate::main_view) fn handle_add_row_event(
         cx.notify();
     });
 
-    window.push_notification(
-        Notification::info("New row added. Tip: open the form editor for a safer full-row insert.")
-            .title("New row created")
-            .autohide(false)
-            .action(move |_notification, _window, _cx| {
-                let viewer_weak = viewer_weak.clone();
-                Button::new("open-new-row-form")
-                    .label("Open Form")
-                    .small()
-                    .primary()
-                    .on_click(move |_, _window, cx| {
-                        if let Err(error) = viewer_weak.update(cx, |viewer, cx| {
-                            viewer.emit_open_new_row_in_form(cx);
-                        }) {
-                            tracing::debug!(error = %error, "Skipped opening new-row form after viewer dropped");
-                        }
-                    })
-            }),
-        cx,
-    );
+    if new_row_added {
+        viewer_entity.update(cx, |viewer, cx| {
+            viewer.emit_open_new_row_in_form(cx);
+        });
+    }
 }
 
 pub(in crate::main_view) fn handle_save_new_row_event(

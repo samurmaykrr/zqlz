@@ -1646,6 +1646,21 @@ impl ConnectionSidebar {
             }
 
             if let Some(schema_data) = &database.schema {
+                if Self::should_flatten_database_schema_group(
+                    &connection.db_type,
+                    &database.name,
+                    schema_data,
+                ) {
+                    self.append_database_level_objects_rows(
+                        connection,
+                        database,
+                        2,
+                        rows,
+                        matched_leaf_rows,
+                    );
+                    continue;
+                }
+
                 if let Some(groups) = Self::group_schema_sections_for_rows(
                     &schema_data.tables,
                     &schema_data.views,
@@ -1788,6 +1803,26 @@ impl ConnectionSidebar {
 
     fn should_skip_unloaded_database(database: &SidebarDatabaseInfo) -> bool {
         database.schema.is_none() && !database.is_active && !database.is_loading
+    }
+
+    fn should_flatten_database_schema_group(
+        driver_type: &str,
+        database_name: &str,
+        schema_data: &DatabaseSchemaData,
+    ) -> bool {
+        if !matches!(
+            driver_type.to_ascii_lowercase().as_str(),
+            "sqlite" | "turso"
+        ) {
+            return false;
+        }
+
+        schema_data.schema_name.as_deref() == Some(database_name)
+            && schema_data.schema_names.len() == 1
+            && schema_data
+                .schema_names
+                .first()
+                .is_some_and(|schema_name| schema_name == database_name)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -4461,7 +4496,7 @@ impl Panel for ConnectionSidebar {
 #[cfg(test)]
 mod tests {
     use super::ConnectionSidebar;
-    use crate::widgets::sidebar::types::SidebarDatabaseInfo;
+    use crate::widgets::sidebar::types::{DatabaseSchemaData, SidebarDatabaseInfo};
 
     #[test]
     fn sidebar_groups_postgres_metadata_sections_by_schema() {
@@ -4536,6 +4571,36 @@ mod tests {
             main.tables,
             vec!["public.activity_communications".to_string()]
         );
+    }
+
+    #[test]
+    fn sqlite_main_database_does_not_render_duplicate_main_schema_group() {
+        let schema_data = DatabaseSchemaData {
+            schema_name: Some("main".to_string()),
+            schema_names: vec!["main".to_string()],
+            ..DatabaseSchemaData::default()
+        };
+
+        assert!(ConnectionSidebar::should_flatten_database_schema_group(
+            "sqlite",
+            "main",
+            &schema_data
+        ));
+    }
+
+    #[test]
+    fn postgres_keeps_schema_group_matching_database_name() {
+        let schema_data = DatabaseSchemaData {
+            schema_name: Some("main".to_string()),
+            schema_names: vec!["main".to_string()],
+            ..DatabaseSchemaData::default()
+        };
+
+        assert!(!ConnectionSidebar::should_flatten_database_schema_group(
+            "postgres",
+            "main",
+            &schema_data
+        ));
     }
 
     #[test]

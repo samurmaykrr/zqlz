@@ -84,6 +84,12 @@ impl AppMenuBar {
         self.set_selected_index(None, window, cx);
     }
 
+    fn clear_selected_index(&mut self, cx: &mut Context<Self>) {
+        if self.selected_index.take().is_some() {
+            cx.notify();
+        }
+    }
+
     fn set_selected_index(
         &mut self,
         ix: Option<usize>,
@@ -191,13 +197,13 @@ impl AppMenu {
         &mut self,
         _: &Entity<PopupMenu>,
         _: &DismissEvent,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         self._subscription.take();
         self.popup_menu.take();
         self.menu_bar.update(cx, |state, cx| {
-            state.on_cancel(&Cancel, window, cx);
+            state.clear_selected_index(cx);
         });
     }
 
@@ -214,10 +220,16 @@ impl AppMenu {
     ) {
         let is_selected = self.menu_bar.read(cx).selected_index == Some(self.ix);
 
-        self.menu_bar.update(cx, |state, cx| {
-            let new_ix = if is_selected { None } else { Some(self.ix) };
-            state.set_selected_index(new_ix, window, cx);
-        });
+        if is_selected {
+            self.clear_popup_menu();
+            self.menu_bar.update(cx, |state, cx| {
+                state.clear_selected_index(cx);
+            });
+        } else {
+            self.menu_bar.update(cx, |state, cx| {
+                state.set_selected_index(Some(self.ix), window, cx);
+            });
+        }
     }
 
     fn handle_hover(&mut self, hovered: &bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -244,6 +256,7 @@ impl Render for AppMenu {
         div()
             .id(self.ix)
             .relative()
+            .occlude()
             .child(
                 Button::new("menu")
                     .small()
@@ -261,18 +274,21 @@ impl Render for AppMenu {
             )
             .on_hover(cx.listener(Self::handle_hover))
             .when(is_selected, |this| {
-                this.child(deferred(
-                    anchored()
-                        .anchor(gpui::Anchor::TopLeft)
-                        .snap_to_window_with_margin(px(8.))
-                        .child(
-                            div()
-                                .size_full()
-                                .occlude()
-                                .top_1()
-                                .child(self.build_popup_menu(window, cx)),
-                        ),
-                ))
+                this.child(
+                    deferred(
+                        anchored()
+                            .anchor(gpui::Anchor::TopLeft)
+                            .snap_to_window_with_margin(px(8.))
+                            .child(
+                                div()
+                                    .size_full()
+                                    .occlude()
+                                    .top_1()
+                                    .child(self.build_popup_menu(window, cx)),
+                            ),
+                    )
+                    .with_priority(1),
+                )
             })
     }
 }

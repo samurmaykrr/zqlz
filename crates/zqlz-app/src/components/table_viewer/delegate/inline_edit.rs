@@ -33,7 +33,8 @@ impl TableViewerDelegate {
 
         let data_col = col - 1;
 
-        if !self.can_edit_cells() {
+        let is_new_row = self.is_new_row(actual_row);
+        if !self.can_edit_cells() && !is_new_row {
             tracing::info!("Skipping cell edit: table has no stable row identity");
             return;
         }
@@ -44,7 +45,7 @@ impl TableViewerDelegate {
         }
 
         // Auto-increment columns on new rows show a placeholder and are not editable
-        if self.is_auto_increment_column(data_col) && self.is_new_row(actual_row) {
+        if self.is_auto_increment_column(data_col) && is_new_row {
             return;
         }
 

@@ -337,6 +337,15 @@ impl MainView {
         let workspace_controller =
             cx.new(|_| WorkspaceController::new(weak_dock_area.clone(), workspace_id.clone()));
         crate::window_manager::register_main_workspace(window, workspace_controller.clone(), cx);
+        let main_view = cx.entity().downgrade();
+        window.on_window_should_close(cx, move |window, cx| {
+            if main_view.upgrade().is_some() {
+                window.dispatch_action(crate::actions::CloseWindow.boxed_clone(), cx);
+                false
+            } else {
+                true
+            }
+        });
 
         let loaded_from_saved = if let Ok(Some(persisted)) = load_layout(&workspace_id) {
             tracing::info!("Loading saved dock layout");

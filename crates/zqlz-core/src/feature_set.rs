@@ -53,6 +53,31 @@ pub struct ObjectFeatureSet {
     pub available_actions: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ObjectActionFeature {
+    Browse,
+    Create,
+    Edit,
+    Delete,
+}
+
+pub fn object_feature_for_action(action_id: &str) -> ObjectActionFeature {
+    if action_id.starts_with("new_") || action_id.contains("create") {
+        return ObjectActionFeature::Create;
+    }
+
+    if matches!(action_id, "delete" | "drop" | "empty") || action_id.contains("delete") {
+        return ObjectActionFeature::Delete;
+    }
+
+    if matches!(action_id, "design" | "edit" | "rename" | "duplicate") || action_id.contains("edit")
+    {
+        return ObjectActionFeature::Edit;
+    }
+
+    ObjectActionFeature::Browse
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StoreFeatureSet {
     pub key_value: FeatureAvailability,
@@ -113,16 +138,13 @@ impl ConnectionFeatureSet {
 
         let can_create_objects = available_actions
             .iter()
-            .any(|action| action.starts_with("new_"))
-            || available_actions
-                .iter()
-                .any(|action| action.contains("create"));
+            .any(|action| object_feature_for_action(action) == ObjectActionFeature::Create);
         let can_edit_objects = available_actions
             .iter()
-            .any(|action| matches!(action.as_str(), "edit" | "rename") || action.contains("edit"));
-        let can_delete_objects = available_actions.iter().any(|action| {
-            matches!(action.as_str(), "delete" | "drop") || action.contains("delete")
-        });
+            .any(|action| object_feature_for_action(action) == ObjectActionFeature::Edit);
+        let can_delete_objects = available_actions
+            .iter()
+            .any(|action| object_feature_for_action(action) == ObjectActionFeature::Delete);
 
         Self {
             driver_name: inputs.driver_name,
@@ -281,6 +303,7 @@ mod tests {
         assert!(features.query.cancel.available);
         assert!(features.data_editing.browse_rows.available);
         assert!(features.objects.create_objects.available);
+        assert!(features.objects.edit_objects.available);
         assert!(!features.stores.key_value.available);
     }
 
