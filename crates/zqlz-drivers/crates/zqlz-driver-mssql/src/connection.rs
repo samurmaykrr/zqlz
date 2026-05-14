@@ -1,6 +1,7 @@
 //! MS SQL Server connection implementation using tiberius
 
 use async_trait::async_trait;
+use std::borrow::Cow;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, Row as TiberiusRow};
 use tokio::net::TcpStream;
@@ -9,9 +10,10 @@ use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
 use uuid::Uuid;
 use zqlz_core::{
     BindPlaceholderPolicy, CheckConstraintEnforcement, ColumnMeta, Connection, ConnectionScope,
-    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ForeignKeyChecksSql,
-    ImportIndexCapabilities, ImportSemanticDefault, QueryResult, ResolvedConnectionScope, Result,
-    Row, SchemaIntrospection, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
+    ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault, QueryResult,
+    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SqlObjectName, StatementResult,
+    Transaction, Value, ZqlzError,
 };
 
 /// MS SQL Server connection errors
@@ -203,7 +205,11 @@ impl Connection for MssqlConnection {
     }
 
     fn explain_config(&self) -> ExplainConfig {
-        ExplainConfig::default()
+        mssql_explain_config()
+    }
+
+    fn explain_parser_kind(&self) -> ExplainParserKind {
+        ExplainParserKind::Raw
     }
 
     fn quote_identifier(&self, identifier: &str) -> String {
@@ -921,5 +927,22 @@ impl std::fmt::Debug for MssqlConnection {
             .field("database", &self.database)
             .field("closed", &self.closed.load(Ordering::SeqCst))
             .finish()
+    }
+}
+
+fn mssql_explain_config() -> ExplainConfig {
+    ExplainConfig {
+        explain_format: Cow::Borrowed("SET SHOWPLAN_TEXT ON; {sql}; SET SHOWPLAN_TEXT OFF"),
+        query_plan_format: Some(Cow::Borrowed(
+            "SET SHOWPLAN_ALL ON; {sql}; SET SHOWPLAN_ALL OFF",
+        )),
+        analyze_format: Some(Cow::Borrowed(
+            "SET STATISTICS IO ON; SET STATISTICS TIME ON; {sql}; SET STATISTICS IO OFF; SET STATISTICS TIME OFF",
+        )),
+        explain_description: Cow::Borrowed("Shows text-based execution plan"),
+        query_plan_description: Some(Cow::Borrowed(
+            "Shows detailed execution plan with cost estimates",
+        )),
+        analyze_is_safe: false,
     }
 }

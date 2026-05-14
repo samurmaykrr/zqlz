@@ -306,7 +306,7 @@ fn parse_detail(detail: &str) -> Result<PlanNode> {
     let detail_upper = detail.to_uppercase();
 
     // Match known patterns
-    let node = if detail_upper.starts_with("SCAN") {
+    let mut node = if detail_upper.starts_with("SCAN") {
         parse_scan_operation(detail)
     } else if detail_upper.starts_with("SEARCH") {
         parse_search_operation(detail)
@@ -348,7 +348,18 @@ fn parse_detail(detail: &str) -> Result<PlanNode> {
         node
     };
 
+    attach_sqlite_detail(&mut node, detail);
     Ok(node)
+}
+
+fn attach_sqlite_detail(node: &mut PlanNode, detail: &str) {
+    if node.description.is_none() {
+        node.description = Some(detail.to_string());
+    }
+    node.extra.insert(
+        "sqlite_detail".to_string(),
+        serde_json::Value::String(detail.to_string()),
+    );
 }
 
 /// Parses SCAN operation

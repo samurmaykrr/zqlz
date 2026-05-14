@@ -14,6 +14,14 @@ mod tree_format_tests {
         let plan = parse_sqlite_explain(output).unwrap();
         assert_eq!(plan.root.node_type, NodeType::SeqScan);
         assert_eq!(plan.root.relation.as_deref(), Some("users"));
+        assert_eq!(plan.root.description.as_deref(), Some("SCAN users"));
+        assert_eq!(
+            plan.root
+                .extra
+                .get("sqlite_detail")
+                .and_then(|value| value.as_str()),
+            Some("SCAN users")
+        );
     }
 
     #[test]

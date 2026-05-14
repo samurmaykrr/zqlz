@@ -1024,7 +1024,11 @@ impl MainView {
         };
 
         if !app_state.is_connected(id) {
-            super::connection_window::ConnectionWindow::open_for_edit(saved, cx);
+            super::connection_window::ConnectionWindow::open_for_edit(
+                window.window_handle(),
+                saved,
+                cx,
+            );
             return;
         }
 
@@ -1105,7 +1109,11 @@ impl MainView {
             Notification::info("Connection closed before editing settings"),
             cx,
         );
-        super::connection_window::ConnectionWindow::open_for_edit(saved, cx);
+        super::connection_window::ConnectionWindow::open_for_edit(
+            window.window_handle(),
+            saved,
+            cx,
+        );
     }
 
     fn connection_scoped_center_panels(&self, id: Uuid, cx: &App) -> Vec<Arc<dyn PanelView>> {
@@ -1152,11 +1160,11 @@ impl MainView {
     /// Open the new connection window
     pub(super) fn open_new_connection_dialog(
         &mut self,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         tracing::info!("Opening new connection window");
-        super::connection_window::ConnectionWindow::open(cx);
+        super::connection_window::ConnectionWindow::open(window.window_handle(), cx);
     }
 
     pub(super) fn import_database_file_and_open_query(

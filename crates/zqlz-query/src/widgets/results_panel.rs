@@ -1624,93 +1624,96 @@ impl ResultsPanel {
     fn render_info_tab(&self, exec: &QueryExecution, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
 
-        v_flex()
-            .size_full()
-            .p_4()
-            .gap_3()
-            .text_sm()
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child("Time Stamp:"),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.foreground)
-                            .child(exec.start_time.format("%Y-%m-%d %H:%M:%S").to_string()),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child("Connection:"),
-                    )
-                    .child(
-                        div().text_color(theme.foreground).child(
-                            exec.connection_name
-                                .clone()
-                                .unwrap_or_else(|| "Unknown".to_string()),
+        div().size_full().child(
+            v_flex()
+                .size_full()
+                .p_4()
+                .gap_3()
+                .text_sm()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Time Stamp:"),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .child(exec.start_time.format("%Y-%m-%d %H:%M:%S").to_string()),
                         ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(div().text_color(theme.muted_foreground).child("Database:"))
-                    .child(
-                        div().text_color(theme.foreground).child(
-                            exec.database_name
-                                .clone()
-                                .unwrap_or_else(|| "N/A".to_string()),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Connection:"),
+                        )
+                        .child(
+                            div().text_color(theme.foreground).child(
+                                exec.connection_name
+                                    .clone()
+                                    .unwrap_or_else(|| "Unknown".to_string()),
+                            ),
                         ),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child("Query Time:"),
-                    )
-                    .child(
-                        div()
-                            .text_color(theme.foreground)
-                            .child(format!("{:.3}s", exec.duration_ms as f64 / 1000.0)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_color(theme.muted_foreground)
-                            .child("Fetch Time:"),
-                    )
-                    .child(div().text_color(theme.foreground).child("0/s")),
-            )
-            .child(div().h(px(1.0)).w_full().bg(theme.border))
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(div().text_color(theme.muted_foreground).child("Query:"))
-                    .child(
-                        div()
-                            .text_color(theme.foreground)
-                            .font_family(theme.mono_font_family.clone())
-                            .p_2()
-                            .bg(theme.muted)
-                            .border_1()
-                            .border_color(theme.border.opacity(0.6))
-                            .child(exec.sql.clone()),
-                    ),
-            )
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(div().text_color(theme.muted_foreground).child("Database:"))
+                        .child(
+                            div().text_color(theme.foreground).child(
+                                exec.database_name
+                                    .clone()
+                                    .unwrap_or_else(|| "N/A".to_string()),
+                            ),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Query Time:"),
+                        )
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .child(format!("{:.3}s", exec.duration_ms as f64 / 1000.0)),
+                        ),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_color(theme.muted_foreground)
+                                .child("Fetch Time:"),
+                        )
+                        .child(div().text_color(theme.foreground).child("0/s")),
+                )
+                .child(div().h(px(1.0)).w_full().bg(theme.border))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().text_color(theme.muted_foreground).child("Query:"))
+                        .child(
+                            div()
+                                .text_color(theme.foreground)
+                                .font_family(theme.mono_font_family.clone())
+                                .p_2()
+                                .bg(theme.muted)
+                                .border_1()
+                                .border_color(theme.border.opacity(0.6))
+                                .child(exec.sql.clone()),
+                        ),
+                )
+                .overflow_y_scrollbar(),
+        )
     }
 
     /// Render the empty state
@@ -1881,14 +1884,9 @@ impl ResultsPanel {
     }
 
     fn explain_supports_op(&self, explain_idx: usize) -> bool {
-        self.explain_results.get(explain_idx).is_some_and(|result| {
-            result.raw_output.is_some()
-                && result
-                    .provider_id
-                    .as_deref()
-                    .map(|provider| provider.eq_ignore_ascii_case("sqlite"))
-                    .unwrap_or(false)
-        })
+        self.explain_results
+            .get(explain_idx)
+            .is_some_and(|result| result.raw_output.is_some())
     }
 
     /// Render Visual sub-tab with Summary, Plan Tree, and Suggestions

@@ -954,7 +954,7 @@ impl KeyValueEditorPanel {
                 } else {
                     value.display_for_editor()
                 };
-                let is_null = value.is_null() && !uses_default_placeholder;
+                let is_null = col.nullable && value.is_null() && !uses_default_placeholder;
                 let placeholder = format!("{} ({})", col.name, col.data_type);
                 let input = cx.new(|cx| {
                     let mut state = InputState::new(window, cx)
@@ -981,6 +981,14 @@ impl KeyValueEditorPanel {
                     InputEvent::Change => {
                         this.is_modified = true;
                         let new_value = input_entity.read(cx).text().to_string();
+                        if this
+                            .row_fields
+                            .get(col_index)
+                            .is_some_and(|field| field.is_null)
+                            && let Some(field) = this.row_fields.get_mut(col_index)
+                        {
+                            field.is_null = false;
+                        }
                         let is_null = this
                             .row_fields
                             .get(col_index)
@@ -1059,13 +1067,26 @@ impl KeyValueEditorPanel {
 
         self.edit_row(data, window, cx);
 
-        // Focus the first non-auto-increment field
-        if let Some(first_field_index) = self
-            .row_data
-            .as_ref()
-            .and_then(|d| d.column_meta.iter().position(|c| !c.auto_increment))
-            && let Some(field) = self.row_fields.get(first_field_index)
+        self.focus_first_editable_row_field(window, cx);
+    }
+
+    /// Focus the first SQL row field that can accept typed input.
+    pub fn focus_first_editable_row_field(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(first_field_index) = self.row_data.as_ref().and_then(|data| {
+            data.column_meta
+                .iter()
+                .enumerate()
+                .find_map(|(index, column)| {
+                    self.row_fields.get(index)?;
+                    if column.auto_increment {
+                        None
+                    } else {
+                        Some(index)
+                    }
+                })
+        }) && let Some(field) = self.row_fields.get(first_field_index)
         {
+            self.focused_field_index = Some(first_field_index);
             field.input.update(cx, |input, cx| {
                 input.focus(window, cx);
             });
@@ -2645,7 +2666,7 @@ impl KeyValueEditorPanel {
         let is_auto = col.auto_increment;
         let is_nullable = col.nullable;
         let is_null = field.is_null;
-        let is_disabled = is_auto || is_null;
+        let is_disabled = is_auto;
         let field_index = index;
         let is_expanded = self.is_row_field_expanded(index);
 

@@ -699,33 +699,14 @@ impl QueryService {
             ExplainParserKind::PostgreSql => raw_output
                 .and_then(Self::parse_postgres_query_result)
                 .or_else(|| query_plan.and_then(Self::parse_postgres_query_result)),
-            ExplainParserKind::MySql => {
-                // For MySQL, try to parse the raw output as JSON
-                if let Some(raw) = raw_output {
-                    if let Some(first_row) = raw.rows.first() {
-                        if let Some(first_value) = first_row.values.first() {
-                            let json_str = first_value.to_string();
-                            parse_mysql_explain(&json_str).ok()
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                }
-            }
-            ExplainParserKind::Sqlite => {
-                // For SQLite, parse the query plan output
-                if let Some(plan) = query_plan {
-                    // Convert QueryResult to text format for parsing
-                    let plan_text = Self::query_result_to_text(plan);
-                    parse_sqlite_explain(&plan_text).ok()
-                } else {
-                    None
-                }
-            }
+            ExplainParserKind::MySql => raw_output
+                .and_then(Self::mysql_query_result_to_plan_text)
+                .or_else(|| query_plan.and_then(Self::mysql_query_result_to_plan_text))
+                .and_then(|plan_text| parse_mysql_explain(&plan_text).ok()),
+            ExplainParserKind::Sqlite => query_plan
+                .and_then(Self::sqlite_query_result_to_plan_text)
+                .and_then(|plan_text| parse_sqlite_explain(&plan_text).ok()),
+            ExplainParserKind::Raw => None,
             ExplainParserKind::None => None,
         };
 
@@ -740,23 +721,62 @@ impl QueryService {
         })
     }
 
-    /// Convert QueryResult to text format for parsing
-    fn query_result_to_text(result: &zqlz_core::QueryResult) -> String {
+    fn sqlite_query_result_to_plan_text(result: &zqlz_core::QueryResult) -> Option<String> {
+        let detail_index = result
+            .columns
+            .iter()
+            .position(|column| column.name.eq_ignore_ascii_case("detail"));
+
+        let lines = result
+            .rows
+            .iter()
+            .filter_map(|row| {
+                let value = detail_index
+                    .and_then(|index| row.values.get(index))
+                    .or_else(|| row.values.last())?;
+                let text = Self::explain_value_to_text(value);
+                let text = text.trim();
+                (!text.is_empty()).then(|| text.to_string())
+            })
+            .collect::<Vec<_>>();
+
+        (!lines.is_empty()).then(|| lines.join("\n"))
+    }
+
+    fn mysql_query_result_to_plan_text(result: &zqlz_core::QueryResult) -> Option<String> {
+        if let Some(single_value) = result.rows.first().and_then(|row| {
+            (result.columns.len() == 1)
+                .then(|| row.values.first())
+                .flatten()
+        }) {
+            let text = Self::explain_value_to_text(single_value);
+            let text = text.trim();
+            if text.starts_with('{') {
+                return Some(text.to_string());
+            }
+        }
+
         let mut lines = Vec::new();
-
-        // Add header
         if !result.columns.is_empty() {
-            let header: Vec<_> = result.columns.iter().map(|c| c.name.as_str()).collect();
-            lines.push(header.join("\t"));
+            lines.push(
+                result
+                    .columns
+                    .iter()
+                    .map(|column| column.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\t"),
+            );
         }
 
-        // Add rows
-        for row in &result.rows {
-            let row_text: Vec<_> = row.values.iter().map(|v| v.to_string()).collect();
-            lines.push(row_text.join("\t"));
-        }
+        lines.extend(result.rows.iter().map(|row| {
+            row.values
+                .iter()
+                .map(Self::explain_value_to_text)
+                .collect::<Vec<_>>()
+                .join("\t")
+        }));
 
-        lines.join("\n")
+        (!lines.is_empty()).then(|| lines.join("\n"))
     }
 
     fn parse_postgres_query_result(
@@ -855,6 +875,7 @@ impl Default for QueryService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zqlz_core::{ColumnMeta, QueryResult, Row};
 
     #[test]
     fn test_is_query() {
@@ -871,6 +892,58 @@ mod tests {
         assert!(!service.is_query("DELETE FROM users"));
         assert!(!service.is_query("CREATE TABLE users (id INT)"));
         assert!(!service.is_query("DROP TABLE users"));
+    }
+
+    #[test]
+    fn test_mysql_query_result_to_plan_text_tabular() {
+        let columns = vec![
+            "id",
+            "select_type",
+            "table",
+            "type",
+            "possible_keys",
+            "key",
+            "key_len",
+            "ref",
+            "rows",
+            "filtered",
+            "Extra",
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, name)| ColumnMeta {
+            name: name.to_string(),
+            ordinal,
+            ..ColumnMeta::default()
+        })
+        .collect::<Vec<_>>();
+        let column_names = columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        let mut result = QueryResult::empty();
+        result.columns = columns;
+        result.rows = vec![Row::new(
+            column_names,
+            vec![
+                Value::Int32(1),
+                Value::String("SIMPLE".to_string()),
+                Value::String("users".to_string()),
+                Value::String("ALL".to_string()),
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Null,
+                Value::Int64(100),
+                Value::Decimal("100.00".to_string()),
+                Value::String("Using where".to_string()),
+            ],
+        )];
+
+        let text = QueryService::mysql_query_result_to_plan_text(&result).unwrap();
+        assert!(text.starts_with("id\tselect_type\ttable\ttype"));
+        assert!(text.contains("1\tSIMPLE\tusers\tALL"));
+        assert!(parse_mysql_explain(&text).is_ok());
     }
 
     #[test]

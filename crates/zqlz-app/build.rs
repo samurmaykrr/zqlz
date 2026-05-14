@@ -126,6 +126,12 @@ fn windows_build() {
 
     let resources_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources");
     let windows_resources = resources_dir.join("windows");
+    for icon_name in ["app-icon.ico", "app-icon-dev.ico", "app-icon-nightly.ico"] {
+        println!(
+            "cargo:rerun-if-changed={}",
+            windows_resources.join(icon_name).display()
+        );
+    }
 
     // Determine which icon to use based on release channel
     let release_channel = std::env::var("RELEASE_CHANNEL").unwrap_or_else(|_| "dev".to_string());

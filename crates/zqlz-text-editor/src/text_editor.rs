@@ -2002,7 +2002,9 @@ impl TextEditor {
             cx.write_to_clipboard(ClipboardItem::new_string(selected_text.to_string()));
 
             // Then delete the selection
-            self.delete_selection();
+            if self.delete_selection() {
+                self.did_change_content(cx);
+            }
             true
         } else {
             false
@@ -5165,7 +5167,9 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         if self.has_selection() {
-            self.delete_selection();
+            if self.delete_selection() {
+                self.did_change_content(cx);
+            }
         } else {
             self.delete_before_cursor(window, cx);
         }
@@ -5175,7 +5179,9 @@ impl TextEditor {
 
     fn handle_delete(&mut self, _: &actions::Delete, window: &mut Window, cx: &mut Context<Self>) {
         if self.has_selection() {
-            self.delete_selection();
+            if self.delete_selection() {
+                self.did_change_content(cx);
+            }
         } else {
             self.delete_at_cursor(window, cx);
         }

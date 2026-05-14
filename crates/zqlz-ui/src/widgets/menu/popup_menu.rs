@@ -1338,6 +1338,7 @@ impl Render for PopupMenu {
             let window_half_height = window.window_bounds().get_bounds().size.height * 0.5;
             window_half_height.min(px(450.))
         });
+        let should_scroll = self.scrollable || self.estimated_height() > max_height;
 
         let has_left_icon = self
             .menu_items
@@ -1386,7 +1387,7 @@ impl Render for PopupMenu {
                     .min_w(rems(8.))
                     .when_some(self.min_width, |this, min_width| this.min_w(min_width))
                     .max_w(max_width)
-                    .when(self.scrollable, |this| {
+                    .when(should_scroll, |this| {
                         this.max_h(max_height)
                             .overflow_y_scroll()
                             .track_scroll(&self.scroll_handle)
@@ -1401,7 +1402,7 @@ impl Render for PopupMenu {
                     )
                     .on_prepaint(move |bounds, _, cx| view.update(cx, |r, _| r.bounds = bounds)),
             )
-            .when(self.scrollable, |this| {
+            .when(should_scroll, |this| {
                 this.vertical_scrollbar(&self.scroll_handle)
             })
     }

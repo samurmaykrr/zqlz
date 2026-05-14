@@ -17,6 +17,7 @@ enum ConnectionWindowMode {
 
 pub struct ConnectionWindow {
     mode: ConnectionWindowMode,
+    parent_window: AnyWindowHandle,
     picker: Entity<ConnectionPicker>,
     connection_form: Option<Entity<ConnectionForm>>,
     _picker_subscription: Subscription,
@@ -42,11 +43,12 @@ impl ConnectionWindow {
         (picker, picker_subscription)
     }
 
-    fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(parent_window: AnyWindowHandle, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let (picker, picker_subscription) = Self::new_picker(window, cx);
 
         Self {
             mode: ConnectionWindowMode::New,
+            parent_window,
             picker,
             connection_form: None,
             _picker_subscription: picker_subscription,
@@ -54,12 +56,18 @@ impl ConnectionWindow {
         }
     }
 
-    fn new_for_edit(saved: SavedConnection, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new_for_edit(
+        parent_window: AnyWindowHandle,
+        saved: SavedConnection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let (picker, picker_subscription) = Self::new_picker(window, cx);
         let mut instance = Self {
             mode: ConnectionWindowMode::Edit {
                 saved: saved.clone(),
             },
+            parent_window,
             picker,
             connection_form: None,
             _picker_subscription: picker_subscription,
@@ -73,7 +81,7 @@ impl ConnectionWindow {
         instance
     }
 
-    pub fn open(cx: &mut App) {
+    pub fn open(parent_window: AnyWindowHandle, cx: &mut App) {
         let window_options = WindowOptions {
             titlebar: Some(TitleBar::title_bar_options()),
             window_bounds: Some(WindowBounds::centered(size(px(700.0), px(550.0)), cx)),
@@ -88,7 +96,8 @@ impl ConnectionWindow {
                 window.activate_window();
                 window.set_window_title("New Connection");
 
-                let connection_window = cx.new(|cx| ConnectionWindow::new(window, cx));
+                let connection_window =
+                    cx.new(|cx| ConnectionWindow::new(parent_window, window, cx));
                 cx.new(|cx| Root::new(connection_window, window, cx))
             })?;
 
@@ -97,7 +106,7 @@ impl ConnectionWindow {
         .detach();
     }
 
-    pub fn open_for_edit(saved: SavedConnection, cx: &mut App) {
+    pub fn open_for_edit(parent_window: AnyWindowHandle, saved: SavedConnection, cx: &mut App) {
         let window_title = format!("Edit Connection - {}", saved.name);
 
         let window_options = WindowOptions {
@@ -115,7 +124,7 @@ impl ConnectionWindow {
                 window.set_window_title(&window_title);
 
                 let connection_window =
-                    cx.new(|cx| ConnectionWindow::new_for_edit(saved, window, cx));
+                    cx.new(|cx| ConnectionWindow::new_for_edit(parent_window, saved, window, cx));
                 cx.new(|cx| Root::new(connection_window, window, cx))
             })?;
 
@@ -243,22 +252,16 @@ impl ConnectionWindow {
             app_state.save_connection(saved.clone());
         }
 
-        let current_window = window.window_handle();
+        let parent_window = self.parent_window;
         window.remove_window();
 
         cx.defer(move |cx| {
             use crate::actions::RefreshConnectionsList;
 
-            for window_handle in cx.windows() {
-                if window_handle == current_window {
-                    continue;
-                }
-
-                if let Err(error) = cx.update_window(window_handle, |_, window, cx| {
-                    window.dispatch_action(RefreshConnectionsList.boxed_clone(), cx);
-                }) {
-                    tracing::warn!("Failed to dispatch RefreshConnectionsList: {:?}", error);
-                }
+            if let Err(error) = cx.update_window(parent_window, |_, window, cx| {
+                window.dispatch_action(RefreshConnectionsList.boxed_clone(), cx);
+            }) {
+                tracing::warn!("Failed to dispatch RefreshConnectionsList: {:?}", error);
             }
         });
     }

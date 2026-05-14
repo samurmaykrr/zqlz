@@ -221,11 +221,11 @@ impl Connection for DuckDbConnection {
     }
 
     fn explain_config(&self) -> ExplainConfig {
-        ExplainConfig::default()
+        duckdb_explain_config()
     }
 
     fn explain_parser_kind(&self) -> ExplainParserKind {
-        ExplainParserKind::None
+        ExplainParserKind::Raw
     }
 
     fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {

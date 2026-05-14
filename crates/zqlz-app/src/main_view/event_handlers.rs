@@ -1,6 +1,8 @@
 // Event handlers for MainView
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
+#[cfg(not(target_os = "windows"))]
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use super::{
@@ -1672,6 +1674,7 @@ impl MainView {
                                     .text_sm()
                                     .child("Close all open tabs and this window?"),
                             )
+                            .confirm()
                             .button_props(
                                 DialogButtonProps::default()
                                     .ok_text("Close All")
@@ -1703,6 +1706,7 @@ impl MainView {
                     dialog
                         .title(prompt.title)
                         .child(div().text_sm().child(prompt.message.clone()))
+                        .confirm()
                         .button_props(
                             DialogButtonProps::default()
                                 .ok_text(prompt.discard_button)

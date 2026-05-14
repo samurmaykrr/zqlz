@@ -9,7 +9,7 @@ use zqlz_core::{
     ColumnMeta, CommentStyles, Connection, ConnectionConfig, ConnectionField,
     ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo, DatabaseDriver,
     DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions, DropViewOptions,
-    ExplainConfig, FunctionCategory, KeywordCategory, KeywordInfo, QueryResult,
+    ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory, KeywordInfo, QueryResult,
     ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName, StatementResult,
     TableOptionDef, TableOptionType, Transaction, Value, ZqlzError,
 };
@@ -307,7 +307,11 @@ impl Connection for ClickHouseConnection {
     }
 
     fn explain_config(&self) -> ExplainConfig {
-        ExplainConfig::default()
+        clickhouse_explain_config()
+    }
+
+    fn explain_parser_kind(&self) -> ExplainParserKind {
+        ExplainParserKind::Raw
     }
 
     fn rename_table_sql(&self, table_name: &SqlObjectName, new_table_name: &str) -> Result<String> {

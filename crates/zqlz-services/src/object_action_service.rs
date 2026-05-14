@@ -1,7 +1,7 @@
 use zqlz_core::{
-    format_qualified_object_name, parse_redis_database_index, FeatureAvailability,
-    ObjectFeatureSet, ObjectFormAction, ObjectFormMode, ObjectType,
-    ObjectsPanelAction as ManifestAction, ObjectsPanelManifest, ObjectsPanelObjectRef,
+    format_qualified_object_name, object_feature_for_action, parse_redis_database_index,
+    FeatureAvailability, ObjectActionFeature, ObjectFeatureSet, ObjectFormAction, ObjectFormMode,
+    ObjectType, ObjectsPanelAction as ManifestAction, ObjectsPanelManifest, ObjectsPanelObjectRef,
 };
 use zqlz_versioning::DatabaseObjectType;
 
@@ -101,31 +101,6 @@ pub fn objects_panel_action_feature_availability(
         ObjectActionFeature::Edit => features.edit_objects.clone(),
         ObjectActionFeature::Delete => features.delete_objects.clone(),
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ObjectActionFeature {
-    Browse,
-    Create,
-    Edit,
-    Delete,
-}
-
-fn object_feature_for_action(action_id: &str) -> ObjectActionFeature {
-    if action_id.starts_with("new_") || action_id.contains("create") {
-        return ObjectActionFeature::Create;
-    }
-
-    if matches!(action_id, "delete" | "drop" | "empty") || action_id.contains("delete") {
-        return ObjectActionFeature::Delete;
-    }
-
-    if matches!(action_id, "design" | "edit" | "rename" | "duplicate") || action_id.contains("edit")
-    {
-        return ObjectActionFeature::Edit;
-    }
-
-    ObjectActionFeature::Browse
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1265,7 +1240,10 @@ mod tests {
             available_actions: vec![
                 "open".to_string(),
                 "new_table".to_string(),
+                "design".to_string(),
                 "rename".to_string(),
+                "duplicate".to_string(),
+                "empty".to_string(),
                 "delete".to_string(),
             ],
         }
@@ -1298,6 +1276,18 @@ mod tests {
         assert_eq!(
             objects_panel_action_feature_availability(&features, "rename"),
             FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "design"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "duplicate"),
+            FeatureAvailability::available()
+        );
+        assert_eq!(
+            objects_panel_action_feature_availability(&features, "empty"),
+            FeatureAvailability::unavailable("delete blocked")
         );
         assert_eq!(
             objects_panel_action_feature_availability(&features, "delete"),

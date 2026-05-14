@@ -16,7 +16,7 @@ use zqlz_ui::widgets::{
 };
 
 const NODE_WIDTH: f32 = 132.0;
-const NODE_HEIGHT: f32 = 72.0;
+const NODE_HEIGHT: f32 = 90.0;
 const COLUMN_GAP: f32 = 178.0;
 const ROW_GAP: f32 = 92.0;
 const CANVAS_PADDING_X: f32 = 72.0;
@@ -305,7 +305,7 @@ impl ExplainGraphView {
     ) -> AnyElement {
         let theme = cx.theme();
         let cost_percent = node.cost_percent(root_total_cost);
-        let highlighted = cost_percent >= COST_THRESHOLD;
+        let highlighted = node.total_cost.is_some() && cost_percent >= COST_THRESHOLD;
         let color = if highlighted {
             theme.warning
         } else {
@@ -338,7 +338,14 @@ impl ExplainGraphView {
                     .font_family(theme.mono_font_family.clone())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color)
-                    .child(format_cost(node.total_cost)),
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .child(
+                        node.total_cost
+                            .map(format_cost)
+                            .unwrap_or_else(|| node.operation_label.clone()),
+                    ),
             )
             .child(
                 h_flex()
@@ -368,26 +375,22 @@ impl ExplainGraphView {
                     .text_color(theme.foreground)
                     .overflow_hidden()
                     .text_ellipsis()
-                    .whitespace_nowrap()
                     .child(node.display_label.clone()),
             )
-            .child(
-                div()
-                    .w_full()
-                    .text_center()
-                    .text_xs()
-                    .font_family(theme.mono_font_family.clone())
-                    .text_color(theme.muted_foreground)
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(format!(
-                        "{} rows",
-                        node.rows
-                            .map(format_count)
-                            .unwrap_or_else(|| "-".to_string())
-                    )),
-            )
+            .when_some(node.rows, |this, rows| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .text_xs()
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.muted_foreground)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(format!("{} rows", format_count(rows))),
+                )
+            })
             .into_any_element()
     }
 
@@ -529,7 +532,7 @@ impl ExplainGraph {
     pub fn from_analysis(analysis: &QueryAnalysis) -> Self {
         let mut builder = GraphBuilder::default();
         let root_id = builder.push_node(&analysis.plan.root, 0);
-        let root_total_cost = node_total_cost(&analysis.plan.root).max(1.0);
+        let root_total_cost = node_total_cost(&analysis.plan.root).unwrap_or(1.0).max(1.0);
         let mut graph = builder.finish(root_id, root_total_cost);
         graph.layout();
         graph
@@ -596,7 +599,8 @@ pub struct GraphNode {
     display_label: String,
     icon_family: IconFamily,
     startup_cost: Option<f64>,
-    total_cost: f64,
+    total_cost: Option<f64>,
+    operation_label: String,
     rows: Option<u64>,
     width: Option<u32>,
     relation: Option<String>,
@@ -632,10 +636,14 @@ impl GraphNode {
     }
 
     pub fn cost_percent(&self, root_total_cost: f64) -> f64 {
+        let Some(total_cost) = self.total_cost else {
+            return 0.0;
+        };
+
         if root_total_cost <= 0.0 {
             0.0
         } else {
-            (self.total_cost / root_total_cost).clamp(0.0, 1.0)
+            (total_cost / root_total_cost).clamp(0.0, 1.0)
         }
     }
 
@@ -654,11 +662,13 @@ impl GraphNode {
     pub fn detail_rows(&self) -> Vec<(String, String)> {
         let mut rows = Vec::new();
         rows.push(("Node Type".to_string(), self.node_type.clone()));
-        rows.push(("Node Cost".to_string(), format_cost(self.total_cost)));
+        rows.push(("Operation".to_string(), self.operation_label.clone()));
         if let Some(startup_cost) = self.startup_cost {
             rows.push(("Startup Cost".to_string(), format_cost(startup_cost)));
         }
-        rows.push(("Total Cost".to_string(), format_cost(self.total_cost)));
+        if let Some(total_cost) = self.total_cost {
+            rows.push(("Total Cost".to_string(), format_cost(total_cost)));
+        }
         if let Some(plan_rows) = self.rows {
             rows.push(("Plan Rows".to_string(), format_count(plan_rows)));
         }
@@ -758,6 +768,7 @@ impl GraphBuilder {
             icon_family: icon_family(node),
             startup_cost: node.cost.map(|cost| cost.startup),
             total_cost: node_total_cost(node),
+            operation_label: node_operation_label(node),
             rows: node.rows,
             width: node.width,
             relation: node.relation.clone(),
@@ -847,6 +858,14 @@ pub fn icon_family(node: &PlanNode) -> IconFamily {
 }
 
 fn node_display_label(node: &PlanNode) -> String {
+    if let Some(description) = node
+        .description
+        .as_ref()
+        .filter(|description| !description.is_empty())
+    {
+        return description.clone();
+    }
+
     node.relation
         .as_ref()
         .or(node.index_name.as_ref())
@@ -854,11 +873,24 @@ fn node_display_label(node: &PlanNode) -> String {
         .unwrap_or_else(|| node.node_type.description().to_string())
 }
 
-fn node_total_cost(node: &PlanNode) -> f64 {
-    node.cost
-        .as_ref()
-        .map(|cost| cost.total)
-        .unwrap_or_default()
+fn node_operation_label(node: &PlanNode) -> String {
+    match node.node_type {
+        NodeType::SeqScan => "SCAN".to_string(),
+        NodeType::IndexScan | NodeType::IndexOnlyScan | NodeType::BitmapIndexScan => {
+            "SEARCH".to_string()
+        }
+        NodeType::Sort => "SORT".to_string(),
+        NodeType::NestedLoop | NodeType::HashJoin | NodeType::MergeJoin => "JOIN".to_string(),
+        NodeType::HashAggregate | NodeType::Aggregate | NodeType::GroupAggregate => {
+            "AGGREGATE".to_string()
+        }
+        NodeType::Append | NodeType::SetOp => "SET".to_string(),
+        _ => node.node_type.description().to_string(),
+    }
+}
+
+fn node_total_cost(node: &PlanNode) -> Option<f64> {
+    node.cost.as_ref().map(|cost| cost.total)
 }
 
 fn push_optional(rows: &mut Vec<(String, String)>, label: &str, value: Option<&str>) {
