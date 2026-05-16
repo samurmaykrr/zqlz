@@ -63,6 +63,17 @@ fn object_form_version_target(request: &ObjectFormDdlRequest) -> Option<ObjectFo
     })
 }
 
+fn object_form_target_database(
+    request: &ObjectFormDdlRequest,
+    active_database: Option<String>,
+) -> Option<String> {
+    request
+        .object_ref
+        .as_ref()
+        .and_then(|object_ref| object_ref.database.clone())
+        .or(active_database)
+}
+
 fn object_form_version_message(
     object_type: DatabaseObjectType,
     object_name: &str,
@@ -119,11 +130,15 @@ impl MainView {
         };
 
         let connection_service = app_state.connection_service.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
+        let target_database = object_ref
+            .as_ref()
+            .and_then(|object_ref| object_ref.database.clone())
+            .or_else(|| {
+                self.workspace_state
+                    .read(cx)
+                    .active_database()
+                    .map(ToString::to_string)
+            });
         let main_view = cx.entity().downgrade();
         let request = ObjectFormSpecRequest {
             kind_id,
@@ -210,12 +225,14 @@ impl MainView {
         };
 
         let connection_service = app_state.connection_service.clone();
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
         let request = request.clone();
+        let target_database = object_form_target_database(
+            &request,
+            self.workspace_state
+                .read(cx)
+                .active_database()
+                .map(ToString::to_string),
+        );
         let connection_id = *connection_id;
         let execute = *execute;
         let objects_panel = self.objects_panel.downgrade();

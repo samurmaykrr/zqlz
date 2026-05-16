@@ -2,7 +2,7 @@
 
 use gpui::*;
 use uuid::Uuid;
-use zqlz_core::Value;
+use zqlz_core::{DocumentCellUpdateRequest, DriverCategory, Value};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, v_flex,
 };
@@ -16,7 +16,7 @@ use crate::components::{
 
 use crate::main_view::table_handlers_utils::{
     conversion::resolve_schema_qualifier,
-    redis::{fetch_redis_key_value, parse_human_readable_ttl},
+    redis::{fetch_redis_key_value, fetch_redis_string_bytes, parse_human_readable_ttl},
 };
 use crate::workspace::WorkspaceController;
 
@@ -59,11 +59,18 @@ pub(in crate::main_view) fn handle_save_cell_event(
     };
 
     let table_service = app_state.table_service.clone();
+    let document_service = app_state.document_service.clone();
     let table_name = request.table_name;
     let column_name = request.column_name;
     let original_value = request.original_value;
     let new_value_for_update = request.new_value.clone();
+    let document_id_value = request
+        .all_column_names
+        .iter()
+        .position(|column_name| column_name == "_id")
+        .and_then(|index| request.all_row_values.get(index).cloned());
     let connection = connection.clone();
+    let driver_category = connection.driver_category();
 
     let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
@@ -78,10 +85,46 @@ pub(in crate::main_view) fn handle_save_cell_event(
     let col = request.data_col;
 
     window.spawn(cx, async move |cx| {
-        match table_service
-            .update_cell(connection, &table_name, schema_qualifier.as_deref(), cell_update_data)
-            .await
-        {
+        let update_result = if matches!(driver_category, DriverCategory::Document) {
+            if column_name == "_id" {
+                Err(anyhow::anyhow!("Cannot edit MongoDB _id values"))
+            } else {
+                let database = database_name
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Document database context is unavailable"));
+                let id_value = document_id_value
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("Row has no _id value"));
+                match (database, id_value) {
+                    (Ok(database), Ok(id_value)) => document_service
+                        .update_document_cell(
+                            connection,
+                            DocumentCellUpdateRequest {
+                                database,
+                                collection: table_name.clone(),
+                                id_json: document_id_json(&id_value),
+                                field_path: column_name.clone(),
+                                new_value: new_value_for_update.as_value(),
+                            },
+                        )
+                        .await
+                        .map_err(|error| anyhow::anyhow!("{}", error)),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                }
+            }
+        } else {
+            table_service
+                .update_cell(
+                    connection,
+                    &table_name,
+                    schema_qualifier.as_deref(),
+                    cell_update_data,
+                )
+                .await
+                .map_err(|error| anyhow::anyhow!("{}", error))
+        };
+
+        match update_result {
             Ok(()) => {
                 tracing::info!("Cell updated successfully in database");
                 _ = viewer_weak.update(cx, |viewer, cx| {
@@ -218,6 +261,14 @@ pub(in crate::main_view) fn update_pending_new_row_cell(
     true
 }
 
+fn document_id_json(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Json(value) => value.to_string(),
+        _ => value.to_json_value().to_string(),
+    }
+}
+
 pub(in crate::main_view) fn handle_edit_cell_event(
     cell_data: CellData,
     viewer_weak: WeakEntity<TableViewerPanel>,
@@ -256,6 +307,7 @@ pub(in crate::main_view) fn handle_edit_cell_event(
 pub(in crate::main_view) fn handle_redis_key_edit_event(
     request: RedisKeyEditRequest,
     key_value_editor_panel: &Entity<KeyValueEditorPanel>,
+    cell_editor_panel: &Entity<CellEditorPanel>,
     workspace_controller: &Entity<WorkspaceController>,
     inspector_panel: &Entity<InspectorPanel>,
     window: &mut Window,
@@ -325,11 +377,64 @@ pub(in crate::main_view) fn handle_redis_key_edit_event(
     let connection_id = request.connection_id;
     let database_name = request.database_name;
     let key_value_editor_panel = key_value_editor_panel.clone();
+    let cell_editor_panel = cell_editor_panel.clone();
     let workspace_controller = workspace_controller.clone();
     let inspector_panel = inspector_panel.clone();
 
     window
         .spawn(cx, async move |cx| {
+            if value_type == RedisValueType::String
+                && let Some(bytes) = fetch_redis_string_bytes(&connection, &key_clone).await
+            {
+                cx.update(|window, cx| {
+                    let cell_data = CellData {
+                        table_name: key_clone.clone(),
+                        column_name: "value".to_string(),
+                        column_type: "binary".to_string(),
+                        column_meta: zqlz_core::ColumnMeta {
+                            name: "value".to_string(),
+                            data_type: "binary".to_string(),
+                            nullable: true,
+                            ordinal: 0,
+                            max_length: None,
+                            precision: None,
+                            scale: None,
+                            auto_increment: false,
+                            default_value: None,
+                            comment: None,
+                            enum_values: None,
+                        },
+                        current_value: Value::Bytes(bytes.clone()),
+                        row_index: 0,
+                        col_index: 0,
+                        connection_id,
+                        all_row_values: vec![Value::Bytes(bytes.clone())],
+                        all_column_names: vec!["value".to_string()],
+                        all_column_types: vec!["binary".to_string()],
+                        raw_bytes: Some(bytes),
+                    };
+
+                    cell_editor_panel.update(cx, |editor, cx| {
+                        editor.edit_cell(cell_data, None, window, cx);
+                    });
+
+                    inspector_panel.update(cx, |panel, cx| {
+                        panel.set_active_view(InspectorView::CellEditor, cx);
+                    });
+
+                    workspace_controller.update(cx, |workspace, cx| {
+                        workspace.reveal_panel(
+                            "InspectorPanel",
+                            zqlz_ui::widgets::dock::DockPlacement::Right,
+                            window,
+                            cx,
+                        );
+                    });
+                })?;
+
+                return Ok::<_, anyhow::Error>(());
+            }
+
             let value = fetch_redis_key_value(&connection, &key_clone, value_type).await;
 
             cx.update(|window, cx| {

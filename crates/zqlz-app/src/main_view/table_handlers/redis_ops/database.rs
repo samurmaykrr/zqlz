@@ -342,6 +342,7 @@ impl MainView {
             Arc::new(viewer_entity.clone());
 
         let key_value_editor_panel = self.key_value_editor_panel.clone();
+        let cell_editor_panel = self.cell_editor_panel.clone();
         let workspace_controller = self.workspace_controller.clone();
         let inspector_panel = self.inspector_panel.clone();
         let schema_details_panel = self.schema_details_panel.clone();
@@ -366,6 +367,7 @@ impl MainView {
                             all_column_names: all_column_names.clone(),
                         },
                         &key_value_editor_panel,
+                        &cell_editor_panel,
                         &workspace_controller,
                         &inspector_panel,
                         window,
@@ -414,6 +416,7 @@ impl MainView {
                 } => {
                     handle_delete_redis_keys_event(
                         *connection_id,
+                        Some(db_name.clone()),
                         all_column_names,
                         rows_to_delete,
                         viewer_entity_for_events.clone(),

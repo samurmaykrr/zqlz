@@ -12,11 +12,14 @@ impl TableViewerPanel {
             .as_ref()
             .map(|state| state.read(cx).delegate().can_insert_rows())
             .unwrap_or(false);
+        let is_key_value = matches!(self.driver_category, DriverCategory::KeyValue);
+        let can_add_entry = is_key_value || can_insert_rows;
         let can_delete_rows = self
             .table_state
             .as_ref()
             .map(|state| state.read(cx).delegate().can_delete_rows())
             .unwrap_or(false);
+        let can_delete_entry = is_key_value || can_delete_rows;
 
         h_flex()
             .w_full()
@@ -52,8 +55,8 @@ impl TableViewerPanel {
                     .icon(ZqlzIcon::Plus)
                     .ghost()
                     .small()
-                    .tooltip("Add Row")
-                    .disabled(connection_id.is_none() || table_name.is_none() || !can_insert_rows)
+                    .tooltip(if is_key_value { "Add Key" } else { "Add Row" })
+                    .disabled(connection_id.is_none() || table_name.is_none() || !can_add_entry)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.emit_add_row(cx);
                     })),
@@ -68,7 +71,7 @@ impl TableViewerPanel {
                         connection_id.is_none()
                             || table_name.is_none()
                             || !has_selection
-                            || !can_delete_rows,
+                            || !can_delete_entry,
                     )
                     .on_click(cx.listener(move |this, _, window, cx| {
                         this.show_delete_confirmation(window, cx);

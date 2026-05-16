@@ -11,7 +11,7 @@
 //! - Manage the full lifecycle of cell editing from user input to database persistence
 
 use gpui::*;
-use zqlz_core::DriverCategory;
+use zqlz_core::{DocumentCellUpdateRequest, DriverCategory, Value};
 use zqlz_ui::widgets::{
     ActiveTheme as _, WindowExt, button::ButtonVariant, dialog::DialogButtonProps,
     notification::Notification, v_flex,
@@ -65,6 +65,7 @@ impl MainView {
 
                 let table_service = app_state.table_service.clone();
                 let key_value_service = app_state.key_value_service.clone();
+                let document_service = app_state.document_service.clone();
                 let table_name = cell_data.table_name.clone();
                 let column_name = cell_data.column_name.clone();
                 let success_column_name = column_name.clone();
@@ -72,7 +73,8 @@ impl MainView {
                 let col_index = cell_data.col_index;
                 let original_value = cell_data.current_value.clone();
                 let is_key_value = connection.driver_category() == DriverCategory::KeyValue;
-                let schema_qualifier = if !is_key_value {
+                let is_document = connection.driver_category() == DriverCategory::Document;
+                let schema_qualifier = if !is_key_value && !is_document {
                     source_viewer.as_ref().and_then(|v| {
                         v.read_with(cx, |viewer, _cx| {
                             let db = viewer.database_name();
@@ -93,6 +95,15 @@ impl MainView {
                     all_row_values: cell_data.all_row_values.clone(),
                     all_column_types: cell_data.all_column_types.clone(),
                 };
+                let document_id_value = if is_document {
+                    cell_data
+                        .all_column_names
+                        .iter()
+                        .position(|column_name| column_name == "_id")
+                        .and_then(|index| cell_data.all_row_values.get(index).cloned())
+                } else {
+                    None
+                };
 
                 cx.spawn_in(window, async move |_this, cx| {
                     let update_result = if is_key_value {
@@ -100,6 +111,33 @@ impl MainView {
                             .update_key_cell(connection, &table_name, None, cell_update_data)
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))
+                    } else if is_document {
+                        if column_name == "_id" {
+                            Err(anyhow::anyhow!("Cannot edit MongoDB _id values"))
+                        } else {
+                            let database = database_name.clone().ok_or_else(|| {
+                                anyhow::anyhow!("Document database context is unavailable")
+                            });
+                            let id_value = document_id_value.clone().ok_or_else(|| {
+                                anyhow::anyhow!("Row has no _id value")
+                            });
+                            match (database, id_value) {
+                                (Ok(database), Ok(id_value)) => document_service
+                                    .update_document_cell(
+                                        connection,
+                                        DocumentCellUpdateRequest {
+                                            database,
+                                            collection: table_name.clone(),
+                                            id_json: document_id_json(&id_value),
+                                            field_path: column_name.clone(),
+                                            new_value: typed_value.clone(),
+                                        },
+                                    )
+                                    .await
+                                    .map_err(|e| anyhow::anyhow!("{}", e)),
+                                (Err(error), _) | (_, Err(error)) => Err(error),
+                            }
+                        }
                     } else {
                         table_service
                             .update_cell(connection, &table_name, schema_qualifier.as_deref(), cell_update_data)
@@ -202,5 +240,13 @@ impl MainView {
                 tracing::debug!("Cell editor cancelled");
             }
         }
+    }
+}
+
+fn document_id_json(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Json(value) => value.to_string(),
+        _ => value.to_json_value().to_string(),
     }
 }

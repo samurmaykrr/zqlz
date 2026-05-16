@@ -6,7 +6,7 @@ license.workspace = true
 
 [dependencies]
 zqlz-core.workspace = true
-zqlz-drivers.workspace = true
+zqlz-drivers = { workspace = true, features = ["mongodb"] }
 zqlz-ui.workspace = true
 
 gpui.workspace = true

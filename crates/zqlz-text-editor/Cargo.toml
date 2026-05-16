@@ -18,6 +18,7 @@ ropey = "1.6"
 
 # Syntax highlighting
 tree-sitter.workspace = true
+tree-sitter-javascript.workspace = true
 tree-sitter-sequel.workspace = true
 
 # LSP support

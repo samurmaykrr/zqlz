@@ -5,6 +5,7 @@
 
 use crate::components::RedisValueType;
 use std::sync::Arc;
+use zqlz_core::Value;
 
 /// Parse human-readable TTL string (e.g., "30s", "5m 30s", "1h 15m") into seconds
 pub(in crate::main_view) fn parse_human_readable_ttl(ttl_str: &str) -> Option<i64> {
@@ -92,10 +93,10 @@ pub(in crate::main_view) async fn fetch_redis_key_value(
                 Err(_) => connection.query(&format!("GET {}", key), &[]).await.ok(),
             }
         }
-        RedisValueType::Stream => {
-            // Streams are complex, just return None for now
-            None
-        }
+        RedisValueType::Stream => connection
+            .query(&format!("XRANGE {} - + COUNT 1000", key), &[])
+            .await
+            .ok(),
     };
 
     // Convert the result to a JSON string format that our parser expects
@@ -161,7 +162,60 @@ pub(in crate::main_view) async fn fetch_redis_key_value(
                 }
                 Some(serde_json::to_string(&map).unwrap_or_default())
             }
-            RedisValueType::Stream => None,
+            RedisValueType::Stream => {
+                let values: Vec<Value> = result
+                    .rows
+                    .iter()
+                    .filter_map(|row| row.get_by_name("value").cloned())
+                    .collect();
+                let mut entries = Vec::new();
+                for chunk in values.chunks(2) {
+                    let [id_value, fields_value] = chunk else {
+                        continue;
+                    };
+                    let Some(id) = id_value.as_str() else {
+                        continue;
+                    };
+                    let Value::Array(field_values) = fields_value else {
+                        continue;
+                    };
+
+                    let mut fields = serde_json::Map::new();
+                    for field_chunk in field_values.chunks(2) {
+                        let [field, value] = field_chunk else {
+                            continue;
+                        };
+                        let Some(field) = field.as_str() else {
+                            continue;
+                        };
+                        fields.insert(
+                            field.to_string(),
+                            serde_json::Value::String(value.display_for_editor()),
+                        );
+                    }
+
+                    let mut entry = serde_json::Map::new();
+                    entry.insert("id".to_string(), serde_json::Value::String(id.to_string()));
+                    entry.insert("fields".to_string(), serde_json::Value::Object(fields));
+                    entries.push(serde_json::Value::Object(entry));
+                }
+                Some(serde_json::to_string(&entries).unwrap_or_default())
+            }
         }
     })
+}
+
+pub(in crate::main_view) async fn fetch_redis_string_bytes(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    key: &str,
+) -> Option<Vec<u8>> {
+    let result = connection.query(&format!("GET {}", key), &[]).await.ok()?;
+    result
+        .rows
+        .first()
+        .and_then(|row| row.get_by_name("value"))
+        .and_then(|value| match value {
+            Value::Bytes(bytes) => Some(bytes.clone()),
+            _ => None,
+        })
 }

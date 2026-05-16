@@ -455,6 +455,7 @@ impl SqlLsp {
             SqlDialect::PostgreSQL => "PostgreSQL",
             SqlDialect::SQLServer => "SQL Server",
             SqlDialect::Redis => "Redis",
+            SqlDialect::MongoDB => "MongoDB",
             SqlDialect::Generic => "SQL",
         }
     }
@@ -1814,6 +1815,13 @@ impl SqlLsp {
                     relevant_keywords.push("SET");
                     relevant_keywords.push("HGET");
                     relevant_keywords.push("KEYS");
+                }
+                SqlDialect::MongoDB => {
+                    relevant_keywords.push("db");
+                    relevant_keywords.push("find");
+                    relevant_keywords.push("aggregate");
+                    relevant_keywords.push("getCollection");
+                    relevant_keywords.push("getSiblingDB");
                 }
                 SqlDialect::Generic => {}
             }
@@ -4171,6 +4179,22 @@ impl SqlLsp {
         // (for example SQLite/MySQL/PostgreSQL), synthesize a minimal config so
         // diagnostics can still route to the correct sqlparser dialect by driver id.
         let dialect_config_owned = self.dialect.dialect_config().cloned().or_else(|| {
+            if self.driver_type.eq_ignore_ascii_case("mongodb")
+                || self.driver_type.eq_ignore_ascii_case("mongo")
+            {
+                return Some(zqlz_core::DialectConfig {
+                    id: self.driver_type.clone(),
+                    display_name: self.get_dialect_name().to_string(),
+                    language_type: zqlz_core::LanguageType::Document,
+                    parser: zqlz_core::ParserConfig {
+                        skip_sql_validation: true,
+                        skip_tree_sitter_errors: true,
+                        custom_validator: false,
+                    },
+                    ..zqlz_core::DialectConfig::default()
+                });
+            }
+
             if self.dialect == SqlDialect::Generic {
                 return None;
             }

@@ -468,8 +468,6 @@ pub fn build_query_execution_outcome(
     display_context: QueryDisplayContext,
     completed_at: DateTime<Utc>,
 ) -> QueryExecutionOutcome {
-    let success = service_execution.is_ok();
-
     let execution = match service_execution {
         Ok(execution) => QueryExecution {
             sql: execution.sql,
@@ -506,6 +504,11 @@ pub fn build_query_execution_outcome(
             }],
         },
     };
+
+    let success = execution
+        .statements
+        .iter()
+        .all(|statement| statement.error.is_none());
 
     QueryExecutionOutcome { execution, success }
 }

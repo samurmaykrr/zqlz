@@ -160,6 +160,7 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
         SqlDialect::PostgreSQL => "postgres",
         SqlDialect::SQLServer => "sqlserver",
         SqlDialect::Redis => "redis",
+        SqlDialect::MongoDB => "mongodb",
         SqlDialect::Generic => "generic",
     };
 

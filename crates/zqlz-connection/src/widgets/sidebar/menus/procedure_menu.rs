@@ -85,6 +85,7 @@ impl ConnectionSidebar {
                                         connection_id: conn_id,
                                         procedure_name: name.clone(),
                                         object_schema: object_schema.clone(),
+                                        database_name: None,
                                     });
                                 });
                             }

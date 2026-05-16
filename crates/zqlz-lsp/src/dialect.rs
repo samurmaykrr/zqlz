@@ -23,6 +23,8 @@ pub enum SqlDialect {
     SQLServer,
     /// Redis commands dialect
     Redis,
+    /// MongoDB query language
+    MongoDB,
     /// Generic SQL (common subset)
     Generic,
 }
@@ -36,6 +38,7 @@ impl SqlDialect {
             "postgres" | "postgresql" => Self::PostgreSQL,
             "sqlserver" | "mssql" => Self::SQLServer,
             "redis" => Self::Redis,
+            "mongodb" | "mongo" => Self::MongoDB,
             _ => Self::Generic,
         }
     }
@@ -48,6 +51,7 @@ impl SqlDialect {
             Self::PostgreSQL => "postgres",
             Self::SQLServer => "sqlserver",
             Self::Redis => "redis",
+            Self::MongoDB => "mongodb",
             Self::Generic => "generic",
         }
     }

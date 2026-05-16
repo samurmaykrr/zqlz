@@ -5,7 +5,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use uuid::Uuid;
-use zqlz_core::{ConstraintType, DriverCategory, ObjectsPanelData};
+use zqlz_core::{ConstraintType, DriverCategory};
 use zqlz_ui::widgets::{
     ActiveTheme, WindowExt, button::ButtonVariant, dialog::DialogButtonProps, dock::PanelView,
     notification::Notification, v_flex,
@@ -214,8 +214,20 @@ async fn run_connection_sidebar_bootstrap(
                     "Redis databases loaded"
                 );
 
-                let (objects_panel_data, objects_panel_manifest) =
-                    ObjectsPanelData::from_redis_databases_with_manifest(databases.clone());
+                let (objects_panel_data, objects_panel_manifest) = match connection_service
+                    .load_objects_panel_data(connection_id)
+                    .await
+                {
+                    Ok(objects_panel) => objects_panel,
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            connection_id = %connection_id,
+                            "Failed to load Redis objects panel data"
+                        );
+                        return;
+                    }
+                };
                 let coverage_gaps = manifest_action_coverage_gaps(&objects_panel_manifest);
 
                 if !coverage_gaps.is_empty() {

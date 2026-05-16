@@ -872,6 +872,10 @@ impl Value {
                 .parse::<i64>()
                 .map(Value::Int64)
                 .unwrap_or_else(|_| Value::String(input.to_string())),
+            "long" => input
+                .parse::<i64>()
+                .map(Value::Int64)
+                .unwrap_or_else(|_| Value::String(input.to_string())),
             "tinyint" => input
                 .parse::<i8>()
                 .map(Value::Int8)
@@ -904,6 +908,8 @@ impl Value {
             "timestamptz" | "timestamp with time zone" => {
                 Self::parse_datetime_utc(input).unwrap_or_else(|| Value::String(input.to_string()))
             }
+            "objectid" | "object_id" | "string" | "regex" | "javascript" | "symbol"
+            | "dbpointer" | "minkey" | "maxkey" => Value::String(input.to_string()),
             "bytea" | "binary" | "varbinary" | "blob" | "tinyblob" | "mediumblob" | "longblob" => {
                 Self::parse_hex_bytes(input)
                     .map(Value::Bytes)
@@ -1081,6 +1087,23 @@ mod tests {
         assert_eq!(
             Value::parse_from_string("1010", "bit(4)"),
             Value::String("1010".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_from_string_handles_mongodb_type_names() {
+        assert_eq!(Value::parse_from_string("42", "long"), Value::Int64(42));
+        assert_eq!(
+            Value::parse_from_string("12.5", "double"),
+            Value::Float64(12.5)
+        );
+        assert_eq!(
+            Value::parse_from_string("507f1f77bcf86cd799439011", "objectId"),
+            Value::String("507f1f77bcf86cd799439011".to_string())
+        );
+        assert_eq!(
+            Value::parse_from_string("/tenant-.*/i", "regex"),
+            Value::String("/tenant-.*/i".to_string())
         );
     }
 

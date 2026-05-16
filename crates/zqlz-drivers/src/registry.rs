@@ -29,7 +29,11 @@ impl DriverRegistry {
         #[cfg(feature = "postgres")]
         registry.register(Arc::new(crate::postgres::PostgresDriver::new()));
         #[cfg(feature = "mysql")]
-        registry.register(Arc::new(crate::mysql::MySqlDriver::new()));
+        {
+            let mysql_driver = Arc::new(crate::mysql::MySqlDriver::new());
+            registry.register(mysql_driver.clone());
+            registry.register_alias("mariadb", mysql_driver);
+        }
         #[cfg(feature = "mssql")]
         registry.register(Arc::new(crate::mssql::MssqlDriver::new()));
         #[cfg(feature = "duckdb")]
@@ -51,6 +55,15 @@ impl DriverRegistry {
         let name = driver.name().to_string();
         tracing::info!(driver = %name, "registering database driver");
         self.drivers.insert(name, driver);
+    }
+
+    fn register_alias(&mut self, alias: &str, driver: Arc<dyn DatabaseDriver>) {
+        tracing::info!(
+            alias,
+            driver = driver.name(),
+            "registering database driver alias"
+        );
+        self.drivers.insert(alias.to_string(), driver);
     }
 
     /// Get a driver by name
@@ -82,6 +95,24 @@ impl DriverRegistry {
         self.drivers
             .get(name)
             .and_then(|driver| driver.dialect_bundle())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DriverRegistry;
+
+    #[cfg(feature = "mysql")]
+    #[test]
+    fn mariadb_resolves_to_mysql_driver() {
+        let registry = DriverRegistry::with_defaults();
+        let driver = registry
+            .get("mariadb")
+            .expect("mariadb should resolve through mysql driver alias");
+
+        assert_eq!(driver.name(), "mysql");
+        assert!(registry.has("mariadb"));
+        assert!(registry.dialect_info("mariadb").is_some());
     }
 }
 

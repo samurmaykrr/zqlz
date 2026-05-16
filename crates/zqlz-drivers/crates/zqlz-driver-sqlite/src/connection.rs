@@ -142,10 +142,11 @@ impl SqliteConnection {
             return Ok(requested_name.to_string());
         }
 
-        if let Some((schema_name, relation_name)) = requested_name.split_once('.') {
-            if schema_name != "main" && tables.iter().any(|table| table.name == relation_name) {
-                return Ok(relation_name.to_string());
-            }
+        if let Some((schema_name, relation_name)) = requested_name.split_once('.')
+            && schema_name != "main"
+            && tables.iter().any(|table| table.name == relation_name)
+        {
+            return Ok(relation_name.to_string());
         }
 
         Ok(requested_name.to_string())

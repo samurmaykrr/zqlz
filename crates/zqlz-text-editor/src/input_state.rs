@@ -37,6 +37,7 @@ pub(crate) struct EditorPositionMap {
 }
 
 impl EditorPositionMap {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         bounds_origin: gpui::Point<Pixels>,
         bounds_size: gpui::Size<Pixels>,

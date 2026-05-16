@@ -8,6 +8,7 @@ pub mod batch;
 mod engine;
 mod error;
 mod execution_workflows;
+mod explain;
 mod history;
 pub mod parameters;
 mod saved_queries;
@@ -38,8 +39,9 @@ pub use history::{HistoryPersistence, QueryHistory, QueryHistoryEntry};
 pub use saved_queries::{
     SavedQueryOperation, SavedQueryRecord, SavedQueryStore, SavedQueryWorkflowError,
     SavedQueryWorkflowOutcome, SavedQueryWorkflowRequest, create_saved_query, delete_saved_query,
-    load_saved_queries_for_connection, load_saved_query, rename_saved_query,
-    run_saved_query_workflow, update_saved_query_sql,
+    export_saved_queries, import_saved_queries, load_saved_queries_for_connection,
+    load_saved_query, move_saved_query_to_folder, rename_saved_query, run_saved_query_workflow,
+    update_saved_query_sql,
 };
 pub use service::QueryService;
 // Note: view_models types are superseded by widgets types for UI consumption

@@ -866,6 +866,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn mongodb_shell_query_uses_non_error_parse_tree() {
+        let source = Rope::from_str(
+            r#"db.products.find(
+  { $text: { $search: "developer iot" } },
+  { sku: 1, name: 1, tags: 1 }
+).sort({ score: { $meta: "textScore" } }).limit(5)"#,
+        );
+        let mut highlighter = SyntaxHighlighter::new("mongodb");
+
+        highlighter.update(None, &source);
+        let tree = highlighter
+            .tree
+            .as_ref()
+            .expect("mongodb source should parse");
+
+        assert!(
+            !tree.root_node().has_error(),
+            "MongoDB shell syntax should not be parsed with JSON error recovery"
+        );
+    }
+
     #[track_caller]
     fn assert_unique_styles(
         range: Range<usize>,

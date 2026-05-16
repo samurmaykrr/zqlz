@@ -2,7 +2,7 @@
 
 use gpui::Context;
 use uuid::Uuid;
-use zqlz_core::ObjectsPanelManifest;
+use zqlz_core::{DocumentCollectionInfo, DocumentDatabaseObjects, ObjectsPanelManifest};
 
 use crate::widgets::sidebar::ConnectionSidebar;
 use crate::widgets::sidebar::types::*;
@@ -181,8 +181,18 @@ impl ConnectionSidebar {
                 is_loading: false,
                 schema: Some(schema),
                 collections: Vec::new(),
+                indexes: Vec::new(),
+                functions: Vec::new(),
+                gridfs_buckets: Vec::new(),
+                users: Vec::new(),
+                roles: Vec::new(),
+                search_indexes: Vec::new(),
+                vector_indexes: Vec::new(),
+                server: Vec::new(),
+                sharding: Vec::new(),
                 collections_expanded: false,
                 collections_loading: false,
+                document_expanded_sections: std::collections::HashSet::new(),
             });
         }
     }
@@ -556,8 +566,18 @@ impl ConnectionSidebar {
                 is_loading: true,
                 schema: None,
                 collections: Vec::new(),
+                indexes: Vec::new(),
+                functions: Vec::new(),
+                gridfs_buckets: Vec::new(),
+                users: Vec::new(),
+                roles: Vec::new(),
+                search_indexes: Vec::new(),
+                vector_indexes: Vec::new(),
+                server: Vec::new(),
+                sharding: Vec::new(),
                 collections_expanded: false,
                 collections_loading: false,
+                document_expanded_sections: std::collections::HashSet::new(),
             }];
         }
         self.invalidate_virtual_rows();
@@ -628,8 +648,18 @@ impl ConnectionSidebar {
                                 None
                             },
                             collections: Vec::new(),
+                            indexes: Vec::new(),
+                            functions: Vec::new(),
+                            gridfs_buckets: Vec::new(),
+                            users: Vec::new(),
+                            roles: Vec::new(),
+                            search_indexes: Vec::new(),
+                            vector_indexes: Vec::new(),
+                            server: Vec::new(),
+                            sharding: Vec::new(),
                             collections_expanded: false,
                             collections_loading: false,
+                            document_expanded_sections: std::collections::HashSet::new(),
                         }
                     }
                 })
@@ -706,8 +736,18 @@ impl ConnectionSidebar {
                             None
                         },
                         collections: Vec::new(),
+                        indexes: Vec::new(),
+                        functions: Vec::new(),
+                        gridfs_buckets: Vec::new(),
+                        users: Vec::new(),
+                        roles: Vec::new(),
+                        search_indexes: Vec::new(),
+                        vector_indexes: Vec::new(),
+                        server: Vec::new(),
+                        sharding: Vec::new(),
                         collections_expanded: false,
                         collections_loading: false,
+                        document_expanded_sections: std::collections::HashSet::new(),
                     }
                 })
                 .collect();
@@ -859,7 +899,7 @@ impl ConnectionSidebar {
             && !conn.queries.iter().any(|q| q.id == query.id)
         {
             conn.queries.push(query);
-            conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
+            Self::sort_saved_queries(&mut conn.queries);
         }
         self.invalidate_virtual_rows();
         cx.notify();
@@ -886,10 +926,47 @@ impl ConnectionSidebar {
             if let Some(query) = conn.queries.iter_mut().find(|q| q.id == query_id) {
                 query.name = new_name;
             }
-            conn.queries.sort_by(|a, b| a.name.cmp(&b.name));
+            Self::sort_saved_queries(&mut conn.queries);
         }
         self.invalidate_virtual_rows();
         cx.notify();
+    }
+
+    pub fn update_saved_query_text(
+        &mut self,
+        conn_id: Uuid,
+        query_id: Uuid,
+        query_text: String,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
+            && let Some(query) = conn.queries.iter_mut().find(|q| q.id == query_id)
+        {
+            query.query_text = query_text;
+        }
+        self.invalidate_virtual_rows();
+        cx.notify();
+    }
+
+    pub fn move_saved_query_to_folder(
+        &mut self,
+        conn_id: Uuid,
+        query_id: Uuid,
+        folder: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            if let Some(query) = conn.queries.iter_mut().find(|q| q.id == query_id) {
+                query.folder = folder;
+            }
+            Self::sort_saved_queries(&mut conn.queries);
+        }
+        self.invalidate_virtual_rows();
+        cx.notify();
+    }
+
+    fn sort_saved_queries(queries: &mut [SavedQueryInfo]) {
+        queries.sort_by(|a, b| a.folder.cmp(&b.folder).then_with(|| a.name.cmp(&b.name)));
     }
 
     /// Mark all schema sections as loading for a connection.
@@ -935,7 +1012,7 @@ impl ConnectionSidebar {
         &mut self,
         id: Uuid,
         database_name: &str,
-        collections: Vec<String>,
+        collections: Vec<DocumentCollectionInfo>,
         cx: &mut Context<Self>,
     ) {
         if let Some(conn) = self.connections.iter_mut().find(|conn| conn.id == id)
@@ -945,6 +1022,45 @@ impl ConnectionSidebar {
                 .find(|database| database.name == database_name)
         {
             database.collections = collections;
+            database.indexes.clear();
+            database.functions.clear();
+            database.gridfs_buckets.clear();
+            database.users.clear();
+            database.roles.clear();
+            database.search_indexes.clear();
+            database.vector_indexes.clear();
+            database.server.clear();
+            database.sharding.clear();
+            database.collections_loading = false;
+            database.collections_expanded = true;
+        }
+        self.invalidate_virtual_rows();
+        cx.notify();
+    }
+
+    pub fn set_document_database_objects(
+        &mut self,
+        id: Uuid,
+        database_name: &str,
+        objects: DocumentDatabaseObjects,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(conn) = self.connections.iter_mut().find(|conn| conn.id == id)
+            && let Some(database) = conn
+                .databases
+                .iter_mut()
+                .find(|database| database.name == database_name)
+        {
+            database.collections = objects.collections;
+            database.indexes = objects.indexes;
+            database.functions = objects.functions;
+            database.gridfs_buckets = objects.gridfs_buckets;
+            database.users = objects.users;
+            database.roles = objects.roles;
+            database.search_indexes = objects.search_indexes;
+            database.vector_indexes = objects.vector_indexes;
+            database.server = objects.server;
+            database.sharding = objects.sharding;
             database.collections_loading = false;
             database.collections_expanded = true;
         }
@@ -1056,8 +1172,18 @@ mod tests {
                 is_loading: false,
                 schema: None,
                 collections: Vec::new(),
+                indexes: Vec::new(),
+                functions: Vec::new(),
+                gridfs_buckets: Vec::new(),
+                users: Vec::new(),
+                roles: Vec::new(),
+                search_indexes: Vec::new(),
+                vector_indexes: Vec::new(),
+                server: Vec::new(),
+                sharding: Vec::new(),
                 collections_expanded: false,
                 collections_loading: false,
+                document_expanded_sections: std::collections::HashSet::new(),
             },
             SidebarDatabaseInfo {
                 name: "postgres".to_string(),
@@ -1067,8 +1193,18 @@ mod tests {
                 is_loading: true,
                 schema: None,
                 collections: Vec::new(),
+                indexes: Vec::new(),
+                functions: Vec::new(),
+                gridfs_buckets: Vec::new(),
+                users: Vec::new(),
+                roles: Vec::new(),
+                search_indexes: Vec::new(),
+                vector_indexes: Vec::new(),
+                server: Vec::new(),
+                sharding: Vec::new(),
                 collections_expanded: false,
                 collections_loading: false,
+                document_expanded_sections: std::collections::HashSet::new(),
             },
         ];
 
@@ -1131,8 +1267,18 @@ mod tests {
                 ..DatabaseSchemaData::default()
             }),
             collections: Vec::new(),
+            indexes: Vec::new(),
+            functions: Vec::new(),
+            gridfs_buckets: Vec::new(),
+            users: Vec::new(),
+            roles: Vec::new(),
+            search_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
+            server: Vec::new(),
+            sharding: Vec::new(),
             collections_expanded: false,
             collections_loading: false,
+            document_expanded_sections: std::collections::HashSet::new(),
         }];
 
         ConnectionSidebar::apply_database_schema_to_connections(

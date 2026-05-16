@@ -8,6 +8,7 @@ use zqlz_versioning::DatabaseObjectType;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SelectedObjectRef {
     pub name: String,
+    pub database: Option<String>,
     pub schema: Option<String>,
     pub signature: Option<String>,
     pub associated_table: Option<String>,
@@ -16,6 +17,7 @@ pub struct SelectedObjectRef {
 pub fn selected_object_ref(object_ref: &ObjectsPanelObjectRef) -> SelectedObjectRef {
     SelectedObjectRef {
         name: object_ref.name.clone(),
+        database: object_ref.database.clone(),
         schema: object_ref.schema.clone(),
         signature: object_ref.signature.clone(),
         associated_table: if object_ref.kind_id == "trigger" {
@@ -344,6 +346,10 @@ impl ObjectsPanelActionRegistry {
             ("design", "extension"),
             SelectionActionBinding::OpenExtension,
         );
+        selection_bindings.insert(
+            ("delete", "extension"),
+            SelectionActionBinding::DeleteExtension,
+        );
 
         selection_bindings.insert(("delete", "key"), SelectionActionBinding::DeleteKey);
         selection_bindings.insert(("copy_name", "key"), SelectionActionBinding::CopyName);
@@ -355,10 +361,89 @@ impl ObjectsPanelActionRegistry {
             ("open", "redis_database"),
             SelectionActionBinding::OpenRedisDatabase,
         );
+        for kind_id in ["document_database", "document_collection", "document_view"] {
+            selection_bindings.insert(("copy_name", kind_id), SelectionActionBinding::CopyName);
+            selection_bindings.insert(
+                ("copy_qualified_name", kind_id),
+                SelectionActionBinding::CopyQualifiedName,
+            );
+        }
+        selection_bindings.insert(
+            ("open", "document_database"),
+            SelectionActionBinding::OpenGenericDdl,
+        );
         selection_bindings.insert(
             ("open", "document_collection"),
             SelectionActionBinding::OpenDocumentCollection,
         );
+        selection_bindings.insert(
+            ("inspect", "document_collection"),
+            SelectionActionBinding::OpenGenericDdl,
+        );
+        selection_bindings.insert(
+            ("design", "document_collection"),
+            SelectionActionBinding::OpenObjectForm {
+                mode: ObjectFormMode::Edit,
+            },
+        );
+        selection_bindings.insert(
+            ("delete", "document_collection"),
+            SelectionActionBinding::OpenObjectForm {
+                mode: ObjectFormMode::Drop,
+            },
+        );
+        selection_bindings.insert(
+            ("open", "document_view"),
+            SelectionActionBinding::OpenDocumentCollection,
+        );
+        selection_bindings.insert(
+            ("inspect", "document_view"),
+            SelectionActionBinding::OpenGenericDdl,
+        );
+        selection_bindings.insert(
+            ("design", "document_view"),
+            SelectionActionBinding::OpenObjectForm {
+                mode: ObjectFormMode::Edit,
+            },
+        );
+        selection_bindings.insert(
+            ("delete", "document_view"),
+            SelectionActionBinding::OpenObjectForm {
+                mode: ObjectFormMode::Drop,
+            },
+        );
+        for kind_id in DOCUMENT_METADATA_KIND_IDS {
+            selection_bindings.insert(("open", *kind_id), SelectionActionBinding::OpenGenericDdl);
+            selection_bindings.insert(("copy_name", *kind_id), SelectionActionBinding::CopyName);
+            selection_bindings.insert(
+                ("copy_qualified_name", *kind_id),
+                SelectionActionBinding::CopyQualifiedName,
+            );
+        }
+        selection_bindings.insert(
+            ("open", "document_gridfs_bucket"),
+            SelectionActionBinding::OpenDocumentCollection,
+        );
+        selection_bindings.insert(
+            ("inspect", "document_gridfs_bucket"),
+            SelectionActionBinding::OpenGenericDdl,
+        );
+        for kind_id in DOCUMENT_ADMIN_MUTABLE_KIND_IDS {
+            selection_bindings.insert(
+                ("delete", *kind_id),
+                SelectionActionBinding::OpenObjectForm {
+                    mode: ObjectFormMode::Drop,
+                },
+            );
+        }
+        for kind_id in ["document_user", "document_role"] {
+            selection_bindings.insert(
+                ("design", kind_id),
+                SelectionActionBinding::OpenObjectForm {
+                    mode: ObjectFormMode::Edit,
+                },
+            );
+        }
 
         Self {
             versioned_object_bindings,
@@ -495,6 +580,19 @@ const METADATA_KIND_IDS: &[&str] = &[
     "process",
     "replica_status",
 ];
+const DOCUMENT_METADATA_KIND_IDS: &[&str] = &[
+    "document_index",
+    "document_function",
+    "document_gridfs_bucket",
+    "document_user",
+    "document_role",
+    "document_search_index",
+    "document_vector_index",
+    "document_server",
+    "document_sharding",
+];
+const DOCUMENT_ADMIN_MUTABLE_KIND_IDS: &[&str] =
+    &["document_index", "document_user", "document_role"];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum EmptySelectionActionBinding {
@@ -551,6 +649,7 @@ enum SelectionActionBinding {
     RenameView,
     DeleteTable,
     DeleteView,
+    DeleteExtension,
     DeleteKey,
     DeleteTrigger,
     DuplicateTable,
@@ -615,9 +714,17 @@ impl SelectionActionBinding {
                 .first()
                 .and_then(|object_ref| {
                     object_ref.database.as_ref().map(|database_name| {
+                        let collection_name = if object_ref.kind_id == "document_gridfs_bucket" {
+                            object_ref
+                                .schema
+                                .clone()
+                                .unwrap_or_else(|| format!("{}.files", object_ref.name))
+                        } else {
+                            object_ref.name.clone()
+                        };
                         ResolvedObjectsPanelAction::OpenDocumentCollection {
                             database_name: database_name.clone(),
-                            collection_name: object_ref.name.clone(),
+                            collection_name,
                         }
                     })
                 })
@@ -668,6 +775,9 @@ impl SelectionActionBinding {
             Self::DeleteView => ResolvedObjectsPanelAction::DeleteViews {
                 object_names: names,
             },
+            Self::DeleteExtension => selected_ref_plan(object_refs, |extension_ref| {
+                ResolvedObjectsPanelAction::DeleteExtension { extension_ref }
+            }),
             Self::DeleteKey => ResolvedObjectsPanelAction::DeleteKeys { key_names: names },
             Self::DeleteTrigger => selected_ref_plan(object_refs, |trigger_ref| {
                 ResolvedObjectsPanelAction::DeleteTrigger { trigger_ref }
@@ -868,6 +978,9 @@ pub enum ResolvedObjectsPanelAction {
     DeleteKeys {
         key_names: Vec<String>,
     },
+    DeleteExtension {
+        extension_ref: SelectedObjectRef,
+    },
     DeleteTrigger {
         trigger_ref: SelectedObjectRef,
     },
@@ -1023,7 +1136,25 @@ pub fn classify_objects_panel_action_resolution(
 fn representative_object_ref_for_kind(kind_id: &str) -> ObjectsPanelObjectRef {
     match kind_id {
         "redis_database" => ObjectsPanelObjectRef::new("redis_database", "db0"),
+        "document_database" => ObjectsPanelObjectRef::new("document_database", "app")
+            .with_database_option(Some("app".to_string())),
         "document_collection" => ObjectsPanelObjectRef::new("document_collection", "users")
+            .with_database_option(Some("app".to_string())),
+        "document_view" => ObjectsPanelObjectRef::new("document_view", "activeCustomers")
+            .with_database_option(Some("app".to_string())),
+        "document_index" => ObjectsPanelObjectRef::new("document_index", "status_1")
+            .with_database_option(Some("app".to_string()))
+            .with_schema_option(Some("orders".to_string())),
+        "document_gridfs_bucket" => ObjectsPanelObjectRef::new("document_gridfs_bucket", "fs")
+            .with_database_option(Some("app".to_string()))
+            .with_schema_option(Some("fs.files".to_string())),
+        "document_function"
+        | "document_user"
+        | "document_role"
+        | "document_search_index"
+        | "document_vector_index"
+        | "document_server"
+        | "document_sharding" => ObjectsPanelObjectRef::new(kind_id, "sample_object")
             .with_database_option(Some("app".to_string())),
         "function" | "procedure" => ObjectsPanelObjectRef::new(kind_id, "do_work")
             .with_schema_option(Some("public".to_string()))
@@ -1324,6 +1455,157 @@ mod tests {
                 database_name: "app".to_string(),
                 collection_name: "users".to_string(),
             }
+        );
+        let collection_ref = object_ref("document_collection", "users")
+            .with_database_option(Some("app".to_string()));
+        assert_eq!(
+            registry.resolve_objects_panel_action("copy_name", &[collection_ref], None),
+            ResolvedObjectsPanelAction::CopyObjectNames {
+                names: vec!["users".to_string()],
+            }
+        );
+        let database_ref =
+            object_ref("document_database", "app").with_database_option(Some("app".to_string()));
+        assert_eq!(
+            registry.resolve_objects_panel_action("copy_qualified_name", &[database_ref], None),
+            ResolvedObjectsPanelAction::CopyQualifiedNames {
+                names: vec!["app.app".to_string()],
+            }
+        );
+        let collection_ref = object_ref("document_collection", "users")
+            .with_database_option(Some("app".to_string()));
+        assert_eq!(
+            registry.resolve_objects_panel_action("design", &[collection_ref.clone()], None),
+            ResolvedObjectsPanelAction::OpenObjectForm {
+                kind_id: "document_collection".to_string(),
+                mode: ObjectFormMode::Edit,
+                object_ref: Some(collection_ref.clone()),
+            }
+        );
+        assert_eq!(
+            registry.resolve_objects_panel_action("delete", &[collection_ref.clone()], None),
+            ResolvedObjectsPanelAction::OpenObjectForm {
+                kind_id: "document_collection".to_string(),
+                mode: ObjectFormMode::Drop,
+                object_ref: Some(collection_ref),
+            }
+        );
+    }
+
+    #[test]
+    fn registry_routes_document_metadata_open_and_admin_drop() {
+        let registry = ObjectsPanelActionRegistry::default();
+        let index_ref = object_ref("document_index", "status_1")
+            .with_database_option(Some("app".to_string()))
+            .with_schema_option(Some("orders".to_string()));
+        let gridfs_ref = object_ref("document_gridfs_bucket", "fs")
+            .with_database_option(Some("app".to_string()))
+            .with_schema_option(Some("fs.files".to_string()));
+
+        assert_eq!(
+            registry.resolve_objects_panel_action("open", &[gridfs_ref], None),
+            ResolvedObjectsPanelAction::OpenDocumentCollection {
+                database_name: "app".to_string(),
+                collection_name: "fs.files".to_string(),
+            }
+        );
+        let gridfs_ref = object_ref("document_gridfs_bucket", "fs")
+            .with_database_option(Some("app".to_string()))
+            .with_schema_option(Some("fs.files".to_string()));
+        assert_eq!(
+            registry.resolve_objects_panel_action("inspect", &[gridfs_ref], None),
+            ResolvedObjectsPanelAction::OpenGenericDdl {
+                kind_id: "document_gridfs_bucket".to_string(),
+                object_ref: SelectedObjectRef {
+                    database: Some("app".to_string()),
+                    name: "fs".to_string(),
+                    schema: Some("fs.files".to_string()),
+                    signature: None,
+                    associated_table: None,
+                },
+            }
+        );
+        assert_eq!(
+            registry.resolve_objects_panel_action("delete", &[index_ref.clone()], None),
+            ResolvedObjectsPanelAction::OpenObjectForm {
+                kind_id: "document_index".to_string(),
+                mode: ObjectFormMode::Drop,
+                object_ref: Some(index_ref),
+            }
+        );
+    }
+
+    #[test]
+    fn manifest_coverage_accepts_document_special_object_actions() {
+        let database_actions = vec![
+            action("open"),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            action("refresh"),
+        ];
+        let collection_actions = vec![
+            action("open"),
+            action("inspect"),
+            zqlz_core::ObjectsPanelAction::new("design", "Edit")
+                .object_form("document_collection", ObjectFormMode::Edit),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            zqlz_core::ObjectsPanelAction::new("delete", "Drop")
+                .object_form("document_collection", ObjectFormMode::Drop),
+            action("refresh"),
+        ];
+        let read_only_actions = vec![
+            action("open"),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            action("refresh"),
+        ];
+        let gridfs_actions = vec![
+            action("open"),
+            action("inspect"),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            action("refresh"),
+        ];
+        let mutable_actions = vec![
+            action("open"),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            zqlz_core::ObjectsPanelAction::new("delete", "Drop")
+                .object_form("document_index", ObjectFormMode::Drop),
+            action("refresh"),
+        ];
+        let mutable_admin_actions = vec![
+            action("open"),
+            zqlz_core::ObjectsPanelAction::new("design", "Edit")
+                .object_form("document_user", ObjectFormMode::Edit),
+            action("copy_name"),
+            action("copy_qualified_name"),
+            zqlz_core::ObjectsPanelAction::new("delete", "Drop")
+                .object_form("document_user", ObjectFormMode::Drop),
+            action("refresh"),
+        ];
+        let manifest = ObjectsPanelManifest {
+            object_kinds: vec![
+                kind("document_database", database_actions),
+                kind("document_collection", collection_actions.clone()),
+                kind("document_view", collection_actions),
+                kind("document_index", mutable_actions.clone()),
+                kind("document_function", read_only_actions.clone()),
+                kind("document_gridfs_bucket", gridfs_actions),
+                kind("document_user", mutable_admin_actions.clone()),
+                kind("document_role", mutable_admin_actions),
+                kind("document_search_index", read_only_actions.clone()),
+                kind("document_vector_index", read_only_actions.clone()),
+                kind("document_server", read_only_actions.clone()),
+                kind("document_sharding", read_only_actions),
+            ],
+            toolbar_actions: vec![action("refresh")],
+        };
+
+        assert!(
+            manifest_action_coverage_gaps(&manifest).is_empty(),
+            "document special-object manifest should have no action coverage gaps"
         );
     }
 

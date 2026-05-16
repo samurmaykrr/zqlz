@@ -4,9 +4,9 @@ use std::sync::Arc;
 
 use zqlz_core::{
     Connection, DocumentAggregateRequest, DocumentCellUpdateRequest, DocumentCollectionInfo,
-    DocumentDatabaseInfo, DocumentDeleteOutcome, DocumentDeleteRequest, DocumentInferredField,
-    DocumentQueryRequest, DocumentReplaceRequest, DocumentSaveRequest, DocumentSchemaSampleRequest,
-    QueryResult, Value,
+    DocumentDatabaseInfo, DocumentDatabaseObjects, DocumentDeleteOutcome, DocumentDeleteRequest,
+    DocumentInferredField, DocumentQueryRequest, DocumentReplaceRequest, DocumentSaveRequest,
+    DocumentSchemaSampleRequest, QueryResult, Value,
 };
 
 use crate::error::{ServiceError, ServiceResult};
@@ -35,6 +35,17 @@ impl DocumentService {
     ) -> ServiceResult<Vec<DocumentCollectionInfo>> {
         Self::store(connection.as_ref())?
             .list_collections(database)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))
+    }
+
+    pub async fn list_database_objects(
+        &self,
+        connection: Arc<dyn Connection>,
+        database: &str,
+    ) -> ServiceResult<DocumentDatabaseObjects> {
+        Self::store(connection.as_ref())?
+            .list_database_objects(database)
             .await
             .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))
     }

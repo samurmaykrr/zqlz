@@ -446,9 +446,30 @@ impl CellEditorPanel {
                 | "mediumtext"
                 | "tinytext"
                 | "dynamic"
+                | "string"
+                | "objectid"
+                | "object_id"
+                | "regex"
+                | "javascript"
+                | "symbol"
+                | "dbpointer"
+                | "minkey"
+                | "maxkey"
                 | "enum"
                 | "set"
         )
+    }
+
+    fn is_object_id_column(column_type: &str) -> bool {
+        matches!(
+            Self::base_column_type(column_type).as_str(),
+            "objectid" | "object_id"
+        )
+    }
+
+    fn is_valid_object_id(value: &str) -> bool {
+        let value = value.trim();
+        value.len() == 24 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 
     fn validation_hint(column_type: &str) -> Option<&'static str> {
@@ -467,6 +488,7 @@ impl CellEditorPanel {
             }
             "numeric" | "decimal" | "money" => Some("a numeric value"),
             "json" | "jsonb" => Some("valid JSON"),
+            "objectid" | "object_id" => Some("a 24-character ObjectId hex string"),
             "uuid" => Some("a UUID like 550e8400-e29b-41d4-a716-446655440000"),
             "date" => Some("a date like 2024-03-15"),
             "time" | "timetz" | "time without time zone" | "time with time zone" => {
@@ -546,6 +568,16 @@ impl CellEditorPanel {
 
     fn validate_typed_value(&self, cell_data: &CellData, value: &str) -> Result<Value, String> {
         let typed_value = parse_editor_value(Some(value), cell_data);
+
+        if Self::is_object_id_column(&cell_data.column_type)
+            && !typed_value.is_null()
+            && !Self::is_valid_object_id(value)
+        {
+            return Err(format!(
+                "Invalid value for '{}'. Expected a 24-character ObjectId hex string.",
+                cell_data.column_name
+            ));
+        }
 
         if typed_value.is_null()
             && (!Self::is_string_like_column(&cell_data.column_type)
@@ -2039,6 +2071,22 @@ mod tests {
             "DYNAMIC",
             &Value::String("{\"en\":\"23\"}".to_string())
         ));
+    }
+
+    #[test]
+    fn mongodb_string_backed_scalars_accept_string_values() {
+        for column_type in ["string", "regex", "javascript"] {
+            assert!(CellEditorPanel::is_string_like_column(column_type));
+            assert!(!CellEditorPanel::should_reject_string_fallback(
+                column_type,
+                &Value::String("507f1f77bcf86cd799439011".to_string())
+            ));
+        }
+        assert!(CellEditorPanel::is_object_id_column("objectId"));
+        assert!(CellEditorPanel::is_valid_object_id(
+            "507f1f77bcf86cd799439011"
+        ));
+        assert!(!CellEditorPanel::is_valid_object_id("2"));
     }
 
     #[test]

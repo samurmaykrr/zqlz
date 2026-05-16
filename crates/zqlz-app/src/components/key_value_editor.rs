@@ -99,6 +99,7 @@ impl RedisValueType {
                 | RedisValueType::Set
                 | RedisValueType::ZSet
                 | RedisValueType::Hash
+                | RedisValueType::Stream
         )
     }
 }
@@ -223,6 +224,20 @@ pub struct ZSetMember {
     _score_subscription: Subscription,
 }
 
+/// A field value inside a Redis Stream entry.
+pub struct StreamField {
+    pub name: String,
+    pub value_input: Entity<InputState>,
+    _value_subscription: Subscription,
+}
+
+/// A Redis Stream entry.
+pub struct StreamEntry {
+    pub id_input: Entity<InputState>,
+    pub fields: Vec<StreamField>,
+    _id_subscription: Subscription,
+}
+
 /// Data for a key-value entry being edited
 #[derive(Clone, Debug)]
 #[allow(dead_code)]
@@ -313,6 +328,17 @@ fn parse_row_field_value(input: Option<String>, column_type: &str) -> Value {
     }
 }
 
+fn row_field_display_value(value: &Value, is_new: bool, column: &ColumnMeta) -> String {
+    if value.is_null()
+        && (is_new || column.nullable)
+        && !matches!(value, Value::String(_))
+    {
+        String::new()
+    } else {
+        value.display_for_editor()
+    }
+}
+
 fn strip_column_type_modifiers(column_type: &str) -> &str {
     match column_type.find('(') {
         Some(index) => column_type[..index].trim(),
@@ -336,9 +362,30 @@ fn is_string_column_type(column_type: &str) -> bool {
             | "longtext"
             | "mediumtext"
             | "tinytext"
+            | "string"
+            | "objectid"
+            | "object_id"
+            | "regex"
+            | "javascript"
+            | "symbol"
+            | "dbpointer"
+            | "minkey"
+            | "maxkey"
             | "enum"
             | "set"
     )
+}
+
+fn is_object_id_column_type(column_type: &str) -> bool {
+    matches!(
+        strip_column_type_modifiers(column_type),
+        "objectid" | "object_id"
+    )
+}
+
+fn is_valid_object_id_string(input: &str) -> bool {
+    let input = input.trim();
+    input.len() == 24 && input.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn is_valid_typed_row_value(input: &str, typed_value: &Value, column_type: &str) -> bool {
@@ -347,6 +394,10 @@ fn is_valid_typed_row_value(input: &str, typed_value: &Value, column_type: &str)
     }
 
     let normalized_type = column_type.trim().to_lowercase();
+    if is_object_id_column_type(&normalized_type) {
+        return matches!(typed_value, Value::String(_)) && is_valid_object_id_string(input);
+    }
+
     if is_string_column_type(&normalized_type) {
         return true;
     }
@@ -473,9 +524,11 @@ pub struct KeyValueEditorPanel {
     list_items: Vec<ListItem>,
     hash_fields: Vec<HashField>,
     zset_members: Vec<ZSetMember>,
+    stream_entries: Vec<StreamEntry>,
     list_scroll_handle: UniformListScrollHandle,
     hash_scroll_handle: UniformListScrollHandle,
     zset_scroll_handle: UniformListScrollHandle,
+    stream_scroll_handle: UniformListScrollHandle,
 
     // --- SQL row mode fields ---
     row_data: Option<RowData>,
@@ -557,9 +610,11 @@ impl KeyValueEditorPanel {
             list_items: Vec::new(),
             hash_fields: Vec::new(),
             zset_members: Vec::new(),
+            stream_entries: Vec::new(),
             list_scroll_handle: UniformListScrollHandle::new(),
             hash_scroll_handle: UniformListScrollHandle::new(),
             zset_scroll_handle: UniformListScrollHandle::new(),
+            stream_scroll_handle: UniformListScrollHandle::new(),
             row_data: None,
             row_fields: Vec::new(),
             focused_field_index: None,
@@ -658,9 +713,11 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.stream_entries.clear();
         self.list_scroll_handle = UniformListScrollHandle::new();
         self.hash_scroll_handle = UniformListScrollHandle::new();
         self.zset_scroll_handle = UniformListScrollHandle::new();
+        self.stream_scroll_handle = UniformListScrollHandle::new();
 
         match value_type {
             RedisValueType::List | RedisValueType::Set => {
@@ -671,6 +728,9 @@ impl KeyValueEditorPanel {
             }
             RedisValueType::ZSet => {
                 self.parse_zset_value(value, window, cx);
+            }
+            RedisValueType::Stream => {
+                self.parse_stream_value(value, window, cx);
             }
             RedisValueType::Json => {
                 let formatted = self.format_json(value).unwrap_or_else(|| value.to_string());
@@ -699,6 +759,72 @@ impl KeyValueEditorPanel {
                     input.set_value(value_str, window, cx);
                 });
             }
+        }
+    }
+
+    fn subscribe_stream_input(
+        &self,
+        input: &Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Subscription {
+        cx.subscribe(input, |this, _, event, cx| {
+            use zqlz_ui::widgets::input::InputEvent;
+            if matches!(event, InputEvent::Change) {
+                this.is_modified = true;
+                cx.notify();
+            }
+        })
+    }
+
+    fn parse_stream_value(&mut self, value: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Ok(entries) = serde_json::from_str::<serde_json::Value>(value) else {
+            return;
+        };
+        let Some(entries) = entries.as_array() else {
+            return;
+        };
+
+        for entry in entries {
+            let id = entry
+                .get("id")
+                .and_then(|value| value.as_str())
+                .unwrap_or("*");
+            let id_input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Entry ID...");
+                state.set_value(id, window, cx);
+                state
+            });
+            let _id_subscription = self.subscribe_stream_input(&id_input, cx);
+
+            let mut fields = Vec::new();
+            if let Some(field_map) = entry.get("fields").and_then(|value| value.as_object()) {
+                for (name, value) in field_map {
+                    let value = value.as_str().map(ToString::to_string).unwrap_or_else(|| {
+                        if value.is_null() {
+                            String::new()
+                        } else {
+                            value.to_string()
+                        }
+                    });
+                    let value_input = cx.new(|cx| {
+                        let mut state = InputState::new(window, cx).placeholder("Value...");
+                        state.set_value(value, window, cx);
+                        state
+                    });
+                    let _value_subscription = self.subscribe_stream_input(&value_input, cx);
+                    fields.push(StreamField {
+                        name: name.clone(),
+                        value_input,
+                        _value_subscription,
+                    });
+                }
+            }
+
+            self.stream_entries.push(StreamEntry {
+                id_input,
+                fields,
+                _id_subscription,
+            });
         }
     }
 
@@ -897,6 +1023,7 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.stream_entries.clear();
         self.is_modified = false;
         self.value_editor_expanded = false;
         self.validation_error = None;
@@ -934,6 +1061,7 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.stream_entries.clear();
         self.focused_field_index = None;
         self.expanded_row_field = None;
         self.value_editor_expanded = false;
@@ -952,7 +1080,7 @@ impl KeyValueEditorPanel {
                 let display_value = if uses_default_placeholder {
                     String::new()
                 } else {
-                    value.display_for_editor()
+                    row_field_display_value(value, data.is_new, col)
                 };
                 let is_null = col.nullable && value.is_null() && !uses_default_placeholder;
                 let placeholder = format!("{} ({})", col.name, col.data_type);
@@ -1169,9 +1297,20 @@ impl KeyValueEditorPanel {
         }
     }
 
-    fn toggle_row_field_null(&mut self, field_index: usize, cx: &mut Context<Self>) {
+    fn toggle_row_field_null(
+        &mut self,
+        field_index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if let Some(field) = self.row_fields.get_mut(field_index) {
-            field.is_null = !field.is_null;
+            let next_is_null = !field.is_null;
+            if next_is_null {
+                field.input.update(cx, |input, cx| {
+                    input.set_value(String::new(), window, cx);
+                });
+            }
+            field.is_null = next_is_null;
             self.is_modified = true;
         }
 
@@ -1224,8 +1363,8 @@ impl KeyValueEditorPanel {
                 Checkbox::new(("null-checkbox", field_index))
                     .checked(is_null)
                     .animated(false)
-                    .on_click(cx.listener(move |this, _, _window, cx| {
-                        this.toggle_row_field_null(field_index, cx);
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.toggle_row_field_null(field_index, window, cx);
                     })),
             )
             .child(
@@ -1277,6 +1416,7 @@ impl KeyValueEditorPanel {
             self.list_items.clear();
             self.hash_fields.clear();
             self.zset_members.clear();
+            self.stream_entries.clear();
         }
 
         cx.notify();
@@ -1456,6 +1596,22 @@ impl KeyValueEditorPanel {
                     return false;
                 }
             }
+            RedisValueType::Stream => {
+                let has_entry = self.stream_entries.iter().any(|entry| {
+                    !entry.id_input.read(cx).text().to_string().trim().is_empty()
+                        && entry
+                            .fields
+                            .iter()
+                            .any(|field| !field.name.trim().is_empty())
+                });
+                if !has_entry {
+                    self.validation_error = Some(
+                        "Redis streams cannot be empty. Add at least one entry or delete the key explicitly."
+                            .to_string(),
+                    );
+                    return false;
+                }
+            }
             _ => {}
         }
         true
@@ -1510,10 +1666,17 @@ impl KeyValueEditorPanel {
             }
 
             if !is_valid_typed_row_value(&value, &typed_value, &col.data_type) {
-                self.validation_error = Some(format!(
-                    "Column '{}' expects a valid {} value",
-                    col.name, col.data_type
-                ));
+                self.validation_error = if is_object_id_column_type(&col.data_type.to_lowercase()) {
+                    Some(format!(
+                        "Column '{}' expects a 24-character ObjectId hex string",
+                        col.name
+                    ))
+                } else {
+                    Some(format!(
+                        "Column '{}' expects a valid {} value",
+                        col.name, col.data_type
+                    ))
+                };
                 return false;
             }
         }
@@ -1568,6 +1731,36 @@ impl KeyValueEditorPanel {
                     map.insert(element, serde_json::Value::Number(number));
                 }
                 serde_json::to_string(&map).map_err(|error| error.to_string())
+            }
+            RedisValueType::Stream => {
+                let mut entries = Vec::new();
+                for entry in &self.stream_entries {
+                    let id = entry.id_input.read(cx).text().to_string();
+                    if id.trim().is_empty() {
+                        continue;
+                    }
+
+                    let mut fields = serde_json::Map::new();
+                    for field in &entry.fields {
+                        if field.name.trim().is_empty() {
+                            continue;
+                        }
+                        fields.insert(
+                            field.name.clone(),
+                            serde_json::Value::String(
+                                field.value_input.read(cx).text().to_string(),
+                            ),
+                        );
+                    }
+
+                    if !fields.is_empty() {
+                        let mut entry_value = serde_json::Map::new();
+                        entry_value.insert("id".to_string(), serde_json::Value::String(id));
+                        entry_value.insert("fields".to_string(), serde_json::Value::Object(fields));
+                        entries.push(serde_json::Value::Object(entry_value));
+                    }
+                }
+                serde_json::to_string(&entries).map_err(|error| error.to_string())
             }
             _ => Ok(self.value_input.read(cx).text().to_string()),
         }
@@ -1682,6 +1875,7 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.stream_entries.clear();
         self.is_modified = false;
         self.validation_error = None;
         cx.emit(KeyValueEditorEvent::Cancelled);
@@ -1761,6 +1955,7 @@ impl KeyValueEditorPanel {
         self.list_items.clear();
         self.hash_fields.clear();
         self.zset_members.clear();
+        self.stream_entries.clear();
         self.is_modified = false;
         self.validation_error = None;
         cx.notify();
@@ -1902,6 +2097,56 @@ impl KeyValueEditorPanel {
         }
     }
 
+    fn stream_field_names(&self) -> Vec<String> {
+        let mut names = Vec::new();
+        for entry in &self.stream_entries {
+            for field in &entry.fields {
+                if !names.iter().any(|name| name == &field.name) {
+                    names.push(field.name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    fn add_stream_entry(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let id_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("Entry ID...");
+            state.set_value("*", window, cx);
+            state
+        });
+        let _id_subscription = self.subscribe_stream_input(&id_input, cx);
+        let field_names = self.stream_field_names();
+        let fields = field_names
+            .into_iter()
+            .map(|name| {
+                let value_input = cx.new(|cx| InputState::new(window, cx).placeholder("Value..."));
+                let _value_subscription = self.subscribe_stream_input(&value_input, cx);
+                StreamField {
+                    name,
+                    value_input,
+                    _value_subscription,
+                }
+            })
+            .collect();
+
+        self.stream_entries.push(StreamEntry {
+            id_input,
+            fields,
+            _id_subscription,
+        });
+        self.is_modified = true;
+        cx.notify();
+    }
+
+    fn remove_stream_entry(&mut self, index: usize, cx: &mut Context<Self>) {
+        if index < self.stream_entries.len() {
+            self.stream_entries.remove(index);
+            self.is_modified = true;
+            cx.notify();
+        }
+    }
+
     fn render_list_item_row(&self, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let theme = cx.theme();
         let Some(item) = self.list_items.get(index) else {
@@ -1989,6 +2234,52 @@ impl KeyValueEditorPanel {
                     })),
             )
             .into_any_element()
+    }
+
+    fn render_stream_entry_row(
+        &self,
+        index: usize,
+        field_names: Rc<Vec<String>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let theme = cx.theme();
+        let Some(entry) = self.stream_entries.get(index) else {
+            return div().id(("stream-entry-empty", index)).into_any_element();
+        };
+
+        let mut row = h_flex()
+            .id(("stream-entry-row", index))
+            .w_full()
+            .h(px(REDIS_COLLECTION_ROW_HEIGHT))
+            .px_1()
+            .py_0p5()
+            .gap_1()
+            .items_center()
+            .border_b_1()
+            .border_color(theme.border)
+            .child(Input::new(&entry.id_input).w(px(150.)).xsmall());
+
+        for field_name in field_names.iter() {
+            let field_input = entry
+                .fields
+                .iter()
+                .find(|field| &field.name == field_name)
+                .map(|field| field.value_input.clone());
+            row = row.child(div().w(px(140.)).when_some(field_input, |this, input| {
+                this.child(Input::new(&input).w_full().xsmall())
+            }));
+        }
+
+        row.child(
+            Button::new(("remove-stream-entry", index))
+                .icon(Icon::new(ZqlzIcon::Minus).size_3())
+                .ghost()
+                .xsmall()
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.remove_stream_entry(index, cx);
+                })),
+        )
+        .into_any_element()
     }
 
     fn render_field_row(
@@ -2471,6 +2762,161 @@ impl KeyValueEditorPanel {
             )
     }
 
+    fn render_stream_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = cx.theme();
+        let entry_count = self.stream_entries.len();
+        let field_names = Rc::new(self.stream_field_names());
+        let border_color = theme.border;
+        let muted_foreground = theme.muted_foreground;
+        let header_field_names = field_names.clone();
+
+        v_flex()
+            .gap_1()
+            .flex_1()
+            .child(
+                h_flex().items_center().justify_between().child(
+                    div()
+                        .text_xs()
+                        .text_color(theme.muted_foreground)
+                        .child("Value:"),
+                ),
+            )
+            .child(
+                h_flex()
+                    .w_full()
+                    .px_2()
+                    .py_1()
+                    .gap_1()
+                    .bg(theme.table_head)
+                    .border_b_1()
+                    .border_color(border_color)
+                    .child(
+                        div()
+                            .w(px(150.))
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child("Entry ID"),
+                    )
+                    .children(header_field_names.iter().map(|name| {
+                        div()
+                            .w(px(140.))
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(name.clone())
+                    })),
+            )
+            .child(
+                div()
+                    .id("stream-entries-container")
+                    .flex_1()
+                    .min_h(px(100.))
+                    .relative()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(border_color)
+                    .when(entry_count == 0, |this| {
+                        this.child(
+                            v_flex().size_full().items_center().justify_center().child(
+                                div()
+                                    .text_xs()
+                                    .text_color(muted_foreground)
+                                    .child("No entries"),
+                            ),
+                        )
+                    })
+                    .when(entry_count > 0, |this| {
+                        let field_names = field_names.clone();
+                        this.child(
+                            uniform_list(
+                                "redis-stream-entries",
+                                entry_count,
+                                cx.processor(
+                                    move |state: &mut KeyValueEditorPanel,
+                                          visible_range: Range<usize>,
+                                          _window,
+                                          cx| {
+                                        let total_rows = state.stream_entries.len();
+                                        let start = visible_range.start.min(total_rows);
+                                        let end = visible_range.end.min(total_rows);
+
+                                        (start..end)
+                                            .map(|index| {
+                                                state.render_stream_entry_row(
+                                                    index,
+                                                    field_names.clone(),
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>()
+                                    },
+                                ),
+                            )
+                            .flex_grow()
+                            .size_full()
+                            .pr(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                            .track_scroll(&self.stream_scroll_handle)
+                            .with_sizing_behavior(ListSizingBehavior::Auto)
+                            .into_any_element(),
+                        )
+                    })
+                    .when(entry_count > 0, |this| {
+                        this.child(
+                            div()
+                                .absolute()
+                                .top_0()
+                                .right_0()
+                                .bottom_0()
+                                .w(px(REDIS_COLLECTION_SCROLLBAR_WIDTH))
+                                .child(
+                                    Scrollbar::vertical(&self.stream_scroll_handle)
+                                        .scrollbar_show(ScrollbarShow::Always),
+                                ),
+                        )
+                    }),
+            )
+            .child(
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .justify_between()
+                    .pt_1()
+                    .child(
+                        h_flex()
+                            .gap_0p5()
+                            .child(
+                                Button::new("add-stream-entry")
+                                    .icon(Icon::new(ZqlzIcon::Plus).size_3())
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Add Entry")
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.add_stream_entry(window, cx);
+                                    })),
+                            )
+                            .child(
+                                Button::new("remove-last-stream-entry")
+                                    .icon(Icon::new(ZqlzIcon::Minus).size_3())
+                                    .ghost()
+                                    .xsmall()
+                                    .tooltip("Remove Last")
+                                    .disabled(self.stream_entries.is_empty())
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        let len = this.stream_entries.len();
+                                        if len > 0 {
+                                            this.remove_stream_entry(len - 1, cx);
+                                        }
+                                    })),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_foreground)
+                            .child(format!("{} entries", entry_count)),
+                    ),
+            )
+    }
+
     /// Render the string/JSON value editor (textarea)
     fn render_string_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         const COLLAPSED_VALUE_EDITOR_MIN_HEIGHT: f32 = 100.0;
@@ -2579,6 +3025,7 @@ impl KeyValueEditorPanel {
             }
             RedisValueType::Hash => self.render_hash_editor(cx).into_any_element(),
             RedisValueType::ZSet => self.render_zset_editor(cx).into_any_element(),
+            RedisValueType::Stream => self.render_stream_editor(cx).into_any_element(),
             _ => self.render_string_editor(cx).into_any_element(),
         }
     }
@@ -2789,7 +3236,7 @@ impl KeyValueEditorPanel {
                                         .w_full()
                                         .h_full()
                                         .small()
-                                        .disabled(is_disabled),
+                                        .disabled(is_disabled || is_null),
                                 ),
                         )
                         .when(is_nullable, |this| {
@@ -2809,7 +3256,7 @@ impl KeyValueEditorPanel {
                                 Input::new(&field.input)
                                     .w_full()
                                     .small()
-                                    .disabled(is_disabled),
+                                    .disabled(is_disabled || is_null),
                             ),
                         )
                         .when(is_nullable, |this| {

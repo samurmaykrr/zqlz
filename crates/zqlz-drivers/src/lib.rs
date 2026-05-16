@@ -25,6 +25,7 @@ pub use zqlz_driver_mongodb as mongodb;
 #[cfg(feature = "redis")]
 pub use zqlz_driver_redis as redis;
 
+pub mod explain;
 mod registry;
 
 pub use registry::{DriverRegistry, get_dialect_bundle, get_dialect_info};

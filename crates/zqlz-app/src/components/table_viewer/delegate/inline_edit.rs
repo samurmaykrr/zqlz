@@ -34,6 +34,11 @@ impl TableViewerDelegate {
         let data_col = col - 1;
 
         let is_new_row = self.is_new_row(actual_row);
+        if matches!(self.driver_category, DriverCategory::KeyValue) {
+            self.emit_edit_cell_event(actual_row, col, data_col, cx);
+            return;
+        }
+
         if !self.can_edit_cells() && !is_new_row {
             tracing::info!("Skipping cell edit: table has no stable row identity");
             return;

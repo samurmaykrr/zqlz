@@ -25,6 +25,7 @@ impl ConnectionSidebar {
     pub(in crate::widgets) fn show_section_context_menu(
         &mut self,
         conn_id: Uuid,
+        database_name: Option<String>,
         section: &str,
         position: Point<Pixels>,
         window: &mut Window,
@@ -53,6 +54,121 @@ impl ConnectionSidebar {
                 state.position = position;
                 let new_menu = PopupMenu::build(window, cx, |menu, _, _| {
                     let menu = match section {
+                        "collections" if database_name.is_some() => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Collection").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                let database_name = database_name.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "document_collection".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: Some(
+                                                zqlz_core::ObjectsPanelObjectRef::new(
+                                                    "document_collection",
+                                                    "",
+                                                )
+                                                .with_database_option(database_name.clone()),
+                                            ),
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "views" if database_name.is_some() => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New View").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                let database_name = database_name.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "document_view".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: Some(
+                                                zqlz_core::ObjectsPanelObjectRef::new(
+                                                    "document_view",
+                                                    "",
+                                                )
+                                                .with_database_option(database_name.clone()),
+                                            ),
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "indexes" if database_name.is_some() => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Index").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                let database_name = database_name.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "document_index".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: Some(
+                                                zqlz_core::ObjectsPanelObjectRef::new(
+                                                    "document_index",
+                                                    "",
+                                                )
+                                                .with_database_option(database_name.clone()),
+                                            ),
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "users" if database_name.is_some() => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New User").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                let database_name = database_name.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "document_user".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: Some(
+                                                zqlz_core::ObjectsPanelObjectRef::new(
+                                                    "document_user",
+                                                    "",
+                                                )
+                                                .with_database_option(database_name.clone()),
+                                            ),
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "roles" if database_name.is_some() => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("New Role").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                let database_name = database_name.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                                            connection_id: conn_id,
+                                            kind_id: "document_role".to_string(),
+                                            mode: zqlz_core::ObjectFormMode::Create,
+                                            object_ref: Some(
+                                                zqlz_core::ObjectsPanelObjectRef::new(
+                                                    "document_role",
+                                                    "",
+                                                )
+                                                .with_database_option(database_name.clone()),
+                                            ),
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
                         "tables" => menu
                             .action_context(action_context.clone())
                             .item(PopupMenuItem::new("New Table").on_click({
@@ -135,6 +251,29 @@ impl ConnectionSidebar {
                                             kind_id: "event".to_string(),
                                             mode: zqlz_core::ObjectFormMode::Create,
                                             object_ref: None,
+                                        });
+                                    });
+                                }
+                            }))
+                            .separator(),
+                        "queries" => menu
+                            .action_context(action_context.clone())
+                            .item(PopupMenuItem::new("Import Queries").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::ImportSavedQueries {
+                                            connection_id: conn_id,
+                                        });
+                                    });
+                                }
+                            }))
+                            .item(PopupMenuItem::new("Export Queries").on_click({
+                                let sidebar = sidebar_weak.clone();
+                                move |_event, _window, cx| {
+                                    _ = sidebar.update(cx, |_sidebar, cx| {
+                                        cx.emit(ConnectionSidebarEvent::ExportSavedQueries {
+                                            connection_id: conn_id,
                                         });
                                     });
                                 }

@@ -31,6 +31,8 @@ const GUTTER_SEPARATOR_WIDTH: Pixels = px(1.0);
 /// text. Line numbers stay next to the editor separator where users expect them.
 const FOLD_CHEVRON_ZONE: Pixels = px(14.0);
 
+const MAX_DIAGNOSTIC_SQUIGGLES_PER_FRAME: usize = 400;
+
 /// Maximum number of completion items to show in the menu at once
 pub(crate) const MAX_COMPLETION_ITEMS: usize = 10;
 
@@ -1244,19 +1246,6 @@ impl Element for EditorElement {
             .unwrap_or_else(Position::zero);
         let scroll_offset = editor_snapshot.scroll_offset;
         let total_lines = buffer.line_count();
-        let diagnostics = document_snapshot
-            .display_snapshot
-            .diagnostics()
-            .iter()
-            .filter_map(|diagnostic| {
-                let range = buffer.resolve_anchored_range(diagnostic.range).ok()?;
-                Some(crate::syntax::Highlight {
-                    start: range.start,
-                    end: range.end,
-                    kind: diagnostic.kind,
-                })
-            })
-            .collect::<Vec<_>>();
         let hover_state = document_snapshot.hover_state.clone();
         let signature_help_state = document_snapshot.signature_help_state.clone();
         let bracket_pairs_snapshot = editor_snapshot.bracket_pairs.clone();
@@ -1639,39 +1628,6 @@ impl Element for EditorElement {
             }
         }
 
-        // Calculate diagnostic (error) bounds for squiggles.
-        // Each diagnostic is broken into per-line segments so that start_col and end_col are
-        // always on the same buffer line, preventing unsigned underflow when a diagnostic spans
-        // multiple lines and the end column is smaller than the start column.
-        let mut diagnostic_bounds = Vec::new();
-        for highlight in &diagnostics {
-            if let Ok(start_pos) = buffer.offset_to_position(highlight.start)
-                && let Ok(end_pos) = buffer.offset_to_position(highlight.end)
-            {
-                let start_line = start_pos.line;
-                let end_line = end_pos.line;
-                for line_idx in start_line..=end_line {
-                    if visible_display_slot(line_idx).is_none() {
-                        continue;
-                    }
-                    let line_len = buffer.line(line_idx).map(|l| l.len()).unwrap_or(0);
-                    let start_col = if line_idx == start_line {
-                        start_pos.column
-                    } else {
-                        0
-                    };
-                    let end_col = if line_idx == end_line {
-                        end_pos.column
-                    } else {
-                        line_len
-                    };
-                    if start_col < end_col {
-                        diagnostic_bounds.push((highlight.clone(), line_idx, start_col, end_col));
-                    }
-                }
-            }
-        }
-
         // Calculate cursor bounds — only when the cursor's buffer line is visible.
         let cursor_height = line_height * 0.85; // 85% of line height, centered
         let cursor_bounds = visible_display_slot(cursor_pos.line).map(|slot| {
@@ -1819,13 +1775,22 @@ impl Element for EditorElement {
             None
         };
 
-        // Build diagnostic bounds for rendering squiggles (offset into text area by gutter_width)
+        // Build diagnostic bounds for visible squiggles only.
         let mut diag_bounds = Vec::new();
-        for (highlight, line_idx, start_col, end_col) in diagnostic_bounds {
-            if let Some(display_slot) = visible_display_slot(line_idx) {
-                let start_position = Position::new(line_idx, start_col);
-                let end_position = Position::new(line_idx, end_col);
-                let origin = Self::wrapped_position_origin(
+        for chunk in visible_chunks.iter() {
+            for diagnostic_range in &chunk.diagnostics {
+                if diag_bounds.len() >= MAX_DIAGNOSTIC_SQUIGGLES_PER_FRAME {
+                    break;
+                }
+                if diagnostic_range.start >= diagnostic_range.end {
+                    continue;
+                }
+
+                let line_idx = chunk.buffer_line;
+                let display_slot = chunk.display_row;
+                let start_position = Position::new(line_idx, diagnostic_range.start);
+                let end_position = Position::new(line_idx, diagnostic_range.end);
+                let mut origin = Self::wrapped_position_origin(
                     &wrapped_position_context,
                     start_position,
                     display_slot,
@@ -1833,19 +1798,32 @@ impl Element for EditorElement {
                 let width_columns = document_snapshot
                     .display_snapshot
                     .display_column_for_position(end_position)
-                    .unwrap_or(end_col)
+                    .unwrap_or(diagnostic_range.end)
                     .saturating_sub(
                         document_snapshot
                             .display_snapshot
                             .display_column_for_position(start_position)
-                            .unwrap_or(start_col),
+                            .unwrap_or(diagnostic_range.start),
                     )
                     .max(1);
-                let rect = Bounds::new(
-                    origin,
-                    size(char_width * (width_columns as f32), line_height),
-                );
-                diag_bounds.push((highlight, rect));
+                let mut width = char_width * (width_columns as f32);
+                let left_edge = bounds.origin.x + gutter_width;
+                let right_edge = bounds.origin.x + bounds.size.width;
+                if origin.x < left_edge {
+                    let clipped = left_edge - origin.x;
+                    origin.x = left_edge;
+                    width = (width - clipped).max(px(0.0));
+                }
+                width = width.min((right_edge - origin.x).max(px(0.0)));
+                if width > px(0.0) {
+                    let highlight = crate::syntax::Highlight {
+                        start: chunk.start_offset + diagnostic_range.start,
+                        end: chunk.start_offset + diagnostic_range.end,
+                        kind: crate::syntax::HighlightKind::Error,
+                    };
+                    let rect = Bounds::new(origin, size(width, line_height));
+                    diag_bounds.push((highlight, rect));
+                }
             }
         }
 

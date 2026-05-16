@@ -147,6 +147,8 @@ impl MainView {
             .map(|query| SavedQueryInfo {
                 id: query.id,
                 name: query.name,
+                query_text: query.sql,
+                folder: query.folder,
             })
             .collect()
     }

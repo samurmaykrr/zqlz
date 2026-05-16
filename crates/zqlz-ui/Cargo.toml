@@ -47,6 +47,7 @@ smol.workspace = true
 
 # Tree-sitter for syntax highlighting
 tree-sitter.workspace = true
+tree-sitter-javascript.workspace = true
 tree-sitter-json.workspace = true
 tree-sitter-sequel.workspace = true
 aho-corasick.workspace = true

@@ -5,6 +5,7 @@
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use uuid::Uuid;
 use zqlz_ui::widgets::{
     ActiveTheme as _, Icon, WindowExt, ZqlzIcon,
@@ -62,11 +63,13 @@ fn find_open_saved_query_editor(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn save_query_for_editor(
     editor: WeakEntity<QueryEditor>,
     sql: String,
     connection_id: Uuid,
     query_name: String,
+    folder: Option<String>,
     sidebar_weak: WeakEntity<ConnectionSidebar>,
     window: &mut Window,
     cx: &mut App,
@@ -74,6 +77,7 @@ pub(super) fn save_query_for_editor(
     let Some(app_state) = cx.try_global::<AppState>() else {
         return Err("Application state not available".to_string());
     };
+    let query_text = sql.clone();
 
     match run_saved_query_workflow(
         app_state.storage.as_ref(),
@@ -81,6 +85,7 @@ pub(super) fn save_query_for_editor(
             name: query_name,
             connection_id,
             sql,
+            folder,
         },
     )
     .and_then(SavedQueryWorkflowOutcome::into_created)
@@ -103,6 +108,8 @@ pub(super) fn save_query_for_editor(
                     SavedQueryInfo {
                         id: query_id,
                         name: query_name.clone(),
+                        query_text: query_text.clone(),
+                        folder: saved_query.folder.clone(),
                     },
                     cx,
                 );
@@ -131,10 +138,13 @@ pub(super) fn update_saved_query_for_editor(
     query_id: Uuid,
     sql: String,
     editor: WeakEntity<QueryEditor>,
+    sidebar_weak: WeakEntity<ConnectionSidebar>,
     window: &mut Window,
     cx: &mut App,
 ) {
-    if let Err(error_message) = try_update_saved_query_for_editor(query_id, sql, editor, cx) {
+    if let Err(error_message) =
+        try_update_saved_query_for_editor(query_id, sql, editor, Some(sidebar_weak), cx)
+    {
         window.push_notification(Notification::error(error_message), cx);
     }
 }
@@ -143,11 +153,13 @@ pub(super) fn try_update_saved_query_for_editor(
     query_id: Uuid,
     sql: String,
     editor: WeakEntity<QueryEditor>,
+    sidebar_weak: Option<WeakEntity<ConnectionSidebar>>,
     cx: &mut App,
 ) -> Result<(), String> {
     let Some(app_state) = cx.try_global::<AppState>() else {
         return Err("Application state not available".to_string());
     };
+    let query_text = sql.clone();
 
     match run_saved_query_workflow(
         app_state.storage.as_ref(),
@@ -156,10 +168,26 @@ pub(super) fn try_update_saved_query_for_editor(
     .and_then(SavedQueryWorkflowOutcome::into_updated)
     {
         Ok(()) => {
+            let connection_id = editor
+                .read_with(cx, |editor, _| editor.connection_id())
+                .ok()
+                .flatten();
             if let Err(error) = editor.update(cx, |editor, cx| {
                 editor.mark_clean(cx);
             }) {
                 tracing::warn!(%error, %query_id, "failed to mark editor clean after save");
+            }
+            if let (Some(connection_id), Some(sidebar_weak)) = (connection_id, sidebar_weak)
+                && let Err(error) = sidebar_weak.update(cx, |sidebar, cx| {
+                    sidebar.update_saved_query_text(
+                        connection_id,
+                        query_id,
+                        query_text.clone(),
+                        cx,
+                    );
+                })
+            {
+                tracing::warn!(%error, %query_id, "failed to refresh saved query text in sidebar");
             }
 
             Ok(())
@@ -197,6 +225,9 @@ impl MainView {
         // Create input state for the query name
         let name_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Enter query name..."));
+        let folder_input = cx.new(|cx| {
+            InputState::new(window, cx).placeholder("Folder name (optional, blank = root)")
+        });
         let error_message: Entity<Option<String>> = cx.new(|_| None);
 
         // Get weak reference to sidebar for updating after save
@@ -218,6 +249,7 @@ impl MainView {
 
         window.open_dialog(cx, {
             let name_input = name_input.clone();
+            let folder_input = folder_input.clone();
             let error_message = error_message.clone();
             let sidebar_weak = sidebar_weak.clone();
 
@@ -225,6 +257,7 @@ impl MainView {
                 let sql = sql.clone();
                 let connection_name = connection_name.clone();
                 let name_input = name_input.clone();
+                let folder_input = folder_input.clone();
                 let error_message = error_message.clone();
                 let error_message_for_ok = error_message.clone();
                 let editor_weak = editor.clone();
@@ -242,6 +275,12 @@ impl MainView {
                                     .gap_1()
                                     .child(body_small("Query Name:"))
                                     .child(Input::new(&name_input)),
+                            )
+                            .child(
+                                v_flex()
+                                    .gap_1()
+                                    .child(body_small("Folder:"))
+                                    .child(Input::new(&folder_input)),
                             )
                             // Save Location (read-only, shows current connection)
                             .child(
@@ -271,25 +310,33 @@ impl MainView {
                                 })
                             }),
                     )
-                    .on_ok(move |_, _window, cx| {
-                        let query_name = name_input.read(cx).text().to_string().trim().to_string();
+                    .on_ok({
+                        let folder_input = folder_input.clone();
+                        move |_, _window, cx| {
+                            let query_name =
+                                name_input.read(cx).text().to_string().trim().to_string();
+                            let folder = folder_input.read(cx).text().to_string();
+                            let folder =
+                                (!folder.trim().is_empty()).then(|| folder.trim().to_string());
 
-                        match save_query_for_editor(
-                            editor_weak.clone(),
-                            sql.clone(),
-                            connection_id,
-                            query_name,
-                            sidebar_weak.clone(),
-                            _window,
-                            cx,
-                        ) {
-                            Ok(_) => true,
-                            Err(error) => {
-                                error_message_for_ok.update(cx, |msg, cx| {
-                                    *msg = Some(error);
-                                    cx.notify();
-                                });
-                                false
+                            match save_query_for_editor(
+                                editor_weak.clone(),
+                                sql.clone(),
+                                connection_id,
+                                query_name,
+                                folder,
+                                sidebar_weak.clone(),
+                                _window,
+                                cx,
+                            ) {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    error_message_for_ok.update(cx, |msg, cx| {
+                                        *msg = Some(error);
+                                        cx.notify();
+                                    });
+                                    false
+                                }
                             }
                         }
                     })
@@ -316,7 +363,14 @@ impl MainView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        update_saved_query_for_editor(query_id, sql, editor, window, cx);
+        update_saved_query_for_editor(
+            query_id,
+            sql,
+            editor,
+            self.connection_sidebar.downgrade(),
+            window,
+            cx,
+        );
     }
 
     /// Open a saved query in the query editor
@@ -538,6 +592,184 @@ impl MainView {
                 )
                 .confirm()
         });
+    }
+
+    pub fn export_saved_queries(
+        &mut self,
+        connection_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            window.push_notification(Notification::error("Application state not available"), cx);
+            return;
+        };
+
+        let content = match run_saved_query_workflow(
+            app_state.storage.as_ref(),
+            SavedQueryWorkflowRequest::Export { connection_id },
+        )
+        .and_then(SavedQueryWorkflowOutcome::into_exported)
+        {
+            Ok(content) => content,
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(error.user_message(SavedQueryOperation::LoadForConnection)),
+                    cx,
+                );
+                return;
+            }
+        };
+
+        let receiver = cx.prompt_for_new_path(&PathBuf::from("zqlz-queries.json"), None);
+        let window_handle = window.window_handle();
+        cx.spawn(async move |_this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(path))) => path,
+                _ => return anyhow::Ok(()),
+            };
+
+            match std::fs::write(&path, content) {
+                Ok(()) => {
+                    let _ = window_handle.update(cx, |_, window, cx| {
+                        window.push_notification(
+                            Notification::success(format!("Exported queries to {}", path.display())),
+                            cx,
+                        );
+                    });
+                }
+                Err(error) => tracing::error!(%error, path = %path.display(), "failed to export saved queries"),
+            }
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    pub fn import_saved_queries(
+        &mut self,
+        connection_id: Uuid,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Import Queries".into()),
+        });
+        let sidebar_weak = self.connection_sidebar.downgrade();
+        let window_handle = window.window_handle();
+
+        cx.spawn(async move |_this, cx| {
+            let path = match receiver.await {
+                Ok(Ok(Some(paths))) => match paths.first() {
+                    Some(path) => path.clone(),
+                    None => return anyhow::Ok(()),
+                },
+                _ => return anyhow::Ok(()),
+            };
+
+            let content = match std::fs::read_to_string(&path) {
+                Ok(content) => content,
+                Err(error) => {
+                    tracing::error!(%error, path = %path.display(), "failed to read saved query import file");
+                    return anyhow::Ok(());
+                }
+            };
+
+            let _ = window_handle.update(cx, |_, window, cx| {
+                let Some(app_state) = cx.try_global::<AppState>() else {
+                    window.push_notification(Notification::error("Application state not available"), cx);
+                    return;
+                };
+
+                match run_saved_query_workflow(
+                    app_state.storage.as_ref(),
+                    SavedQueryWorkflowRequest::Import {
+                        connection_id,
+                        content,
+                    },
+                )
+                .and_then(SavedQueryWorkflowOutcome::into_imported)
+                {
+                    Ok(queries) => {
+                        let count = queries.len();
+                        let saved_queries = queries
+                            .into_iter()
+                            .map(|query| SavedQueryInfo {
+                                id: query.id,
+                                name: query.name,
+                                query_text: query.sql,
+                                folder: query.folder,
+                            })
+                            .collect::<Vec<_>>();
+
+                        let _ = sidebar_weak.update(cx, |sidebar, cx| {
+                            for query in saved_queries {
+                                sidebar.add_saved_query(connection_id, query, cx);
+                            }
+                        });
+
+                        window.push_notification(
+                            Notification::success(format!("Imported {count} queries")),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        window.push_notification(
+                            Notification::error(error.user_message(SavedQueryOperation::Create)),
+                            cx,
+                        );
+                    }
+                }
+            });
+
+            anyhow::Ok(())
+        })
+        .detach();
+    }
+
+    pub fn move_saved_query_to_folder(
+        &mut self,
+        connection_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+        folder: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            window.push_notification(Notification::error("Application state not available"), cx);
+            return;
+        };
+
+        match run_saved_query_workflow(
+            app_state.storage.as_ref(),
+            SavedQueryWorkflowRequest::MoveToFolder {
+                query_id,
+                folder: folder.clone(),
+            },
+        )
+        .and_then(SavedQueryWorkflowOutcome::into_updated)
+        {
+            Ok(()) => {
+                self.connection_sidebar.update(cx, |sidebar, cx| {
+                    sidebar.move_saved_query_to_folder(connection_id, query_id, folder.clone(), cx);
+                });
+                let destination = folder.unwrap_or_else(|| "root".to_string());
+                window.push_notification(
+                    Notification::success(format!("Moved '{query_name}' to {destination}")),
+                    cx,
+                );
+            }
+            Err(error) => {
+                window.push_notification(
+                    Notification::error(error.user_message(SavedQueryOperation::Update)),
+                    cx,
+                );
+            }
+        }
     }
 
     /// Rename a saved query

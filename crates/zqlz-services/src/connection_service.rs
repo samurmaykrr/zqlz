@@ -691,6 +691,34 @@ impl ConnectionService {
             })
     }
 
+    /// Load driver-owned objects panel data for a connected source.
+    pub async fn load_objects_panel_data(
+        &self,
+        connection_id: Uuid,
+    ) -> ServiceResult<(ObjectsPanelData, ObjectsPanelManifest)> {
+        let connection = self.get_connection_or_error(connection_id)?;
+        let introspection = connection.as_schema_introspection().ok_or_else(|| {
+            ServiceError::SchemaLoadFailed(
+                "Connection does not support objects panel introspection".to_string(),
+            )
+        })?;
+        let data = introspection
+            .list_tables_extended(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+        let manifest = introspection
+            .list_objects_panel_manifest(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+        manifest.validate().map_err(|error| {
+            ServiceError::SchemaLoadFailed(format!(
+                "Driver returned invalid objects panel manifest: {}",
+                error
+            ))
+        })?;
+        Ok((data, manifest))
+    }
+
     /// Load all supported non-table sidebar sections for a connected source.
     ///
     /// The returned vector only includes sections supported by the active

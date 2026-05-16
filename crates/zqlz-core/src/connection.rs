@@ -204,6 +204,69 @@ pub struct DocumentCollectionInfo {
     pub document_count: Option<u64>,
     pub size_bytes: Option<u64>,
     pub index_count: Option<u32>,
+    pub options_json: Option<serde_json::Value>,
+    pub validator_json: Option<serde_json::Value>,
+    pub collation_json: Option<serde_json::Value>,
+    pub view_on: Option<String>,
+    pub pipeline_json: Option<serde_json::Value>,
+    pub timeseries_json: Option<serde_json::Value>,
+    pub clustered_index_json: Option<serde_json::Value>,
+    pub change_stream_pre_and_post_images: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentIndexInfo {
+    pub database: String,
+    pub collection: String,
+    pub name: String,
+    pub keys_json: serde_json::Value,
+    pub options_json: serde_json::Value,
+    pub unique: bool,
+    pub sparse: bool,
+    pub ttl_seconds: Option<i64>,
+    pub partial_filter_json: Option<serde_json::Value>,
+    pub collation_json: Option<serde_json::Value>,
+    pub kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentFunctionInfo {
+    pub database: String,
+    pub name: String,
+    pub body: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentGridFsBucketInfo {
+    pub database: String,
+    pub name: String,
+    pub files_collection: String,
+    pub chunks_collection: String,
+    pub file_count: Option<u64>,
+    pub size_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DocumentAdminObjectInfo {
+    pub database: String,
+    pub kind: String,
+    pub name: String,
+    pub details_json: serde_json::Value,
+    pub unavailable_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct DocumentDatabaseObjects {
+    pub collections: Vec<DocumentCollectionInfo>,
+    pub indexes: Vec<DocumentIndexInfo>,
+    pub functions: Vec<DocumentFunctionInfo>,
+    pub gridfs_buckets: Vec<DocumentGridFsBucketInfo>,
+    pub users: Vec<DocumentAdminObjectInfo>,
+    pub roles: Vec<DocumentAdminObjectInfo>,
+    pub search_indexes: Vec<DocumentAdminObjectInfo>,
+    pub vector_indexes: Vec<DocumentAdminObjectInfo>,
+    pub server: Vec<DocumentAdminObjectInfo>,
+    pub sharding: Vec<DocumentAdminObjectInfo>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -283,6 +346,12 @@ pub struct DocumentInferredField {
 pub trait DocumentStore: Send + Sync {
     async fn list_document_databases(&self) -> Result<Vec<DocumentDatabaseInfo>>;
     async fn list_collections(&self, database: &str) -> Result<Vec<DocumentCollectionInfo>>;
+    async fn list_database_objects(&self, database: &str) -> Result<DocumentDatabaseObjects> {
+        Ok(DocumentDatabaseObjects {
+            collections: self.list_collections(database).await?,
+            ..Default::default()
+        })
+    }
     async fn query_documents(&self, request: DocumentQueryRequest) -> Result<QueryResult>;
     async fn aggregate_documents(&self, request: DocumentAggregateRequest) -> Result<QueryResult>;
     async fn insert_document(&self, request: DocumentSaveRequest) -> Result<Value>;

@@ -2,12 +2,14 @@ use thiserror::Error;
 use uuid::Uuid;
 use zqlz_core::validate_query_name;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct SavedQueryRecord {
     pub id: Uuid,
     pub name: String,
     pub connection_id: Uuid,
     pub sql: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
 }
 
 pub trait SavedQueryStore {
@@ -15,6 +17,7 @@ pub trait SavedQueryStore {
     fn save_query(&self, query: &SavedQueryRecord) -> anyhow::Result<()>;
     fn load_query(&self, query_id: Uuid) -> anyhow::Result<Option<SavedQueryRecord>>;
     fn update_query_sql(&self, query_id: Uuid, sql: &str) -> anyhow::Result<()>;
+    fn move_query_to_folder(&self, query_id: Uuid, folder: Option<&str>) -> anyhow::Result<()>;
     fn rename_query(&self, query_id: Uuid, new_name: &str) -> anyhow::Result<()>;
     fn delete_query(&self, query_id: Uuid) -> anyhow::Result<()>;
     fn load_queries_for_connection(
@@ -87,10 +90,15 @@ pub enum SavedQueryWorkflowRequest {
         name: String,
         connection_id: Uuid,
         sql: String,
+        folder: Option<String>,
     },
     UpdateSql {
         query_id: Uuid,
         sql: String,
+    },
+    MoveToFolder {
+        query_id: Uuid,
+        folder: Option<String>,
     },
     Load {
         query_id: Uuid,
@@ -106,6 +114,13 @@ pub enum SavedQueryWorkflowRequest {
     LoadForConnection {
         connection_id: Uuid,
     },
+    Import {
+        connection_id: Uuid,
+        content: String,
+    },
+    Export {
+        connection_id: Uuid,
+    },
 }
 
 /// Typed outcome envelope for saved-query workflows.
@@ -116,6 +131,8 @@ pub enum SavedQueryWorkflowOutcome {
     Renamed,
     Deleted,
     LoadedForConnection(Vec<SavedQueryRecord>),
+    Imported(Vec<SavedQueryRecord>),
+    Exported(String),
 }
 
 impl SavedQueryWorkflowOutcome {
@@ -180,6 +197,24 @@ impl SavedQueryWorkflowOutcome {
             )),
         }
     }
+
+    pub fn into_imported(self) -> Result<Vec<SavedQueryRecord>, SavedQueryWorkflowError> {
+        match self {
+            SavedQueryWorkflowOutcome::Imported(records) => Ok(records),
+            _ => Err(SavedQueryWorkflowError::Validation(
+                "Internal workflow mismatch: expected imported outcome".to_string(),
+            )),
+        }
+    }
+
+    pub fn into_exported(self) -> Result<String, SavedQueryWorkflowError> {
+        match self {
+            SavedQueryWorkflowOutcome::Exported(content) => Ok(content),
+            _ => Err(SavedQueryWorkflowError::Validation(
+                "Internal workflow mismatch: expected exported outcome".to_string(),
+            )),
+        }
+    }
 }
 
 /// Execute a saved-query workflow request through a single typed API.
@@ -192,14 +227,20 @@ pub fn run_saved_query_workflow(
             name,
             connection_id,
             sql,
+            folder,
         } => Ok(SavedQueryWorkflowOutcome::Created(create_saved_query(
             store,
             &name,
             connection_id,
             &sql,
+            folder.as_deref(),
         )?)),
         SavedQueryWorkflowRequest::UpdateSql { query_id, sql } => {
             update_saved_query_sql(store, query_id, &sql)?;
+            Ok(SavedQueryWorkflowOutcome::Updated)
+        }
+        SavedQueryWorkflowRequest::MoveToFolder { query_id, folder } => {
+            move_saved_query_to_folder(store, query_id, folder.as_deref())?;
             Ok(SavedQueryWorkflowOutcome::Updated)
         }
         SavedQueryWorkflowRequest::Load { query_id } => Ok(SavedQueryWorkflowOutcome::Loaded(
@@ -222,6 +263,17 @@ pub fn run_saved_query_workflow(
                 load_saved_queries_for_connection(store, connection_id)?,
             ))
         }
+        SavedQueryWorkflowRequest::Import {
+            connection_id,
+            content,
+        } => Ok(SavedQueryWorkflowOutcome::Imported(import_saved_queries(
+            store,
+            connection_id,
+            &content,
+        )?)),
+        SavedQueryWorkflowRequest::Export { connection_id } => Ok(
+            SavedQueryWorkflowOutcome::Exported(export_saved_queries(store, connection_id)?),
+        ),
     }
 }
 
@@ -230,6 +282,7 @@ pub fn create_saved_query(
     name: &str,
     connection_id: Uuid,
     sql: &str,
+    folder: Option<&str>,
 ) -> Result<SavedQueryRecord, SavedQueryWorkflowError> {
     let name = name.trim().to_string();
     if let Some(error) = validate_query_name(&name) {
@@ -248,6 +301,7 @@ pub fn create_saved_query(
         name,
         connection_id,
         sql: sql.to_string(),
+        folder: normalize_folder(folder),
     };
 
     store
@@ -255,6 +309,13 @@ pub fn create_saved_query(
         .map_err(|error| SavedQueryWorkflowError::Storage(error.to_string()))?;
 
     Ok(query)
+}
+
+fn normalize_folder(folder: Option<&str>) -> Option<String> {
+    folder
+        .map(str::trim)
+        .filter(|folder| !folder.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 pub fn load_saved_query(
@@ -274,6 +335,16 @@ pub fn update_saved_query_sql(
 ) -> Result<(), SavedQueryWorkflowError> {
     store
         .update_query_sql(query_id, sql)
+        .map_err(|error| SavedQueryWorkflowError::Storage(error.to_string()))
+}
+
+pub fn move_saved_query_to_folder(
+    store: &dyn SavedQueryStore,
+    query_id: Uuid,
+    folder: Option<&str>,
+) -> Result<(), SavedQueryWorkflowError> {
+    store
+        .move_query_to_folder(query_id, normalize_folder(folder).as_deref())
         .map_err(|error| SavedQueryWorkflowError::Storage(error.to_string()))
 }
 
@@ -316,6 +387,37 @@ pub fn load_saved_queries_for_connection(
     store
         .load_queries_for_connection(connection_id)
         .map_err(|error| SavedQueryWorkflowError::Storage(error.to_string()))
+}
+
+pub fn export_saved_queries(
+    store: &dyn SavedQueryStore,
+    connection_id: Uuid,
+) -> Result<String, SavedQueryWorkflowError> {
+    let queries = load_saved_queries_for_connection(store, connection_id)?;
+    serde_json::to_string_pretty(&queries)
+        .map_err(|error| SavedQueryWorkflowError::Storage(error.to_string()))
+}
+
+pub fn import_saved_queries(
+    store: &dyn SavedQueryStore,
+    connection_id: Uuid,
+    content: &str,
+) -> Result<Vec<SavedQueryRecord>, SavedQueryWorkflowError> {
+    let queries: Vec<SavedQueryRecord> = serde_json::from_str(content)
+        .map_err(|error| SavedQueryWorkflowError::Validation(error.to_string()))?;
+    let mut imported = Vec::new();
+
+    for query in queries {
+        imported.push(create_saved_query(
+            store,
+            &query.name,
+            connection_id,
+            &query.sql,
+            query.folder.as_deref(),
+        )?);
+    }
+
+    Ok(imported)
 }
 
 #[cfg(test)]
@@ -382,6 +484,20 @@ mod tests {
             Ok(())
         }
 
+        fn move_query_to_folder(&self, query_id: Uuid, folder: Option<&str>) -> anyhow::Result<()> {
+            if let Some(record) = self
+                .records
+                .lock()
+                .expect("test mutex poisoned")
+                .iter_mut()
+                .find(|record| record.id == query_id)
+            {
+                record.folder = folder.map(ToOwned::to_owned);
+            }
+
+            Ok(())
+        }
+
         fn rename_query(&self, query_id: Uuid, new_name: &str) -> anyhow::Result<()> {
             if let Some(record) = self
                 .records
@@ -427,9 +543,10 @@ mod tests {
             name: "Existing".to_string(),
             connection_id,
             sql: "select 1".to_string(),
+            folder: None,
         }]);
 
-        let result = create_saved_query(&store, "Existing", connection_id, "select 2");
+        let result = create_saved_query(&store, "Existing", connection_id, "select 2", None);
         assert!(matches!(
             result,
             Err(SavedQueryWorkflowError::NameAlreadyExists)
@@ -457,6 +574,7 @@ mod tests {
                 name: "Lifecycle Query".to_string(),
                 connection_id,
                 sql: "select 1".to_string(),
+                folder: Some("Analytics".to_string()),
             },
         )
         .and_then(SavedQueryWorkflowOutcome::into_created)
@@ -502,6 +620,26 @@ mod tests {
         assert_eq!(loaded_for_connection.len(), 1);
         assert_eq!(loaded_for_connection[0].id, created.id);
         assert_eq!(loaded_for_connection[0].name, "Renamed Query");
+        assert_eq!(
+            loaded_for_connection[0].folder.as_deref(),
+            Some("Analytics")
+        );
+
+        run_saved_query_workflow(
+            &store,
+            SavedQueryWorkflowRequest::MoveToFolder {
+                query_id: created.id,
+                folder: None,
+            },
+        )
+        .and_then(SavedQueryWorkflowOutcome::into_updated)
+        .expect("move to root should succeed");
+
+        let exported =
+            run_saved_query_workflow(&store, SavedQueryWorkflowRequest::Export { connection_id })
+                .and_then(SavedQueryWorkflowOutcome::into_exported)
+                .expect("export should succeed");
+        assert!(exported.contains("Renamed Query"));
 
         run_saved_query_workflow(
             &store,

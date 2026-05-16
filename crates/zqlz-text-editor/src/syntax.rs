@@ -291,9 +291,25 @@ impl SyntaxHighlighter {
             return;
         }
 
+        if let Err(error) = self.set_parser_language(language_profile) {
+            tracing::error!(%error, language_profile, "Failed to switch syntax parser language");
+            return;
+        }
+
         self.language_profile = language_profile;
         self.dialect_keywords = dialect_keywords_for(language_profile);
         self.invalidate_tree();
+    }
+
+    fn set_parser_language(&mut self, language_profile: &str) -> Result<(), String> {
+        let language = match normalize_language_profile(language_profile) {
+            "mongodb" => tree_sitter::Language::new(tree_sitter_javascript::LANGUAGE),
+            _ => tree_sitter::Language::new(tree_sitter_sequel::LANGUAGE),
+        };
+
+        self.parser
+            .set_language(&language)
+            .map_err(|error| format!("Failed to load {language_profile} grammar: {error}"))
     }
 
     /// Discards the cached parse tree, forcing a full re-parse on the next
@@ -468,6 +484,10 @@ impl SyntaxHighlighter {
     fn classify_non_literal_node(&self, node: Node) -> HighlightKind {
         let node_kind = node.kind();
 
+        if self.language_profile == "mongodb" {
+            return self.classify_mongodb_node(node);
+        }
+
         if node_kind == "identifier" && self.identifier_is_function_name(node) {
             return HighlightKind::Function;
         }
@@ -489,6 +509,48 @@ impl SyntaxHighlighter {
         }
 
         HighlightKind::Default
+    }
+
+    fn classify_mongodb_node(&self, node: Node) -> HighlightKind {
+        let node_kind = node.kind();
+
+        match node_kind {
+            "comment" => HighlightKind::Comment,
+            "string" | "string_fragment" | "template_string" => HighlightKind::String,
+            "number" => HighlightKind::Number,
+            "true" | "false" => HighlightKind::Boolean,
+            "null" | "undefined" => HighlightKind::Null,
+            "identifier" if self.mongodb_identifier_is_function_name(node) => {
+                HighlightKind::Function
+            }
+            "identifier" => HighlightKind::Identifier,
+            "property_identifier" if self.mongodb_identifier_is_function_name(node) => {
+                HighlightKind::Function
+            }
+            "property_identifier" | "shorthand_property_identifier" => HighlightKind::Identifier,
+            "ERROR" => HighlightKind::Error,
+            _ => HighlightKind::Default,
+        }
+    }
+
+    fn mongodb_identifier_is_function_name(&self, node: Node) -> bool {
+        let Some(parent) = node.parent() else {
+            return false;
+        };
+
+        if parent.kind() == "call_expression" {
+            return true;
+        }
+
+        if parent.kind() != "member_expression" {
+            return false;
+        }
+
+        let Some(grandparent) = parent.parent() else {
+            return false;
+        };
+
+        grandparent.kind() == "call_expression" && grandparent.start_byte() == parent.start_byte()
     }
 
     fn classify_identifier_text(&self, text: &str) -> HighlightKind {
@@ -901,6 +963,7 @@ fn normalize_language_profile(language_profile: &str) -> &'static str {
         "mysql" | "mariadb" => "mysql",
         "sqlite" => "sqlite",
         "clickhouse" => "clickhouse",
+        "mongo" | "mongodb" => "mongodb",
         _ => "sql",
     }
 }
@@ -921,6 +984,14 @@ fn dialect_keywords_for(language_profile: &str) -> HashSet<&'static str> {
     ]);
 
     match normalize_language_profile(language_profile) {
+        "mongodb" => keywords.extend([
+            "DB",
+            "ISODate",
+            "ObjectId",
+            "NumberDecimal",
+            "NumberInt",
+            "NumberLong",
+        ]),
         "postgresql" => keywords.extend([
             "BIGSERIAL",
             "BYTEA",
@@ -1134,6 +1205,36 @@ mod tests {
         assert_eq!(
             highlighter.classify_identifier_text("jsonb"),
             HighlightKind::Keyword
+        );
+    }
+
+    #[test]
+    fn test_mongodb_profile_uses_document_syntax() {
+        let mut highlighter = SyntaxHighlighter::new().unwrap();
+        highlighter.set_language_profile("mongodb");
+
+        assert_eq!(highlighter.language_profile(), "mongodb");
+
+        let text = r#"db.products.find(
+  { $text: { $search: "developer iot" } },
+  { sku: 1, name: 1, tags: 1 }
+).sort({ score: { $meta: "textScore" } }).limit(5)"#;
+        let highlights = highlighter.highlight(text);
+
+        assert!(
+            highlights
+                .iter()
+                .all(|highlight| highlight.kind != HighlightKind::Error)
+        );
+        assert!(
+            highlights
+                .iter()
+                .any(|highlight| highlight.kind == HighlightKind::Function)
+        );
+        assert!(
+            highlights
+                .iter()
+                .any(|highlight| highlight.kind == HighlightKind::String)
         );
     }
 

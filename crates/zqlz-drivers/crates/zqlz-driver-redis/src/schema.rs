@@ -15,9 +15,10 @@ use crate::keys::{
 use async_trait::async_trait;
 use zqlz_core::{
     ColumnInfo, Connection, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
-    ForeignKeyInfo, FunctionInfo, IndexInfo, KeyValueInfo, PrimaryKeyInfo, ProcedureInfo, Result,
-    SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType, TriggerInfo,
-    TypeInfo, ViewInfo, ZqlzError,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, KeyValueInfo, ObjectsPanelColumn, ObjectsPanelData,
+    ObjectsPanelManifest, ObjectsPanelObjectRef, ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo,
+    Result, SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType,
+    TriggerInfo, TypeInfo, ViewInfo, ZqlzError, parse_redis_database_index,
 };
 
 /// Default number of Redis databases (can be configured in redis.conf)
@@ -182,6 +183,26 @@ impl SchemaIntrospection for RedisConnection {
     #[tracing::instrument(skip(self))]
     async fn list_views(&self, _schema: Option<&str>) -> Result<Vec<ViewInfo>> {
         Ok(vec![])
+    }
+
+    async fn list_tables_extended(&self, _schema: Option<&str>) -> Result<ObjectsPanelData> {
+        let databases = self
+            .list_databases()
+            .await?
+            .into_iter()
+            .filter_map(|database| {
+                parse_redis_database_index(&database.name).map(|index| (index, database.size_bytes))
+            })
+            .collect();
+        Ok(redis_objects_panel_data(databases))
+    }
+
+    async fn list_objects_panel_manifest(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<ObjectsPanelManifest> {
+        let data = self.list_tables_extended(schema).await?;
+        Ok(ObjectsPanelManifest::from_data(&data))
     }
 
     /// Get detailed info for a Redis key
@@ -574,6 +595,49 @@ impl SchemaIntrospection for RedisConnection {
     async fn get_dependencies(&self, _object: &DatabaseObject) -> Result<Vec<Dependency>> {
         Ok(vec![])
     }
+}
+
+fn redis_objects_panel_data(databases: Vec<(u16, Option<i64>)>) -> ObjectsPanelData {
+    let columns = vec![
+        ObjectsPanelColumn::new("name", "Database")
+            .width(300.0)
+            .min_width(150.0)
+            .resizable(true)
+            .sortable(),
+        ObjectsPanelColumn::new("key_count", "Keys")
+            .width(100.0)
+            .min_width(60.0)
+            .resizable(false)
+            .sortable()
+            .text_right(),
+    ];
+
+    let rows = databases
+        .into_iter()
+        .map(|(index, key_count)| {
+            let database_name = format!("db{}", index);
+            let mut values = std::collections::BTreeMap::new();
+            values.insert("name".to_string(), database_name.clone());
+            values.insert(
+                "key_count".to_string(),
+                key_count
+                    .map(|count| count.to_string())
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+
+            ObjectsPanelRow {
+                name: database_name.clone(),
+                schema: None,
+                object_type: "redis_database".to_string(),
+                object_ref: Some(ObjectsPanelObjectRef::new("redis_database", database_name)),
+                values,
+                redis_database_index: Some(index),
+                key_value_info: None,
+            }
+        })
+        .collect();
+
+    ObjectsPanelData { columns, rows }
 }
 
 impl RedisConnection {

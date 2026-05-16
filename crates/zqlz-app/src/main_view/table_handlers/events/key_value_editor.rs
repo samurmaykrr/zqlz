@@ -8,7 +8,10 @@
 //! - Syncing field changes between row editor and table grid
 
 use gpui::*;
-use zqlz_core::{KeyValueDeleteRequest, KeyValueKind, KeyValueSaveRequest, Value};
+use zqlz_core::{
+    DocumentCellUpdateRequest, DocumentSaveRequest, DriverCategory, KeyValueDeleteRequest,
+    KeyValueKind, KeyValueSaveRequest, Value,
+};
 use zqlz_services::RowInsertData;
 use zqlz_ui::widgets::{WindowExt, notification::Notification};
 
@@ -28,6 +31,43 @@ fn map_redis_value_type(value_type: RedisValueType) -> KeyValueKind {
         RedisValueType::Stream => KeyValueKind::Stream,
         RedisValueType::Json => KeyValueKind::Json,
     }
+}
+
+fn document_id_json(value: &Value) -> String {
+    match value {
+        Value::String(value) => value.clone(),
+        Value::Json(value) => value.to_string(),
+        _ => value.to_json_value().to_string(),
+    }
+}
+
+fn is_object_id_column_type(column_type: &str) -> bool {
+    matches!(
+        column_type
+            .trim()
+            .to_lowercase()
+            .split_once('(')
+            .map(|(base, _)| base.trim().to_string())
+            .unwrap_or_else(|| column_type.trim().to_lowercase())
+            .as_str(),
+        "objectid" | "object_id"
+    )
+}
+
+fn is_valid_object_id_string(input: &str) -> bool {
+    let input = input.trim();
+    input.len() == 24 && input.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn document_insert_json_value(column_type: &str, value: &Value) -> serde_json::Value {
+    if is_object_id_column_type(column_type)
+        && let Value::String(value) = value
+        && is_valid_object_id_string(value)
+    {
+        return serde_json::json!({ "$oid": value.trim() });
+    }
+
+    value.to_json_value()
 }
 
 fn refresh_active_table_viewer(workspace_controller: &Entity<WorkspaceController>, cx: &mut App) {
@@ -272,6 +312,7 @@ impl MainView {
                 };
 
                 let table_service = app_state.table_service.clone();
+                let document_service = app_state.document_service.clone();
                 let schema_qualifier = source_viewer.as_ref().and_then(|v| {
                     v.read_with(cx, |viewer, _cx| {
                         let db = viewer.database_name();
@@ -288,9 +329,102 @@ impl MainView {
                 let source_viewer = source_viewer.clone();
                 let window_handle = window.window_handle();
                 let column_types_for_updates = column_types.clone();
+                let driver_category = connection.driver_category();
 
                 cx.spawn(async move |_this, cx| {
-                    let result = if is_new {
+                    let result = if matches!(driver_category, DriverCategory::Document) {
+                        match database_name.clone() {
+                            Some(database_name) if is_new => {
+                                let document = column_names
+                                    .iter()
+                                    .zip(column_types.iter())
+                                    .zip(typed_values.iter())
+                                    .filter(|(_, value)| !value.is_null())
+                                    .map(|((column_name, column_type), value)| {
+                                        (
+                                            column_name.clone(),
+                                            document_insert_json_value(column_type, value),
+                                        )
+                                    })
+                                    .collect::<serde_json::Map<_, _>>();
+                                document_service
+                                    .insert_document(
+                                        connection.clone(),
+                                        DocumentSaveRequest {
+                                            database: database_name,
+                                            collection: table_name.clone(),
+                                            document_json: serde_json::Value::Object(document)
+                                                .to_string(),
+                                        },
+                                    )
+                                    .await
+                                    .map(|_| ())
+                            }
+                            Some(database_name) => {
+                                let id_column_index = column_names
+                                    .iter()
+                                    .position(|column_name| column_name == "_id");
+                                match id_column_index.and_then(|id_column_index| {
+                                    original_row_values.get(id_column_index)
+                                }) {
+                                    Some(id_value) => {
+                                        let mut update_error: Option<String> = None;
+
+                                        for (col_index, new_value) in
+                                            typed_values.iter().enumerate()
+                                        {
+                                            let Some(col_name) = column_names.get(col_index) else {
+                                                continue;
+                                            };
+                                            if col_name == "_id" {
+                                                continue;
+                                            }
+                                            let original = original_row_values
+                                                .get(col_index)
+                                                .cloned()
+                                                .unwrap_or_default();
+                                            if *new_value == original {
+                                                continue;
+                                            }
+
+                                            if let Err(error) = document_service
+                                                .update_document_cell(
+                                                    connection.clone(),
+                                                    DocumentCellUpdateRequest {
+                                                        database: database_name.clone(),
+                                                        collection: table_name.clone(),
+                                                        id_json: document_id_json(id_value),
+                                                        field_path: col_name.clone(),
+                                                        new_value: new_value.clone(),
+                                                    },
+                                                )
+                                                .await
+                                            {
+                                                update_error = Some(format!(
+                                                    "Failed to update column '{}': {}",
+                                                    col_name, error
+                                                ));
+                                                break;
+                                            }
+                                        }
+
+                                        match update_error {
+                                            Some(error) => Err(
+                                                zqlz_services::ServiceError::UpdateFailed(error),
+                                            ),
+                                            None => Ok(()),
+                                        }
+                                    }
+                                    None => Err(zqlz_services::ServiceError::UpdateFailed(
+                                        "Row has no _id value".to_string(),
+                                    )),
+                                }
+                            }
+                            None => Err(zqlz_services::ServiceError::UpdateFailed(
+                                "Document database context is unavailable".to_string(),
+                            )),
+                        }
+                    } else if is_new {
                         table_service
                             .insert_row(
                                 connection.clone(),

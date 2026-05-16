@@ -109,6 +109,7 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
                     connection_id,
                     function_ref.name,
                     function_ref.schema,
+                    None,
                     function_ref.signature,
                     window,
                     cx,
@@ -119,6 +120,7 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
                     connection_id,
                     procedure_ref.name,
                     procedure_ref.schema,
+                    None,
                     procedure_ref.signature,
                     window,
                     cx,
@@ -215,6 +217,9 @@ impl ResolvedObjectsPanelActionExt for ResolvedObjectsPanelAction {
             Self::DeleteViews { object_names } => {
                 main_view.delete_views(connection_id, object_names, window, cx);
             }
+            Self::DeleteExtension { extension_ref } => {
+                main_view.delete_extension(connection_id, extension_ref.name, window, cx);
+            }
             Self::DeleteKeys { key_names } => {
                 main_view.delete_keys(connection_id, key_names, window, cx);
             }
@@ -305,11 +310,12 @@ impl MainView {
             return;
         };
 
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
+        let target_database = object_ref.database.clone().or_else(|| {
+            self.workspace_state
+                .read(cx)
+                .active_database()
+                .map(ToString::to_string)
+        });
         let Some(connection) = app_state
             .connection_service
             .get_connection_for_database_cached(connection_id, target_database.as_deref())
@@ -325,7 +331,11 @@ impl MainView {
         let object_ref_for_task = object_ref.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let ddl = if let Some(object_type) = object_type_for_kind_id(&kind_id_for_task) {
+            let ddl = if let Some(metadata_query) =
+                document_metadata_query(&kind_id_for_task, &object_ref_for_task)
+            {
+                metadata_query
+            } else if let Some(object_type) = object_type_for_kind_id(&kind_id_for_task) {
                 match connection.as_schema_introspection() {
                     Some(schema) => {
                         let object = DatabaseObject {
@@ -373,6 +383,88 @@ impl MainView {
             anyhow::Ok(())
         })
         .detach();
+    }
+}
+
+fn document_metadata_query(kind_id: &str, object_ref: &SelectedObjectRef) -> Option<String> {
+    let database = object_ref.schema.as_deref().unwrap_or("<collection>");
+    match kind_id {
+        "document_collection" => Some(format!(
+            "{{\n  \"listCollections\": 1,\n  \"filter\": {{ \"name\": {name:?} }},\n  \"nameOnly\": false\n}}",
+            name = object_ref.name,
+        )),
+        "document_view" => Some(format!(
+            "{{\n  \"listCollections\": 1,\n  \"filter\": {{ \"name\": {name:?}, \"type\": \"view\" }},\n  \"nameOnly\": false\n}}",
+            name = object_ref.name,
+        )),
+        "document_index" => Some(format!(
+            "{{\n  \"listIndexes\": {collection:?},\n  \"comment\": \"Inspect index {index}\"\n}}",
+            collection = database,
+            index = object_ref.name,
+        )),
+        "document_function" => Some(format!(
+            "{{\n  \"find\": \"system.js\",\n  \"filter\": {{ \"_id\": {name:?} }},\n  \"limit\": 1\n}}",
+            name = object_ref.name,
+        )),
+        "document_gridfs_bucket" => Some(format!(
+            "{{\n  \"find\": {files_collection:?},\n  \"sort\": {{ \"uploadDate\": -1 }}\n}}",
+            files_collection = object_ref.schema.as_deref().unwrap_or("<bucket>.files"),
+        )),
+        "document_user" => Some(format!(
+            "{{\n  \"usersInfo\": {user:?},\n  \"showPrivileges\": true\n}}",
+            user = object_ref.name,
+        )),
+        "document_role" => Some(format!(
+            "{{\n  \"rolesInfo\": {role:?},\n  \"showPrivileges\": true,\n  \"showBuiltinRoles\": true\n}}",
+            role = object_ref.name,
+        )),
+        "document_search_index" | "document_vector_index" => object_ref
+            .name
+            .rsplit_once('.')
+            .map(|(collection, index)| {
+                format!(
+                    "{{\n  \"aggregate\": {collection:?},\n  \"pipeline\": [\n    {{ \"$listSearchIndexes\": {{ \"name\": {index:?} }} }}\n  ],\n  \"cursor\": {{}}\n}}"
+                )
+            })
+            .or_else(|| {
+                Some(format!(
+                    "db.getCollectionNames().flatMap(collection => db.getCollection(collection).aggregate([{{ $listSearchIndexes: {{}} }}]).toArray().filter(index => `${{collection}}.${{index.name}}` === {index:?}))",
+                    index = object_ref.name,
+                ))
+            }),
+        "document_server" => Some(format!(
+            "{{\n  \"$db\": \"admin\",\n  {command:?}: 1\n}}",
+            command = object_ref.name,
+        )),
+        "document_sharding" if object_ref.schema.as_deref() == Some("sharded_collection") => {
+            Some(format!(
+                "{{\n  \"$db\": \"config\",\n  \"find\": \"collections\",\n  \"filter\": {{ \"_id\": {namespace:?} }},\n  \"limit\": 1\n}}",
+                namespace = object_ref.name,
+            ))
+        }
+        "document_sharding" if object_ref.schema.as_deref() == Some("chunk") => Some(format!(
+            "{{\n  \"$db\": \"config\",\n  \"aggregate\": \"chunks\",\n  \"pipeline\": [\n    {{ \"$lookup\": {{ \"from\": \"collections\", \"localField\": \"uuid\", \"foreignField\": \"uuid\", \"as\": \"collection\" }} }},\n    {{ \"$match\": {{ \"$or\": [{{ \"_id\": {chunk_id:?} }}, {{ \"ns\": {namespace:?} }}, {{ \"collection._id\": {namespace:?} }}] }} }}\n  ],\n  \"cursor\": {{}}\n}}",
+            chunk_id = object_ref.name,
+            namespace = object_ref
+                .name
+                .split(" chunk ")
+                .next()
+                .unwrap_or(&object_ref.name),
+        )),
+        "document_sharding" if object_ref.schema.as_deref() == Some("zone") => Some(format!(
+            "{{\n  \"$db\": \"config\",\n  \"find\": \"tags\",\n  \"filter\": {{ \"ns\": {namespace:?} }}\n}}",
+            namespace = object_ref
+                .name
+                .split(" zone ")
+                .next()
+                .unwrap_or(&object_ref.name),
+        )),
+        "document_sharding" if object_ref.name.contains('.') => Some(format!(
+            "{{\n  \"$db\": \"config\",\n  \"find\": \"collections\",\n  \"filter\": {{ \"_id\": {namespace:?} }},\n  \"limit\": 1\n}}",
+            namespace = object_ref.name,
+        )),
+        "document_sharding" => Some("{\n  \"$db\": \"admin\",\n  \"listShards\": 1\n}".to_string()),
+        _ => None,
     }
 }
 
@@ -434,6 +526,195 @@ mod tests {
                 "delete".to_string(),
             ],
         }
+    }
+
+    #[test]
+    fn document_metadata_query_opens_gridfs_bucket_files() {
+        let collection = SelectedObjectRef {
+            database: None,
+            name: "customers".to_string(),
+            schema: None,
+            signature: None,
+            associated_table: None,
+        };
+        let view = SelectedObjectRef {
+            database: None,
+            name: "activeCustomers".to_string(),
+            schema: None,
+            signature: None,
+            associated_table: None,
+        };
+        let object_ref = SelectedObjectRef {
+            database: None,
+            name: "fs".to_string(),
+            schema: Some("fs.files".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+
+        assert_eq!(
+            document_metadata_query("document_collection", &collection).as_deref(),
+            Some(
+                "{\n  \"listCollections\": 1,\n  \"filter\": { \"name\": \"customers\" },\n  \"nameOnly\": false\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_view", &view).as_deref(),
+            Some(
+                "{\n  \"listCollections\": 1,\n  \"filter\": { \"name\": \"activeCustomers\", \"type\": \"view\" },\n  \"nameOnly\": false\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_gridfs_bucket", &object_ref).as_deref(),
+            Some("{\n  \"find\": \"fs.files\",\n  \"sort\": { \"uploadDate\": -1 }\n}")
+        );
+    }
+
+    #[test]
+    fn document_metadata_query_uses_runnable_command_json_for_index_and_function() {
+        let index = SelectedObjectRef {
+            database: None,
+            name: "orders_placed_at_idx".to_string(),
+            schema: Some("orders".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+        let function = SelectedObjectRef {
+            database: None,
+            name: "formatCurrency".to_string(),
+            schema: Some("function".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+
+        assert_eq!(
+            document_metadata_query("document_index", &index).as_deref(),
+            Some(
+                "{\n  \"listIndexes\": \"orders\",\n  \"comment\": \"Inspect index orders_placed_at_idx\"\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_function", &function).as_deref(),
+            Some(
+                "{\n  \"find\": \"system.js\",\n  \"filter\": { \"_id\": \"formatCurrency\" },\n  \"limit\": 1\n}"
+            )
+        );
+    }
+
+    #[test]
+    fn document_metadata_query_uses_runnable_command_json_for_search_indexes() {
+        let search_index = SelectedObjectRef {
+            database: None,
+            name: "documents.documents_text_idx".to_string(),
+            schema: Some("search_index".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+        let vector_index = SelectedObjectRef {
+            database: None,
+            name: "documents.documents_vector_idx".to_string(),
+            schema: Some("vector_search_index".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+
+        assert_eq!(
+            document_metadata_query("document_search_index", &search_index).as_deref(),
+            Some(
+                "{\n  \"aggregate\": \"documents\",\n  \"pipeline\": [\n    { \"$listSearchIndexes\": { \"name\": \"documents_text_idx\" } }\n  ],\n  \"cursor\": {}\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_vector_index", &vector_index).as_deref(),
+            Some(
+                "{\n  \"aggregate\": \"documents\",\n  \"pipeline\": [\n    { \"$listSearchIndexes\": { \"name\": \"documents_vector_idx\" } }\n  ],\n  \"cursor\": {}\n}"
+            )
+        );
+    }
+
+    #[test]
+    fn document_metadata_query_uses_runnable_command_json_for_admin_objects() {
+        let user = SelectedObjectRef {
+            database: None,
+            name: "reporter".to_string(),
+            schema: Some("user".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+        let server = SelectedObjectRef {
+            database: None,
+            name: "buildInfo".to_string(),
+            schema: Some("server".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+
+        assert_eq!(
+            document_metadata_query("document_user", &user).as_deref(),
+            Some("{\n  \"usersInfo\": \"reporter\",\n  \"showPrivileges\": true\n}")
+        );
+        assert_eq!(
+            document_metadata_query("document_server", &server).as_deref(),
+            Some("{\n  \"$db\": \"admin\",\n  \"buildInfo\": 1\n}")
+        );
+    }
+
+    #[test]
+    fn document_metadata_query_opens_sharding_config_by_kind() {
+        let sharded_collection = SelectedObjectRef {
+            database: None,
+            name: "zqlz_feature_lab.orders".to_string(),
+            schema: Some("sharded_collection".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+        let chunk = SelectedObjectRef {
+            database: None,
+            name: "zqlz_feature_lab.orders chunk 3".to_string(),
+            schema: Some("chunk".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+        let zone = SelectedObjectRef {
+            database: None,
+            name: "zqlz_feature_lab.orders zone east".to_string(),
+            schema: Some("zone".to_string()),
+            signature: None,
+            associated_table: None,
+        };
+
+        assert_eq!(
+            document_metadata_query("document_sharding", &sharded_collection).as_deref(),
+            Some(
+                "{\n  \"$db\": \"config\",\n  \"find\": \"collections\",\n  \"filter\": { \"_id\": \"zqlz_feature_lab.orders\" },\n  \"limit\": 1\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_sharding", &chunk).as_deref(),
+            Some(
+                "{\n  \"$db\": \"config\",\n  \"aggregate\": \"chunks\",\n  \"pipeline\": [\n    { \"$lookup\": { \"from\": \"collections\", \"localField\": \"uuid\", \"foreignField\": \"uuid\", \"as\": \"collection\" } },\n    { \"$match\": { \"$or\": [{ \"_id\": \"zqlz_feature_lab.orders chunk 3\" }, { \"ns\": \"zqlz_feature_lab.orders\" }, { \"collection._id\": \"zqlz_feature_lab.orders\" }] } }\n  ],\n  \"cursor\": {}\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query("document_sharding", &zone).as_deref(),
+            Some(
+                "{\n  \"$db\": \"config\",\n  \"find\": \"tags\",\n  \"filter\": { \"ns\": \"zqlz_feature_lab.orders\" }\n}"
+            )
+        );
+        assert_eq!(
+            document_metadata_query(
+                "document_sharding",
+                &SelectedObjectRef {
+                    database: None,
+                    name: "listShards".to_string(),
+                    schema: Some("sharding".to_string()),
+                    signature: None,
+                    associated_table: None,
+                },
+            )
+            .as_deref(),
+            Some("{\n  \"$db\": \"admin\",\n  \"listShards\": 1\n}")
+        );
     }
 
     #[test]
@@ -686,6 +967,7 @@ mod tests {
             action_resolution,
             ResolvedObjectsPanelAction::OpenTriggerDdl {
                 trigger_ref: SelectedObjectRef {
+                    database: None,
                     name: "trg_payment_audit".to_string(),
                     schema: Some("public".to_string()),
                     signature: Some("payments".to_string()),
@@ -713,6 +995,7 @@ mod tests {
             action_resolution,
             ResolvedObjectsPanelAction::DesignTrigger {
                 trigger_ref: SelectedObjectRef {
+                    database: None,
                     name: "trg_payment_audit".to_string(),
                     schema: Some("public".to_string()),
                     signature: Some("payments".to_string()),
@@ -741,6 +1024,7 @@ mod tests {
             action_resolution,
             ResolvedObjectsPanelAction::OpenFunction {
                 function_ref: SelectedObjectRef {
+                    database: None,
                     name: "log_row_change".to_string(),
                     schema: Some("audit".to_string()),
                     signature: Some("integer, text".to_string()),
@@ -763,6 +1047,7 @@ mod tests {
             ),
             ResolvedObjectsPanelAction::OpenSequence {
                 sequence_ref: SelectedObjectRef {
+                    database: None,
                     name: "orders_id_seq".to_string(),
                     schema: Some("public".to_string()),
                     signature: None,
@@ -774,6 +1059,7 @@ mod tests {
             registry.resolve_objects_panel_action("design", &[sequence_ref], None),
             ResolvedObjectsPanelAction::DesignSequence {
                 sequence_ref: SelectedObjectRef {
+                    database: None,
                     name: "orders_id_seq".to_string(),
                     schema: Some("public".to_string()),
                     signature: None,
@@ -788,12 +1074,36 @@ mod tests {
         let registry = ObjectsPanelActionRegistry::default();
         let collection_ref = zqlz_core::ObjectsPanelObjectRef::new("document_collection", "users")
             .with_database_option(Some("app".to_string()));
+        let view_ref = zqlz_core::ObjectsPanelObjectRef::new("document_view", "activeCustomers")
+            .with_database_option(Some("app".to_string()));
 
         assert_eq!(
             registry.resolve_objects_panel_action("open", &[collection_ref], None),
             ResolvedObjectsPanelAction::OpenDocumentCollection {
                 database_name: "app".to_string(),
                 collection_name: "users".to_string(),
+            }
+        );
+        assert_eq!(
+            registry.resolve_objects_panel_action("open", &[view_ref], None),
+            ResolvedObjectsPanelAction::OpenDocumentCollection {
+                database_name: "app".to_string(),
+                collection_name: "activeCustomers".to_string(),
+            }
+        );
+        let inspect_ref = zqlz_core::ObjectsPanelObjectRef::new("document_collection", "users")
+            .with_database_option(Some("app".to_string()));
+        assert_eq!(
+            registry.resolve_objects_panel_action("inspect", &[inspect_ref], None),
+            ResolvedObjectsPanelAction::OpenGenericDdl {
+                kind_id: "document_collection".to_string(),
+                object_ref: SelectedObjectRef {
+                    database: Some("app".to_string()),
+                    name: "users".to_string(),
+                    schema: None,
+                    signature: None,
+                    associated_table: None,
+                },
             }
         );
     }
@@ -910,6 +1220,7 @@ mod tests {
             action("design"),
             action("copy_name"),
             action("copy_qualified_name"),
+            action("delete"),
             action("refresh"),
         ];
 

@@ -1157,6 +1157,38 @@ async fn invalidate_connection_cache_clears_table_details_cache() {
 }
 
 #[tokio::test]
+async fn invalidate_table_details_clears_column_cache() {
+    let conn = mysql_connection("table_column_invalidation_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+
+    service
+        .get_table_details(connection.clone(), conn_id, "users", Some("schema_a"))
+        .await
+        .expect("initial table details");
+
+    let initial_get_columns_count = conn.get_columns_count();
+
+    service.invalidate_table_details(conn_id, "users");
+
+    service
+        .get_table_details(connection, conn_id, "users", Some("schema_a"))
+        .await
+        .expect("reloaded table details");
+
+    assert!(
+        conn.get_columns_count() > initial_get_columns_count,
+        "targeted table invalidation should force column metadata reload"
+    );
+}
+
+#[tokio::test]
 async fn get_table_details_falls_back_for_sqlite_virtual_tables() {
     let conn = Arc::new(SqliteVirtualTableFallbackConnection);
     let service = SchemaService::new();

@@ -37,6 +37,9 @@ mod collections_tests;
 mod driver;
 #[cfg(test)]
 mod driver_tests;
+mod explain;
+mod objects_panel;
 
 pub use collections::*;
 pub use driver::*;
+pub use explain::parse_mongodb_explain_result;
