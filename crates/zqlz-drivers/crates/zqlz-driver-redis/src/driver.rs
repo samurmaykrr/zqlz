@@ -29,6 +29,10 @@ use crate::RedisSshTunnel;
 const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
 const COMPLETIONS_TOML: &str = include_str!("../dialect/completions.toml");
 const DIAGNOSTICS_TOML: &str = include_str!("../dialect/diagnostics.toml");
+const HYPERLOGLOG_MAGIC: &[u8; 4] = b"HYLL";
+
+type StreamEntryFields = Vec<(String, String)>;
+type StreamEntries = Vec<(String, StreamEntryFields)>;
 
 /// Cached dialect bundle - loaded once on first access
 fn get_dialect_bundle() -> &'static DialectBundle {
@@ -682,7 +686,7 @@ impl RedisConnection {
         match value {
             redis::Value::Nil => String::new(),
             redis::Value::Int(value) => value.to_string(),
-            redis::Value::BulkString(bytes) => String::from_utf8_lossy(bytes).to_string(),
+            redis::Value::BulkString(bytes) => bytes_to_display_string(bytes),
             redis::Value::SimpleString(value) => value.clone(),
             redis::Value::Okay => "OK".to_string(),
             redis::Value::Double(value) => value.to_string(),
@@ -782,26 +786,68 @@ impl RedisConnection {
     fn parse_zset_items(value: &str) -> Result<Vec<(f64, String)>> {
         let json = serde_json::from_str::<serde_json::Value>(value)
             .map_err(|error| ZqlzError::Driver(format!("Invalid zset payload JSON: {}", error)))?;
-        let array = json
-            .as_array()
-            .ok_or_else(|| ZqlzError::Driver("ZSet payload must be a JSON array".to_string()))?;
+
+        if let Some(object) = json.as_object() {
+            return object
+                .iter()
+                .map(|(member, score)| {
+                    let score = score.as_f64().ok_or_else(|| {
+                        ZqlzError::Driver(format!("ZSet member '{}' has invalid score", member))
+                    })?;
+                    Ok((score, member.clone()))
+                })
+                .collect();
+        }
+
+        let array = json.as_array().ok_or_else(|| {
+            ZqlzError::Driver("ZSet payload must be a JSON object or array".to_string())
+        })?;
+
+        if array.iter().all(|item| item.as_object().is_some()) {
+            return array
+                .iter()
+                .map(|item| {
+                    let object = item.as_object().ok_or_else(|| {
+                        ZqlzError::Driver("ZSet members must be JSON objects".to_string())
+                    })?;
+                    let score = object
+                        .get("score")
+                        .and_then(|value| value.as_f64())
+                        .ok_or_else(|| {
+                            ZqlzError::Driver("ZSet member missing score".to_string())
+                        })?;
+                    let member = object
+                        .get("member")
+                        .and_then(|value| value.as_str())
+                        .ok_or_else(|| {
+                            ZqlzError::Driver("ZSet member missing member".to_string())
+                        })?;
+                    Ok((score, member.to_string()))
+                })
+                .collect();
+        }
+
         array
-            .iter()
-            .map(|item| {
-                let object = item.as_object().ok_or_else(|| {
-                    ZqlzError::Driver("ZSet members must be JSON objects".to_string())
+            .chunks(2)
+            .map(|chunk| {
+                if chunk.len() != 2 {
+                    return Err(ZqlzError::Driver(
+                        "ZSet array payload must contain score/member pairs".to_string(),
+                    ));
+                }
+                let score = chunk[0].as_f64().ok_or_else(|| {
+                    ZqlzError::Driver("ZSet array pair missing score".to_string())
                 })?;
-                let score = object
-                    .get("score")
-                    .and_then(|value| value.as_f64())
-                    .ok_or_else(|| ZqlzError::Driver("ZSet member missing score".to_string()))?;
-                let member = object
-                    .get("member")
-                    .and_then(|value| value.as_str())
-                    .ok_or_else(|| ZqlzError::Driver("ZSet member missing member".to_string()))?;
+                let member = chunk[1].as_str().ok_or_else(|| {
+                    ZqlzError::Driver("ZSet array pair missing member".to_string())
+                })?;
                 Ok((score, member.to_string()))
             })
             .collect()
+    }
+
+    fn parse_stream_entries(value: &str) -> Result<StreamEntries> {
+        parse_stream_entries(value)
     }
 
     fn ensure_key_value_database(&self, database_index: u16) -> Result<()> {
@@ -852,10 +898,10 @@ impl RedisConnection {
                 })
                 .await
                 .ok()
-                .map(|value| Self::value_to_string(&value)),
+                .map(|value| string_key_preview(key, &value)),
             KeyValueKind::Json => self
-                .run_redis_command("JSON.GET", |command| {
-                    command.arg(key);
+                .run_redis_command("GETRANGE", |command| {
+                    command.arg(key).arg(0).arg(120);
                 })
                 .await
                 .ok()
@@ -889,13 +935,21 @@ impl RedisConnection {
                 .await
                 .ok()
                 .and_then(hash_scan_preview),
-            KeyValueKind::Stream => self
-                .run_redis_command("XREVRANGE", |command| {
+            KeyValueKind::Stream => {
+                let length = self
+                    .run_redis_int_command("XLEN", |command| {
+                        command.arg(key);
+                    })
+                    .await
+                    .ok()
+                    .unwrap_or(0);
+                self.run_redis_command("XREVRANGE", |command| {
                     command.arg(key).arg("+").arg("-").arg("COUNT").arg(1);
                 })
                 .await
                 .ok()
-                .map(|value| truncate_text(&Self::value_to_string(&value), 120)),
+                .map(|value| stream_preview(value, length))
+            }
             KeyValueKind::None => None,
         }
     }
@@ -958,6 +1012,54 @@ fn truncate_text(value: &str, max_len: usize) -> String {
     }
 }
 
+fn bytes_to_display_string(bytes: &[u8]) -> String {
+    if is_hyperloglog_payload(bytes) {
+        return format!("HyperLogLog payload ({} B)", bytes.len());
+    }
+
+    if let Ok(value) = std::str::from_utf8(bytes)
+        && value.chars().all(is_text_display_character)
+    {
+        return value.to_string();
+    }
+
+    let hex = bytes
+        .iter()
+        .take(32)
+        .map(|byte| format!("{:02x}", byte))
+        .collect::<Vec<_>>()
+        .join(" ");
+    let suffix = if bytes.len() > 32 { " ..." } else { "" };
+    format!("Binary data ({} B): {}{}", bytes.len(), hex, suffix)
+}
+
+fn bytes_to_zqlz_value(bytes: &[u8]) -> Value {
+    if let Ok(value) = std::str::from_utf8(bytes)
+        && value.chars().all(is_text_display_character)
+    {
+        return Value::String(value.to_string());
+    }
+
+    Value::Bytes(bytes.to_vec())
+}
+
+fn is_text_display_character(character: char) -> bool {
+    !character.is_control() || matches!(character, '\n' | '\r' | '\t')
+}
+
+fn is_hyperloglog_payload(bytes: &[u8]) -> bool {
+    bytes.starts_with(HYPERLOGLOG_MAGIC)
+}
+
+fn string_key_preview(key: &str, value: &redis::Value) -> String {
+    match value {
+        redis::Value::BulkString(bytes) if is_hyperloglog_payload(bytes) => {
+            format!("HyperLogLog key ({} B). Run PFCOUNT {}", bytes.len(), key)
+        }
+        _ => RedisConnection::value_to_string(value),
+    }
+}
+
 fn array_preview(value: redis::Value, open: &str, close: &str) -> String {
     let items = match value {
         redis::Value::Array(items) => items
@@ -1012,6 +1114,187 @@ fn zset_preview(value: redis::Value) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn stream_preview(value: redis::Value, length: i64) -> String {
+    let redis::Value::Array(entries) = value else {
+        return format!("{} entries", length);
+    };
+    let Some(redis::Value::Array(parts)) = entries.first() else {
+        return format!("{} entries", length);
+    };
+    let Some(id) = parts.first().map(RedisConnection::value_to_string) else {
+        return format!("{} entries", length);
+    };
+    format!("{} entries [{}]", length, truncate_text(&id, 32))
+}
+
+fn stream_entries_to_json(value: &redis::Value) -> Result<String> {
+    let redis::Value::Array(entries) = value else {
+        return Ok("[]".to_string());
+    };
+
+    let mut serialized_entries = Vec::new();
+    for entry in entries {
+        let redis::Value::Array(parts) = entry else {
+            continue;
+        };
+        if parts.len() != 2 {
+            continue;
+        }
+
+        let id = RedisConnection::value_to_string(&parts[0]);
+        let redis::Value::Array(field_values) = &parts[1] else {
+            continue;
+        };
+
+        let mut fields = serde_json::Map::new();
+        for chunk in field_values.chunks(2) {
+            if chunk.len() != 2 {
+                continue;
+            }
+            fields.insert(
+                RedisConnection::value_to_string(&chunk[0]),
+                serde_json::Value::String(RedisConnection::value_to_string(&chunk[1])),
+            );
+        }
+
+        let mut entry_object = serde_json::Map::new();
+        entry_object.insert("id".to_string(), serde_json::Value::String(id));
+        entry_object.insert("fields".to_string(), serde_json::Value::Object(fields));
+        serialized_entries.push(serde_json::Value::Object(entry_object));
+    }
+
+    serde_json::to_string(&serialized_entries)
+        .map_err(|error| ZqlzError::Driver(format!("Invalid stream payload JSON: {}", error)))
+}
+
+fn parse_stream_entries(value: &str) -> Result<StreamEntries> {
+    let json = serde_json::from_str::<serde_json::Value>(value)
+        .map_err(|error| ZqlzError::Driver(format!("Invalid stream payload JSON: {}", error)))?;
+    let entries = json
+        .as_array()
+        .ok_or_else(|| ZqlzError::Driver("Stream payload must be a JSON array".to_string()))?;
+
+    entries
+        .iter()
+        .map(|entry| {
+            let object = entry.as_object().ok_or_else(|| {
+                ZqlzError::Driver("Stream entries must be JSON objects".to_string())
+            })?;
+            let id = object
+                .get("id")
+                .and_then(|value| value.as_str())
+                .filter(|id| !id.trim().is_empty())
+                .unwrap_or("*")
+                .to_string();
+            let fields = object
+                .get("fields")
+                .and_then(|value| value.as_object())
+                .ok_or_else(|| {
+                    ZqlzError::Driver("Stream entry missing fields object".to_string())
+                })?;
+            let fields = fields
+                .iter()
+                .filter(|(field, _)| !field.trim().is_empty())
+                .map(|(field, value)| {
+                    let value = match value {
+                        serde_json::Value::String(value) => value.clone(),
+                        other => other.to_string(),
+                    };
+                    (field.clone(), value)
+                })
+                .collect::<Vec<_>>();
+            if fields.is_empty() {
+                return Err(ZqlzError::Driver(
+                    "Stream entries must contain at least one field".to_string(),
+                ));
+            }
+            Ok((id, fields))
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::*;
+
+    #[test]
+    fn bytes_to_display_string_keeps_plain_text() {
+        assert_eq!(bytes_to_display_string(b"enabled"), "enabled");
+    }
+
+    #[test]
+    fn bytes_to_display_string_formats_binary_payloads() {
+        let value = bytes_to_display_string(&[0, 159, 146, 150]);
+        assert_eq!(value, "Binary data (4 B): 00 9f 92 96");
+    }
+
+    #[test]
+    fn string_key_preview_identifies_hyperloglog_payloads() {
+        let value = redis::Value::BulkString(vec![b'H', b'Y', b'L', b'L', 1, 0, 0, 0]);
+        assert_eq!(
+            string_key_preview("zqlz:hll:test", &value),
+            "HyperLogLog key (8 B). Run PFCOUNT zqlz:hll:test"
+        );
+    }
+
+    #[test]
+    fn bytes_to_zqlz_value_preserves_binary_bytes() {
+        assert_eq!(
+            bytes_to_zqlz_value(&[0, 159, 146, 150]),
+            Value::Bytes(vec![0, 159, 146, 150])
+        );
+    }
+}
+
+#[cfg(test)]
+mod zset_payload_tests {
+    use super::*;
+
+    #[test]
+    fn parse_zset_items_accepts_member_score_object() {
+        let items = RedisConnection::parse_zset_items(r#"{"gru":34800,"dfw":92783}"#).unwrap();
+        assert_eq!(
+            items,
+            vec![(92783.0, "dfw".to_string()), (34800.0, "gru".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_zset_items_accepts_score_member_objects() {
+        let items =
+            RedisConnection::parse_zset_items(r#"[{"score":34800,"member":"gru"}]"#).unwrap();
+        assert_eq!(items, vec![(34800.0, "gru".to_string())]);
+    }
+
+    #[test]
+    fn parse_zset_items_accepts_score_member_pairs() {
+        let items = RedisConnection::parse_zset_items(r#"[34800,"gru",92783,"dfw"]"#).unwrap();
+        assert_eq!(
+            items,
+            vec![(34800.0, "gru".to_string()), (92783.0, "dfw".to_string())]
+        );
+    }
+
+    #[test]
+    fn parse_stream_entries_accepts_entry_objects() {
+        let items = RedisConnection::parse_stream_entries(
+            r#"[{"id":"1778802803694-1","fields":{"player":"ada","severity":"low"}}]"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            items,
+            vec![(
+                "1778802803694-1".to_string(),
+                vec![
+                    ("player".to_string(), "ada".to_string()),
+                    ("severity".to_string(), "low".to_string())
+                ]
+            )]
+        );
+    }
 }
 
 #[async_trait]
@@ -1477,20 +1760,14 @@ impl KeyValueStore for RedisConnection {
                         command.arg(key);
                     })
                     .await?;
-                Self::rows_from_values(vec![Value::String(Self::value_to_string(&value))], "index")
+                Self::rows_from_values(vec![redis_value_to_zqlz_value(&value)], "index")
             }
             KeyValueKind::Json => {
                 let value = self
-                    .run_redis_command("JSON.GET", |command| {
+                    .run_redis_command("GET", |command| {
                         command.arg(key);
                     })
-                    .await
-                    .map_err(|error| {
-                        ZqlzError::Driver(format!(
-                            "RedisJSON is not available or JSON.GET failed: {}",
-                            error
-                        ))
-                    })?;
+                    .await?;
                 Self::rows_from_values(vec![Value::String(Self::value_to_string(&value))], "index")
             }
             KeyValueKind::List => {
@@ -1610,14 +1887,8 @@ impl KeyValueStore for RedisConnection {
                         command.arg(key).arg("-").arg("+").arg("COUNT").arg(limit);
                     })
                     .await?;
-                let values = match value {
-                    redis::Value::Array(items) => items
-                        .iter()
-                        .map(|item| Value::String(Self::value_to_string(item)))
-                        .collect(),
-                    _ => Vec::new(),
-                };
-                Self::rows_from_values(values, "entry")
+                let serialized = stream_entries_to_json(&value)?;
+                Self::rows_from_values(vec![Value::String(serialized)], "entry")
             }
             KeyValueKind::None => QueryResult::empty(),
         };
@@ -1659,19 +1930,10 @@ impl KeyValueStore for RedisConnection {
                     .await?;
                 }
                 KeyValueKind::Json => {
-                    self.run_redis_command("JSON.SET", |command| {
-                        command
-                            .arg(temporary_key)
-                            .arg("$")
-                            .arg(&request.serialized_value);
+                    self.run_redis_command("SET", |command| {
+                        command.arg(temporary_key).arg(&request.serialized_value);
                     })
-                    .await
-                    .map_err(|error| {
-                        ZqlzError::Driver(format!(
-                            "RedisJSON is not available or JSON.SET failed: {}",
-                            error
-                        ))
-                    })?;
+                    .await?;
                 }
                 KeyValueKind::List => {
                     let items = Self::parse_collection_items(&request.serialized_value);
@@ -1734,14 +1996,21 @@ impl KeyValueStore for RedisConnection {
                     .await?;
                 }
                 KeyValueKind::Stream => {
-                    self.run_redis_command("XADD", |command| {
-                        command
-                            .arg(temporary_key)
-                            .arg("*")
-                            .arg("message")
-                            .arg(&request.serialized_value);
-                    })
-                    .await?;
+                    let entries = Self::parse_stream_entries(&request.serialized_value)?;
+                    if entries.is_empty() {
+                        return Err(ZqlzError::Driver(
+                            "Cannot save an empty Redis stream".to_string(),
+                        ));
+                    }
+                    for (id, fields) in entries {
+                        self.run_redis_command("XADD", |command| {
+                            command.arg(temporary_key).arg(id);
+                            for (field, value) in fields {
+                                command.arg(field).arg(value);
+                            }
+                        })
+                        .await?;
+                    }
                 }
                 KeyValueKind::None => {
                     return Err(ZqlzError::Driver(
@@ -1811,17 +2080,8 @@ impl KeyValueStore for RedisConnection {
             .unwrap_or_default();
         match request.kind {
             KeyValueKind::String | KeyValueKind::Json => {
-                let command_name = if request.kind == KeyValueKind::Json {
-                    "JSON.SET"
-                } else {
-                    "SET"
-                };
-                self.run_redis_command(command_name, |command| {
-                    if request.kind == KeyValueKind::Json {
-                        command.arg(&request.key).arg("$").arg(&new_value);
-                    } else {
-                        command.arg(&request.key).arg(&new_value);
-                    }
+                self.run_redis_command("SET", |command| {
+                    command.arg(&request.key).arg(&new_value);
                 })
                 .await?;
             }
@@ -1949,10 +2209,9 @@ fn redis_value_to_rows(value: &redis::Value) -> (Vec<ColumnMeta>, Vec<Row>) {
             )]
         }
         redis::Value::BulkString(data) => {
-            let s = String::from_utf8_lossy(data).to_string();
             vec![Row::new(
                 column_names.clone(),
-                vec![Value::Null, Value::String(s)],
+                vec![Value::Null, bytes_to_zqlz_value(data)],
             )]
         }
         redis::Value::Array(arr) => {
@@ -2062,7 +2321,7 @@ fn redis_value_to_zqlz_value(value: &redis::Value) -> Value {
     match value {
         redis::Value::Nil => Value::Null,
         redis::Value::Int(n) => Value::Int64(*n),
-        redis::Value::BulkString(data) => Value::String(String::from_utf8_lossy(data).to_string()),
+        redis::Value::BulkString(data) => bytes_to_zqlz_value(data),
         redis::Value::Okay => Value::String("OK".to_string()),
         redis::Value::SimpleString(s) => Value::String(s.clone()),
         redis::Value::Double(d) => Value::Float64(*d),

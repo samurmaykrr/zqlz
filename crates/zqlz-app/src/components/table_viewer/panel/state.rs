@@ -185,7 +185,9 @@ impl TableViewerPanel {
         cx: &mut Context<Self>,
     ) {
         let merge_column = |column: &mut zqlz_core::ColumnMeta, schema_col: &SchemaColumnInfo| {
-            column.data_type = schema_col.data_type.clone();
+            if !schema_col.data_type.is_empty() {
+                column.data_type = schema_col.data_type.clone();
+            }
             column.nullable = schema_col.nullable;
             column.max_length = schema_col.max_length;
             column.precision = schema_col.precision;

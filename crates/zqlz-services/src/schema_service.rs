@@ -164,6 +164,13 @@ impl SchemaService {
             .map(ToOwned::to_owned)
     }
 
+    fn scoped_column_cache_key(table_name: &str, schema: Option<&str>) -> String {
+        match Self::normalize_scope(schema) {
+            Some(schema) => format!("{schema}.{table_name}"),
+            None => table_name.to_string(),
+        }
+    }
+
     async fn resolve_database_name_for_connection(
         connection: &Arc<dyn Connection>,
     ) -> Option<String> {
@@ -1297,6 +1304,8 @@ impl SchemaService {
     /// Call this after schema-modifying operations (ALTER TABLE, etc.) so the
     /// next `get_table_details` call fetches fresh data.
     pub fn invalidate_table_details(&self, connection_id: Uuid, table_name: &str) {
+        self.cache
+            .invalidate_columns_for_table(connection_id, table_name);
         self.table_details_cache
             .write()
             .retain(|(conn_id, cached_table_name, _), _| {
@@ -1679,16 +1688,25 @@ impl SchemaService {
         schema: Option<&str>,
         table_type: TableType,
     ) -> ServiceResult<Vec<SchemaColumnInfo>> {
-        if let Some(cached_columns) = self.cache.get_columns(connection_id, table_name) {
-            tracing::debug!("Table columns cache hit for {}", table_name);
-            return Ok(cached_columns);
+        let cache_key = Self::scoped_column_cache_key(table_name, schema);
+        if let Some(cached_columns) = self.cache.get_columns(connection_id, &cache_key) {
+            if cached_columns.iter().all(|column| column.data_type.is_empty()) {
+                tracing::warn!(
+                    table_name = %table_name,
+                    schema = ?schema,
+                    "Ignoring cached table columns because all data types are empty"
+                );
+            } else {
+                tracing::debug!("Table columns cache hit for {}", cache_key);
+                return Ok(cached_columns);
+            }
         }
 
         tracing::debug!("Table columns cache miss, loading from database");
         match schema_introspection.get_columns(schema, table_name).await {
             Ok(columns) => {
                 self.cache
-                    .set_columns(connection_id, table_name, columns.clone());
+                    .set_columns(connection_id, &cache_key, columns.clone());
                 Ok(columns)
             }
             Err(error)
@@ -1704,7 +1722,7 @@ impl SchemaService {
                     .load_sqlite_virtual_table_columns(schema_introspection, table_name)
                     .await?;
                 self.cache
-                    .set_columns(connection_id, table_name, columns.clone());
+                    .set_columns(connection_id, &cache_key, columns.clone());
                 Ok(columns)
             }
             Err(error) => Err(ServiceError::SchemaLoadFailed(error.to_string())),

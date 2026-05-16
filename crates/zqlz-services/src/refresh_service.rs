@@ -9,7 +9,10 @@ use std::sync::Arc;
 
 use uuid::Uuid;
 use zqlz_connection::{ConnectionManager, SidebarObjectCapabilities};
-use zqlz_core::{Connection, ConnectionScope, DocumentCollectionInfo, DriverCategory};
+use zqlz_core::{
+    Connection, ConnectionScope, DocumentCollectionInfo, DocumentDatabaseObjects, DriverCategory,
+    ObjectsPanelData, ObjectsPanelManifest,
+};
 
 use crate::{
     DatabaseSchema, DocumentService, KeyValueService, SchemaService, ServiceError, ServiceResult,
@@ -112,7 +115,7 @@ pub enum ConnectionRefreshPayload {
     /// Refresh payload for key-value drivers.
     KeyValue(KeyValueConnectionRefresh),
     /// Refresh payload for document drivers.
-    Document(DocumentConnectionRefresh),
+    Document(Box<DocumentConnectionRefresh>),
 }
 
 /// Refreshed metadata for relational-style connections.
@@ -134,6 +137,10 @@ pub struct RelationalConnectionRefresh {
 pub struct KeyValueConnectionRefresh {
     /// Logical databases keyed by index with best-effort sizes/counts.
     pub databases: Vec<(u16, Option<i64>)>,
+    /// Driver-provided objects panel rows.
+    pub objects_panel_data: ObjectsPanelData,
+    /// Driver-provided objects panel manifest.
+    pub objects_panel_manifest: ObjectsPanelManifest,
     /// Sidebar object capabilities resolved for this connection.
     pub object_capabilities: SidebarObjectCapabilities,
 }
@@ -145,6 +152,12 @@ pub struct DocumentConnectionRefresh {
     pub databases: Vec<(String, Option<i64>)>,
     /// Document collections loaded for available databases.
     pub collections: Vec<DocumentCollectionInfo>,
+    /// Native document metadata loaded for available databases.
+    pub objects: DocumentDatabaseObjects,
+    /// Driver-provided objects panel rows.
+    pub objects_panel_data: ObjectsPanelData,
+    /// Driver-provided objects panel manifest.
+    pub objects_panel_manifest: ObjectsPanelManifest,
     /// Sidebar object capabilities resolved for this connection.
     pub object_capabilities: SidebarObjectCapabilities,
 }
@@ -296,12 +309,30 @@ impl RefreshService {
         connection_id: Uuid,
     ) -> ServiceResult<ConnectionRefresh> {
         let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
-        let databases = self.key_value_service.load_databases(connection).await?;
+        let databases = self
+            .key_value_service
+            .load_databases(connection.clone())
+            .await?;
+        let introspection = connection.as_schema_introspection().ok_or_else(|| {
+            ServiceError::SchemaLoadFailed(
+                "Key-value driver does not provide objects panel introspection".to_string(),
+            )
+        })?;
+        let objects_panel_data = introspection
+            .list_tables_extended(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+        let objects_panel_manifest = introspection
+            .list_objects_panel_manifest(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
 
         Ok(ConnectionRefresh {
             connection_id,
             payload: ConnectionRefreshPayload::KeyValue(KeyValueConnectionRefresh {
                 databases,
+                objects_panel_data,
+                objects_panel_manifest,
                 object_capabilities,
             }),
         })
@@ -313,6 +344,11 @@ impl RefreshService {
         connection_id: Uuid,
     ) -> ServiceResult<ConnectionRefresh> {
         let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
+        let introspection = connection.as_schema_introspection().ok_or_else(|| {
+            ServiceError::SchemaLoadFailed(
+                "Document driver does not provide objects panel introspection".to_string(),
+            )
+        })?;
         let databases = self
             .document_service
             .list_databases(connection.clone())
@@ -320,14 +356,33 @@ impl RefreshService {
             .into_iter()
             .collect::<Vec<_>>();
         let mut collections = Vec::new();
+        let mut objects = DocumentDatabaseObjects::default();
 
         for database in &databases {
             match self
                 .document_service
-                .list_collections(connection.clone(), &database.name)
+                .list_database_objects(connection.clone(), &database.name)
                 .await
             {
-                Ok(database_collections) => collections.extend(database_collections),
+                Ok(database_objects) => {
+                    collections.extend(database_objects.collections.clone());
+                    objects.collections.extend(database_objects.collections);
+                    objects.indexes.extend(database_objects.indexes);
+                    objects.functions.extend(database_objects.functions);
+                    objects
+                        .gridfs_buckets
+                        .extend(database_objects.gridfs_buckets);
+                    objects.users.extend(database_objects.users);
+                    objects.roles.extend(database_objects.roles);
+                    objects
+                        .search_indexes
+                        .extend(database_objects.search_indexes);
+                    objects
+                        .vector_indexes
+                        .extend(database_objects.vector_indexes);
+                    objects.server.extend(database_objects.server);
+                    objects.sharding.extend(database_objects.sharding);
+                }
                 Err(error) => {
                     tracing::warn!(
                         connection_id = %connection_id,
@@ -350,14 +405,25 @@ impl RefreshService {
                 )
             })
             .collect();
+        let objects_panel_data = introspection
+            .list_tables_extended(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
+        let objects_panel_manifest = introspection
+            .list_objects_panel_manifest(None)
+            .await
+            .map_err(|error| ServiceError::SchemaLoadFailed(error.to_string()))?;
 
         Ok(ConnectionRefresh {
             connection_id,
-            payload: ConnectionRefreshPayload::Document(DocumentConnectionRefresh {
+            payload: ConnectionRefreshPayload::Document(Box::new(DocumentConnectionRefresh {
                 databases,
                 collections,
+                objects,
+                objects_panel_data,
+                objects_panel_manifest,
                 object_capabilities,
-            }),
+            })),
         })
     }
 }

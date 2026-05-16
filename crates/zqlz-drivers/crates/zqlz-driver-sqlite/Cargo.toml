@@ -12,6 +12,7 @@ path = "src/zqlz_driver_sqlite.rs"
 
 [dependencies]
 zqlz-core.workspace = true
+zqlz-analyzer.workspace = true
 async-trait.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

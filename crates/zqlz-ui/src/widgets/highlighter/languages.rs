@@ -154,11 +154,25 @@ pub(super) fn register_sql_dialects(registry: &LanguageRegistry) {
     }
 }
 
+const MONGODB_HIGHLIGHTS: &str = concat!(
+    include_str!("languages/javascript/highlights.scm"),
+    "\n",
+    r#"
+((identifier) @variable.builtin
+  (#eq? @variable.builtin "db"))
+
+((property_identifier) @operator
+  (#match? @operator "^\$"))
+
+((shorthand_property_identifier) @operator
+  (#match? @operator "^\$"))
+"#
+);
+
 /// Registers non-SQL dialects (Redis, MongoDB) into the registry.
-///
-/// These use JSON grammar as a base for structure with dialect-specific highlights.
 pub(super) fn register_nosql_dialects(registry: &LanguageRegistry) {
     let json_grammar = tree_sitter::Language::new(tree_sitter_json::LANGUAGE);
+    let javascript_grammar = tree_sitter::Language::new(tree_sitter_javascript::LANGUAGE);
 
     let dialects: &[(&str, &str, &str, &str)] = &[
         (
@@ -169,25 +183,21 @@ pub(super) fn register_nosql_dialects(registry: &LanguageRegistry) {
         ),
         (
             "mongodb",
-            include_str!("languages/mongodb/highlights.scm"),
+            MONGODB_HIGHLIGHTS,
             include_str!("languages/mongodb/brackets.scm"),
             include_str!("languages/mongodb/folds.scm"),
         ),
     ];
 
     for (name, highlights, brackets, folds) in dialects {
+        let grammar = match *name {
+            "mongodb" => javascript_grammar.clone(),
+            _ => json_grammar.clone(),
+        };
+
         registry.register(
             name,
-            &LanguageConfig::new(
-                *name,
-                json_grammar.clone(),
-                vec![],
-                highlights,
-                "",
-                "",
-                brackets,
-                folds,
-            ),
+            &LanguageConfig::new(*name, grammar, vec![], highlights, "", "", brackets, folds),
         );
     }
 }

@@ -345,6 +345,11 @@ impl TableViewerPanel {
         delegate.set_driver_category(driver_category);
         delegate.set_primary_key_columns(self.primary_key_columns.clone());
         self.apply_preserved_column_widths(&mut delegate, &preserved_widths);
+        let column_meta = delegate.column_meta.clone();
+        TableViewerDelegate::apply_key_value_database_column_widths(
+            delegate.columns_mut(),
+            &column_meta,
+        );
         self.apply_active_sort_to_delegate_columns(&mut delegate, cx);
 
         let table_state = cx.new(|cx| {

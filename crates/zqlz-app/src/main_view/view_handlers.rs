@@ -233,6 +233,12 @@ async fn fetch_sequence_definition(
     schema_name: Option<&str>,
     sequence_name: &str,
 ) -> Result<String, String> {
+    if connection_is_postgres(connection.as_ref()) {
+        return fetch_sequence_design(connection, schema_name, sequence_name)
+            .await
+            .map(|design| design.to_ddl());
+    }
+
     fetch_database_object_definition(
         connection,
         schema_name,
@@ -242,6 +248,16 @@ async fn fetch_sequence_definition(
     )
     .await
     .map_err(|error| format!("Failed to fetch sequence definition: {}", error))
+}
+
+fn build_drop_extension_statement(
+    connection: &Arc<dyn zqlz_core::Connection>,
+    extension_name: &str,
+) -> String {
+    format!(
+        "DROP EXTENSION {};",
+        connection.quote_identifier(extension_name)
+    )
 }
 
 async fn fetch_sequence_design(
@@ -349,6 +365,7 @@ struct ObjectEditorConnection {
     connection_name: String,
     connection: Arc<dyn zqlz_core::Connection>,
     driver_name: String,
+    database_name: Option<String>,
 }
 
 struct ObjectEditorDefinition {
@@ -404,6 +421,7 @@ impl MainView {
             Some(connection.driver_name),
             cx,
         );
+        editor.set_current_database(connection.database_name, cx);
 
         editor
     }
@@ -555,6 +573,7 @@ impl MainView {
                                     connection_name: connection_name.clone(),
                                     connection: connection.clone(),
                                     driver_name: driver_name.clone(),
+                                    database_name: target_database.clone(),
                                 },
                                 MainView::handle_view_editor_event,
                                 window,
@@ -636,6 +655,7 @@ impl MainView {
                 connection_name,
                 connection: connection.clone(),
                 driver_name,
+                database_name: target_database,
             },
             MainView::handle_view_editor_event,
             window,
@@ -722,6 +742,118 @@ impl MainView {
                             Ok(_) => {
                                 tracing::info!("View '{}' deleted successfully", view_name);
 
+                                if let Err(error) =
+                                    cx.update_window(window_handle, |_, _window, cx| {
+                                        if let Err(error) = main_view.update(cx, |main_view, cx| {
+                                            main_view.request_refresh(
+                                                RefreshScope::ConnectionSurfaces(connection_id),
+                                                cx,
+                                            );
+                                        }) {
+                                            tracing::error!(
+                                                %error,
+                                                "Failed to refresh after deleting extension"
+                                            );
+                                        }
+                                    })
+                                {
+                                    tracing::error!(
+                                        %error,
+                                        "Failed to update window after deleting extension"
+                                    );
+                                }
+                            }
+                            Err(e) => {
+                                tracing::error!("Failed to delete view: {}", e);
+                            }
+                        }
+                    })
+                    .detach();
+
+                    true
+                })
+                .confirm()
+        });
+    }
+
+    pub(super) fn delete_extension(
+        &mut self,
+        connection_id: Uuid,
+        extension_name: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::info!(
+            "Delete extension: {} on connection {}",
+            extension_name,
+            connection_id
+        );
+
+        let Some(app_state) = cx.try_global::<AppState>() else {
+            tracing::error!("No AppState available");
+            return;
+        };
+
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(connection_id, target_database.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(connection_id))
+        else {
+            tracing::error!("Connection not found: {}", connection_id);
+            return;
+        };
+
+        let connection = connection.clone();
+        let window_handle = window.window_handle();
+        let main_view = cx.entity().downgrade();
+        let extension_name_for_dialog = extension_name.clone();
+
+        window.open_dialog(cx, move |dialog, _window, cx| {
+            let connection = connection.clone();
+            let window_handle = window_handle;
+            let main_view = main_view.clone();
+            let extension_name = extension_name_for_dialog.clone();
+
+            dialog
+                .title("Delete Extension")
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(div().child(format!(
+                            "Are you sure you want to delete extension '{}'?",
+                            extension_name
+                        )))
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(cx.theme().muted_foreground)
+                                .child("This action cannot be undone."),
+                        ),
+                )
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text("Delete")
+                        .ok_variant(ButtonVariant::Danger),
+                )
+                .on_ok(move |_, _window, cx| {
+                    let connection = connection.clone();
+                    let main_view = main_view.clone();
+                    let extension_name = extension_name.clone();
+
+                    cx.spawn(async move |cx| {
+                        let sql = build_drop_extension_statement(&connection, &extension_name);
+                        match connection.execute(&sql, &[]).await {
+                            Ok(_) => {
+                                tracing::info!(
+                                    "Extension '{}' deleted successfully",
+                                    extension_name
+                                );
+
                                 let _ = cx.update_window(window_handle, |_, _window, cx| {
                                     let _ = main_view.update(cx, |main_view, cx| {
                                         main_view.request_refresh(
@@ -731,8 +863,8 @@ impl MainView {
                                     });
                                 });
                             }
-                            Err(e) => {
-                                tracing::error!("Failed to delete view: {}", e);
+                            Err(error) => {
+                                tracing::error!("Failed to delete extension: {}", error);
                             }
                         }
                     })
@@ -1016,17 +1148,34 @@ impl MainView {
             }
             // For standard query execution events, delegate to the normal query handler
             QueryEditorEvent::ExecuteQuery {
-                sql, connection_id, ..
+                sql,
+                connection_id,
+                database_name,
+                ..
             } => {
                 tracing::info!("Executing view query: {}", sql);
-                // Can reuse existing query execution logic
-                self.execute_view_query(sql.clone(), *connection_id, window, cx);
+                self.execute_view_query(
+                    sql.clone(),
+                    *connection_id,
+                    database_name.clone(),
+                    window,
+                    cx,
+                );
             }
             QueryEditorEvent::ExecuteSelection {
-                sql, connection_id, ..
+                sql,
+                connection_id,
+                database_name,
+                ..
             } => {
                 tracing::info!("Executing view selection: {}", sql);
-                self.execute_view_query(sql.clone(), *connection_id, window, cx);
+                self.execute_view_query(
+                    sql.clone(),
+                    *connection_id,
+                    database_name.clone(),
+                    window,
+                    cx,
+                );
             }
             // Other events can be handled as needed
             _ => {}
@@ -1038,6 +1187,7 @@ impl MainView {
         &mut self,
         sql: String,
         connection_id: Option<Uuid>,
+        database_name: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1063,7 +1213,11 @@ impl MainView {
         };
         let conn_id = selection.connection_id;
 
-        let Some(connection) = app_state.connection_service.get_connection(conn_id) else {
+        let Some(connection) = app_state
+            .connection_service
+            .get_connection_for_database_cached(conn_id, database_name.as_deref())
+            .or_else(|| app_state.connection_service.get_connection(conn_id))
+        else {
             tracing::error!("Connection not found: {}", conn_id);
             return;
         };
@@ -1072,7 +1226,7 @@ impl MainView {
         let results_panel = self.results_panel.clone();
         let connection = connection.clone();
         let connection_name = Some(selection.connection_name);
-        let database_name = selection.default_database_name;
+        let database_name = database_name.or(selection.default_database_name);
 
         results_panel.update(cx, |panel, cx| {
             panel.set_loading(true, cx);
@@ -1312,11 +1466,15 @@ impl MainView {
             return;
         };
 
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
+        let editor_database = editor_weak
+            .upgrade()
+            .and_then(|editor| editor.read(cx).current_database());
+        let target_database = editor_database.or_else(|| {
+            self.workspace_state
+                .read(cx)
+                .active_database()
+                .map(ToString::to_string)
+        });
         let Some(connection) = app_state
             .connection_service
             .get_connection_for_database_cached(connection_id, target_database.as_deref())
@@ -1393,6 +1551,7 @@ impl MainView {
         connection_id: Uuid,
         function_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
         signature: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1409,11 +1568,12 @@ impl MainView {
             return;
         };
 
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
+        let target_database = database_name.or_else(|| {
+            self.workspace_state
+                .read(cx)
+                .active_database()
+                .map(ToString::to_string)
+        });
         let Some(connection) = app_state
             .connection_service
             .get_connection_for_database_cached(connection_id, target_database.as_deref())
@@ -1468,6 +1628,7 @@ impl MainView {
                                     connection_name: connection_name.clone(),
                                     connection: connection.clone(),
                                     driver_name: driver_name.clone(),
+                                    database_name: target_database.clone(),
                                 },
                                 MainView::handle_view_editor_event,
                                 window,
@@ -1501,6 +1662,7 @@ impl MainView {
         connection_id: Uuid,
         procedure_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
         signature: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -1517,11 +1679,12 @@ impl MainView {
             return;
         };
 
-        let target_database = self
-            .workspace_state
-            .read(cx)
-            .active_database()
-            .map(ToString::to_string);
+        let target_database = database_name.or_else(|| {
+            self.workspace_state
+                .read(cx)
+                .active_database()
+                .map(ToString::to_string)
+        });
         let Some(connection) = app_state
             .connection_service
             .get_connection_for_database_cached(connection_id, target_database.as_deref())
@@ -1576,6 +1739,7 @@ impl MainView {
                                     connection_name: connection_name.clone(),
                                     connection: connection.clone(),
                                     driver_name: driver_name.clone(),
+                                    database_name: target_database.clone(),
                                 },
                                 MainView::handle_view_editor_event,
                                 window,
@@ -1988,6 +2152,7 @@ impl MainView {
                                     connection_name: connection_name.clone(),
                                     connection: connection.clone(),
                                     driver_name: driver_name.clone(),
+                                    database_name: target_database.clone(),
                                 },
                                 MainView::handle_trigger_editor_event,
                                 window,
@@ -2092,6 +2257,7 @@ END;"#
                 connection_name,
                 connection: connection.clone(),
                 driver_name,
+                database_name: target_database,
             },
             MainView::handle_trigger_editor_event,
             window,
@@ -2598,16 +2764,34 @@ END;"#
                 self.show_query_editor_ddl_preview(object_type, definition, window, cx);
             }
             QueryEditorEvent::ExecuteQuery {
-                sql, connection_id, ..
+                sql,
+                connection_id,
+                database_name,
+                ..
             } => {
                 tracing::info!("Executing trigger query: {}", sql);
-                self.execute_view_query(sql.clone(), *connection_id, window, cx);
+                self.execute_view_query(
+                    sql.clone(),
+                    *connection_id,
+                    database_name.clone(),
+                    window,
+                    cx,
+                );
             }
             QueryEditorEvent::ExecuteSelection {
-                sql, connection_id, ..
+                sql,
+                connection_id,
+                database_name,
+                ..
             } => {
                 tracing::info!("Executing trigger selection: {}", sql);
-                self.execute_view_query(sql.clone(), *connection_id, window, cx);
+                self.execute_view_query(
+                    sql.clone(),
+                    *connection_id,
+                    database_name.clone(),
+                    window,
+                    cx,
+                );
             }
             _ => {}
         }

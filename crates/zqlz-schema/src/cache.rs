@@ -225,6 +225,16 @@ impl SchemaCache {
         entry.columns.insert(table.to_string(), columns);
     }
 
+    /// Remove cached columns for a table, including schema-qualified keys.
+    pub fn invalidate_columns_for_table(&self, connection_id: Uuid, table: &str) {
+        let mut cache = self.cache.write();
+        if let Some(entry) = cache.get_mut(&connection_id) {
+            entry.columns.retain(|key, _| {
+                key != table && key.rsplit_once('.').map(|(_, name)| name != table).unwrap_or(true)
+            });
+        }
+    }
+
     /// Get all cached indexes (keyed by table name)
     pub fn get_all_indexes(&self, connection_id: Uuid) -> Option<HashMap<String, Vec<IndexInfo>>> {
         self.cache

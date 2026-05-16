@@ -4,7 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 
 use uuid::Uuid;
-use zqlz_core::ObjectsPanelManifest;
+use zqlz_core::{
+    DocumentAdminObjectInfo, DocumentCollectionInfo, DocumentFunctionInfo,
+    DocumentGridFsBucketInfo, DocumentIndexInfo, ObjectsPanelManifest,
+};
 use zqlz_drivers::DriverRegistry;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -172,6 +175,8 @@ fn sidebar_driver_registry() -> &'static DriverRegistry {
 pub struct SavedQueryInfo {
     pub id: Uuid,
     pub name: String,
+    pub query_text: String,
+    pub folder: Option<String>,
 }
 
 /// Information about a Redis database for display in the sidebar
@@ -215,9 +220,19 @@ pub struct SidebarDatabaseInfo {
     /// Schema data loaded for this database (populated on demand)
     pub schema: Option<DatabaseSchemaData>,
     /// Document collections loaded for document-store databases.
-    pub collections: Vec<String>,
+    pub collections: Vec<DocumentCollectionInfo>,
+    pub indexes: Vec<DocumentIndexInfo>,
+    pub functions: Vec<DocumentFunctionInfo>,
+    pub gridfs_buckets: Vec<DocumentGridFsBucketInfo>,
+    pub users: Vec<DocumentAdminObjectInfo>,
+    pub roles: Vec<DocumentAdminObjectInfo>,
+    pub search_indexes: Vec<DocumentAdminObjectInfo>,
+    pub vector_indexes: Vec<DocumentAdminObjectInfo>,
+    pub server: Vec<DocumentAdminObjectInfo>,
+    pub sharding: Vec<DocumentAdminObjectInfo>,
     pub collections_expanded: bool,
     pub collections_loading: bool,
+    pub document_expanded_sections: HashSet<String>,
 }
 
 #[derive(Clone, Debug, Default)]

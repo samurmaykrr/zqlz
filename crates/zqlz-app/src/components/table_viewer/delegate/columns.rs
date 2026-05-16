@@ -1,6 +1,28 @@
 use super::*;
 
 impl TableViewerDelegate {
+    pub(in crate::components::table_viewer) fn apply_key_value_database_column_widths(
+        columns: &mut [Column],
+        column_meta: &[ColumnMeta],
+    ) {
+        let is_key_value_database_view = column_meta.len() == 5
+            && column_meta[0].name == "Key"
+            && column_meta[1].name == "Type"
+            && column_meta[2].name == "Value"
+            && column_meta[3].name == "Size"
+            && column_meta[4].name == "TTL";
+
+        if !is_key_value_database_view {
+            return;
+        }
+
+        for (data_col_ix, width) in [360.0, 150.0, 560.0, 150.0, 150.0].into_iter().enumerate() {
+            if let Some(column) = columns.get_mut(data_col_ix + 1) {
+                *column = column.clone().width(column.width.as_f32().max(width));
+            }
+        }
+    }
+
     pub fn freeze_column(&mut self, col_ix: usize) {
         if col_ix > 0 && col_ix < self.columns.len() {
             self.columns[col_ix] = self.columns[col_ix].clone().fixed(ColumnFixed::Left);
@@ -214,5 +236,32 @@ mod tests {
     fn row_number_width_unchanged() {
         assert_eq!(TableViewerDelegate::row_number_column_width(0), 52.0);
         assert_eq!(TableViewerDelegate::row_number_column_width(999), 68.0);
+    }
+
+    #[::core::prelude::v1::test]
+    fn key_value_database_columns_use_wide_defaults() {
+        let mut columns = vec![
+            Column::new("row-num", "#").width(52.0),
+            Column::new("key", "Key").width(80.0),
+            Column::new("type", "Type").width(80.0),
+            Column::new("value", "Value").width(80.0),
+            Column::new("size", "Size").width(80.0),
+            Column::new("ttl", "TTL").width(80.0),
+        ];
+        let metadata = vec![
+            metadata("Key", "key name"),
+            metadata("Type", "data type"),
+            metadata("Value", "value preview"),
+            metadata("Size", "memory size"),
+            metadata("TTL", "time to live"),
+        ];
+
+        TableViewerDelegate::apply_key_value_database_column_widths(&mut columns, &metadata);
+
+        assert_eq!(columns[1].width.as_f32(), 360.0);
+        assert_eq!(columns[2].width.as_f32(), 150.0);
+        assert_eq!(columns[3].width.as_f32(), 560.0);
+        assert_eq!(columns[4].width.as_f32(), 150.0);
+        assert_eq!(columns[5].width.as_f32(), 150.0);
     }
 }

@@ -135,6 +135,11 @@ impl TableViewerPanel {
             return;
         }
 
+        if matches!(self.driver_category, DriverCategory::Document) {
+            self.emit_add_row_form(cx);
+            return;
+        }
+
         let Some(table_state) = &self.table_state else {
             return;
         };
@@ -288,12 +293,19 @@ impl TableViewerPanel {
             return;
         }
 
-        if !table_state.read_with(cx, |table, _cx| table.delegate().can_delete_rows()) {
+        if !matches!(self.driver_category, DriverCategory::KeyValue)
+            && !table_state.read_with(cx, |table, _cx| table.delegate().can_delete_rows())
+        {
             tracing::info!("Skipping row delete: table has no stable row identity");
             return;
         }
 
-        if self.auto_commit_mode {
+        if self.auto_commit_mode
+            || matches!(
+                self.driver_category,
+                DriverCategory::KeyValue | DriverCategory::Document
+            )
+        {
             let Some(connection_id) = self.connection_id else {
                 return;
             };

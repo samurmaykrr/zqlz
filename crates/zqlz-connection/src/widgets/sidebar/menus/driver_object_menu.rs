@@ -39,24 +39,98 @@ impl ConnectionSidebar {
         object_type: &str,
     ) -> Option<Vec<ObjectsPanelAction>> {
         let object_type = Self::normalized_manifest_object_type(object_type);
-        let manifest = self
+        let manifest_actions = self
             .connections()
             .iter()
             .find(|connection| connection.id == connection_id)
-            .and_then(|connection| connection.objects_panel_manifest.as_ref())?;
-
-        manifest
-            .object_kinds
-            .iter()
-            .find(|kind| kind.id == object_type)
+            .and_then(|connection| connection.objects_panel_manifest.as_ref())
+            .and_then(|manifest| {
+                manifest
+                    .object_kinds
+                    .iter()
+                    .find(|kind| kind.id == object_type)
+            })
             .map(|kind| {
                 kind.row_actions
                     .iter()
                     .filter(|action| Self::supports_driver_object_action(&action.id, object_type))
                     .cloned()
                     .collect()
-            })
+            });
+
+        manifest_actions
             .filter(|actions: &Vec<ObjectsPanelAction>| !actions.is_empty())
+            .or_else(|| Self::fallback_document_object_actions(object_type))
+    }
+
+    fn fallback_document_object_actions(object_type: &str) -> Option<Vec<ObjectsPanelAction>> {
+        match object_type {
+            "document_collection" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("inspect", "Inspect"),
+                ObjectsPanelAction::new("design", "Design")
+                    .single_selection()
+                    .object_form("document_collection", ObjectFormMode::Edit),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("delete", "Drop")
+                    .destructive()
+                    .object_form("document_collection", ObjectFormMode::Drop),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            "document_index" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("delete", "Drop")
+                    .destructive()
+                    .object_form(object_type, ObjectFormMode::Drop),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            "document_user" | "document_role" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("design", "Edit")
+                    .single_selection()
+                    .object_form(object_type, ObjectFormMode::Edit),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("delete", "Drop")
+                    .destructive()
+                    .object_form(object_type, ObjectFormMode::Drop),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            "document_view" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("inspect", "Inspect"),
+                ObjectsPanelAction::new("design", "Design")
+                    .single_selection()
+                    .object_form("document_view", ObjectFormMode::Edit),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("delete", "Drop")
+                    .destructive()
+                    .object_form("document_view", ObjectFormMode::Drop),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            "document_gridfs_bucket" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("inspect", "Inspect"),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            "document_function"
+            | "document_search_index"
+            | "document_vector_index"
+            | "document_server"
+            | "document_sharding" => Some(vec![
+                ObjectsPanelAction::new("open", "Open"),
+                ObjectsPanelAction::new("copy_name", "Copy Name"),
+                ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name"),
+                ObjectsPanelAction::new("refresh", "Refresh"),
+            ]),
+            _ => None,
+        }
     }
 
     pub(in crate::widgets) fn apply_driver_object_actions_to_menu(
@@ -142,6 +216,10 @@ impl ConnectionSidebar {
         match action_id {
             "copy_name" | "copy_qualified_name" | "refresh" => true,
             "open" => true,
+            "inspect" => matches!(
+                object_type,
+                "document_collection" | "document_view" | "document_gridfs_bucket"
+            ),
             "design" => matches!(
                 object_type,
                 "table"
@@ -153,6 +231,10 @@ impl ConnectionSidebar {
                     | "procedure"
                     | "trigger"
                     | "event"
+                    | "document_collection"
+                    | "document_view"
+                    | "document_user"
+                    | "document_role"
             ),
             "rename" | "duplicate" | "delete" => matches!(
                 object_type,
@@ -163,6 +245,11 @@ impl ConnectionSidebar {
                     | "materialized_view"
                     | "trigger"
                     | "event"
+                    | "document_collection"
+                    | "document_view"
+                    | "document_index"
+                    | "document_user"
+                    | "document_role"
             ),
             "empty" | "import" | "dump_sql_structure_data" | "dump_sql_structure" => {
                 matches!(object_type, "table" | "partitioned_table" | "foreign_table")
@@ -197,6 +284,11 @@ impl ConnectionSidebar {
                 | "new_function"
                 | "new_procedure"
                 | "new_event"
+                | "new_document_collection"
+                | "new_document_view"
+                | "new_document_index"
+                | "new_document_user"
+                | "new_document_role"
         )
     }
 
@@ -227,6 +319,10 @@ impl ConnectionSidebar {
 
         match action_id {
             "open" => self.invoke_open_object(context, cx),
+            "inspect" => cx.emit(ConnectionSidebarEvent::OpenGenericObjectDefinition {
+                connection_id: context.connection_id,
+                object_ref: context.object_ref(),
+            }),
             "design" => self.invoke_design_object(context, cx),
             "rename" => self.invoke_rename_object(context, cx),
             "duplicate" => self.invoke_duplicate_object(context, cx),
@@ -296,6 +392,19 @@ impl ConnectionSidebar {
                     object_ref: None,
                 });
             }
+            "new_document_collection"
+            | "new_document_view"
+            | "new_document_index"
+            | "new_document_user"
+            | "new_document_role" => {
+                let kind_id = action_id.trim_start_matches("new_").to_string();
+                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                    connection_id,
+                    kind_id,
+                    mode: ObjectFormMode::Create,
+                    object_ref: None,
+                });
+            }
             _ => {}
         }
     }
@@ -318,11 +427,13 @@ impl ConnectionSidebar {
                 connection_id: context.connection_id,
                 function_name: context.object_name,
                 object_schema: context.object_schema,
+                database_name: context.database_name,
             }),
             "procedure" => cx.emit(ConnectionSidebarEvent::OpenProcedure {
                 connection_id: context.connection_id,
                 procedure_name: context.object_name,
                 object_schema: context.object_schema,
+                database_name: context.database_name,
             }),
             "trigger" => cx.emit(ConnectionSidebarEvent::DesignTrigger {
                 connection_id: context.connection_id,
@@ -353,11 +464,13 @@ impl ConnectionSidebar {
                 connection_id: context.connection_id,
                 function_name: context.object_name,
                 object_schema: context.object_schema,
+                database_name: context.database_name,
             }),
             "procedure" => cx.emit(ConnectionSidebarEvent::OpenProcedure {
                 connection_id: context.connection_id,
                 procedure_name: context.object_name,
                 object_schema: context.object_schema,
+                database_name: context.database_name,
             }),
             "trigger" => cx.emit(ConnectionSidebarEvent::DesignTrigger {
                 connection_id: context.connection_id,
@@ -370,6 +483,14 @@ impl ConnectionSidebar {
                 mode: ObjectFormMode::Edit,
                 object_ref: Some(context.object_ref()),
             }),
+            "document_collection" | "document_view" | "document_user" | "document_role" => {
+                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                    connection_id: context.connection_id,
+                    kind_id: context.object_type.clone(),
+                    mode: ObjectFormMode::Edit,
+                    object_ref: Some(context.object_ref()),
+                })
+            }
             _ => {}
         }
     }
@@ -432,6 +553,18 @@ impl ConnectionSidebar {
                 mode: ObjectFormMode::Drop,
                 object_ref: Some(context.object_ref()),
             }),
+            "document_collection"
+            | "document_view"
+            | "document_index"
+            | "document_user"
+            | "document_role" => {
+                cx.emit(ConnectionSidebarEvent::OpenObjectDesigner {
+                    connection_id: context.connection_id,
+                    kind_id: context.object_type.clone(),
+                    mode: ObjectFormMode::Drop,
+                    object_ref: Some(context.object_ref()),
+                });
+            }
             _ => {}
         }
     }

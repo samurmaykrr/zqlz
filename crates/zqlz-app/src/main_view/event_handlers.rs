@@ -497,6 +497,27 @@ impl MainView {
                     cx,
                 );
             }
+            ConnectionSidebarEvent::ImportSavedQueries { connection_id } => {
+                self.import_saved_queries(connection_id, window, cx);
+            }
+            ConnectionSidebarEvent::ExportSavedQueries { connection_id } => {
+                self.export_saved_queries(connection_id, window, cx);
+            }
+            ConnectionSidebarEvent::MoveSavedQueryToFolder {
+                connection_id,
+                query_id,
+                query_name,
+                folder,
+            } => {
+                self.move_saved_query_to_folder(
+                    connection_id,
+                    query_id,
+                    query_name,
+                    folder,
+                    window,
+                    cx,
+                );
+            }
             ConnectionSidebarEvent::ViewHistory {
                 connection_id,
                 object_name,
@@ -528,11 +549,13 @@ impl MainView {
                 connection_id,
                 function_name,
                 object_schema,
+                database_name,
             } => {
                 self.open_function_definition(
                     connection_id,
                     function_name,
                     object_schema,
+                    database_name,
                     None,
                     window,
                     cx,
@@ -542,11 +565,13 @@ impl MainView {
                 connection_id,
                 procedure_name,
                 object_schema,
+                database_name,
             } => {
                 self.open_procedure_definition(
                     connection_id,
                     procedure_name,
                     object_schema,
+                    database_name,
                     None,
                     window,
                     cx,
@@ -596,6 +621,7 @@ impl MainView {
                     connection_id,
                     object_ref.kind_id.clone(),
                     SelectedObjectRef {
+                        database: object_ref.database,
                         name: object_ref.name,
                         schema: object_ref.schema,
                         signature: object_ref.signature,
@@ -1800,6 +1826,7 @@ impl MainView {
                                             query_id,
                                             save_sql.clone(),
                                             editor_weak.clone(),
+                                            None,
                                             cx,
                                         ),
                                     );
@@ -1979,6 +2006,7 @@ impl MainView {
                                             save_sql.clone(),
                                             connection_id,
                                             query_name,
+                                            None,
                                             sidebar_weak.clone(),
                                             window,
                                             cx,

@@ -18,7 +18,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 use std::time::Duration;
 use uuid::Uuid;
-use zqlz_core::{ObjectFormMode, ObjectsPanelObjectRef};
+use zqlz_core::{
+    DocumentAdminObjectInfo, DocumentCollectionInfo, ObjectFormMode, ObjectsPanelObjectRef,
+};
 use zqlz_ui::widgets::{
     ActiveTheme, DatabaseLogo, Icon, IconName, Sizable, ZqlzIcon,
     button::{Button, ButtonVariants},
@@ -80,7 +82,9 @@ pub enum ConnectionSidebarEvent {
         object_schema: Option<String>,
     },
     /// User wants to create a new view
-    NewView { connection_id: Uuid },
+    NewView {
+        connection_id: Uuid,
+    },
     /// User wants to delete a view
     DeleteView {
         connection_id: Uuid,
@@ -97,7 +101,9 @@ pub enum ConnectionSidebarEvent {
         view_name: String,
     },
     /// User wants to copy view name to clipboard
-    CopyViewName { view_name: String },
+    CopyViewName {
+        view_name: String,
+    },
     /// User wants to open a new query for this connection
     NewQuery(Uuid),
     /// User wants to refresh connections list
@@ -118,7 +124,9 @@ pub enum ConnectionSidebarEvent {
         table_name: String,
     },
     /// User wants to create a new table
-    NewTable { connection_id: Uuid },
+    NewTable {
+        connection_id: Uuid,
+    },
     /// User wants to delete a table
     DeleteTable {
         connection_id: Uuid,
@@ -156,9 +164,13 @@ pub enum ConnectionSidebarEvent {
         include_data: bool,
     },
     /// User wants to copy table name to clipboard
-    CopyTableName { table_name: String },
+    CopyTableName {
+        table_name: String,
+    },
     /// User wants to refresh a specific connection's schema
-    RefreshSchema { connection_id: Uuid },
+    RefreshSchema {
+        connection_id: Uuid,
+    },
 
     // Saved queries events
     /// User wants to open a saved query
@@ -179,6 +191,18 @@ pub enum ConnectionSidebarEvent {
         query_id: Uuid,
         query_name: String,
     },
+    ImportSavedQueries {
+        connection_id: Uuid,
+    },
+    ExportSavedQueries {
+        connection_id: Uuid,
+    },
+    MoveSavedQueryToFolder {
+        connection_id: Uuid,
+        query_id: Uuid,
+        query_name: String,
+        folder: Option<String>,
+    },
 
     // Version history events
     /// User wants to view version history for a database object
@@ -195,6 +219,7 @@ pub enum ConnectionSidebarEvent {
         connection_id: Uuid,
         function_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
     },
 
     // Procedure events
@@ -203,6 +228,7 @@ pub enum ConnectionSidebarEvent {
         connection_id: Uuid,
         procedure_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
     },
 
     // Trigger events
@@ -213,7 +239,9 @@ pub enum ConnectionSidebarEvent {
         object_schema: Option<String>,
     },
     /// User wants to create a new trigger
-    NewTrigger { connection_id: Uuid },
+    NewTrigger {
+        connection_id: Uuid,
+    },
     /// User wants to delete a trigger
     DeleteTrigger {
         connection_id: Uuid,
@@ -275,6 +303,27 @@ pub enum ConnectionSidebarEvent {
         connection_id: Uuid,
         section: SidebarSection,
     },
+}
+
+#[derive(Clone)]
+struct DragSavedQuery {
+    connection_id: Uuid,
+    query_id: Uuid,
+    query_name: SharedString,
+}
+
+impl Render for DragSavedQuery {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .bg(cx.theme().muted)
+            .text_color(cx.theme().muted_foreground)
+            .border_1()
+            .border_color(cx.theme().border)
+            .shadow_md()
+            .child(self.query_name.clone())
+    }
 }
 
 /// Connection sidebar showing all connections and their schema objects
@@ -776,22 +825,33 @@ impl ConnectionSidebar {
         section: &str,
         cx: &mut Context<Self>,
     ) {
-        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id)
-            && let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name)
-            && let Some(schema) = &mut db.schema
-        {
-            match section {
-                "schema" => schema.schema_expanded = !schema.schema_expanded,
-                "tables" => schema.tables_expanded = !schema.tables_expanded,
-                "views" => schema.views_expanded = !schema.views_expanded,
-                "materialized_views" => {
-                    schema.materialized_views_expanded = !schema.materialized_views_expanded
+        if let Some(conn) = self.connections.iter_mut().find(|c| c.id == conn_id) {
+            let is_document = conn.is_document();
+            let Some(db) = conn.databases.iter_mut().find(|d| d.name == db_name) else {
+                return;
+            };
+            if is_document {
+                if section == "collections" {
+                    db.collections_expanded = !db.collections_expanded;
+                } else if db.document_expanded_sections.contains(section) {
+                    db.document_expanded_sections.remove(section);
+                } else {
+                    db.document_expanded_sections.insert(section.to_string());
                 }
-                "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
-                "functions" => schema.functions_expanded = !schema.functions_expanded,
-                "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
-                "events" => schema.events_expanded = !schema.events_expanded,
-                _ => {}
+            } else if let Some(schema) = &mut db.schema {
+                match section {
+                    "schema" => schema.schema_expanded = !schema.schema_expanded,
+                    "tables" => schema.tables_expanded = !schema.tables_expanded,
+                    "views" => schema.views_expanded = !schema.views_expanded,
+                    "materialized_views" => {
+                        schema.materialized_views_expanded = !schema.materialized_views_expanded
+                    }
+                    "triggers" => schema.triggers_expanded = !schema.triggers_expanded,
+                    "functions" => schema.functions_expanded = !schema.functions_expanded,
+                    "procedures" => schema.procedures_expanded = !schema.procedures_expanded,
+                    "events" => schema.events_expanded = !schema.events_expanded,
+                    _ => {}
+                }
             }
         }
         self.virtual_rows_dirty = true;
@@ -1487,7 +1547,7 @@ impl ConnectionSidebar {
             }
         }
 
-        if !connection.queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
+        if !has_search || !filtered_queries.is_empty() {
             rows.push(SidebarVirtualRow::Section(SectionRow {
                 element_id: format!("queries-header-{}", connection.id),
                 icon: SidebarRowIcon::Query,
@@ -1504,21 +1564,7 @@ impl ConnectionSidebar {
             }));
 
             if queries_expanded {
-                for query in filtered_queries {
-                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                        element_id: format!("query-{}-{}", connection.id, query.id),
-                        icon: SidebarRowIcon::Query,
-                        label: query.name.clone(),
-                        depth: 2,
-                        kind: SidebarLeafKind::Query {
-                            conn_id: connection.id,
-                            query_id: query.id,
-                            query_name: query.name.clone(),
-                        },
-                    }));
-
-                    *matched_leaf_rows += 1;
-                }
+                Self::push_query_rows(rows, connection.id, filtered_queries, 2, matched_leaf_rows);
             }
         }
     }
@@ -1537,12 +1583,139 @@ impl ConnectionSidebar {
                 .iter()
                 .filter(|collection| {
                     !has_search
-                        || collection.to_lowercase().contains(search_lowercase)
+                        || collection.name.to_lowercase().contains(search_lowercase)
                         || database.name.to_lowercase().contains(search_lowercase)
                 })
                 .collect::<Vec<_>>();
+            let matching_views = matching_collections
+                .iter()
+                .copied()
+                .filter(|collection| collection.collection_type == "view")
+                .collect::<Vec<_>>();
+            let matching_regular_collections = matching_collections
+                .iter()
+                .copied()
+                .filter(|collection| Self::is_regular_mongodb_collection(collection))
+                .collect::<Vec<_>>();
+            let matching_timeseries_collections = matching_collections
+                .iter()
+                .copied()
+                .filter(|collection| collection.collection_type == "timeseries")
+                .collect::<Vec<_>>();
+            let matching_capped_collections = matching_collections
+                .iter()
+                .copied()
+                .filter(|collection| {
+                    collection
+                        .options_json
+                        .as_ref()
+                        .and_then(|options| options.get("capped"))
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+                })
+                .collect::<Vec<_>>();
+            let matching_clustered_collections = matching_collections
+                .iter()
+                .copied()
+                .filter(|collection| collection.clustered_index_json.is_some())
+                .collect::<Vec<_>>();
+            let matching_indexes = database
+                .indexes
+                .iter()
+                .filter(|index| {
+                    !has_search
+                        || index.name.to_lowercase().contains(search_lowercase)
+                        || index.collection.to_lowercase().contains(search_lowercase)
+                })
+                .collect::<Vec<_>>();
+            let matching_functions = database
+                .functions
+                .iter()
+                .filter(|function| {
+                    !has_search || function.name.to_lowercase().contains(search_lowercase)
+                })
+                .collect::<Vec<_>>();
+            let matching_gridfs_buckets = database
+                .gridfs_buckets
+                .iter()
+                .filter(|bucket| {
+                    !has_search || bucket.name.to_lowercase().contains(search_lowercase)
+                })
+                .collect::<Vec<_>>();
+            let matching_users = database
+                .users
+                .iter()
+                .filter(|user| Self::document_admin_matches_search(user, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_roles = database
+                .roles
+                .iter()
+                .filter(|role| Self::document_admin_matches_search(role, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_search_indexes = database
+                .search_indexes
+                .iter()
+                .filter(|index| Self::document_admin_matches_search(index, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_vector_indexes = database
+                .vector_indexes
+                .iter()
+                .filter(|index| Self::document_admin_matches_search(index, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_server = database
+                .server
+                .iter()
+                .filter(|object| Self::document_admin_matches_search(object, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_sharding = database
+                .sharding
+                .iter()
+                .filter(|object| Self::document_admin_matches_search(object, search_lowercase))
+                .collect::<Vec<_>>();
+            let matching_aggregation_pipelines = connection
+                .queries
+                .iter()
+                .filter(|query| {
+                    Self::is_mongodb_aggregation_asset(query)
+                        && (!has_search
+                            || Self::saved_query_matches_search(query, search_lowercase))
+                })
+                .collect::<Vec<_>>();
+            let matching_map_reduces = connection
+                .queries
+                .iter()
+                .filter(|query| {
+                    Self::is_mongodb_map_reduce_asset(query)
+                        && (!has_search
+                            || Self::saved_query_matches_search(query, search_lowercase))
+                })
+                .collect::<Vec<_>>();
+            let matching_queries = connection
+                .queries
+                .iter()
+                .filter(|query| {
+                    !Self::is_mongodb_aggregation_asset(query)
+                        && !Self::is_mongodb_map_reduce_asset(query)
+                        && (!has_search
+                            || Self::saved_query_matches_search(query, search_lowercase))
+                })
+                .collect::<Vec<_>>();
 
-            if has_search && matching_collections.is_empty() {
+            if has_search
+                && matching_collections.is_empty()
+                && matching_indexes.is_empty()
+                && matching_functions.is_empty()
+                && matching_gridfs_buckets.is_empty()
+                && matching_users.is_empty()
+                && matching_roles.is_empty()
+                && matching_search_indexes.is_empty()
+                && matching_vector_indexes.is_empty()
+                && matching_server.is_empty()
+                && matching_sharding.is_empty()
+                && matching_aggregation_pipelines.is_empty()
+                && matching_map_reduces.is_empty()
+                && matching_queries.is_empty()
+            {
                 continue;
             }
 
@@ -1569,22 +1742,389 @@ impl ConnectionSidebar {
                     }));
                 }
 
-                for collection_name in matching_collections {
-                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                let collections_expanded = database.collections_expanded
+                    || (has_search && !matching_regular_collections.is_empty());
+                rows.push(SidebarVirtualRow::Section(SectionRow {
+                    element_id: format!("document-collections-{}-{}", connection.id, database.name),
+                    icon: SidebarRowIcon::Table,
+                    label: "Collections".to_string(),
+                    total_count: database
+                        .collections
+                        .iter()
+                        .filter(|collection| {
+                            collection.collection_type != "view"
+                                && collection.collection_type != "timeseries"
+                                && !collection.name.starts_with("system.")
+                        })
+                        .count(),
+                    filtered_count: matching_regular_collections.len(),
+                    is_expanded: collections_expanded,
+                    depth: 2,
+                    action: SidebarSectionAction::DatabaseSection {
+                        conn_id: connection.id,
+                        database_name: database.name.clone(),
+                        section: "collections",
+                    },
+                    context_menu_section: Some("collections"),
+                }));
+                if collections_expanded {
+                    for collection in matching_regular_collections {
+                        rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                            element_id: format!(
+                                "document-collection-{}-{}-{}",
+                                connection.id, database.name, collection.name
+                            ),
+                            icon: SidebarRowIcon::Table,
+                            label: collection.name.clone(),
+                            depth: 3,
+                            kind: SidebarLeafKind::DocumentCollection {
+                                conn_id: connection.id,
+                                database_name: database.name.clone(),
+                                collection_name: collection.name.clone(),
+                                object_type: "document_collection",
+                            },
+                        }));
+                        *matched_leaf_rows += 1;
+                    }
+                }
+
+                let document_sections = [
+                    ("views", "Views", SidebarRowIcon::View, matching_views.len()),
+                    (
+                        "timeseries",
+                        "Time Series",
+                        SidebarRowIcon::Sequence,
+                        matching_timeseries_collections.len(),
+                    ),
+                    (
+                        "capped",
+                        "Capped",
+                        SidebarRowIcon::Database,
+                        matching_capped_collections.len(),
+                    ),
+                    (
+                        "clustered",
+                        "Clustered",
+                        SidebarRowIcon::Index,
+                        matching_clustered_collections.len(),
+                    ),
+                    (
+                        "functions",
+                        "Functions",
+                        SidebarRowIcon::Function,
+                        matching_functions.len(),
+                    ),
+                    (
+                        "indexes",
+                        "Indexes",
+                        SidebarRowIcon::Index,
+                        matching_indexes.len(),
+                    ),
+                    (
+                        "map_reduces",
+                        "MapReduces",
+                        SidebarRowIcon::Procedure,
+                        matching_map_reduces.len(),
+                    ),
+                    (
+                        "aggregation_pipelines",
+                        "Aggregation Pipelines",
+                        SidebarRowIcon::Sequence,
+                        matching_aggregation_pipelines.len(),
+                    ),
+                    (
+                        "search_indexes",
+                        "Search Indexes",
+                        SidebarRowIcon::Index,
+                        matching_search_indexes.len(),
+                    ),
+                    (
+                        "vector_indexes",
+                        "Vector Indexes",
+                        SidebarRowIcon::Index,
+                        matching_vector_indexes.len(),
+                    ),
+                    (
+                        "gridfs_buckets",
+                        "GridFS Buckets",
+                        SidebarRowIcon::Database,
+                        matching_gridfs_buckets.len(),
+                    ),
+                    (
+                        "users",
+                        "Users",
+                        SidebarRowIcon::Procedure,
+                        matching_users.len(),
+                    ),
+                    (
+                        "roles",
+                        "Roles",
+                        SidebarRowIcon::Procedure,
+                        matching_roles.len(),
+                    ),
+                    (
+                        "sharding",
+                        "Sharding",
+                        SidebarRowIcon::Database,
+                        matching_sharding.len(),
+                    ),
+                    (
+                        "server",
+                        "Server",
+                        SidebarRowIcon::Database,
+                        matching_server.len(),
+                    ),
+                    (
+                        "queries",
+                        "Queries",
+                        SidebarRowIcon::Query,
+                        connection.queries.len(),
+                    ),
+                ];
+
+                for (section_key, label, icon, count) in document_sections {
+                    let is_expanded = database.document_expanded_sections.contains(section_key)
+                        || (has_search && count > 0);
+                    rows.push(SidebarVirtualRow::Section(SectionRow {
                         element_id: format!(
-                            "document-collection-{}-{}-{}",
-                            connection.id, database.name, collection_name
+                            "document-section-{}-{}-{}",
+                            connection.id, database.name, section_key
                         ),
-                        icon: SidebarRowIcon::Table,
-                        label: collection_name.clone(),
+                        icon,
+                        label: label.to_string(),
+                        total_count: count,
+                        filtered_count: count,
+                        is_expanded,
                         depth: 2,
-                        kind: SidebarLeafKind::DocumentCollection {
+                        action: SidebarSectionAction::DatabaseSection {
                             conn_id: connection.id,
                             database_name: database.name.clone(),
-                            collection_name: collection_name.clone(),
+                            section: section_key,
+                        },
+                        context_menu_section: match section_key {
+                            "views" | "indexes" | "users" | "roles" => Some(section_key),
+                            _ => None,
                         },
                     }));
-                    *matched_leaf_rows += 1;
+
+                    if !is_expanded {
+                        continue;
+                    }
+
+                    match section_key {
+                        "views" => {
+                            for collection in &matching_views {
+                                rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                                    element_id: format!(
+                                        "document-view-{}-{}-{}",
+                                        connection.id, database.name, collection.name
+                                    ),
+                                    icon: SidebarRowIcon::View,
+                                    label: collection.name.clone(),
+                                    depth: 3,
+                                    kind: SidebarLeafKind::DocumentCollection {
+                                        conn_id: connection.id,
+                                        database_name: database.name.clone(),
+                                        collection_name: collection.name.clone(),
+                                        object_type: "document_view",
+                                    },
+                                }));
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "timeseries" => {
+                            for collection in &matching_timeseries_collections {
+                                Self::push_document_collection_leaf(
+                                    rows,
+                                    connection.id,
+                                    &database.name,
+                                    &collection.name,
+                                    SidebarRowIcon::Sequence,
+                                    "document-timeseries",
+                                    3,
+                                );
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "capped" => {
+                            for collection in &matching_capped_collections {
+                                Self::push_document_collection_leaf(
+                                    rows,
+                                    connection.id,
+                                    &database.name,
+                                    &collection.name,
+                                    SidebarRowIcon::Database,
+                                    "document-capped",
+                                    3,
+                                );
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "clustered" => {
+                            for collection in &matching_clustered_collections {
+                                Self::push_document_collection_leaf(
+                                    rows,
+                                    connection.id,
+                                    &database.name,
+                                    &collection.name,
+                                    SidebarRowIcon::Index,
+                                    "document-clustered",
+                                    3,
+                                );
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "functions" => {
+                            for function in &matching_functions {
+                                rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                                    element_id: format!(
+                                        "document-function-{}-{}-{}",
+                                        connection.id, database.name, function.name
+                                    ),
+                                    icon: SidebarRowIcon::Function,
+                                    label: function.name.clone(),
+                                    depth: 3,
+                                    kind: SidebarLeafKind::MetadataObject {
+                                        conn_id: connection.id,
+                                        object_name: function.name.clone(),
+                                        object_schema: None,
+                                        database_name: Some(database.name.clone()),
+                                        object_type: "document_function",
+                                    },
+                                }));
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "indexes" => {
+                            for index in &matching_indexes {
+                                rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                                    element_id: format!(
+                                        "document-index-{}-{}-{}-{}",
+                                        connection.id, database.name, index.collection, index.name
+                                    ),
+                                    icon: SidebarRowIcon::Index,
+                                    label: format!("{}.{}", index.collection, index.name),
+                                    depth: 3,
+                                    kind: SidebarLeafKind::MetadataObject {
+                                        conn_id: connection.id,
+                                        object_name: index.name.clone(),
+                                        object_schema: Some(index.collection.clone()),
+                                        database_name: Some(database.name.clone()),
+                                        object_type: "document_index",
+                                    },
+                                }));
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "gridfs_buckets" => {
+                            for bucket in &matching_gridfs_buckets {
+                                rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                                    element_id: format!(
+                                        "document-gridfs-{}-{}-{}",
+                                        connection.id, database.name, bucket.name
+                                    ),
+                                    icon: SidebarRowIcon::Database,
+                                    label: bucket.name.clone(),
+                                    depth: 3,
+                                    kind: SidebarLeafKind::DocumentCollection {
+                                        conn_id: connection.id,
+                                        database_name: database.name.clone(),
+                                        collection_name: bucket.files_collection.clone(),
+                                        object_type: "document_gridfs_bucket",
+                                    },
+                                }));
+                                *matched_leaf_rows += 1;
+                            }
+                        }
+                        "map_reduces" => Self::push_query_rows(
+                            rows,
+                            connection.id,
+                            matching_map_reduces.clone(),
+                            3,
+                            matched_leaf_rows,
+                        ),
+                        "aggregation_pipelines" => Self::push_query_rows(
+                            rows,
+                            connection.id,
+                            matching_aggregation_pipelines.clone(),
+                            3,
+                            matched_leaf_rows,
+                        ),
+                        "users" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_user",
+                                SidebarRowIcon::Procedure,
+                                &matching_users,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "roles" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_role",
+                                SidebarRowIcon::Procedure,
+                                &matching_roles,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "search_indexes" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_search_index",
+                                SidebarRowIcon::Index,
+                                &matching_search_indexes,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "vector_indexes" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_vector_index",
+                                SidebarRowIcon::Index,
+                                &matching_vector_indexes,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "server" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_server",
+                                SidebarRowIcon::Database,
+                                &matching_server,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "sharding" => {
+                            Self::push_document_admin_rows(
+                                rows,
+                                connection.id,
+                                &database.name,
+                                "document_sharding",
+                                SidebarRowIcon::Database,
+                                &matching_sharding,
+                                matched_leaf_rows,
+                            );
+                        }
+                        "queries" => Self::push_query_rows(
+                            rows,
+                            connection.id,
+                            matching_queries.clone(),
+                            3,
+                            matched_leaf_rows,
+                        ),
+                        _ => {}
+                    }
                 }
             }
         }
@@ -1803,6 +2343,206 @@ impl ConnectionSidebar {
 
     fn should_skip_unloaded_database(database: &SidebarDatabaseInfo) -> bool {
         database.schema.is_none() && !database.is_active && !database.is_loading
+    }
+
+    fn push_document_collection_leaf(
+        rows: &mut Vec<SidebarVirtualRow>,
+        connection_id: Uuid,
+        database_name: &str,
+        collection_name: &str,
+        icon: SidebarRowIcon,
+        element_prefix: &str,
+        depth: usize,
+    ) {
+        rows.push(SidebarVirtualRow::Leaf(LeafRow {
+            element_id: format!(
+                "{element_prefix}-{connection_id}-{database_name}-{collection_name}"
+            ),
+            icon,
+            label: collection_name.to_string(),
+            depth,
+            kind: SidebarLeafKind::DocumentCollection {
+                conn_id: connection_id,
+                database_name: database_name.to_string(),
+                collection_name: collection_name.to_string(),
+                object_type: "document_collection",
+            },
+        }));
+    }
+
+    fn push_document_admin_rows(
+        rows: &mut Vec<SidebarVirtualRow>,
+        connection_id: Uuid,
+        database_name: &str,
+        object_type: &'static str,
+        icon: SidebarRowIcon,
+        objects: &[&DocumentAdminObjectInfo],
+        matched_leaf_rows: &mut usize,
+    ) {
+        for object in objects {
+            let label = object
+                .unavailable_reason
+                .as_ref()
+                .map(|_| format!("{} unavailable", object.name))
+                .unwrap_or_else(|| object.name.clone());
+            rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                element_id: format!(
+                    "{object_type}-{connection_id}-{database_name}-{}",
+                    object.name
+                ),
+                icon,
+                label,
+                depth: 3,
+                kind: SidebarLeafKind::MetadataObject {
+                    conn_id: connection_id,
+                    object_name: object.name.clone(),
+                    object_schema: Some(object.kind.clone()),
+                    database_name: Some(database_name.to_string()),
+                    object_type,
+                },
+            }));
+            *matched_leaf_rows += 1;
+        }
+    }
+
+    fn is_mongodb_aggregation_asset(query: &SavedQueryInfo) -> bool {
+        let folder = query.folder.as_deref().unwrap_or_default().to_lowercase();
+        let name = query.name.to_lowercase();
+        let query_text = query.query_text.to_lowercase();
+
+        folder.contains("aggregation")
+            || folder.contains("pipeline")
+            || name.contains("aggregation")
+            || name.contains("pipeline")
+            || query_text.contains(".aggregate(")
+            || query_text.contains("\"aggregate\"")
+            || query_text.contains("'aggregate'")
+            || query_text.contains("aggregate:")
+    }
+
+    fn is_regular_mongodb_collection(collection: &DocumentCollectionInfo) -> bool {
+        let is_capped = collection
+            .options_json
+            .as_ref()
+            .and_then(|options| options.get("capped"))
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false);
+
+        collection.collection_type != "view"
+            && collection.collection_type != "timeseries"
+            && !is_capped
+            && collection.clustered_index_json.is_none()
+            && !collection.name.starts_with("system.")
+    }
+
+    fn is_mongodb_map_reduce_asset(query: &SavedQueryInfo) -> bool {
+        let folder = query.folder.as_deref().unwrap_or_default().to_lowercase();
+        let name = query.name.to_lowercase();
+        let query_text = query.query_text.to_lowercase();
+
+        folder.contains("mapreduce")
+            || folder.contains("map_reduce")
+            || folder.contains("map reduce")
+            || name.contains("mapreduce")
+            || name.contains("map_reduce")
+            || name.contains("map reduce")
+            || query_text.contains(".mapreduce(")
+            || query_text.contains("\"mapreduce\"")
+            || query_text.contains("'mapreduce'")
+            || query_text.contains("mapreduce:")
+    }
+
+    fn saved_query_matches_search(query: &SavedQueryInfo, search_lowercase: &str) -> bool {
+        query.name.to_lowercase().contains(search_lowercase)
+            || query
+                .folder
+                .as_deref()
+                .map(|folder| folder.to_lowercase().contains(search_lowercase))
+                .unwrap_or(false)
+            || query.query_text.to_lowercase().contains(search_lowercase)
+    }
+
+    fn document_admin_matches_search(
+        object: &zqlz_core::DocumentAdminObjectInfo,
+        search_lowercase: &str,
+    ) -> bool {
+        search_lowercase.is_empty()
+            || object.name.to_lowercase().contains(search_lowercase)
+            || object.kind.to_lowercase().contains(search_lowercase)
+            || object
+                .unavailable_reason
+                .as_deref()
+                .map(|reason| reason.to_lowercase().contains(search_lowercase))
+                .unwrap_or(false)
+    }
+
+    fn push_query_rows(
+        rows: &mut Vec<SidebarVirtualRow>,
+        connection_id: Uuid,
+        queries: Vec<&SavedQueryInfo>,
+        depth: usize,
+        matched_leaf_rows: &mut usize,
+    ) {
+        let mut root_queries = Vec::new();
+        let mut folder_queries: BTreeMap<String, Vec<&SavedQueryInfo>> = BTreeMap::new();
+
+        for query in queries {
+            match query
+                .folder
+                .as_deref()
+                .map(str::trim)
+                .filter(|folder| !folder.is_empty())
+            {
+                Some(folder) => folder_queries
+                    .entry(folder.to_string())
+                    .or_default()
+                    .push(query),
+                None => root_queries.push(query),
+            }
+        }
+
+        for query in root_queries {
+            rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                element_id: format!("query-{connection_id}-{}", query.id),
+                icon: SidebarRowIcon::Query,
+                label: query.name.clone(),
+                depth,
+                kind: SidebarLeafKind::Query {
+                    conn_id: connection_id,
+                    query_id: query.id,
+                    query_name: query.name.clone(),
+                },
+            }));
+            *matched_leaf_rows += 1;
+        }
+
+        for (folder, queries) in folder_queries {
+            rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                element_id: format!("query-folder-{connection_id}-{folder}"),
+                icon: SidebarRowIcon::Folder,
+                label: folder.clone(),
+                depth,
+                kind: SidebarLeafKind::QueryFolder {
+                    conn_id: connection_id,
+                    folder,
+                },
+            }));
+
+            for query in queries {
+                rows.push(SidebarVirtualRow::Leaf(LeafRow {
+                    element_id: format!("query-{connection_id}-{}", query.id),
+                    icon: SidebarRowIcon::Query,
+                    label: query.name.clone(),
+                    depth: depth + 1,
+                    kind: SidebarLeafKind::Query {
+                        conn_id: connection_id,
+                        query_id: query.id,
+                        query_name: query.name.clone(),
+                    },
+                }));
+                *matched_leaf_rows += 1;
+            }
+        }
     }
 
     fn should_flatten_database_schema_group(
@@ -2232,6 +2972,7 @@ impl ConnectionSidebar {
                                     conn_id: connection.id,
                                     function_name: (*function_name).clone(),
                                     object_schema: Some(schema_name.clone()),
+                                    database_name: database_name.clone(),
                                 },
                             }));
 
@@ -2289,6 +3030,7 @@ impl ConnectionSidebar {
                                     conn_id: connection.id,
                                     procedure_name: (*procedure_name).clone(),
                                     object_schema: Some(schema_name.clone()),
+                                    database_name: database_name.clone(),
                                 },
                             }));
 
@@ -2390,7 +3132,7 @@ impl ConnectionSidebar {
             .filter(|query| self.matches_search(&query.name))
             .collect();
         let queries_expanded = queries_expanded || (has_search && !filtered_queries.is_empty());
-        if !queries.is_empty() && (!has_search || !filtered_queries.is_empty()) {
+        if !has_search || !filtered_queries.is_empty() {
             rows.push(SidebarVirtualRow::Section(SectionRow {
                 element_id: format!("queries-header-{}", connection.id),
                 icon: SidebarRowIcon::Query,
@@ -2407,21 +3149,13 @@ impl ConnectionSidebar {
             }));
 
             if queries_expanded {
-                for query in filtered_queries {
-                    rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                        element_id: format!("query-{}-{}", connection.id, query.id),
-                        icon: SidebarRowIcon::Query,
-                        label: query.name.clone(),
-                        depth: depth + 1,
-                        kind: SidebarLeafKind::Query {
-                            conn_id: connection.id,
-                            query_id: query.id,
-                            query_name: query.name.clone(),
-                        },
-                    }));
-
-                    *matched_leaf_rows += 1;
-                }
+                Self::push_query_rows(
+                    rows,
+                    connection.id,
+                    filtered_queries,
+                    depth + 1,
+                    matched_leaf_rows,
+                );
             }
         }
     }
@@ -2453,7 +3187,7 @@ impl ConnectionSidebar {
             || (has_search && !filtered_objects.is_empty());
         rows.push(SidebarVirtualRow::Section(SectionRow {
             element_id: format!("{section}-header-{conn_id}-{schema_name}"),
-            icon: icon.clone(),
+            icon,
             label: label.to_string(),
             total_count: objects.len(),
             filtered_count: filtered_objects.len(),
@@ -2479,7 +3213,7 @@ impl ConnectionSidebar {
         for object_name in filtered_objects {
             rows.push(SidebarVirtualRow::Leaf(LeafRow {
                 element_id: format!("{section}-{conn_id}-{schema_name}-{object_name}"),
-                icon: icon.clone(),
+                icon,
                 label: (*object_name).clone(),
                 depth: leaf_depth,
                 kind: SidebarLeafKind::MetadataObject {
@@ -2851,6 +3585,7 @@ impl ConnectionSidebar {
                                 conn_id: connection.id,
                                 function_name: function_name.clone(),
                                 object_schema,
+                                database_name: database_name.clone(),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -2909,6 +3644,7 @@ impl ConnectionSidebar {
                                 conn_id: connection.id,
                                 procedure_name: procedure_name.clone(),
                                 object_schema,
+                                database_name: database_name.clone(),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -2978,20 +3714,13 @@ impl ConnectionSidebar {
         );
 
         if include_queries_section && queries_expanded {
-            for query in filtered_queries {
-                rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                    element_id: format!("query-{}-{}", connection.id, query.id),
-                    icon: SidebarRowIcon::Query,
-                    label: query.name.clone(),
-                    depth: depth + 1,
-                    kind: SidebarLeafKind::Query {
-                        conn_id: connection.id,
-                        query_id: query.id,
-                        query_name: query.name.clone(),
-                    },
-                }));
-                *matched_leaf_rows += 1;
-            }
+            Self::push_query_rows(
+                rows,
+                connection.id,
+                filtered_queries,
+                depth + 1,
+                matched_leaf_rows,
+            );
         }
     }
 
@@ -3297,6 +4026,7 @@ impl ConnectionSidebar {
                                 function_name: (*function_name).clone(),
                                 object_schema: self
                                     .current_schema_for_virtual_rows(Some(&database_name)),
+                                database_name: Some(database_name.clone()),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -3351,6 +4081,7 @@ impl ConnectionSidebar {
                                 procedure_name: (*procedure_name).clone(),
                                 object_schema: self
                                     .current_schema_for_virtual_rows(Some(&database_name)),
+                                database_name: Some(database_name.clone()),
                             },
                         }));
                         *matched_leaf_rows += 1;
@@ -3424,20 +4155,13 @@ impl ConnectionSidebar {
         );
 
         if include_queries_section && queries_expanded {
-            for query in filtered_queries {
-                rows.push(SidebarVirtualRow::Leaf(LeafRow {
-                    element_id: format!("query-{}-{}", connection.id, query.id),
-                    icon: SidebarRowIcon::Query,
-                    label: query.name.clone(),
-                    depth: depth + 1,
-                    kind: SidebarLeafKind::Query {
-                        conn_id: connection.id,
-                        query_id: query.id,
-                        query_name: query.name.clone(),
-                    },
-                }));
-                *matched_leaf_rows += 1;
-            }
+            Self::push_query_rows(
+                rows,
+                connection.id,
+                filtered_queries,
+                depth + 1,
+                matched_leaf_rows,
+            );
         }
     }
 
@@ -3743,6 +4467,13 @@ impl ConnectionSidebar {
         } = row;
         let action_for_click = action.clone();
         let action_for_context = action;
+        let root_query_drop_connection = match &action_for_click {
+            SidebarSectionAction::ConnectionSection {
+                conn_id,
+                section: "queries",
+            } => Some(*conn_id),
+            _ => None,
+        };
         let theme = cx.theme();
         let has_search = !self.search_query.is_empty();
         let indent = Self::sidebar_indent(depth);
@@ -3830,18 +4561,33 @@ impl ConnectionSidebar {
             .on_mouse_down(
                 MouseButton::Right,
                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
-                    let conn_id = match &action_for_context {
+                    let (conn_id, database_name) = match &action_for_context {
                         SidebarSectionAction::RedisDatabases { conn_id }
-                        | SidebarSectionAction::ConnectionSection { conn_id, .. }
-                        | SidebarSectionAction::DatabaseSection { conn_id, .. }
-                        | SidebarSectionAction::SchemaGroup { conn_id, .. }
-                        | SidebarSectionAction::SchemaGroupSection { conn_id, .. } => *conn_id,
+                        | SidebarSectionAction::ConnectionSection { conn_id, .. } => {
+                            (*conn_id, None)
+                        }
+                        SidebarSectionAction::DatabaseSection {
+                            conn_id,
+                            database_name,
+                            ..
+                        } => (*conn_id, Some(database_name.clone())),
+                        SidebarSectionAction::SchemaGroup {
+                            conn_id,
+                            database_name,
+                            ..
+                        }
+                        | SidebarSectionAction::SchemaGroupSection {
+                            conn_id,
+                            database_name,
+                            ..
+                        } => (*conn_id, database_name.clone()),
                     };
 
                     if let Some(section) = context_menu_section {
                         cx.stop_propagation();
                         this.show_section_context_menu(
                             conn_id,
+                            database_name,
                             section,
                             event.position,
                             window,
@@ -3850,6 +4596,27 @@ impl ConnectionSidebar {
                     }
                 }),
             )
+            .when_some(root_query_drop_connection, |this, conn_id| {
+                this.drag_over::<DragSavedQuery>(move |this, drag, _, cx| {
+                    if drag.connection_id == conn_id {
+                        this.bg(cx.theme().drop_target)
+                    } else {
+                        this
+                    }
+                })
+                .on_drop(cx.listener(
+                    move |_this, drag: &DragSavedQuery, _window, cx| {
+                        if drag.connection_id == conn_id {
+                            cx.emit(ConnectionSidebarEvent::MoveSavedQueryToFolder {
+                                connection_id: conn_id,
+                                query_id: drag.query_id,
+                                query_name: drag.query_name.to_string(),
+                                folder: None,
+                            });
+                        }
+                    },
+                ))
+            })
             .child(
                 Icon::new(if is_expanded {
                     IconName::ChevronDown
@@ -3913,6 +4680,22 @@ impl ConnectionSidebar {
         };
         let icon = self.sidebar_row_icon(&row_icon, theme.muted_foreground);
         let element_id_for_click = element_id.clone();
+        let query_drag = match &kind_for_click {
+            SidebarLeafKind::Query {
+                conn_id,
+                query_id,
+                query_name,
+            } => Some(DragSavedQuery {
+                connection_id: *conn_id,
+                query_id: *query_id,
+                query_name: SharedString::from(query_name.clone()),
+            }),
+            _ => None,
+        };
+        let query_folder_drop = match &kind_for_click {
+            SidebarLeafKind::QueryFolder { conn_id, folder } => Some((*conn_id, folder.clone())),
+            _ => None,
+        };
 
         h_flex()
             .id(SharedString::from(element_id))
@@ -4011,19 +4794,23 @@ impl ConnectionSidebar {
                         conn_id,
                         function_name,
                         object_schema,
+                        database_name,
                     } => cx.emit(ConnectionSidebarEvent::OpenFunction {
                         connection_id: *conn_id,
                         function_name: function_name.clone(),
                         object_schema: object_schema.clone(),
+                        database_name: database_name.clone(),
                     }),
                     SidebarLeafKind::Procedure {
                         conn_id,
                         procedure_name,
                         object_schema,
+                        database_name,
                     } => cx.emit(ConnectionSidebarEvent::OpenProcedure {
                         connection_id: *conn_id,
                         procedure_name: procedure_name.clone(),
                         object_schema: object_schema.clone(),
+                        database_name: database_name.clone(),
                     }),
                     SidebarLeafKind::MetadataObject {
                         conn_id,
@@ -4050,6 +4837,7 @@ impl ConnectionSidebar {
                         query_id: *query_id,
                         query_name: query_name.clone(),
                     }),
+                    SidebarLeafKind::QueryFolder { .. } => {}
                     SidebarLeafKind::RedisDatabase {
                         conn_id,
                         database_index,
@@ -4062,6 +4850,7 @@ impl ConnectionSidebar {
                         conn_id,
                         database_name,
                         collection_name,
+                        ..
                     } => cx.emit(ConnectionSidebarEvent::OpenDocumentCollection {
                         connection_id: *conn_id,
                         database_name: database_name.clone(),
@@ -4133,6 +4922,7 @@ impl ConnectionSidebar {
                             conn_id,
                             function_name,
                             object_schema,
+                            ..
                         } => this.show_function_context_menu(
                             *conn_id,
                             function_name.clone(),
@@ -4145,6 +4935,7 @@ impl ConnectionSidebar {
                             conn_id,
                             procedure_name,
                             object_schema,
+                            ..
                         } => this.show_procedure_context_menu(
                             *conn_id,
                             procedure_name.clone(),
@@ -4182,6 +4973,7 @@ impl ConnectionSidebar {
                             window,
                             cx,
                         ),
+                        SidebarLeafKind::QueryFolder { .. } => {}
                         SidebarLeafKind::RedisDatabase {
                             conn_id,
                             database_index,
@@ -4193,10 +4985,52 @@ impl ConnectionSidebar {
                             window,
                             cx,
                         ),
-                        SidebarLeafKind::DocumentCollection { .. } => {}
+                        SidebarLeafKind::DocumentCollection {
+                            conn_id,
+                            database_name,
+                            collection_name,
+                            object_type,
+                        } => this.show_metadata_object_context_menu(
+                            *conn_id,
+                            collection_name.clone(),
+                            None,
+                            Some(database_name.clone()),
+                            object_type.to_string(),
+                            event.position,
+                            window,
+                            cx,
+                        ),
                     }
                 }),
             )
+            .when_some(query_drag, |this, drag| {
+                this.on_drag(drag, |drag, _, _, cx| {
+                    cx.stop_propagation();
+                    cx.new(|_| drag.clone())
+                })
+            })
+            .when_some(query_folder_drop, |this, (conn_id, folder)| {
+                let folder_for_drop = folder.clone();
+                this.drag_over::<DragSavedQuery>(move |this, drag, _, cx| {
+                    if drag.connection_id == conn_id {
+                        this.bg(cx.theme().drop_target)
+                    } else {
+                        this
+                    }
+                })
+                .on_drop(cx.listener(
+                    move |_this, drag: &DragSavedQuery, _window, cx| {
+                        if drag.connection_id == conn_id {
+                            cx.emit(ConnectionSidebarEvent::MoveSavedQueryToFolder {
+                                connection_id: conn_id,
+                                query_id: drag.query_id,
+                                query_name: drag.query_name.to_string(),
+                                folder: Some(folder_for_drop.clone()),
+                            });
+                        }
+                    },
+                ))
+            })
             .child(icon)
             .child(
                 div()
@@ -4496,7 +5330,9 @@ impl Panel for ConnectionSidebar {
 #[cfg(test)]
 mod tests {
     use super::ConnectionSidebar;
-    use crate::widgets::sidebar::types::{DatabaseSchemaData, SidebarDatabaseInfo};
+    use crate::widgets::sidebar::types::{DatabaseSchemaData, SavedQueryInfo, SidebarDatabaseInfo};
+    use uuid::Uuid;
+    use zqlz_core::{DocumentAdminObjectInfo, DocumentCollectionInfo};
 
     #[test]
     fn sidebar_groups_postgres_metadata_sections_by_schema() {
@@ -4604,6 +5440,130 @@ mod tests {
     }
 
     #[test]
+    fn mongodb_saved_query_classifier_splits_pipelines_and_map_reduce_assets() {
+        let aggregation = SavedQueryInfo {
+            id: Uuid::new_v4(),
+            name: "daily revenue".to_string(),
+            query_text: "db.orders.aggregate([{ $match: { status: 'paid' } }])".to_string(),
+            folder: None,
+        };
+        let map_reduce = SavedQueryInfo {
+            id: Uuid::new_v4(),
+            name: "legacy rollup".to_string(),
+            query_text: "db.orders.mapReduce(map, reduce, { out: 'rollup' })".to_string(),
+            folder: None,
+        };
+        let regular = SavedQueryInfo {
+            id: Uuid::new_v4(),
+            name: "open orders".to_string(),
+            query_text: "db.orders.find({ status: 'open' })".to_string(),
+            folder: None,
+        };
+        let aggregation_command = SavedQueryInfo {
+            id: Uuid::new_v4(),
+            name: "paid totals".to_string(),
+            query_text: r#"{ "aggregate": "orders", "pipeline": [{ "$match": { "status": "paid" } }], "cursor": {} }"#.to_string(),
+            folder: None,
+        };
+        let map_reduce_command = SavedQueryInfo {
+            id: Uuid::new_v4(),
+            name: "legacy command".to_string(),
+            query_text: r#"{ "mapReduce": "orders", "map": "function() {}", "reduce": "function() {}", "out": "order_rollup" }"#.to_string(),
+            folder: None,
+        };
+
+        assert!(ConnectionSidebar::is_mongodb_aggregation_asset(
+            &aggregation
+        ));
+        assert!(ConnectionSidebar::is_mongodb_map_reduce_asset(&map_reduce));
+        assert!(ConnectionSidebar::is_mongodb_aggregation_asset(
+            &aggregation_command
+        ));
+        assert!(ConnectionSidebar::is_mongodb_map_reduce_asset(
+            &map_reduce_command
+        ));
+        assert!(!ConnectionSidebar::is_mongodb_aggregation_asset(&regular));
+        assert!(!ConnectionSidebar::is_mongodb_map_reduce_asset(&regular));
+    }
+
+    #[test]
+    fn mongodb_regular_collection_predicate_excludes_special_collection_sections() {
+        fn collection(name: &str, collection_type: &str) -> DocumentCollectionInfo {
+            DocumentCollectionInfo {
+                database: "app".to_string(),
+                name: name.to_string(),
+                collection_type: collection_type.to_string(),
+                document_count: None,
+                size_bytes: None,
+                index_count: None,
+                options_json: None,
+                validator_json: None,
+                collation_json: None,
+                view_on: None,
+                pipeline_json: None,
+                timeseries_json: None,
+                clustered_index_json: None,
+                change_stream_pre_and_post_images: None,
+            }
+        }
+
+        let normal = collection("orders", "collection");
+        let view = collection("orders_view", "view");
+        let timeseries = collection("events", "timeseries");
+        let mut capped = collection("auditLogs", "collection");
+        capped.options_json = Some(serde_json::json!({ "capped": true }));
+        let mut clustered = collection("clusteredEvents", "collection");
+        clustered.clustered_index_json = Some(serde_json::json!({ "key": { "_id": 1 } }));
+        let system = collection("system.views", "collection");
+
+        assert!(ConnectionSidebar::is_regular_mongodb_collection(&normal));
+        assert!(!ConnectionSidebar::is_regular_mongodb_collection(&view));
+        assert!(!ConnectionSidebar::is_regular_mongodb_collection(
+            &timeseries
+        ));
+        assert!(!ConnectionSidebar::is_regular_mongodb_collection(&capped));
+        assert!(!ConnectionSidebar::is_regular_mongodb_collection(
+            &clustered
+        ));
+        assert!(!ConnectionSidebar::is_regular_mongodb_collection(&system));
+    }
+
+    #[test]
+    fn mongodb_admin_metadata_search_matches_server_sharding_and_unavailable_rows() {
+        let sharded_collection = DocumentAdminObjectInfo {
+            database: "zqlz_feature_lab".to_string(),
+            kind: "sharded_collection".to_string(),
+            name: "zqlz_feature_lab.orders".to_string(),
+            details_json: serde_json::Value::Null,
+            unavailable_reason: None,
+        };
+        let unavailable_search = DocumentAdminObjectInfo {
+            database: "zqlz_feature_lab".to_string(),
+            kind: "search_index".to_string(),
+            name: "$listSearchIndexes".to_string(),
+            details_json: serde_json::Value::Null,
+            unavailable_reason: Some("command is not supported".to_string()),
+        };
+
+        assert!(ConnectionSidebar::document_admin_matches_search(
+            &sharded_collection,
+            "orders"
+        ));
+        assert!(ConnectionSidebar::document_admin_matches_search(
+            &sharded_collection,
+            "sharded"
+        ));
+        assert!(ConnectionSidebar::document_admin_matches_search(
+            &unavailable_search,
+            "not supported"
+        ));
+        assert!(!ConnectionSidebar::document_admin_matches_search(
+            &unavailable_search,
+            "warehouse"
+        ));
+    }
+
+    #[test]
     fn unloaded_expanded_database_without_loading_does_not_render_loading_row() {
         let database = SidebarDatabaseInfo {
             name: "postgres".to_string(),
@@ -4613,8 +5573,18 @@ mod tests {
             is_loading: false,
             schema: None,
             collections: Vec::new(),
+            indexes: Vec::new(),
+            functions: Vec::new(),
+            gridfs_buckets: Vec::new(),
+            users: Vec::new(),
+            roles: Vec::new(),
+            search_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
+            server: Vec::new(),
+            sharding: Vec::new(),
             collections_expanded: false,
             collections_loading: false,
+            document_expanded_sections: std::collections::HashSet::new(),
         };
 
         assert!(!ConnectionSidebar::should_render_database_loading(
@@ -4633,8 +5603,18 @@ mod tests {
             is_loading: true,
             schema: None,
             collections: Vec::new(),
+            indexes: Vec::new(),
+            functions: Vec::new(),
+            gridfs_buckets: Vec::new(),
+            users: Vec::new(),
+            roles: Vec::new(),
+            search_indexes: Vec::new(),
+            vector_indexes: Vec::new(),
+            server: Vec::new(),
+            sharding: Vec::new(),
             collections_expanded: false,
             collections_loading: false,
+            document_expanded_sections: std::collections::HashSet::new(),
         };
 
         assert!(ConnectionSidebar::should_render_database_loading(&database));

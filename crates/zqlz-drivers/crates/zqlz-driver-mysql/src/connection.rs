@@ -485,6 +485,43 @@ fn mysql_value_to_value(
     }
 }
 
+fn mysql_column_metadata(
+    mysql_columns: &[mysql_async::Column],
+) -> (Vec<ColumnMeta>, Vec<String>, Vec<ColumnType>, Vec<ColumnFlags>) {
+    let mut columns = Vec::new();
+    let mut column_names = Vec::new();
+    let mut column_types = Vec::new();
+    let mut column_flags = Vec::new();
+
+    for (idx, column) in mysql_columns.iter().enumerate() {
+        let name = column.name_str().to_string();
+        column_names.push(name.clone());
+        column_types.push(column.column_type());
+        column_flags.push(column.flags());
+
+        columns.push(ColumnMeta {
+            name,
+            data_type: mysql_column_type_display(
+                column.column_type(),
+                Some(column.column_length()),
+                Some(column.decimals()),
+                Some(column.flags()),
+            ),
+            nullable: true,
+            ordinal: idx,
+            max_length: Some(column.column_length() as i64),
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        });
+    }
+
+    (columns, column_names, column_types, column_flags)
+}
+
 fn format_mysql_bit_value(bytes: &[u8]) -> String {
     if bytes.is_empty() {
         return String::new();
@@ -1139,44 +1176,17 @@ impl Connection for MySqlConnection {
         let cancelled = self.cancelled.clone();
         let (columns, _column_names, rows) = get_mysql_runtime()
             .spawn(async move {
-                let mysql_rows: Vec<MySqlRow> = conn
-                    .query(&final_sql)
+                let result = conn
+                    .query_iter(&final_sql)
                     .await
                     .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
 
-                let mut columns = Vec::new();
-                let mut column_names = Vec::new();
-                let mut column_types = Vec::new();
-                let mut column_flags = Vec::new();
-
-                if let Some(first_row) = mysql_rows.first() {
-                    for (idx, col) in first_row.columns_ref().iter().enumerate() {
-                        let name = col.name_str().to_string();
-                        column_names.push(name.clone());
-                        column_types.push(col.column_type());
-                        column_flags.push(col.flags());
-                        let data_type = mysql_column_type_display(
-                            col.column_type(),
-                            Some(col.column_length()),
-                            Some(col.decimals()),
-                            Some(col.flags()),
-                        );
-
-                        columns.push(ColumnMeta {
-                            name,
-                            data_type,
-                            nullable: true,
-                            ordinal: idx,
-                            max_length: Some(col.column_length() as i64),
-                            precision: None,
-                            scale: None,
-                            auto_increment: false,
-                            default_value: None,
-                            comment: None,
-                            enum_values: None,
-                        });
-                    }
-                }
+                let (columns, column_names, column_types, column_flags) =
+                    mysql_column_metadata(result.columns_ref());
+                let mysql_rows: Vec<MySqlRow> = result
+                    .collect_and_drop()
+                    .await
+                    .map_err(|e| ZqlzError::Query(format!("Failed to collect query rows: {}", e)))?;
 
                 let mut rows = Vec::new();
                 for mysql_row in mysql_rows {
@@ -1526,50 +1536,31 @@ impl Transaction for MySqlTransaction {
         let sql = render_mysql_sql_with_params(sql, params)?;
         let start_time = std::time::Instant::now();
 
-        let (rows_data, column_names, column_types, column_flags, column_type_names) =
+        let (rows_data, columns, column_names, column_types, column_flags) =
             get_mysql_runtime()
                 .spawn(async move {
                     let mut guard = conn_mutex.lock().await;
                     if let Some(ref mut conn) = *guard {
-                        let rows: Vec<MySqlRow> = conn.query(&sql).await.map_err(|e| {
+                        let result = conn.query_iter(&sql).await.map_err(|e| {
                             ZqlzError::Query(format!("Failed to execute query: {}", e))
                         })?;
 
-                        let mut column_names = Vec::new();
-                        let mut column_types = Vec::new();
-                        let mut column_flags = Vec::new();
-                        let mut column_type_names = Vec::new();
-
-                        if let Some(first_row) = rows.first() {
-                            for col in first_row.columns_ref().iter() {
-                                column_names.push(col.name_str().to_string());
-                                column_types.push(col.column_type());
-                                column_flags.push(col.flags());
-                                column_type_names.push(mysql_column_type_display(
-                                    col.column_type(),
-                                    Some(col.column_length()),
-                                    Some(col.decimals()),
-                                    Some(col.flags()),
-                                ));
-                            }
-                        }
+                        let (columns, column_names, column_types, column_flags) =
+                            mysql_column_metadata(result.columns_ref());
+                        let rows: Vec<MySqlRow> = result.collect_and_drop().await.map_err(|e| {
+                            ZqlzError::Query(format!("Failed to collect query rows: {}", e))
+                        })?;
 
                         Ok::<
                             (
                                 Vec<MySqlRow>,
+                                Vec<ColumnMeta>,
                                 Vec<String>,
                                 Vec<ColumnType>,
                                 Vec<ColumnFlags>,
-                                Vec<String>,
                             ),
                             ZqlzError,
-                        >((
-                            rows,
-                            column_names,
-                            column_types,
-                            column_flags,
-                            column_type_names,
-                        ))
+                        >((rows, columns, column_names, column_types, column_flags))
                     } else {
                         Err(ZqlzError::Query(
                             "Transaction connection no longer available".into(),
@@ -1580,29 +1571,6 @@ impl Transaction for MySqlTransaction {
                 .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
 
         // Convert MySQL rows to ZQLZ rows
-        let mut columns = Vec::new();
-        for (idx, name) in column_names.iter().enumerate() {
-            columns.push(ColumnMeta {
-                name: name.clone(),
-                data_type: column_type_names.get(idx).cloned().unwrap_or_else(|| {
-                    column_types
-                        .get(idx)
-                        .copied()
-                        .map(|column_type| mysql_column_type_display(column_type, None, None, None))
-                        .unwrap_or_else(|| "unknown".to_string())
-                }),
-                nullable: true,
-                ordinal: idx,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            });
-        }
-
         let mut rows = Vec::new();
         for mysql_row in &rows_data {
             let mut values = Vec::new();

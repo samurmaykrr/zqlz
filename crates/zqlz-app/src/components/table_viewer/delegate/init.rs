@@ -25,6 +25,8 @@ impl TableViewerDelegate {
                 .sortable()
         }));
 
+        Self::apply_key_value_database_column_widths(&mut columns, &result.columns);
+
         let row_original_order: Vec<u64> = (0..rows.len() as u64).collect();
         let next_row_order_token = rows.len() as u64;
 
@@ -126,18 +128,10 @@ impl TableViewerDelegate {
                 FeatureAvailability::unavailable("Row editing requires a data-editable connection")
             }
         };
-        let insert_rows = match category {
-            DriverCategory::Relational => row_feature.clone(),
-            DriverCategory::Document => {
-                FeatureAvailability::unavailable("Document inserts use the document editor")
-            }
-            _ => row_feature.clone(),
-        };
-
         DataEditingFeatureSet {
             browse_rows: row_feature.clone(),
             edit_cells: row_feature.clone(),
-            insert_rows,
+            insert_rows: row_feature.clone(),
             delete_rows: row_feature,
         }
     }
@@ -306,19 +300,15 @@ mod tests {
     }
 
     #[test]
-    fn document_driver_allows_cell_and_delete_batch_edits_without_relational_primary_key() {
+    fn document_driver_allows_create_update_delete_without_relational_primary_key() {
         let features = TableViewerDelegate::data_editing_features_for_driver_category(
             DriverCategory::Document,
         );
 
         assert!(features.browse_rows.available);
         assert!(features.edit_cells.available);
-        assert!(!features.insert_rows.available);
+        assert!(features.insert_rows.available);
         assert!(features.delete_rows.available);
-        assert_eq!(
-            features.insert_rows.reason.as_deref(),
-            Some("Document inserts use the document editor")
-        );
     }
 
     #[test]

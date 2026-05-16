@@ -7,6 +7,8 @@ use gpui::Task;
 use lsp_types::CodeActionOrCommand;
 use std::sync::Arc;
 
+const MAX_RENDERED_DIAGNOSTICS: usize = 1_000;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AnchoredInlayHint {
     pub anchor: Anchor,
@@ -380,7 +382,12 @@ impl LanguagePipelineState {
             return;
         }
 
-        self.set_diagnostics(Self::project_external_diagnostics(buffer, diagnostics));
+        self.set_diagnostics(
+            Self::project_external_diagnostics(buffer, diagnostics)
+                .into_iter()
+                .take(MAX_RENDERED_DIAGNOSTICS)
+                .collect(),
+        );
     }
 
     pub fn clear_diagnostics(&mut self) {
@@ -808,6 +815,30 @@ mod tests {
         pipeline.apply_external_diagnostics(&buffer, false, Vec::new());
 
         assert!(pipeline.diagnostics().is_empty());
+    }
+
+    #[test]
+    fn apply_external_diagnostics_caps_rendered_highlights() {
+        let mut pipeline = LanguagePipelineState::new();
+        let buffer = TextBuffer::new("x\n".repeat(1_200));
+        let diagnostics = (0..1_200)
+            .map(|line| Diagnostic {
+                line,
+                column: 0,
+                end_line: Some(line),
+                end_column: Some(1),
+                message: "error".to_string(),
+                severity: DiagnosticLevel::Error,
+                source: None,
+            })
+            .collect();
+
+        pipeline.apply_external_diagnostics(&buffer, true, diagnostics);
+
+        assert_eq!(
+            pipeline.diagnostics().len(),
+            super::MAX_RENDERED_DIAGNOSTICS
+        );
     }
 
     #[test]

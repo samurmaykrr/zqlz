@@ -98,10 +98,11 @@ impl TursoConnection {
             return Ok(requested_name.to_string());
         }
 
-        if let Some((schema_name, relation_name)) = requested_name.split_once('.') {
-            if schema_name != "main" && tables.iter().any(|table| table.name == relation_name) {
-                return Ok(relation_name.to_string());
-            }
+        if let Some((schema_name, relation_name)) = requested_name.split_once('.')
+            && schema_name != "main"
+            && tables.iter().any(|table| table.name == relation_name)
+        {
+            return Ok(relation_name.to_string());
         }
 
         Ok(requested_name.to_string())
@@ -1200,10 +1201,12 @@ impl Transaction for TursoTransaction {
             .transaction
             .take()
             .ok_or_else(|| ZqlzError::Query("Transaction already closed".into()))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| ZqlzError::Query(format!("Failed to commit transaction: {}", error)))
+        run_on_turso_runtime(async move {
+            transaction.commit().await.map_err(|error| {
+                ZqlzError::Query(format!("Failed to commit transaction: {}", error))
+            })
+        })
+        .await
     }
 
     async fn rollback(mut self: Box<Self>) -> Result<()> {
@@ -1211,10 +1214,12 @@ impl Transaction for TursoTransaction {
             .transaction
             .take()
             .ok_or_else(|| ZqlzError::Query("Transaction already closed".into()))?;
-        transaction
-            .rollback()
-            .await
-            .map_err(|error| ZqlzError::Query(format!("Failed to rollback transaction: {}", error)))
+        run_on_turso_runtime(async move {
+            transaction.rollback().await.map_err(|error| {
+                ZqlzError::Query(format!("Failed to rollback transaction: {}", error))
+            })
+        })
+        .await
     }
 
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
@@ -1222,7 +1227,13 @@ impl Transaction for TursoTransaction {
             .transaction
             .as_ref()
             .ok_or_else(|| ZqlzError::Query("Transaction already closed".into()))?;
-        TursoConnection::query_with_connection(transaction, sql, params).await
+        let connection = std::ops::Deref::deref(transaction).clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        run_on_turso_runtime(async move {
+            TursoConnection::query_with_connection(&connection, &sql, &params).await
+        })
+        .await
     }
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
@@ -1230,7 +1241,13 @@ impl Transaction for TursoTransaction {
             .transaction
             .as_ref()
             .ok_or_else(|| ZqlzError::Query("Transaction already closed".into()))?;
-        TursoConnection::execute_with_connection(transaction, sql, params).await
+        let connection = std::ops::Deref::deref(transaction).clone();
+        let sql = sql.to_string();
+        let params = params.to_vec();
+        run_on_turso_runtime(async move {
+            TursoConnection::execute_with_connection(&connection, &sql, &params).await
+        })
+        .await
     }
 }
 

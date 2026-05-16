@@ -2,7 +2,10 @@
 //!
 //! Displays query results in tabs: Message, Summary, Result, Explain, Info
 
-use std::ops::Range;
+use std::{
+    ops::Range,
+    time::{Duration, Instant},
+};
 
 use gpui::StatefulInteractiveElement as _;
 use gpui::prelude::FluentBuilder;
@@ -26,6 +29,7 @@ use super::explain_analysis_view::ExplainAnalysisView;
 const RESULTS_MAX_MATERIALIZED_ROWS: usize = 20_000;
 const RESULTS_LIST_SCROLLBAR_WIDTH: f32 = 16.0;
 const RESULTS_MESSAGE_ROW_HEIGHT: f32 = 34.0;
+const RESULTS_LOADING_TICK_MS: u64 = 100;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ResultTab {
@@ -375,6 +379,12 @@ pub struct ResultsPanel {
     /// Whether results are loading
     is_loading: bool,
 
+    /// Query loading start time for live elapsed feedback.
+    loading_started_at: Option<Instant>,
+
+    /// Periodic re-render task for live loading feedback.
+    loading_timer_task: Option<Task<()>>,
+
     /// The currently active editor index (for scoping diagnostics)
     active_editor_id: Option<usize>,
 
@@ -400,6 +410,8 @@ impl ResultsPanel {
             explain_sub_tab: ExplainSubTab::Plan,
             active_tab: ResultTab::Message,
             is_loading: false,
+            loading_started_at: None,
+            loading_timer_task: None,
             active_editor_id: None,
             diagnostics_loading: false,
             closed_result_tabs: std::collections::HashSet::new(),
@@ -479,10 +491,15 @@ impl ResultsPanel {
         self.explain_graph_states.push(None);
 
         let explain_idx = self.explain_results.len();
+        let has_visual_plan = result.analyzed_plan.is_some();
         self.explain_results.push(result);
         self.is_loading = false;
         self.active_tab = ResultTab::Explain(explain_idx);
-        self.explain_sub_tab = ExplainSubTab::Plan;
+        self.explain_sub_tab = if has_visual_plan {
+            ExplainSubTab::Visual
+        } else {
+            ExplainSubTab::Plan
+        };
         self.ensure_explain_plan_table_state(explain_idx, window, cx);
         self.ensure_explain_graph_state(explain_idx, cx);
         cx.notify();
@@ -491,7 +508,46 @@ impl ResultsPanel {
     /// Set loading state
     pub fn set_loading(&mut self, loading: bool, cx: &mut Context<Self>) {
         self.is_loading = loading;
+        if loading {
+            self.loading_started_at = Some(Instant::now());
+            self.start_loading_timer(cx);
+        } else {
+            self.loading_started_at = None;
+            self.loading_timer_task = None;
+        }
         cx.notify();
+    }
+
+    fn start_loading_timer(&mut self, cx: &mut Context<Self>) {
+        self.loading_timer_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                smol::Timer::after(Duration::from_millis(RESULTS_LOADING_TICK_MS)).await;
+                let should_continue = match this.update(cx, |panel, cx| {
+                    if panel.is_loading {
+                        cx.notify();
+                        true
+                    } else {
+                        false
+                    }
+                }) {
+                    Ok(should_continue) => should_continue,
+                    Err(error) => {
+                        tracing::debug!(%error, "Stopped results-panel loading timer after panel dropped");
+                        false
+                    }
+                };
+
+                if !should_continue {
+                    break;
+                }
+            }
+        }));
+    }
+
+    fn loading_elapsed_seconds(&self) -> f64 {
+        self.loading_started_at
+            .map(|started_at| started_at.elapsed().as_secs_f64())
+            .unwrap_or_default()
     }
 
     /// Clear results
@@ -505,6 +561,8 @@ impl ResultsPanel {
         self.explain_graph_states.clear();
         self.closed_result_tabs.clear();
         self.is_loading = false;
+        self.loading_started_at = None;
+        self.loading_timer_task = None;
         cx.notify();
     }
 
@@ -1731,13 +1789,49 @@ impl ResultsPanel {
     /// Render the loading state
     fn render_loading(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let elapsed_seconds = self.loading_elapsed_seconds();
 
-        v_flex().size_full().items_center().justify_center().child(
-            div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("Executing query..."),
-        )
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .child(
+                v_flex()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(theme.foreground)
+                            .child("Executing query..."),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(theme.muted_foreground)
+                            .child(format!("Elapsed {:.1}s", elapsed_seconds)),
+                    ),
+            )
+            .child(
+                div()
+                    .w(px(240.0))
+                    .h(px(4.0))
+                    .rounded_full()
+                    .overflow_hidden()
+                    .bg(theme.muted)
+                    .child(
+                        div()
+                            .h_full()
+                            .w(relative(0.35))
+                            .rounded_full()
+                            .bg(theme.accent)
+                            .map(|this| {
+                                let offset = ((elapsed_seconds * 0.8).sin() as f32 + 1.0) * 0.325;
+                                this.ml(relative(offset))
+                            }),
+                    ),
+            )
     }
 
     /// Render the Explain tab (sub-tab bar + content)

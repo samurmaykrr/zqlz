@@ -7,7 +7,7 @@ use uuid::Uuid;
 
 pub(super) const SIDEBAR_ROW_HEIGHT: f32 = 24.0;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Copy, Debug)]
 pub(super) enum SidebarRowIcon {
     Folder,
     Database,
@@ -88,11 +88,13 @@ pub(super) enum SidebarLeafKind {
         conn_id: Uuid,
         function_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
     },
     Procedure {
         conn_id: Uuid,
         procedure_name: String,
         object_schema: Option<String>,
+        database_name: Option<String>,
     },
     MetadataObject {
         conn_id: Uuid,
@@ -107,6 +109,10 @@ pub(super) enum SidebarLeafKind {
         query_id: Uuid,
         query_name: String,
     },
+    QueryFolder {
+        conn_id: Uuid,
+        folder: String,
+    },
     RedisDatabase {
         conn_id: Uuid,
         database_index: u16,
@@ -115,6 +121,7 @@ pub(super) enum SidebarLeafKind {
         conn_id: Uuid,
         database_name: String,
         collection_name: String,
+        object_type: &'static str,
     },
 }
 

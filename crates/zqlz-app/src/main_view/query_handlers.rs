@@ -294,6 +294,9 @@ impl MainView {
                 )
             }));
         }
+        results_panel.update(cx, |panel, cx| {
+            panel.set_loading(true, cx);
+        });
 
         cx.spawn_in(window, async move |this, cx| {
             tracing::debug!(sql = %tracking_sql, request_kind, "running query workflow");

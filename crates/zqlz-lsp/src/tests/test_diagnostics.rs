@@ -32,6 +32,25 @@ fn test_valid_sql_no_diagnostics() {
 }
 
 #[test]
+fn test_mongodb_shell_query_skips_sql_diagnostics() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MongoDB);
+    let text = Rope::from(
+        r#"db.products.find(
+  { $text: { $search: "developer iot" } },
+  { sku: 1, name: 1, tags: 1 }
+).sort({ score: { $meta: "textScore" } }).limit(5)"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+
+    assert!(
+        diagnostics.is_empty(),
+        "MongoDB shell query should not be validated as SQL, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
 fn test_syntax_error_detected() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("SELECT * FORM users"); // FORM instead of FROM

@@ -12,8 +12,8 @@ use gpui::*;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 use zqlz_core::{
-    ColumnMeta, DocumentCellUpdateRequest, DocumentDeleteRequest, DriverCategory,
-    KeyValueDeleteRequest, Value,
+    ColumnMeta, DocumentCellUpdateRequest, DocumentDeleteRequest, DocumentSaveRequest,
+    DriverCategory, KeyValueDeleteRequest, Value,
 };
 use zqlz_services::{CommitCellChange, CommitTableChangesRequest, RowInsertData};
 use zqlz_ui::widgets::{
@@ -35,6 +35,35 @@ pub(in crate::main_view) struct SaveNewRowRequest {
     pub new_row_index: usize,
     pub row_data: Vec<String>,
     pub column_names: Vec<String>,
+}
+
+fn is_object_id_column_type(column_type: &str) -> bool {
+    matches!(
+        column_type
+            .trim()
+            .to_lowercase()
+            .split_once('(')
+            .map(|(base, _)| base.trim().to_string())
+            .unwrap_or_else(|| column_type.trim().to_lowercase())
+            .as_str(),
+        "objectid" | "object_id"
+    )
+}
+
+fn is_valid_object_id_string(input: &str) -> bool {
+    let input = input.trim();
+    input.len() == 24 && input.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn document_insert_json_value(column_type: &str, value: &Value) -> serde_json::Value {
+    if is_object_id_column_type(column_type)
+        && let Value::String(value) = value
+        && is_valid_object_id_string(value)
+    {
+        return serde_json::json!({ "$oid": value.trim() });
+    }
+
+    value.to_json_value()
 }
 
 pub(in crate::main_view) fn handle_add_row_event(
@@ -408,6 +437,7 @@ pub(in crate::main_view) fn handle_delete_rows_event(
 
 pub(in crate::main_view) fn handle_delete_redis_keys_event(
     connection_id: Uuid,
+    database_name: Option<String>,
     all_column_names: &[String],
     rows_to_delete: &[Vec<Value>],
     viewer_entity: Entity<TableViewerPanel>,
@@ -415,8 +445,9 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
     cx: &mut App,
 ) {
     tracing::info!(
-        "DeleteRedisKeys event: connection={}, rows={}",
+        "DeleteRedisKeys event: connection={}, database={:?}, rows={}",
         connection_id,
+        database_name,
         rows_to_delete.len()
     );
 
@@ -444,8 +475,15 @@ pub(in crate::main_view) fn handle_delete_redis_keys_event(
         return;
     };
 
-    let Some(connection) = app_state.connection_service.get_connection(connection_id) else {
-        tracing::error!("Connection not found: {}", connection_id);
+    let Some(connection) = app_state
+        .connection_service
+        .get_connection_for_database_cached(connection_id, database_name.as_deref())
+    else {
+        tracing::error!(
+            "Connection not found for Redis delete: connection={}, database={:?}",
+            connection_id,
+            database_name
+        );
         return;
     };
 
@@ -525,29 +563,10 @@ pub(in crate::main_view) fn handle_commit_changes_event(
         return;
     };
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(
-            connection_id,
-            viewer_entity.read(cx).database_name().as_deref(),
-        )
-    else {
-        tracing::error!("Connection not found: {}", connection_id);
-        return;
-    };
-
-    let table_service = app_state.table_service.clone();
-    let connection_name = app_state
-        .connection_service
-        .get_saved_connection_name(connection_id)
-        .unwrap_or_else(|| "Unknown".to_string());
-    let connection = connection.clone();
-
     // Capture viewer state before the async spawn
     let is_view = viewer_entity.read(cx).is_view();
     let database_name = viewer_entity.read(cx).database_name();
     let driver_category = viewer_entity.read(cx).driver_category;
-    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
 
     if matches!(driver_category, DriverCategory::Document) {
         handle_document_commit_changes_event(
@@ -564,6 +583,22 @@ pub(in crate::main_view) fn handle_commit_changes_event(
         );
         return;
     }
+
+    let Some(connection) = app_state
+        .connection_service
+        .get_connection_for_database_cached(connection_id, database_name.as_deref())
+    else {
+        tracing::error!("Connection not found: {}", connection_id);
+        return;
+    };
+
+    let table_service = app_state.table_service.clone();
+    let connection_name = app_state
+        .connection_service
+        .get_saved_connection_name(connection_id)
+        .unwrap_or_else(|| "Unknown".to_string());
+    let schema_qualifier = resolve_schema_qualifier(&connection, &database_name);
+    let connection = connection.clone();
 
     window
         .spawn(cx, async move |cx| {
@@ -798,22 +833,6 @@ pub(in crate::main_view) fn handle_document_commit_changes_event(
         return;
     }
 
-    let Some(connection) = app_state
-        .connection_service
-        .get_connection_for_database_cached(connection_id, Some(database_name.as_str()))
-    else {
-        tracing::error!("Connection not found: {}", connection_id);
-        return;
-    };
-
-    if !new_rows.is_empty() {
-        window.push_notification(
-            Notification::warning("Document inserts are not part of batch commit yet"),
-            cx,
-        );
-        return;
-    }
-
     let Some(id_column_index) = column_meta.iter().position(|column| column.name == "_id") else {
         window.push_notification(
             Notification::error("Cannot commit document changes without an _id column"),
@@ -822,13 +841,84 @@ pub(in crate::main_view) fn handle_document_commit_changes_event(
         return;
     };
 
+    let connection_service = app_state.connection_service.clone();
     let document_service = app_state.document_service.clone();
-    let connection = connection.clone();
 
     window
         .spawn(cx, async move |cx| {
+            let connection = match connection_service
+                .get_connection_for_database(connection_id, &database_name)
+                .await
+            {
+                Ok(connection) => connection,
+                Err(error) => {
+                    tracing::error!(
+                        connection_id = %connection_id,
+                        database = %database_name,
+                        error = %error,
+                        "Failed to get document database-specific connection"
+                    );
+                    if let Err(update_error) = cx.update(|window, cx| {
+                        window.push_notification(
+                            Notification::error(format!(
+                                "Failed to connect to database '{}': {}",
+                                database_name, error
+                            )),
+                            cx,
+                        );
+                    }) {
+                        tracing::debug!(error = %update_error, "Skipped document connection failure notification after window closed");
+                    }
+                    return anyhow::Ok(());
+                }
+            };
+
             let mut errors = Vec::new();
             let mut successful_operations = 0usize;
+
+            let column_names = column_meta
+                .iter()
+                .map(|column| column.name.clone())
+                .collect::<Vec<_>>();
+
+            for (row_number, row_values) in new_rows.iter().enumerate() {
+                let document = column_names
+                    .iter()
+                    .zip(column_meta.iter())
+                    .zip(row_values.iter())
+                    .filter(|(_, value)| !value.is_null())
+                    .map(|((column_name, column), value)| {
+                        (
+                            column_name.clone(),
+                            document_insert_json_value(&column.data_type, value),
+                        )
+                    })
+                    .collect::<serde_json::Map<_, _>>();
+
+                if document.is_empty() {
+                    errors.push(format!("New document row {} has no values", row_number + 1));
+                    continue;
+                }
+
+                match document_service
+                    .insert_document(
+                        connection.clone(),
+                        DocumentSaveRequest {
+                            database: database_name.clone(),
+                            collection: collection_name.clone(),
+                            document_json: serde_json::Value::Object(document).to_string(),
+                        },
+                    )
+                    .await
+                {
+                    Ok(_) => successful_operations += 1,
+                    Err(error) => errors.push(format!(
+                        "Failed to insert document row {}: {}",
+                        row_number + 1,
+                        error
+                    )),
+                }
+            }
 
             for ((row_index, column_index), change) in &modified_cells {
                 let Some(row_values) = all_rows.get(*row_index) else {

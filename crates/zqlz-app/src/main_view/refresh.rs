@@ -308,13 +308,9 @@ impl MainView {
                                     payload.databases.clone(),
                                     cx,
                                 );
-                                let (_, objects_panel_manifest) =
-                                    ObjectsPanelData::from_redis_databases_with_manifest(
-                                        payload.databases.clone(),
-                                    );
                                 sidebar.set_objects_panel_manifest(
                                     connection_id,
-                                    objects_panel_manifest,
+                                    payload.objects_panel_manifest.clone(),
                                     cx,
                                 );
                             });
@@ -329,10 +325,8 @@ impl MainView {
 
                         if should_update_objects {
                             objects_panel.update(cx, |panel, cx| {
-                                let (objects_panel_data, objects_panel_manifest) =
-                                    ObjectsPanelData::from_redis_databases_with_manifest(
-                                        payload.databases.clone(),
-                                    );
+                                let objects_panel_data = payload.objects_panel_data.clone();
+                                let objects_panel_manifest = payload.objects_panel_manifest.clone();
 
                                 let coverage_gaps =
                                     manifest_action_coverage_gaps(&objects_panel_manifest);
@@ -378,11 +372,8 @@ impl MainView {
 
                         if should_update_objects {
                             objects_panel.update(cx, |panel, cx| {
-                                let (objects_panel_data, objects_panel_manifest) =
-                                    ObjectsPanelData::from_document_databases_and_collections_with_manifest(
-                                        payload.databases.clone(),
-                                        payload.collections.clone(),
-                                    );
+                                let objects_panel_data = payload.objects_panel_data.clone();
+                                let objects_panel_manifest = payload.objects_panel_manifest.clone();
 
                                 let coverage_gaps =
                                     manifest_action_coverage_gaps(&objects_panel_manifest);

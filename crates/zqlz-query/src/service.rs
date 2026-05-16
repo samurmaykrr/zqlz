@@ -6,13 +6,11 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_analyzer::{
-    QueryAnalyzer, parse_mysql_explain, parse_postgres_explain, parse_sqlite_explain,
-};
-use zqlz_core::{Connection, ExplainConfig, ExplainParserKind, Value};
+use zqlz_core::{Connection, DriverCategory, ExplainConfig, Value};
 
 use crate::engine::QueryEngine;
 use crate::error::{QueryServiceError, QueryServiceResult};
+use crate::explain;
 use crate::history::{QueryHistory, QueryHistoryEntry};
 use crate::parameters::{BindError, bind_named_with_policy, bind_positional_with_policy};
 use crate::view_models::{QueryExecution, StatementExecution, StatementResult};
@@ -84,7 +82,7 @@ impl QueryService {
             let statement_start = std::time::Instant::now();
 
             // Determine if it's a query or statement
-            let is_query = self.engine.is_query(statement_sql);
+            let is_query = self.is_connection_query(&connection, statement_sql);
 
             let statement_result = if is_query {
                 match self.engine.execute_query(&connection, statement_sql).await {
@@ -251,7 +249,7 @@ impl QueryService {
             let statement_start = std::time::Instant::now();
 
             // Determine if it's a query or statement
-            let is_query = self.engine.is_query(statement_sql);
+            let is_query = self.is_connection_query(&connection, statement_sql);
 
             let statement_result = if is_query {
                 match self
@@ -582,6 +580,17 @@ impl QueryService {
         QueryServiceError::QueryFailed(format!("Parameter binding failed: {}", error))
     }
 
+    fn is_connection_query(&self, connection: &Arc<dyn Connection>, sql: &str) -> bool {
+        if connection.driver_category() == DriverCategory::Document {
+            let trimmed = sql.trim();
+            return trimmed.starts_with('{')
+                || trimmed.starts_with("db.")
+                || self.engine.is_query(sql);
+        }
+
+        self.engine.is_query(sql)
+    }
+
     /// Execute EXPLAIN on a SQL query
     ///
     /// Uses the connection's dialect to determine the correct EXPLAIN syntax.
@@ -686,7 +695,6 @@ impl QueryService {
         })
     }
 
-    /// Parse and analyze EXPLAIN output
     fn parse_and_analyze_explain(
         &self,
         connection: &Arc<dyn Connection>,
@@ -694,144 +702,13 @@ impl QueryService {
         query_plan: Option<&zqlz_core::QueryResult>,
         duration_ms: u64,
     ) -> Option<zqlz_analyzer::QueryAnalysis> {
-        // Try to parse based on driver-declared parser behavior
-        let parsed_plan = match connection.explain_parser_kind() {
-            ExplainParserKind::PostgreSql => raw_output
-                .and_then(Self::parse_postgres_query_result)
-                .or_else(|| query_plan.and_then(Self::parse_postgres_query_result)),
-            ExplainParserKind::MySql => raw_output
-                .and_then(Self::mysql_query_result_to_plan_text)
-                .or_else(|| query_plan.and_then(Self::mysql_query_result_to_plan_text))
-                .and_then(|plan_text| parse_mysql_explain(&plan_text).ok()),
-            ExplainParserKind::Sqlite => query_plan
-                .and_then(Self::sqlite_query_result_to_plan_text)
-                .and_then(|plan_text| parse_sqlite_explain(&plan_text).ok()),
-            ExplainParserKind::Raw => None,
-            ExplainParserKind::None => None,
-        };
-
-        // If we successfully parsed the plan, analyze it
-        parsed_plan.map(|mut plan| {
-            // Add execution time from EXPLAIN itself
-            plan.execution_time_ms = Some(duration_ms as f64);
-
-            // Run the analyzer to get suggestions
-            let analyzer = QueryAnalyzer::new();
-            analyzer.analyze(plan)
-        })
-    }
-
-    fn sqlite_query_result_to_plan_text(result: &zqlz_core::QueryResult) -> Option<String> {
-        let detail_index = result
-            .columns
-            .iter()
-            .position(|column| column.name.eq_ignore_ascii_case("detail"));
-
-        let lines = result
-            .rows
-            .iter()
-            .filter_map(|row| {
-                let value = detail_index
-                    .and_then(|index| row.values.get(index))
-                    .or_else(|| row.values.last())?;
-                let text = Self::explain_value_to_text(value);
-                let text = text.trim();
-                (!text.is_empty()).then(|| text.to_string())
-            })
-            .collect::<Vec<_>>();
-
-        (!lines.is_empty()).then(|| lines.join("\n"))
-    }
-
-    fn mysql_query_result_to_plan_text(result: &zqlz_core::QueryResult) -> Option<String> {
-        if let Some(single_value) = result.rows.first().and_then(|row| {
-            (result.columns.len() == 1)
-                .then(|| row.values.first())
-                .flatten()
-        }) {
-            let text = Self::explain_value_to_text(single_value);
-            let text = text.trim();
-            if text.starts_with('{') {
-                return Some(text.to_string());
-            }
-        }
-
-        let mut lines = Vec::new();
-        if !result.columns.is_empty() {
-            lines.push(
-                result
-                    .columns
-                    .iter()
-                    .map(|column| column.name.as_str())
-                    .collect::<Vec<_>>()
-                    .join("\t"),
-            );
-        }
-
-        lines.extend(result.rows.iter().map(|row| {
-            row.values
-                .iter()
-                .map(Self::explain_value_to_text)
-                .collect::<Vec<_>>()
-                .join("\t")
-        }));
-
-        (!lines.is_empty()).then(|| lines.join("\n"))
-    }
-
-    fn parse_postgres_query_result(
-        result: &zqlz_core::QueryResult,
-    ) -> Option<zqlz_analyzer::explain::QueryPlan> {
-        let first_value = result.rows.first().and_then(|row| row.values.first())?;
-
-        if let Some(plan) = Self::parse_postgres_json_value(first_value) {
-            return Some(plan);
-        }
-
-        let plan_text = result
-            .rows
-            .iter()
-            .filter_map(|row| row.values.first())
-            .map(Self::explain_value_to_text)
-            .collect::<Vec<_>>()
-            .join("\n");
-
-        if plan_text.trim().is_empty() {
-            None
-        } else {
-            parse_postgres_explain(&plan_text).ok()
-        }
-    }
-
-    fn parse_postgres_json_value(value: &Value) -> Option<zqlz_analyzer::explain::QueryPlan> {
-        match value {
-            Value::Json(json) => parse_postgres_explain(&json.to_string()).ok(),
-            Value::String(text) => {
-                let trimmed = text.trim();
-                if trimmed.starts_with('[') || trimmed.starts_with('{') {
-                    parse_postgres_explain(trimmed).ok()
-                } else {
-                    None
-                }
-            }
-            _ => {
-                let text = value.to_string();
-                let trimmed = text.trim();
-                if trimmed.starts_with('[') || trimmed.starts_with('{') {
-                    parse_postgres_explain(trimmed).ok()
-                } else {
-                    None
-                }
-            }
-        }
-    }
-
-    fn explain_value_to_text(value: &Value) -> String {
-        match value {
-            Value::Json(json) => json.to_string(),
-            Value::String(text) => text.clone(),
-            _ => value.to_string(),
-        }
+        explain::parse_and_analyze_explain(
+            connection.explain_parser_kind(),
+            connection.dialect_id(),
+            raw_output,
+            query_plan,
+            duration_ms,
+        )
     }
 
     /// Get the ExplainConfig for a connection based on its dialect
@@ -875,7 +752,6 @@ impl Default for QueryService {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zqlz_core::{ColumnMeta, QueryResult, Row};
 
     #[test]
     fn test_is_query() {
@@ -892,58 +768,6 @@ mod tests {
         assert!(!service.is_query("DELETE FROM users"));
         assert!(!service.is_query("CREATE TABLE users (id INT)"));
         assert!(!service.is_query("DROP TABLE users"));
-    }
-
-    #[test]
-    fn test_mysql_query_result_to_plan_text_tabular() {
-        let columns = vec![
-            "id",
-            "select_type",
-            "table",
-            "type",
-            "possible_keys",
-            "key",
-            "key_len",
-            "ref",
-            "rows",
-            "filtered",
-            "Extra",
-        ]
-        .into_iter()
-        .enumerate()
-        .map(|(ordinal, name)| ColumnMeta {
-            name: name.to_string(),
-            ordinal,
-            ..ColumnMeta::default()
-        })
-        .collect::<Vec<_>>();
-        let column_names = columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
-        let mut result = QueryResult::empty();
-        result.columns = columns;
-        result.rows = vec![Row::new(
-            column_names,
-            vec![
-                Value::Int32(1),
-                Value::String("SIMPLE".to_string()),
-                Value::String("users".to_string()),
-                Value::String("ALL".to_string()),
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Null,
-                Value::Int64(100),
-                Value::Decimal("100.00".to_string()),
-                Value::String("Using where".to_string()),
-            ],
-        )];
-
-        let text = QueryService::mysql_query_result_to_plan_text(&result).unwrap();
-        assert!(text.starts_with("id\tselect_type\ttable\ttype"));
-        assert!(text.contains("1\tSIMPLE\tusers\tALL"));
-        assert!(parse_mysql_explain(&text).is_ok());
     }
 
     #[test]

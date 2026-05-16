@@ -61,11 +61,14 @@ impl TableViewerDelegate {
             TableContextMenuAction::EditCells,
         )
         .available;
+        let can_open_editor =
+            edit_cells_available || matches!(self.driver_category, DriverCategory::KeyValue);
         let delete_rows_available = table_context_menu_action_availability(
             &self.data_editing_features,
             TableContextMenuAction::DeleteRows,
         )
-        .available;
+        .available
+            || matches!(self.driver_category, DriverCategory::KeyValue);
         let supports_relational_sql_actions =
             matches!(self.driver_category, DriverCategory::Relational);
 
@@ -206,12 +209,14 @@ impl TableViewerDelegate {
             {
                 let label = if selected_count > 1 {
                     "Edit in Cell Editor (Single Row Only)".to_string()
+                } else if matches!(self.driver_category, DriverCategory::KeyValue) {
+                    "Edit Key".to_string()
                 } else {
                     "Edit in Cell Editor".to_string()
                 };
 
                 PopupMenuItem::new(label)
-                    .disabled(!edit_cells_available || column_meta.is_none() || selected_count > 1)
+                    .disabled(!can_open_editor || column_meta.is_none() || selected_count > 1)
                     .on_click({
                     let column_meta = column_meta.clone();
                     let current_value = current_value.clone();

@@ -37,6 +37,8 @@ pub struct SavedQuery {
     pub connection_id: Uuid,
     /// The SQL text
     pub sql: String,
+    /// Optional sidebar folder. Empty means connection root.
+    pub folder: Option<String>,
     /// When the query was created
     pub created_at: DateTime<Utc>,
     /// When the query was last modified
@@ -131,12 +133,14 @@ impl LocalStorage {
                 name TEXT NOT NULL,
                 connection_id TEXT NOT NULL,
                 sql TEXT NOT NULL,
+                folder TEXT,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY (connection_id) REFERENCES connections(id) ON DELETE CASCADE
             )",
             [],
         )?;
+        let _ = conn.execute("ALTER TABLE saved_queries ADD COLUMN folder TEXT", []);
 
         // Index for faster lookup by connection
         conn.execute(
@@ -499,13 +503,14 @@ impl LocalStorage {
         let conn = self.connect()?;
 
         conn.execute(
-            "INSERT OR REPLACE INTO saved_queries (id, name, connection_id, sql, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT OR REPLACE INTO saved_queries (id, name, connection_id, sql, folder, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             params![
                 query.id.to_string(),
                 query.name,
                 query.connection_id.to_string(),
                 query.sql,
+                query.folder,
                 query.created_at.to_rfc3339(),
                 query.updated_at.to_rfc3339(),
             ],
@@ -519,10 +524,10 @@ impl LocalStorage {
         let conn = self.connect()?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, connection_id, sql, created_at, updated_at 
+            "SELECT id, name, connection_id, sql, folder, created_at, updated_at 
              FROM saved_queries 
              WHERE connection_id = ?1 
-             ORDER BY name ASC",
+             ORDER BY COALESCE(folder, ''), name ASC",
         )?;
 
         let queries = stmt
@@ -549,12 +554,14 @@ impl LocalStorage {
 
                 let sql: String = row.get(3)?;
 
-                let created_at_str: String = row.get(4)?;
+                let folder: Option<String> = row.get(4)?;
+
+                let created_at_str: String = row.get(5)?;
                 let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
 
-                let updated_at_str: String = row.get(5)?;
+                let updated_at_str: String = row.get(6)?;
                 let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
                     .map(|dt| dt.with_timezone(&Utc))
                     .unwrap_or_else(|_| Utc::now());
@@ -564,6 +571,7 @@ impl LocalStorage {
                     name,
                     connection_id,
                     sql,
+                    folder,
                     created_at,
                     updated_at,
                 })
@@ -578,7 +586,7 @@ impl LocalStorage {
         let conn = self.connect()?;
 
         let mut stmt = conn.prepare(
-            "SELECT id, name, connection_id, sql, created_at, updated_at 
+            "SELECT id, name, connection_id, sql, folder, created_at, updated_at 
              FROM saved_queries 
              WHERE id = ?1",
         )?;
@@ -606,12 +614,14 @@ impl LocalStorage {
 
             let sql: String = row.get(3)?;
 
-            let created_at_str: String = row.get(4)?;
+            let folder: Option<String> = row.get(4)?;
+
+            let created_at_str: String = row.get(5)?;
             let created_at = DateTime::parse_from_rfc3339(&created_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
 
-            let updated_at_str: String = row.get(5)?;
+            let updated_at_str: String = row.get(6)?;
             let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
                 .map(|dt| dt.with_timezone(&Utc))
                 .unwrap_or_else(|_| Utc::now());
@@ -621,6 +631,7 @@ impl LocalStorage {
                 name,
                 connection_id,
                 sql,
+                folder,
                 created_at,
                 updated_at,
             })
@@ -641,6 +652,18 @@ impl LocalStorage {
         conn.execute(
             "UPDATE saved_queries SET sql = ?1, updated_at = ?2 WHERE id = ?3",
             params![sql, now, query_id.to_string()],
+        )?;
+
+        Ok(())
+    }
+
+    pub fn move_query_to_folder(&self, query_id: Uuid, folder: Option<&str>) -> Result<()> {
+        let conn = self.connect()?;
+        let now = chrono::Utc::now().to_rfc3339();
+
+        conn.execute(
+            "UPDATE saved_queries SET folder = ?1, updated_at = ?2 WHERE id = ?3",
+            params![folder, now, query_id.to_string()],
         )?;
 
         Ok(())
@@ -752,6 +775,7 @@ impl zqlz_query::SavedQueryStore for LocalStorage {
             name: query.name.clone(),
             connection_id: query.connection_id,
             sql: query.sql.clone(),
+            folder: query.folder.clone(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
         };
@@ -766,12 +790,17 @@ impl zqlz_query::SavedQueryStore for LocalStorage {
                 name: query.name,
                 connection_id: query.connection_id,
                 sql: query.sql,
+                folder: query.folder,
             })
         })
     }
 
     fn update_query_sql(&self, query_id: Uuid, sql: &str) -> Result<()> {
         LocalStorage::update_query_sql(self, query_id, sql)
+    }
+
+    fn move_query_to_folder(&self, query_id: Uuid, folder: Option<&str>) -> Result<()> {
+        LocalStorage::move_query_to_folder(self, query_id, folder)
     }
 
     fn rename_query(&self, query_id: Uuid, new_name: &str) -> Result<()> {
@@ -794,6 +823,7 @@ impl zqlz_query::SavedQueryStore for LocalStorage {
                     name: query.name,
                     connection_id: query.connection_id,
                     sql: query.sql,
+                    folder: query.folder,
                 })
                 .collect()
         })

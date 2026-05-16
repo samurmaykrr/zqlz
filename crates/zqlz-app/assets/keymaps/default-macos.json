@@ -73,6 +73,13 @@
     }
   },
   {
+    "context": "TextEditor",
+    "bindings": {
+      "cmd-s": "query_editor::SaveQuery",
+      "cmd-shift-s": "query_editor::SaveQueryAs"
+    }
+  },
+  {
     "context": "TableViewerPanel",
     "bindings": {
       "cmd-s": "table_viewer::CommitChanges",

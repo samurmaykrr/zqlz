@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [features]
-default = ["postgres", "mysql", "sqlite", "turso", "redis"]
+default = ["postgres", "mysql", "sqlite", "turso", "redis", "mongodb"]
 postgres = ["dep:zqlz-driver-postgres"]
 mysql = ["dep:zqlz-driver-mysql"]
 sqlite = ["dep:zqlz-driver-sqlite"]
@@ -20,6 +20,7 @@ all-drivers = ["postgres", "mysql", "sqlite", "turso", "redis", "mssql", "duckdb
 [dependencies]
 # Core
 zqlz-core.workspace = true
+zqlz-analyzer.workspace = true
 
 # Driver crates (optional based on features)
 zqlz-driver-postgres = { workspace = true, optional = true }
