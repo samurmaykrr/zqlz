@@ -1,11 +1,14 @@
 use crate::{
     Anchor, Bias, Cursor, EditorInlayHint, FoldRegion, Highlight, HighlightKind, InlayHintKind,
     InlayHintSide, Position, SyntaxHighlighter, SyntaxRefreshStrategy, SyntaxSnapshot, TextBuffer,
-    buffer::Change, detect_folds, detect_folds_in_range,
+    buffer::Change,
+    folding::{detect_folds_in_range_with_rules, detect_folds_with_rules},
+    syntax::SyntaxTermOverrides,
 };
 use gpui::Task;
 use lsp_types::CodeActionOrCommand;
 use std::sync::Arc;
+use zqlz_core::{SyntaxDriverCapabilities, normalize_syntax_profile};
 
 const MAX_RENDERED_DIAGNOSTICS: usize = 1_000;
 
@@ -110,9 +113,18 @@ pub struct SyntaxParseToken {
     generation: u64,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SyntaxTermOverrideMode {
+    ExtendProfile,
+    ReplaceDialectTerms,
+}
+
 pub struct LanguagePipelineState {
     syntax_highlighter: Option<SyntaxHighlighter>,
     syntax_language_profile: &'static str,
+    syntax_capabilities_override: Option<SyntaxDriverCapabilities>,
+    syntax_term_overrides: Option<SyntaxTermOverrides>,
+    syntax_term_override_mode: SyntaxTermOverrideMode,
     syntax_snapshot: SyntaxSnapshot,
     syntax_generation: u64,
     syntax_parse_task: Task<anyhow::Result<()>>,
@@ -147,6 +159,9 @@ impl LanguagePipelineState {
         Self {
             syntax_highlighter,
             syntax_language_profile: "sql",
+            syntax_capabilities_override: None,
+            syntax_term_overrides: None,
+            syntax_term_override_mode: SyntaxTermOverrideMode::ExtendProfile,
             syntax_snapshot: SyntaxSnapshot::empty(0),
             syntax_generation: 0,
             syntax_parse_task: Task::ready(Ok(())),
@@ -194,13 +209,12 @@ impl LanguagePipelineState {
     }
 
     pub fn highlight_kind_at(&self, offset: usize) -> HighlightKind {
-        for highlight in self.cached_highlights.iter() {
-            if highlight.start > offset {
-                break;
-            }
-            if offset >= highlight.start && offset < highlight.end {
-                return highlight.kind;
-            }
+        let highlights = self.cached_highlights.as_ref();
+        let index = highlights.partition_point(|highlight| highlight.start <= offset);
+        if let Some(highlight) = index.checked_sub(1).and_then(|index| highlights.get(index))
+            && offset < highlight.end
+        {
+            return highlight.kind;
         }
         HighlightKind::Default
     }
@@ -214,6 +228,7 @@ impl LanguagePipelineState {
     }
 
     pub fn set_syntax_language_profile(&mut self, language_profile: &'static str) -> bool {
+        let language_profile = normalize_syntax_profile(language_profile);
         if self.syntax_language_profile == language_profile {
             return false;
         }
@@ -221,8 +236,103 @@ impl LanguagePipelineState {
         self.syntax_language_profile = language_profile;
         if let Some(ref mut highlighter) = self.syntax_highlighter {
             highlighter.set_language_profile(language_profile);
+            if let Some(capabilities) = self.syntax_capabilities_override.clone() {
+                highlighter.set_syntax_capabilities_override(capabilities);
+            }
         }
         self.bump_syntax_parse_generation();
+        true
+    }
+
+    pub fn set_syntax_capabilities_override(
+        &mut self,
+        capabilities: SyntaxDriverCapabilities,
+    ) -> bool {
+        if self.syntax_capabilities_override.as_ref() == Some(&capabilities) {
+            return false;
+        }
+
+        self.syntax_capabilities_override = Some(capabilities.clone());
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.set_syntax_capabilities_override(capabilities);
+        }
+        self.bump_syntax_parse_generation();
+        true
+    }
+
+    pub fn clear_syntax_capabilities_override(&mut self) -> bool {
+        if self.syntax_capabilities_override.is_none() {
+            return false;
+        }
+
+        self.syntax_capabilities_override = None;
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.clear_syntax_capabilities_override();
+        }
+        self.bump_syntax_parse_generation();
+        true
+    }
+
+    fn block_comment_delimiters(&self) -> Option<(&'static str, &'static str)> {
+        if let Some(capabilities) = self.syntax_capabilities_override.as_ref() {
+            capabilities.block_comment_delimiters
+        } else {
+            Some(("/*", "*/"))
+        }
+    }
+
+    fn folding_rules(&self) -> zqlz_core::SyntaxFoldingRules {
+        self.syntax_capabilities_override
+            .as_ref()
+            .map(|capabilities| capabilities.folding)
+            .unwrap_or(zqlz_core::SQL_FOLDING_RULES)
+    }
+
+    pub fn set_syntax_term_overrides(&mut self, overrides: SyntaxTermOverrides) -> bool {
+        if self.syntax_term_overrides.as_ref() == Some(&overrides)
+            && self.syntax_term_override_mode == SyntaxTermOverrideMode::ExtendProfile
+        {
+            return false;
+        }
+
+        self.syntax_term_overrides = Some(overrides.clone());
+        self.syntax_term_override_mode = SyntaxTermOverrideMode::ExtendProfile;
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.set_syntax_term_overrides(overrides);
+            self.bump_syntax_parse_generation();
+        }
+        true
+    }
+
+    pub fn set_driver_syntax_terms(&mut self, overrides: SyntaxTermOverrides) -> bool {
+        if self.syntax_term_overrides.as_ref() == Some(&overrides)
+            && self.syntax_term_override_mode == SyntaxTermOverrideMode::ReplaceDialectTerms
+        {
+            return false;
+        }
+
+        self.syntax_term_overrides = Some(overrides.clone());
+        self.syntax_term_override_mode = SyntaxTermOverrideMode::ReplaceDialectTerms;
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.set_driver_syntax_terms(overrides);
+            self.bump_syntax_parse_generation();
+        }
+        true
+    }
+
+    pub fn clear_syntax_term_overrides(&mut self) -> bool {
+        if self.syntax_term_overrides.is_none()
+            && self.syntax_term_override_mode == SyntaxTermOverrideMode::ExtendProfile
+        {
+            return false;
+        }
+
+        self.syntax_term_overrides = None;
+        self.syntax_term_override_mode = SyntaxTermOverrideMode::ExtendProfile;
+        if let Some(ref mut highlighter) = self.syntax_highlighter {
+            highlighter.clear_syntax_term_overrides();
+            self.bump_syntax_parse_generation();
+        }
         true
     }
 
@@ -296,6 +406,19 @@ impl LanguagePipelineState {
     pub fn restore_syntax_highlighter(&mut self, highlighter: SyntaxHighlighter) {
         let mut highlighter = highlighter;
         highlighter.set_language_profile(self.syntax_language_profile);
+        if let Some(capabilities) = self.syntax_capabilities_override.clone() {
+            highlighter.set_syntax_capabilities_override(capabilities);
+        }
+        if let Some(overrides) = self.syntax_term_overrides.clone() {
+            match self.syntax_term_override_mode {
+                SyntaxTermOverrideMode::ExtendProfile => {
+                    highlighter.set_syntax_term_overrides(overrides)
+                }
+                SyntaxTermOverrideMode::ReplaceDialectTerms => {
+                    highlighter.set_driver_syntax_terms(overrides)
+                }
+            }
+        }
         self.syntax_highlighter = Some(highlighter);
     }
 
@@ -589,13 +712,22 @@ impl LanguagePipelineState {
             next_regions.retain(|region| {
                 region.end_line < line_range.start || region.start_line >= line_range.end
             });
-            next_regions.extend(detect_folds_in_range(buffer, line_range.clone()));
+            next_regions.extend(detect_folds_in_range_with_rules(
+                buffer,
+                line_range.clone(),
+                self.block_comment_delimiters(),
+                self.folding_rules(),
+            ));
             next_regions
                 .sort_by_key(|region| (region.start_line, std::cmp::Reverse(region.end_line)));
             self.fold_regions = next_regions;
             FoldRefresh::Range(line_range)
         } else {
-            self.fold_regions = detect_folds(buffer);
+            self.fold_regions = detect_folds_with_rules(
+                buffer,
+                self.block_comment_delimiters(),
+                self.folding_rules(),
+            );
             FoldRefresh::Full
         }
     }
@@ -686,6 +818,7 @@ pub fn build_language_pipeline_snapshot(
 #[cfg(test)]
 mod tests {
     use super::{FoldRefresh, LanguagePipelineState, build_language_pipeline_snapshot};
+    use crate::syntax::SyntaxTermOverrides;
     use crate::{
         Cursor, Diagnostic, DiagnosticLevel, Highlight, HighlightKind, Position, SyntaxSnapshot,
         TextBuffer,
@@ -709,11 +842,108 @@ mod tests {
     }
 
     #[test]
+    fn syntax_language_profile_is_normalized_before_generation_bump() {
+        let mut pipeline = LanguagePipelineState::new();
+
+        assert!(pipeline.set_syntax_language_profile("postgres"));
+        assert_eq!(pipeline.syntax_language_profile(), "postgresql");
+
+        assert!(!pipeline.set_syntax_language_profile("postgresql"));
+        assert_eq!(pipeline.syntax_language_profile(), "postgresql");
+    }
+
+    #[test]
+    fn syntax_term_updates_report_noop_when_metadata_is_unchanged() {
+        let mut pipeline = LanguagePipelineState::new();
+        let overrides = SyntaxTermOverrides {
+            keywords: vec!["JSON.GET".to_string()],
+            functions: vec!["FT.SEARCH".to_string()],
+            types: Vec::new(),
+        };
+
+        assert!(pipeline.set_driver_syntax_terms(overrides.clone()));
+        let generation = pipeline.syntax_parse_generation;
+        assert!(!pipeline.set_driver_syntax_terms(overrides.clone()));
+        assert_eq!(pipeline.syntax_parse_generation, generation);
+
+        assert!(pipeline.set_syntax_term_overrides(overrides.clone()));
+        let generation = pipeline.syntax_parse_generation;
+        assert!(!pipeline.set_syntax_term_overrides(overrides));
+        assert_eq!(pipeline.syntax_parse_generation, generation);
+
+        assert!(pipeline.clear_syntax_term_overrides());
+        let generation = pipeline.syntax_parse_generation;
+        assert!(!pipeline.clear_syntax_term_overrides());
+        assert_eq!(pipeline.syntax_parse_generation, generation);
+    }
+
+    #[test]
     fn refresh_folds_supports_incremental_range_refresh() {
         let mut pipeline = LanguagePipelineState::new();
         let buffer = TextBuffer::new("select\nfrom\nwhere");
         let refresh = pipeline.refresh_folds(&buffer, Some(0..2), true);
         assert_eq!(refresh, FoldRefresh::Range(0..2));
+    }
+
+    #[test]
+    fn refresh_folds_uses_driver_block_comment_delimiters() {
+        let mut pipeline = LanguagePipelineState::new();
+        pipeline
+            .set_syntax_capabilities_override(zqlz_core::get_syntax_driver_capabilities("redis"));
+        let buffer =
+            TextBuffer::new("GET key\n/* not redis comment\nstill command */\nSET key value");
+
+        assert_eq!(
+            pipeline.refresh_folds(&buffer, None, true),
+            FoldRefresh::Full
+        );
+        assert!(
+            pipeline
+                .fold_regions()
+                .iter()
+                .all(|region| region.kind != crate::FoldKind::Comment)
+        );
+
+        pipeline.set_syntax_capabilities_override(zqlz_core::get_syntax_driver_capabilities(
+            "postgresql",
+        ));
+        assert_eq!(
+            pipeline.refresh_folds(&buffer, None, true),
+            FoldRefresh::Full
+        );
+        assert!(
+            pipeline
+                .fold_regions()
+                .iter()
+                .any(|region| region.kind == crate::FoldKind::Comment)
+        );
+    }
+
+    #[test]
+    fn refresh_folds_uses_driver_structural_folding_rules() {
+        let mut pipeline = LanguagePipelineState::new();
+        let buffer = TextBuffer::new("BEGIN\nSELECT (\n1\n);\nEND;");
+
+        pipeline
+            .set_syntax_capabilities_override(zqlz_core::get_syntax_driver_capabilities("redis"));
+        pipeline.refresh_folds(&buffer, None, true);
+        assert!(pipeline.fold_regions().is_empty());
+
+        pipeline
+            .set_syntax_capabilities_override(zqlz_core::get_syntax_driver_capabilities("mongodb"));
+        pipeline.refresh_folds(&buffer, None, true);
+        assert!(
+            pipeline
+                .fold_regions()
+                .iter()
+                .all(|region| region.kind != crate::FoldKind::Block)
+        );
+        assert!(
+            pipeline
+                .fold_regions()
+                .iter()
+                .any(|region| region.kind == crate::FoldKind::Parenthesis)
+        );
     }
 
     #[test]
@@ -950,6 +1180,38 @@ mod tests {
         assert!(pipeline.syntax_highlights().iter().any(|highlight| {
             highlight.start == 6 && highlight.end == 12 && highlight.kind == HighlightKind::Keyword
         }));
+    }
+
+    #[test]
+    fn highlight_kind_at_uses_sorted_cached_highlights() {
+        let mut pipeline = LanguagePipelineState::new();
+        pipeline.set_syntax_snapshot(SyntaxSnapshot::new(
+            vec![
+                Highlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                Highlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Identifier,
+                },
+                Highlight {
+                    start: 20,
+                    end: 24,
+                    kind: HighlightKind::Function,
+                },
+            ],
+            1,
+        ));
+
+        assert_eq!(pipeline.highlight_kind_at(0), HighlightKind::Keyword);
+        assert_eq!(pipeline.highlight_kind_at(5), HighlightKind::Keyword);
+        assert_eq!(pipeline.highlight_kind_at(6), HighlightKind::Default);
+        assert_eq!(pipeline.highlight_kind_at(8), HighlightKind::Identifier);
+        assert_eq!(pipeline.highlight_kind_at(22), HighlightKind::Function);
+        assert_eq!(pipeline.highlight_kind_at(24), HighlightKind::Default);
     }
 
     #[test]

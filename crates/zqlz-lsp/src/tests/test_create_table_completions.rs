@@ -6,6 +6,7 @@
 
 use super::test_helpers::*;
 use crate::SqlDialect;
+use zqlz_core::is_inside_active_create_table_column_list;
 use zqlz_ui::widgets::Rope;
 
 // ── Data type completions ────────────────────────────────────────────────────
@@ -166,6 +167,22 @@ fn test_create_table_no_create_table_context_after_closing_paren() {
         "After closing paren completions must not be exclusively data types (wrong context). Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn test_create_table_context_ignores_protected_create_table_text() {
+    assert!(!is_inside_active_create_table_column_list(
+        "'CREATE TABLE fake ('"
+    ));
+    assert!(!is_inside_active_create_table_column_list(
+        "-- CREATE TABLE fake (\n"
+    ));
+    assert!(!is_inside_active_create_table_column_list(
+        "CREATE TABLE users (\n    name TEXT DEFAULT '('\n)"
+    ));
+    assert!(is_inside_active_create_table_column_list(
+        "CREATE TABLE users (\n    name TEXT DEFAULT '(',\n    "
+    ));
 }
 
 // ── CREATE TEMPORARY TABLE / CREATE TEMP TABLE variants ─────────────────────

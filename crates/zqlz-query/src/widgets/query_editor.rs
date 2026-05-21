@@ -10,7 +10,6 @@
 //! - Functions: CREATE/ALTER FUNCTION definitions
 //! - Triggers: CREATE/ALTER TRIGGER definitions
 
-use crate::batch::split_statements;
 use crate::schema_metadata::{SchemaMetadata, SchemaMetadataProvider, SchemaSymbolInfo};
 use gpui::prelude::FluentBuilder;
 use gpui::*;
@@ -21,8 +20,15 @@ use std::rc::Rc;
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::{
-    Connection, DriverCategory, FormatRequest, Value, driver_category_from_driver_name,
-    formatter_provider_for_driver,
+    Connection, FormatRequest, SqlDocumentSymbol, SqlStatementSpan, SyntaxDriverCapabilities,
+    Value,
+    dialect_config::{CompletionsConfig, SnippetDef},
+    driver_document_symbols, driver_document_symbols_for_capabilities,
+    execution_unit_for_capabilities, execution_unit_for_profile, formatter_provider_for_driver,
+};
+use zqlz_drivers::{
+    get_completion_triggers_for_driver, get_completion_word_chars_for_driver,
+    get_highlight_language_for_driver, get_syntax_metadata_for_driver, supports_sql_lsp_for_driver,
 };
 use zqlz_lsp::SqlLsp;
 use zqlz_services::{DatabaseSchema, SchemaService};
@@ -35,6 +41,8 @@ use zqlz_text_editor::{
     CompletionSettings, CursorSettings, DocumentIdentity, DocumentSettings, EditorAppearance,
     EditorLanguageProviders, EditorSettings as TextEditorSettings, FormatProvider, GutterSettings,
     ScrollSettings, SearchSettings, SoftWrapMode, TextDocument, TextEditor, TextEditorEvent,
+    completion_prefix_with_word_chars, completion_trigger_context_for_characters,
+    syntax::SyntaxTermOverrides,
 };
 use zqlz_ui::widgets::{
     ActiveTheme, Disableable, Icon, Sizable, ZqlzIcon,
@@ -46,6 +54,158 @@ use zqlz_ui::widgets::{
     v_flex,
 };
 
+const LARGE_DOCUMENT_BYTE_THRESHOLD: usize = 2 * 1024 * 1024;
+const HUGE_DOCUMENT_BYTE_THRESHOLD: usize = 8 * 1024 * 1024;
+const LARGE_DOCUMENT_LINE_THRESHOLD: usize = 20_000;
+const HUGE_DOCUMENT_LINE_THRESHOLD: usize = 100_000;
+const LARGE_DOCUMENT_MAX_LINE_THRESHOLD: usize = 20_000;
+const COMPLETION_CONTEXT_BYTES: usize = 16 * 1024;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryEditorDocumentPerformanceMode {
+    Normal,
+    Large,
+    HugeDump,
+}
+
+impl QueryEditorDocumentPerformanceMode {
+    fn from_text(text: &str) -> Self {
+        let byte_len = text.len();
+        let mut line_count = 0usize;
+        let mut current_line_len = 0usize;
+        let mut max_line_len = 0usize;
+
+        for byte in text.bytes() {
+            if byte == b'\n' {
+                line_count += 1;
+                max_line_len = max_line_len.max(current_line_len);
+                current_line_len = 0;
+            } else {
+                current_line_len += 1;
+            }
+        }
+        line_count += 1;
+        max_line_len = max_line_len.max(current_line_len);
+
+        Self::from_metrics(byte_len, line_count, max_line_len)
+    }
+
+    fn from_metrics(byte_len: usize, line_count: usize, max_line_len: usize) -> Self {
+        if byte_len >= HUGE_DOCUMENT_BYTE_THRESHOLD
+            || line_count >= HUGE_DOCUMENT_LINE_THRESHOLD
+            || max_line_len >= LARGE_DOCUMENT_MAX_LINE_THRESHOLD
+        {
+            Self::HugeDump
+        } else if byte_len >= LARGE_DOCUMENT_BYTE_THRESHOLD
+            || line_count >= LARGE_DOCUMENT_LINE_THRESHOLD
+        {
+            Self::Large
+        } else {
+            Self::Normal
+        }
+    }
+
+    fn from_rope(text: &ropey::Rope) -> Self {
+        let max_line_len = text
+            .lines()
+            .map(|line| line.len_bytes())
+            .max()
+            .unwrap_or_default();
+        Self::from_metrics(text.len_bytes(), text.len_lines(), max_line_len)
+    }
+
+    fn is_constrained(self) -> bool {
+        !matches!(self, Self::Normal)
+    }
+
+    fn allow_completion(self) -> bool {
+        matches!(self, Self::Normal | Self::Large)
+    }
+
+    fn status_label(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Large => Some("Large document mode"),
+            Self::HugeDump => Some("Huge dump mode"),
+        }
+    }
+
+    fn status_detail(self) -> Option<&'static str> {
+        match self {
+            Self::Normal => None,
+            Self::Large => Some("Viewport syntax and bounded completions stay enabled."),
+            Self::HugeDump => Some("Syntax, diagnostics, wrapping, and LSP are reduced."),
+        }
+    }
+}
+
+fn allow_full_document_lsp(text: &ropey::Rope) -> bool {
+    !QueryEditorDocumentPerformanceMode::from_rope(text).is_constrained()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct QueryEditorFeaturePolicy {
+    highlight_enabled: bool,
+    bracket_matching: bool,
+    show_gutter_diagnostics: bool,
+    selection_highlight: bool,
+    soft_wrap: bool,
+    auto_indent: bool,
+}
+
+impl QueryEditorFeaturePolicy {
+    fn from_settings(
+        settings: &AppEditorSettings,
+        mode: QueryEditorDocumentPerformanceMode,
+    ) -> Self {
+        let mut policy = Self {
+            highlight_enabled: settings.highlight_enabled,
+            bracket_matching: settings.bracket_matching,
+            show_gutter_diagnostics: settings.show_gutter_diagnostics,
+            selection_highlight: settings.selection_highlight,
+            soft_wrap: settings.word_wrap,
+            auto_indent: settings.auto_indent,
+        };
+
+        if mode.is_constrained() {
+            policy.highlight_enabled = false;
+            policy.bracket_matching = false;
+            policy.show_gutter_diagnostics = false;
+            policy.selection_highlight = false;
+            policy.soft_wrap = false;
+            policy.auto_indent = false;
+        }
+
+        policy
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QueryEditorCompletionMode {
+    Disabled,
+    SqlLsp,
+    DriverSyntax,
+}
+
+fn completion_mode_for_driver(
+    driver_type: Option<&str>,
+    settings: &AppEditorSettings,
+) -> QueryEditorCompletionMode {
+    if !settings.lsp_completions_enabled {
+        return QueryEditorCompletionMode::Disabled;
+    }
+
+    if supports_sql_lsp_for_driver(driver_type) {
+        if settings.lsp_enabled {
+            QueryEditorCompletionMode::SqlLsp
+        } else {
+            QueryEditorCompletionMode::Disabled
+        }
+    } else {
+        QueryEditorCompletionMode::DriverSyntax
+    }
+}
+
 use super::actions::{
     FormatQuery, NextProblem, PreviousProblem, SaveQuery, ShowCodeActions, ShowHover,
     TriggerParameterHints,
@@ -56,6 +216,8 @@ pub struct QueryDocumentSymbol {
     pub label: String,
     pub line: usize,
     pub column: usize,
+    pub source_range: std::ops::Range<usize>,
+    pub target_range: Option<std::ops::Range<usize>>,
 }
 
 /// Convert serde_json::Value to minijinja::Value
@@ -89,174 +251,101 @@ fn json_to_minijinja_value(value: serde_json::Value) -> minijinja::Value {
 }
 
 /// Maps a database driver type name to the corresponding syntax highlight language.
+#[cfg(test)]
 fn driver_type_to_highlight_language(driver_type: Option<&str>) -> &'static str {
-    // Use DialectProfile to determine the correct language for syntax highlighting
-    driver_type
-        .map(zqlz_core::dialects::get_highlight_language)
-        .unwrap_or("sql")
-}
-
-fn query_document_symbols(sql: &str) -> Vec<QueryDocumentSymbol> {
-    let mut symbols = Vec::new();
-    let mut current = String::new();
-    let mut start_line = 0usize;
-    let mut start_column = 0usize;
-    let mut line = 0usize;
-    let mut column = 0usize;
-    let mut in_string = false;
-    let mut string_char = '\0';
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let mut statement_started = false;
-    let mut chars = sql.chars().peekable();
-
-    while let Some(character) = chars.next() {
-        let next = chars.peek().copied();
-
-        if !statement_started && !character.is_whitespace() {
-            start_line = line;
-            start_column = column;
-            statement_started = true;
-        }
-
-        if !in_string && !in_block_comment && character == '-' && next == Some('-') {
-            in_line_comment = true;
-            current.push(character);
-            advance_position(character, &mut line, &mut column);
-            continue;
-        }
-
-        if in_line_comment {
-            current.push(character);
-            if character == '\n' {
-                in_line_comment = false;
-            }
-            advance_position(character, &mut line, &mut column);
-            continue;
-        }
-
-        if !in_string && !in_line_comment && character == '/' && next == Some('*') {
-            in_block_comment = true;
-            current.push(character);
-            advance_position(character, &mut line, &mut column);
-            continue;
-        }
-
-        if in_block_comment {
-            current.push(character);
-            advance_position(character, &mut line, &mut column);
-            if character == '*' && next == Some('/') {
-                current.push('/');
-                chars.next();
-                in_block_comment = false;
-                advance_position('/', &mut line, &mut column);
-            }
-            continue;
-        }
-
-        if !in_string && (character == '\'' || character == '"') {
-            in_string = true;
-            string_char = character;
-            current.push(character);
-            advance_position(character, &mut line, &mut column);
-            continue;
-        }
-
-        if in_string {
-            current.push(character);
-            advance_position(character, &mut line, &mut column);
-            if character == string_char {
-                if next == Some(string_char) {
-                    current.push(string_char);
-                    chars.next();
-                    advance_position(string_char, &mut line, &mut column);
-                    continue;
-                }
-                in_string = false;
-            }
-            continue;
-        }
-
-        if character == ';' {
-            if let Some(label) = query_document_symbol_label(&current) {
-                symbols.push(QueryDocumentSymbol {
-                    label,
-                    line: start_line,
-                    column: start_column,
-                });
-            }
-            current.clear();
-            statement_started = false;
-            advance_position(character, &mut line, &mut column);
-            continue;
-        }
-
-        current.push(character);
-        advance_position(character, &mut line, &mut column);
-    }
-
-    if let Some(label) = query_document_symbol_label(&current) {
-        symbols.push(QueryDocumentSymbol {
-            label,
-            line: start_line,
-            column: start_column,
-        });
-    }
-
-    symbols
-}
-
-fn advance_position(character: char, line: &mut usize, column: &mut usize) {
-    if character == '\n' {
-        *line += 1;
-        *column = 0;
-    } else {
-        *column += 1;
-    }
-}
-
-fn query_document_symbol_label(statement: &str) -> Option<String> {
-    let statement = statement.trim();
-    if statement.is_empty() {
-        return None;
-    }
-
-    let words: Vec<&str> = statement
-        .split_whitespace()
-        .filter(|word| !word.starts_with("--"))
-        .take(4)
-        .collect();
-    let first = words
-        .first()?
-        .trim_matches(|ch: char| !ch.is_alphanumeric());
-    if first.is_empty() {
-        return None;
-    }
-
-    let action = first.to_uppercase();
-    let label = match action.as_str() {
-        "SELECT" | "WITH" => "Query".to_string(),
-        "INSERT" | "UPDATE" | "DELETE" | "CREATE" | "ALTER" | "DROP" | "TRUNCATE" => {
-            let target = words
-                .iter()
-                .skip(1)
-                .find(|word| {
-                    !matches!(
-                        word.to_ascii_uppercase().as_str(),
-                        "INTO" | "TABLE" | "VIEW" | "INDEX" | "FUNCTION" | "PROCEDURE" | "TRIGGER"
-                    )
-                })
-                .map(|word| word.trim_matches(|ch: char| ch == '"' || ch == '`' || ch == ','));
-            if let Some(target) = target.filter(|target| !target.is_empty()) {
-                format!("{action} {target}")
-            } else {
-                action
-            }
-        }
-        _ => action,
+    let Some(driver_type) = driver_type else {
+        return "sql";
     };
 
-    Some(label)
+    get_highlight_language_for_driver(driver_type)
+}
+
+#[cfg(test)]
+fn syntax_term_overrides_for_driver(driver_type: Option<&str>) -> Option<SyntaxTermOverrides> {
+    let metadata = get_syntax_metadata_for_driver(driver_type?)?;
+    SyntaxTermOverrides::from_config(&metadata.syntax_terms)
+}
+
+#[derive(Clone, Debug)]
+struct QueryEditorSyntaxProfile {
+    language_profile: &'static str,
+    capabilities: Option<zqlz_core::SyntaxDriverCapabilities>,
+    syntax_terms: Option<SyntaxTermOverrides>,
+    completions: CompletionsConfig,
+    line_comment_prefix: Option<Option<&'static str>>,
+    completion_triggers: Vec<char>,
+    completion_word_chars: Vec<char>,
+    supports_sql_lsp: bool,
+}
+
+impl QueryEditorSyntaxProfile {
+    fn from_driver(driver_type: Option<&str>) -> Self {
+        let metadata = driver_type.and_then(get_syntax_metadata_for_driver);
+        let language_profile = metadata
+            .as_ref()
+            .map(|metadata| metadata.capabilities.profile)
+            .or_else(|| driver_type.map(get_highlight_language_for_driver))
+            .unwrap_or("sql");
+        let syntax_terms = metadata
+            .as_ref()
+            .and_then(|metadata| SyntaxTermOverrides::from_config(&metadata.syntax_terms));
+        let completions = metadata
+            .as_ref()
+            .map(|metadata| metadata.completions.clone())
+            .unwrap_or_default();
+        let line_comment_prefix = metadata
+            .as_ref()
+            .map(|metadata| metadata.capabilities.line_comment_prefix);
+        let capabilities = metadata.map(|metadata| metadata.capabilities);
+
+        Self {
+            language_profile,
+            capabilities,
+            syntax_terms,
+            completions,
+            line_comment_prefix,
+            completion_triggers: get_completion_triggers_for_driver(driver_type),
+            completion_word_chars: get_completion_word_chars_for_driver(driver_type),
+            supports_sql_lsp: supports_sql_lsp_for_driver(driver_type),
+        }
+    }
+
+    fn execution_unit(&self, source: &str, cursor_offset: usize) -> zqlz_core::ExecutionUnit {
+        if let Some(capabilities) = &self.capabilities {
+            execution_unit_for_capabilities(source, cursor_offset, capabilities)
+        } else {
+            execution_unit_for_profile(source, cursor_offset, self.language_profile)
+        }
+    }
+
+    fn document_symbols(&self, source: &str) -> Vec<SqlDocumentSymbol> {
+        if let Some(capabilities) = &self.capabilities {
+            driver_document_symbols_for_capabilities(capabilities, source)
+        } else {
+            driver_document_symbols(self.language_profile, source)
+        }
+    }
+}
+
+#[cfg(test)]
+fn line_comment_prefix_for_driver(driver_type: Option<&str>) -> Option<Option<&'static str>> {
+    driver_type
+        .and_then(get_syntax_metadata_for_driver)
+        .map(|metadata| metadata.capabilities.line_comment_prefix)
+}
+
+fn query_document_symbols(driver_type: Option<&str>, sql: &str) -> Vec<QueryDocumentSymbol> {
+    QueryEditorSyntaxProfile::from_driver(driver_type)
+        .document_symbols(sql)
+        .into_iter()
+        .map(|symbol| QueryDocumentSymbol {
+            label: symbol.label,
+            line: symbol.line,
+            column: symbol.column,
+            source_range: symbol.source_range,
+            target_range: symbol.target_range,
+        })
+        .collect()
 }
 
 /// Adapter that implements HoverProvider for SqlLsp
@@ -281,6 +370,10 @@ impl zqlz_text_editor::HoverProvider for SqlLspHoverAdapter {
         _window: &mut Window,
         _cx: &App,
     ) -> Task<anyhow::Result<Option<lsp_types::Hover>>> {
+        if !allow_full_document_lsp(text) {
+            return Task::ready(Ok(None));
+        }
+
         let text_string = text.to_string();
         let schema_hover = {
             let lsp = self.sql_lsp.read();
@@ -415,6 +508,10 @@ impl zqlz_text_editor::DefinitionProvider for SqlLspDefinitionAdapter {
         offset: usize,
         _document: &zqlz_text_editor::DocumentContext,
     ) -> Option<usize> {
+        if !allow_full_document_lsp(text) {
+            return None;
+        }
+
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
 
@@ -451,6 +548,10 @@ impl zqlz_text_editor::ReferencesProvider for SqlLspReferencesAdapter {
         offset: usize,
         _document: &zqlz_text_editor::DocumentContext,
     ) -> Vec<std::ops::Range<usize>> {
+        if !allow_full_document_lsp(text) {
+            return Vec::new();
+        }
+
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
 
@@ -486,6 +587,10 @@ impl zqlz_text_editor::RenameProvider for SqlLspRenameAdapter {
         new_name: &str,
         _document: &zqlz_text_editor::DocumentContext,
     ) -> Option<lsp_types::WorkspaceEdit> {
+        if !allow_full_document_lsp(text) {
+            return None;
+        }
+
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         self.sql_lsp.read().rename(&ui_rope, offset, new_name)
@@ -508,12 +613,23 @@ impl zqlz_text_editor::CodeActionProvider for SqlLspCodeActionAdapter {
         text: &ropey::Rope,
         offset: usize,
         _document: &zqlz_text_editor::DocumentContext,
+        diagnostics: &[lsp_types::Diagnostic],
     ) -> Vec<lsp_types::CodeActionOrCommand> {
+        if !allow_full_document_lsp(text) {
+            return Vec::new();
+        }
+
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         let mut lsp = self.sql_lsp.write();
-        let diagnostics = lsp.validate_sql(&ui_rope);
-        lsp.get_code_actions(&ui_rope, offset, &diagnostics)
+        let validated_diagnostics;
+        let diagnostics = if diagnostics.is_empty() {
+            validated_diagnostics = lsp.validate_sql(&ui_rope);
+            validated_diagnostics.as_slice()
+        } else {
+            diagnostics
+        };
+        lsp.get_code_actions(&ui_rope, offset, diagnostics)
             .into_iter()
             .map(lsp_types::CodeActionOrCommand::CodeAction)
             .collect()
@@ -536,6 +652,10 @@ impl zqlz_text_editor::DiagnosticProvider for SqlLspDiagnosticAdapter {
         text: &ropey::Rope,
         _document: &zqlz_text_editor::DocumentContext,
     ) -> Task<anyhow::Result<Vec<lsp_types::Diagnostic>>> {
+        if !allow_full_document_lsp(text) {
+            return Task::ready(Ok(Vec::new()));
+        }
+
         let text_string = text.to_string();
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         let diagnostics = self.sql_lsp.write().validate_sql(&ui_rope);
@@ -548,12 +668,443 @@ impl zqlz_text_editor::DiagnosticProvider for SqlLspDiagnosticAdapter {
 /// It enables schema-aware completions (table names, column names, etc.) by delegating to SqlLsp.
 struct SqlLspCompletionAdapter {
     sql_lsp: Arc<RwLock<SqlLsp>>,
+    document_mode: QueryEditorDocumentPerformanceMode,
+    syntax_profile: &'static str,
+    syntax_capabilities: Option<SyntaxDriverCapabilities>,
+    completion_triggers: Vec<char>,
+    completion_word_chars: Vec<char>,
+}
+
+struct DriverSyntaxCompletionAdapter {
+    document_mode: QueryEditorDocumentPerformanceMode,
+    completion_triggers: Vec<char>,
+    completion_word_chars: Vec<char>,
+    completions: CompletionsConfig,
+    keywords: Vec<String>,
+    functions: Vec<String>,
+    types: Vec<String>,
+}
+
+impl DriverSyntaxCompletionAdapter {
+    fn new(
+        document_mode: QueryEditorDocumentPerformanceMode,
+        completion_triggers: Vec<char>,
+        completion_word_chars: Vec<char>,
+        completions: CompletionsConfig,
+        terms: SyntaxTermOverrides,
+    ) -> Self {
+        Self {
+            document_mode,
+            completion_triggers,
+            completion_word_chars,
+            completions,
+            keywords: terms.keywords,
+            functions: terms.functions,
+            types: terms.types,
+        }
+    }
+
+    fn completion_prefix(
+        text: &ropey::Rope,
+        offset: usize,
+        completion_word_chars: &[char],
+    ) -> String {
+        completion_prefix_with_word_chars(text, offset, completion_word_chars)
+    }
+
+    fn term_completions_for_prefix(&self, prefix: &str) -> Vec<lsp_types::CompletionItem> {
+        let prefix = prefix.to_ascii_lowercase();
+        let mut items = Vec::new();
+        self.extend_keyword_completions(&mut items, &prefix);
+        self.extend_function_completions(&mut items, &prefix);
+        self.extend_data_type_completions(&mut items, &prefix);
+        self.extend_snippet_completions(&mut items, &prefix);
+        self.extend_term_completions(
+            &mut items,
+            &self.keywords,
+            lsp_types::CompletionItemKind::KEYWORD,
+            "Driver keyword",
+            &prefix,
+        );
+        self.extend_term_completions(
+            &mut items,
+            &self.functions,
+            lsp_types::CompletionItemKind::FUNCTION,
+            "Driver function",
+            &prefix,
+        );
+        self.extend_term_completions(
+            &mut items,
+            &self.types,
+            lsp_types::CompletionItemKind::TYPE_PARAMETER,
+            "Driver type",
+            &prefix,
+        );
+        items.sort_by(|left, right| {
+            left.label
+                .len()
+                .cmp(&right.label.len())
+                .then_with(|| left.label.cmp(&right.label))
+        });
+        items.dedup_by(|left, right| left.label == right.label);
+        items
+    }
+
+    fn extend_keyword_completions(&self, items: &mut Vec<lsp_types::CompletionItem>, prefix: &str) {
+        for keyword in &self.completions.keywords {
+            if keyword.description.is_none()
+                && keyword.documentation.is_none()
+                && keyword.snippet.is_none()
+            {
+                continue;
+            }
+            if !matches_completion_prefix(&keyword.name, prefix)
+                || item_exists(items, &keyword.name)
+            {
+                continue;
+            }
+            items.push(lsp_types::CompletionItem {
+                label: keyword.name.clone(),
+                kind: Some(lsp_types::CompletionItemKind::KEYWORD),
+                detail: Some(format!("Driver keyword: {:?}", keyword.category)),
+                documentation: completion_documentation(
+                    keyword
+                        .documentation
+                        .as_deref()
+                        .or(keyword.description.as_deref()),
+                ),
+                insert_text: keyword.snippet.clone(),
+                insert_text_format: keyword
+                    .snippet
+                    .as_ref()
+                    .map(|_| lsp_types::InsertTextFormat::SNIPPET),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn extend_function_completions(
+        &self,
+        items: &mut Vec<lsp_types::CompletionItem>,
+        prefix: &str,
+    ) {
+        for function in &self.completions.functions {
+            if function.signature.is_none()
+                && function.return_type.is_none()
+                && function.description.is_none()
+                && function.documentation.is_none()
+            {
+                continue;
+            }
+            if !matches_completion_prefix(&function.name, prefix)
+                || item_exists(items, &function.name)
+            {
+                continue;
+            }
+            let detail = function
+                .signature
+                .as_deref()
+                .or(function.return_type.as_deref())
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("Driver function: {:?}", function.category));
+            items.push(lsp_types::CompletionItem {
+                label: function.name.clone(),
+                kind: Some(lsp_types::CompletionItemKind::FUNCTION),
+                detail: Some(detail),
+                documentation: completion_documentation(
+                    function
+                        .documentation
+                        .as_deref()
+                        .or(function.description.as_deref()),
+                ),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn extend_data_type_completions(
+        &self,
+        items: &mut Vec<lsp_types::CompletionItem>,
+        prefix: &str,
+    ) {
+        for data_type in &self.completions.data_types {
+            if data_type.description.is_none() {
+                continue;
+            }
+            if !matches_completion_prefix(&data_type.name, prefix)
+                || item_exists(items, &data_type.name)
+            {
+                continue;
+            }
+            items.push(lsp_types::CompletionItem {
+                label: data_type.name.clone(),
+                kind: Some(lsp_types::CompletionItemKind::TYPE_PARAMETER),
+                detail: Some(format!("Driver type: {:?}", data_type.category)),
+                documentation: completion_documentation(data_type.description.as_deref()),
+                ..Default::default()
+            });
+        }
+    }
+
+    fn extend_snippet_completions(&self, items: &mut Vec<lsp_types::CompletionItem>, prefix: &str) {
+        for snippet in &self.completions.snippets {
+            if !matches_completion_prefix(&snippet.prefix, prefix)
+                || item_exists(items, &snippet.name)
+            {
+                continue;
+            }
+            items.push(snippet_completion_item(snippet));
+        }
+    }
+
+    fn extend_term_completions(
+        &self,
+        items: &mut Vec<lsp_types::CompletionItem>,
+        terms: &[String],
+        kind: lsp_types::CompletionItemKind,
+        detail: &str,
+        prefix: &str,
+    ) {
+        for term in terms {
+            if !matches_completion_prefix(term, prefix) || item_exists(items, term) {
+                continue;
+            }
+            items.push(lsp_types::CompletionItem {
+                label: term.clone(),
+                kind: Some(kind),
+                detail: Some(detail.to_string()),
+                ..Default::default()
+            });
+        }
+    }
+}
+
+fn matches_completion_prefix(label: &str, prefix: &str) -> bool {
+    prefix.is_empty() || label.to_ascii_lowercase().starts_with(prefix)
+}
+
+fn item_exists(items: &[lsp_types::CompletionItem], label: &str) -> bool {
+    items.iter().any(|item| item.label == label)
+}
+
+fn completion_documentation(text: Option<&str>) -> Option<lsp_types::Documentation> {
+    let text = text?.trim();
+    if text.is_empty() {
+        return None;
+    }
+    Some(lsp_types::Documentation::MarkupContent(
+        lsp_types::MarkupContent {
+            kind: lsp_types::MarkupKind::Markdown,
+            value: text.to_string(),
+        },
+    ))
+}
+
+fn snippet_completion_item(snippet: &SnippetDef) -> lsp_types::CompletionItem {
+    lsp_types::CompletionItem {
+        label: snippet.name.clone(),
+        kind: Some(lsp_types::CompletionItemKind::SNIPPET),
+        detail: snippet.description.clone(),
+        insert_text: Some(snippet.body.clone()),
+        insert_text_format: Some(lsp_types::InsertTextFormat::SNIPPET),
+        ..Default::default()
+    }
+}
+
+fn format_provider_for_driver_context(
+    driver_type: String,
+    object_type: &'static str,
+) -> Option<FormatProvider> {
+    formatter_provider_for_driver(&driver_type)?;
+
+    let object_type = object_type.to_string();
+    Some(Rc::new(move |source| {
+        let formatter = formatter_provider_for_driver(&driver_type)?;
+        let request = FormatRequest::new(source.to_string(), driver_type.clone())
+            .with_object_type(object_type.clone());
+        formatter
+            .format(&request)
+            .ok()
+            .map(|outcome| outcome.source)
+    }))
 }
 
 impl SqlLspCompletionAdapter {
-    fn new(sql_lsp: Arc<RwLock<SqlLsp>>) -> Self {
-        Self { sql_lsp }
+    fn new(
+        sql_lsp: Arc<RwLock<SqlLsp>>,
+        document_mode: QueryEditorDocumentPerformanceMode,
+        syntax_profile: &'static str,
+        syntax_capabilities: Option<SyntaxDriverCapabilities>,
+        completion_triggers: Vec<char>,
+        completion_word_chars: Vec<char>,
+    ) -> Self {
+        Self {
+            sql_lsp,
+            document_mode,
+            syntax_profile,
+            syntax_capabilities,
+            completion_triggers,
+            completion_word_chars,
+        }
     }
+
+    #[cfg(test)]
+    fn completion_context(
+        syntax_profile: &'static str,
+        text: &ropey::Rope,
+        offset: usize,
+    ) -> (String, usize) {
+        Self::completion_context_for_capabilities(None, syntax_profile, text, offset)
+    }
+
+    fn completion_context_for_capabilities(
+        syntax_capabilities: Option<&SyntaxDriverCapabilities>,
+        syntax_profile: &'static str,
+        text: &ropey::Rope,
+        offset: usize,
+    ) -> (String, usize) {
+        if text.len_bytes() <= COMPLETION_CONTEXT_BYTES {
+            return (text.to_string(), offset);
+        }
+
+        let offset = clamp_to_char_boundary(text, offset.min(text.len_bytes()));
+        let start =
+            clamp_to_char_boundary(text, offset.saturating_sub(COMPLETION_CONTEXT_BYTES / 2));
+        let end = clamp_to_char_boundary(
+            text,
+            text.len_bytes()
+                .min(offset.saturating_add(COMPLETION_CONTEXT_BYTES / 2)),
+        );
+        let window = text.byte_slice(start..end).to_string();
+        let relative_offset = offset.saturating_sub(start);
+
+        let unit = if let Some(syntax_capabilities) = syntax_capabilities {
+            execution_unit_for_capabilities(&window, relative_offset, syntax_capabilities)
+        } else {
+            execution_unit_for_profile(&window, relative_offset, syntax_profile)
+        };
+        if unit.byte_range.start == unit.byte_range.end {
+            return (window, relative_offset);
+        }
+
+        if (unit.byte_range.start == 0 && start > 0)
+            || (unit.byte_range.end == window.len() && end < text.len_bytes())
+        {
+            return Self::completion_line_context(text, offset);
+        }
+
+        (
+            unit.source,
+            relative_offset.saturating_sub(unit.byte_range.start),
+        )
+    }
+
+    fn completion_line_context(text: &ropey::Rope, offset: usize) -> (String, usize) {
+        let line_index = text.byte_to_line(offset);
+        let line_start = text.line_to_byte(line_index);
+        let line_end = text
+            .get_line(line_index)
+            .map(|line| line_start + line.len_bytes())
+            .unwrap_or_else(|| text.len_bytes());
+        let start = clamp_to_char_boundary(
+            text,
+            line_start.max(offset.saturating_sub(COMPLETION_CONTEXT_BYTES / 2)),
+        );
+        let end = clamp_to_char_boundary(
+            text,
+            line_end.min(offset.saturating_add(COMPLETION_CONTEXT_BYTES / 2)),
+        );
+        let context = text.byte_slice(start..end).to_string();
+        (context, offset.saturating_sub(start))
+    }
+
+    #[cfg(test)]
+    fn completion_context_for_mode(
+        document_mode: QueryEditorDocumentPerformanceMode,
+        syntax_profile: &'static str,
+        text: &ropey::Rope,
+        offset: usize,
+    ) -> (String, usize) {
+        Self::completion_context_for_mode_and_capabilities(
+            document_mode,
+            None,
+            syntax_profile,
+            text,
+            offset,
+        )
+    }
+
+    fn completion_context_for_mode_and_capabilities(
+        document_mode: QueryEditorDocumentPerformanceMode,
+        syntax_capabilities: Option<&SyntaxDriverCapabilities>,
+        syntax_profile: &'static str,
+        text: &ropey::Rope,
+        offset: usize,
+    ) -> (String, usize) {
+        if document_mode.is_constrained() || text.len_bytes() > COMPLETION_CONTEXT_BYTES {
+            Self::completion_context_for_capabilities(
+                syntax_capabilities,
+                syntax_profile,
+                text,
+                offset,
+            )
+        } else {
+            (text.to_string(), offset)
+        }
+    }
+
+    fn completion_trigger_for_characters(
+        trigger_characters: &[char],
+        word_characters: &[char],
+        new_text: &str,
+    ) -> Option<lsp_types::CompletionContext> {
+        completion_trigger_context_for_characters(trigger_characters, word_characters, new_text)
+    }
+}
+
+impl zqlz_text_editor::CompletionProvider for DriverSyntaxCompletionAdapter {
+    fn completions(
+        &self,
+        text: &ropey::Rope,
+        offset: usize,
+        _trigger: lsp_types::CompletionContext,
+        _window: &mut Window,
+        _cx: &mut Context<zqlz_text_editor::TextEditor>,
+    ) -> Task<Result<lsp_types::CompletionResponse, anyhow::Error>> {
+        if !self.document_mode.allow_completion() {
+            return Task::ready(Ok(lsp_types::CompletionResponse::Array(Vec::new())));
+        }
+
+        let prefix = Self::completion_prefix(text, offset, &self.completion_word_chars);
+        Task::ready(Ok(lsp_types::CompletionResponse::Array(
+            self.term_completions_for_prefix(&prefix),
+        )))
+    }
+
+    fn completion_trigger_context(
+        &self,
+        _offset: usize,
+        new_text: &str,
+        _cx: &mut Context<zqlz_text_editor::TextEditor>,
+    ) -> Option<lsp_types::CompletionContext> {
+        SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &self.completion_triggers,
+            &self.completion_word_chars,
+            new_text,
+        )
+    }
+}
+
+fn clamp_to_char_boundary(text: &ropey::Rope, byte_offset: usize) -> usize {
+    text.try_byte_to_char(byte_offset)
+        .map(|char_index| text.char_to_byte(char_index))
+        .unwrap_or_else(|_| {
+            let mut byte_offset = byte_offset.min(text.len_bytes());
+            while byte_offset > 0 && text.try_byte_to_char(byte_offset).is_err() {
+                byte_offset -= 1;
+            }
+            byte_offset
+        })
 }
 
 impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
@@ -565,13 +1116,22 @@ impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
         _window: &mut Window,
         _cx: &mut Context<zqlz_text_editor::TextEditor>,
     ) -> Task<Result<lsp_types::CompletionResponse, anyhow::Error>> {
-        // Convert ropey 1.x Rope to zqlz_ui Rope for SqlLsp, then delegate
-        let text_string = text.to_string();
+        if !self.document_mode.allow_completion() {
+            return Task::ready(Ok(lsp_types::CompletionResponse::Array(Vec::new())));
+        }
+
+        let (text_string, context_offset) = Self::completion_context_for_mode_and_capabilities(
+            self.document_mode,
+            self.syntax_capabilities.as_ref(),
+            self.syntax_profile,
+            text,
+            offset,
+        );
         let ui_rope = zqlz_ui::widgets::Rope::from(text_string.as_str());
         let mut lsp = self.sql_lsp.write();
         let items = lsp.get_completions_with_trigger(
             &ui_rope,
-            offset,
+            context_offset,
             trigger.trigger_kind == lsp_types::CompletionTriggerKind::INVOKED,
         );
         Task::ready(Ok(lsp_types::CompletionResponse::Array(items)))
@@ -583,32 +1143,11 @@ impl zqlz_text_editor::CompletionProvider for SqlLspCompletionAdapter {
         new_text: &str,
         _cx: &mut Context<zqlz_text_editor::TextEditor>,
     ) -> Option<lsp_types::CompletionContext> {
-        if new_text.len() == 1 {
-            let character = new_text.chars().next()?;
-            if matches!(character, '.' | ' ' | '(' | ',') {
-                return Some(lsp_types::CompletionContext {
-                    trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
-                    trigger_character: Some(character.to_string()),
-                });
-            }
-
-            if character.is_alphanumeric() || character == '_' {
-                return Some(lsp_types::CompletionContext {
-                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
-                    trigger_character: None,
-                });
-            }
-
-            return None;
-        }
-
-        new_text
-            .chars()
-            .any(|c| c.is_alphanumeric())
-            .then_some(lsp_types::CompletionContext {
-                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
-                trigger_character: None,
-            })
+        Self::completion_trigger_for_characters(
+            &self.completion_triggers,
+            &self.completion_word_chars,
+            new_text,
+        )
     }
 }
 
@@ -874,6 +1413,8 @@ pub struct QueryEditor {
     /// The text editor for SQL code editing
     editor: Entity<TextEditor>,
 
+    document_performance_mode: QueryEditorDocumentPerformanceMode,
+
     /// SQL LSP instance for IntelliSense
     sql_lsp: Arc<RwLock<SqlLsp>>,
 
@@ -939,6 +1480,7 @@ struct QueryEditorStatusLabels {
     cursor: String,
     selection: Option<String>,
     mode: String,
+    performance: Option<String>,
     connection: String,
     database: String,
     diagnostics: String,
@@ -951,6 +1493,7 @@ struct QueryEditorStatusInput<'a> {
     cursor_column: usize,
     selection_chars: Option<usize>,
     mode: EditorMode,
+    performance_mode: QueryEditorDocumentPerformanceMode,
     connection_name: Option<&'a str>,
     has_connection: bool,
     database: Option<&'a str>,
@@ -1143,31 +1686,15 @@ impl QueryEditor {
         }
     }
 
-    fn current_statement_for_preview(
-        full_sql: &str,
-        cursor_offset: usize,
-    ) -> (String, Option<(usize, usize)>) {
-        let statements = split_statements(full_sql);
-        if statements.len() <= 1 {
-            return (full_sql.to_string(), Some((0, full_sql.len())));
+    fn line_range_label_for_span(span: SqlStatementSpan) -> String {
+        let start_line = span.line + 1;
+        let end_line = span.end_line + 1;
+
+        if start_line == end_line {
+            format!("Ln {start_line}")
+        } else {
+            format!("Ln {start_line}-{end_line}")
         }
-
-        let cursor_offset = cursor_offset.min(full_sql.len());
-        let mut search_start = 0;
-        for statement in statements {
-            if let Some(relative_start) = full_sql[search_start..].find(&statement) {
-                let statement_start = search_start + relative_start;
-                let statement_end = statement_start + statement.len();
-
-                if cursor_offset >= statement_start && cursor_offset <= statement_end {
-                    return (statement, Some((statement_start, statement_end)));
-                }
-
-                search_start = statement_end;
-            }
-        }
-
-        (full_sql.to_string(), Some((0, full_sql.len())))
     }
 
     fn run_target_preview_from_parts(
@@ -1175,6 +1702,8 @@ impl QueryEditor {
         selected_sql: Option<&str>,
         cursor_offset: usize,
         mode: EditorMode,
+        syntax_capabilities: Option<&SyntaxDriverCapabilities>,
+        syntax_profile: &'static str,
     ) -> QueryEditorRunTargetPreview {
         if let Some(selected_sql) = selected_sql.map(str::trim).filter(|sql| !sql.is_empty()) {
             return QueryEditorRunTargetPreview {
@@ -1194,15 +1723,26 @@ impl QueryEditor {
             };
         }
 
-        let (statement, range) = Self::current_statement_for_preview(executable_sql, cursor_offset);
-        let range_label = range
-            .map(|(start, end)| Self::line_range_label_for_byte_range(executable_sql, start, end))
-            .unwrap_or_else(|| "Current".to_string());
+        let unit = if let Some(syntax_capabilities) = syntax_capabilities {
+            execution_unit_for_capabilities(executable_sql, cursor_offset, syntax_capabilities)
+        } else {
+            execution_unit_for_profile(executable_sql, cursor_offset, syntax_profile)
+        };
+        let range_label = unit
+            .sql_span
+            .map(Self::line_range_label_for_span)
+            .unwrap_or_else(|| {
+                Self::line_range_label_for_byte_range(
+                    executable_sql,
+                    unit.byte_range.start,
+                    unit.byte_range.end,
+                )
+            });
 
         QueryEditorRunTargetPreview {
             label: "Run Current Statement".to_string(),
             detail: range_label,
-            preview: Self::compact_sql_preview(&statement, 96),
+            preview: Self::compact_sql_preview(&unit.source, 96),
             is_selection: false,
         }
     }
@@ -1215,12 +1755,15 @@ impl QueryEditor {
             .map(|text| text.to_string());
         let executable_sql = self.get_executable_sql(cx);
         let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
+        let syntax_profile = QueryEditorSyntaxProfile::from_driver(self.driver_type.as_deref());
 
         Self::run_target_preview_from_parts(
             &executable_sql,
             selected_sql.as_deref(),
             cursor_offset,
             self.editor_mode,
+            syntax_profile.capabilities.as_ref(),
+            syntax_profile.language_profile,
         )
     }
 
@@ -1358,6 +1901,10 @@ impl QueryEditor {
                 EditorMode::Sql => "SQL".to_string(),
                 EditorMode::Template => "Template".to_string(),
             },
+            performance: input
+                .performance_mode
+                .status_label()
+                .map(ToString::to_string),
             connection: input
                 .connection_name
                 .map(ToString::to_string)
@@ -1394,6 +1941,12 @@ impl QueryEditor {
 
         editor.update(cx, |text_editor, cx| {
             Self::apply_editor_settings(text_editor, editor_settings, cx);
+            let mode = QueryEditorDocumentPerformanceMode::from_metrics(
+                text_editor.byte_len(),
+                text_editor.line_count(),
+                text_editor.max_line_byte_len(),
+            );
+            Self::apply_performance_mode_to_editor(text_editor, editor_settings, mode, cx);
             text_editor.set_appearance(EditorAppearance::QueryConsole, cx);
             text_editor.set_autofocus_on_open(true);
         });
@@ -1423,6 +1976,37 @@ impl QueryEditor {
             settings.large_file_line_threshold as usize,
             settings.large_file_byte_threshold as usize,
         );
+    }
+
+    fn apply_performance_mode_to_editor(
+        text_editor: &mut TextEditor,
+        settings: &AppEditorSettings,
+        mode: QueryEditorDocumentPerformanceMode,
+        cx: &mut Context<TextEditor>,
+    ) {
+        let policy = QueryEditorFeaturePolicy::from_settings(settings, mode);
+        text_editor.set_highlight_enabled(policy.highlight_enabled, cx);
+        text_editor.set_bracket_matching_enabled(policy.bracket_matching, cx);
+        text_editor.set_show_gutter_diagnostics(policy.show_gutter_diagnostics, cx);
+        text_editor.set_selection_highlight_enabled(policy.selection_highlight, cx);
+        text_editor.set_soft_wrap_enabled(policy.soft_wrap, cx);
+        text_editor.set_auto_indent_enabled(policy.auto_indent, cx);
+
+        if !mode.is_constrained() {
+            text_editor.set_large_file_thresholds(
+                settings.large_file_line_threshold as usize,
+                settings.large_file_byte_threshold as usize,
+            );
+            return;
+        }
+
+        text_editor.set_large_file_policy_thresholds(
+            settings.large_file_line_threshold as usize,
+            settings.large_file_byte_threshold as usize,
+            LARGE_DOCUMENT_LINE_THRESHOLD,
+            HUGE_DOCUMENT_BYTE_THRESHOLD,
+        );
+        text_editor.set_lsp_diagnostics(Vec::new(), cx);
     }
 
     fn text_editor_settings_from_app(settings: &AppEditorSettings) -> TextEditorSettings {
@@ -1480,18 +2064,7 @@ impl QueryEditor {
 
     fn format_provider_for_current_context(&self) -> Option<FormatProvider> {
         let driver_type = self.driver_type.clone()?;
-        formatter_provider_for_driver(&driver_type)?;
-
-        let object_type = self.object_type.display_name().to_string();
-        Some(Rc::new(move |source| {
-            let formatter = formatter_provider_for_driver(&driver_type)?;
-            let request = FormatRequest::new(source.to_string(), driver_type.clone())
-                .with_object_type(object_type.clone());
-            formatter
-                .format(&request)
-                .ok()
-                .map(|outcome| outcome.source)
-        }))
+        format_provider_for_driver_context(driver_type, self.object_type.display_name())
     }
 
     fn apply_format_provider_to_editor(&self, cx: &mut Context<Self>) {
@@ -1502,17 +2075,76 @@ impl QueryEditor {
         });
     }
 
+    fn apply_document_performance_mode(&self, cx: &mut Context<Self>) {
+        let settings = ZqlzSettings::global(cx).editor.clone();
+        self.editor.update(cx, |editor, cx| {
+            Self::apply_performance_mode_to_editor(
+                editor,
+                &settings,
+                self.document_performance_mode,
+                cx,
+            );
+        });
+    }
+
+    fn refresh_document_performance_mode_from_editor(&mut self, cx: &mut Context<Self>) -> bool {
+        let mode = {
+            let editor = self.editor.read(cx);
+            QueryEditorDocumentPerformanceMode::from_metrics(
+                editor.byte_len(),
+                editor.line_count(),
+                editor.max_line_byte_len(),
+            )
+        };
+        if self.document_performance_mode == mode {
+            return false;
+        }
+
+        self.document_performance_mode = mode;
+        self.apply_document_performance_mode(cx);
+        self.apply_format_provider_to_editor(cx);
+        self.sync_lsp_settings(cx);
+        true
+    }
+
     fn language_providers_for_current_context(
         &self,
         settings: &AppEditorSettings,
     ) -> EditorLanguageProviders {
-        let supports_sql_lsp = self
-            .driver_type
-            .as_deref()
-            .map(driver_category_from_driver_name)
-            .is_none_or(|category| matches!(category, DriverCategory::Relational));
+        let driver_type = self.driver_type.as_deref();
+        let syntax_profile = QueryEditorSyntaxProfile::from_driver(driver_type);
+        let completion = match completion_mode_for_driver(driver_type, settings) {
+            QueryEditorCompletionMode::SqlLsp => Some({
+                Rc::new(SqlLspCompletionAdapter::new(
+                    self.sql_lsp.clone(),
+                    self.document_performance_mode,
+                    syntax_profile.language_profile,
+                    syntax_profile.capabilities.clone(),
+                    syntax_profile.completion_triggers.clone(),
+                    syntax_profile.completion_word_chars.clone(),
+                )) as Rc<dyn zqlz_text_editor::CompletionProvider>
+            }),
+            QueryEditorCompletionMode::DriverSyntax => Some({
+                Rc::new(DriverSyntaxCompletionAdapter::new(
+                    self.document_performance_mode,
+                    syntax_profile.completion_triggers.clone(),
+                    syntax_profile.completion_word_chars.clone(),
+                    syntax_profile.completions.clone(),
+                    syntax_profile.syntax_terms.clone().unwrap_or_default(),
+                )) as Rc<dyn zqlz_text_editor::CompletionProvider>
+            }),
+            QueryEditorCompletionMode::Disabled => None,
+        };
 
-        if !supports_sql_lsp || !settings.lsp_enabled {
+        if !syntax_profile.supports_sql_lsp {
+            return EditorLanguageProviders {
+                completion,
+                format: self.format_provider_for_current_context(),
+                ..EditorLanguageProviders::default()
+            };
+        }
+
+        if !settings.lsp_enabled {
             return EditorLanguageProviders {
                 format: self.format_provider_for_current_context(),
                 ..EditorLanguageProviders::default()
@@ -1520,30 +2152,38 @@ impl QueryEditor {
         }
 
         EditorLanguageProviders {
-            completion: settings.lsp_completions_enabled.then(|| {
-                Rc::new(SqlLspCompletionAdapter::new(self.sql_lsp.clone()))
-                    as Rc<dyn zqlz_text_editor::CompletionProvider>
+            completion,
+            hover: (!self.document_performance_mode.is_constrained() && settings.lsp_hover_enabled)
+                .then(|| {
+                    Rc::new(SqlLspHoverAdapter::new(self.sql_lsp.clone()))
+                        as Rc<dyn zqlz_text_editor::HoverProvider>
+                }),
+            definition: (!self.document_performance_mode.is_constrained()).then(|| {
+                Rc::new(SqlLspDefinitionAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::DefinitionProvider>
             }),
-            hover: settings.lsp_hover_enabled.then(|| {
-                Rc::new(SqlLspHoverAdapter::new(self.sql_lsp.clone()))
-                    as Rc<dyn zqlz_text_editor::HoverProvider>
+            references: (!self.document_performance_mode.is_constrained()).then(|| {
+                Rc::new(SqlLspReferencesAdapter::new(self.sql_lsp.clone()))
+                    as Rc<dyn zqlz_text_editor::ReferencesProvider>
             }),
-            definition: Some(Rc::new(SqlLspDefinitionAdapter::new(self.sql_lsp.clone()))
-                as Rc<dyn zqlz_text_editor::DefinitionProvider>),
-            references: Some(Rc::new(SqlLspReferencesAdapter::new(self.sql_lsp.clone()))
-                as Rc<dyn zqlz_text_editor::ReferencesProvider>),
-            rename: settings.lsp_rename_enabled.then(|| {
-                Rc::new(SqlLspRenameAdapter::new(self.sql_lsp.clone()))
-                    as Rc<dyn zqlz_text_editor::RenameProvider>
-            }),
-            code_actions: settings.lsp_code_actions_enabled.then(|| {
-                Rc::new(SqlLspCodeActionAdapter::new(self.sql_lsp.clone()))
-                    as Rc<dyn zqlz_text_editor::CodeActionProvider>
-            }),
-            diagnostics: settings.lsp_diagnostics_enabled.then(|| {
-                Rc::new(SqlLspDiagnosticAdapter::new(self.sql_lsp.clone()))
-                    as Rc<dyn zqlz_text_editor::DiagnosticProvider>
-            }),
+            rename: (!self.document_performance_mode.is_constrained()
+                && settings.lsp_rename_enabled)
+                .then(|| {
+                    Rc::new(SqlLspRenameAdapter::new(self.sql_lsp.clone()))
+                        as Rc<dyn zqlz_text_editor::RenameProvider>
+                }),
+            code_actions: (!self.document_performance_mode.is_constrained()
+                && settings.lsp_code_actions_enabled)
+                .then(|| {
+                    Rc::new(SqlLspCodeActionAdapter::new(self.sql_lsp.clone()))
+                        as Rc<dyn zqlz_text_editor::CodeActionProvider>
+                }),
+            diagnostics: (!self.document_performance_mode.is_constrained()
+                && settings.lsp_diagnostics_enabled)
+                .then(|| {
+                    Rc::new(SqlLspDiagnosticAdapter::new(self.sql_lsp.clone()))
+                        as Rc<dyn zqlz_text_editor::DiagnosticProvider>
+                }),
             format: self.format_provider_for_current_context(),
         }
     }
@@ -1554,6 +2194,12 @@ impl QueryEditor {
 
         self.editor.update(cx, |text_editor, cx| {
             Self::apply_editor_settings(text_editor, &settings, cx);
+            Self::apply_performance_mode_to_editor(
+                text_editor,
+                &settings,
+                self.document_performance_mode,
+                cx,
+            );
             text_editor.set_language_providers(language_providers, cx);
         });
 
@@ -1625,6 +2271,8 @@ impl QueryEditor {
         );
 
         let initial_text = editor.read(cx).get_text(cx);
+        let document_performance_mode =
+            QueryEditorDocumentPerformanceMode::from_text(initial_text.as_ref());
 
         // Create template parameters JSON editor (multi-line, plain TextEditor)
         let template_params = cx.new(|cx| {
@@ -1647,6 +2295,7 @@ impl QueryEditor {
             connection_name: None,
             saved_query_id: None,
             editor,
+            document_performance_mode,
             sql_lsp,
             driver_type: None,
             is_executing: false,
@@ -1668,6 +2317,7 @@ impl QueryEditor {
             _subscriptions,
         };
 
+        query_editor.apply_document_performance_mode(cx);
         query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
@@ -1710,6 +2360,8 @@ impl QueryEditor {
         let editor_settings = ZqlzSettings::global(cx).editor.clone();
         let editor = Self::build_primary_editor(document, &editor_settings, window, cx);
         let initial_text = editor.read(cx).get_text(cx);
+        let document_performance_mode =
+            QueryEditorDocumentPerformanceMode::from_text(initial_text.as_ref());
 
         let template_params = cx.new(|cx| {
             let mut editor = TextEditor::new(window, cx);
@@ -1731,6 +2383,7 @@ impl QueryEditor {
             connection_name: None,
             saved_query_id: None,
             editor,
+            document_performance_mode,
             sql_lsp,
             driver_type: None,
             is_executing: false,
@@ -1752,6 +2405,7 @@ impl QueryEditor {
             _subscriptions,
         };
 
+        query_editor.apply_document_performance_mode(cx);
         query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
@@ -1782,6 +2436,8 @@ impl QueryEditor {
         let editor_settings = ZqlzSettings::global(cx).editor.clone();
         let editor = Self::build_primary_editor(document, &editor_settings, window, cx);
         let initial_text = editor.read(cx).get_text(cx);
+        let document_performance_mode =
+            QueryEditorDocumentPerformanceMode::from_text(initial_text.as_ref());
 
         let template_params = cx.new(|cx| {
             let mut editor = TextEditor::new(window, cx);
@@ -1803,6 +2459,7 @@ impl QueryEditor {
             connection_name: None,
             saved_query_id: None,
             editor,
+            document_performance_mode,
             sql_lsp,
             driver_type: None,
             is_executing: false,
@@ -1824,6 +2481,7 @@ impl QueryEditor {
             _subscriptions,
         };
 
+        query_editor.apply_document_performance_mode(cx);
         query_editor.apply_format_provider_to_editor(cx);
         query_editor.sync_lsp_settings(cx);
         query_editor
@@ -1849,11 +2507,18 @@ impl QueryEditor {
         self.clear_schema_dependent_ui_state();
         self.current_schema = None;
         self.available_schemas.clear();
-        let dialect_language = driver_type_to_highlight_language(driver_type.as_deref());
+        let syntax_profile = QueryEditorSyntaxProfile::from_driver(driver_type.as_deref());
         self.editor.update(cx, |editor, cx| {
-            editor.set_syntax_language_profile(dialect_language, cx);
+            editor.set_syntax_configuration(
+                syntax_profile.language_profile,
+                syntax_profile.capabilities,
+                syntax_profile.syntax_terms,
+                syntax_profile.line_comment_prefix,
+                cx,
+            );
             editor.clear_code_actions(cx);
         });
+        self.sync_lsp_settings(cx);
 
         // Update SQL LSP with new connection and driver type
         {
@@ -1967,10 +2632,17 @@ impl QueryEditor {
                             );
                             lsp.write().apply_schema_cache_if_current(cache, epoch);
                             tracing::debug!("SQL schema refreshed successfully");
-                _ = this.update(cx, |editor, cx| {
-                    editor.update_schema_selector_from_lsp(cx);
-                    editor.update_diagnostics(cx);
-                });
+                            if let Err(error) = this.update(cx, |editor, cx| {
+                                editor.update_schema_selector_from_lsp(cx);
+                                if !editor.document_performance_mode.is_constrained() {
+                                    editor.update_diagnostics(cx);
+                                }
+                            }) {
+                                tracing::warn!(
+                                    error = %error,
+                                    "Skipped applying refreshed schema to dropped query editor"
+                                );
+                            }
                         }
                         Err(e) => {
                             tracing::error!(error = %e, "Failed to refresh SQL schema after retries");
@@ -2085,7 +2757,9 @@ impl QueryEditor {
                     tracing::debug!("Schema cache refreshed after prefetch completion");
                     _ = _this.update(cx, |this, cx| {
                         this.update_schema_selector_from_lsp(cx);
-                        this.update_diagnostics(cx);
+                        if !this.document_performance_mode.is_constrained() {
+                            this.update_diagnostics(cx);
+                        }
                     });
                 }
                 Err(e) => {
@@ -2159,24 +2833,29 @@ impl QueryEditor {
 
     /// Set the SQL content
     pub fn set_content(&mut self, content: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.document_performance_mode = QueryEditorDocumentPerformanceMode::from_text(&content);
         self.editor.update(cx, |editor, cx| {
             editor.clear_inline_suggestion(cx);
             editor.set_text(content.clone(), window, cx);
         });
+        self.apply_document_performance_mode(cx);
+        self.apply_format_provider_to_editor(cx);
         self._last_diagnostics_text = Some(content);
         cx.notify();
     }
 
     fn handle_primary_editor_changed(&mut self, cx: &mut Context<Self>) {
-        let current_text = self.content(cx).to_string();
-        self._last_diagnostics_text = Some(current_text);
+        self._last_diagnostics_text = None;
         cx.emit(QueryEditorEvent::DocumentStateChanged);
+        self.refresh_document_performance_mode_from_editor(cx);
 
         if self.editor_mode == EditorMode::Template {
             self.update_template_preview(cx);
         }
 
-        self.update_diagnostics(cx);
+        if !self.document_performance_mode.is_constrained() {
+            self.update_diagnostics(cx);
+        }
         cx.notify();
     }
 
@@ -2188,6 +2867,19 @@ impl QueryEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.document_performance_mode.is_constrained() {
+            self._diagnostics_debounce = None;
+            self._last_diagnostics_text = None;
+            self.editor.update(cx, |editor, cx| {
+                editor.set_lsp_diagnostics(Vec::new(), cx);
+            });
+            cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                diagnostics: Vec::new(),
+            });
+            cx.notify();
+            return;
+        }
+
         let settings = ZqlzSettings::global(cx);
         if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
             self._diagnostics_debounce = None;
@@ -2238,9 +2930,11 @@ impl QueryEditor {
                 return;
             };
 
-            let _ = this.update_in(cx, |this, _window, cx| {
+            if let Err(error) = this.update_in(cx, |this, _window, cx| {
                 this.apply_lsp_diagnostics(text_content, lsp_diagnostics, cx);
-            });
+            }) {
+                tracing::warn!(error = %error, "Failed to apply debounced query diagnostics");
+            }
         }));
     }
 
@@ -2254,6 +2948,18 @@ impl QueryEditor {
     }
 
     fn update_diagnostics(&mut self, cx: &mut Context<Self>) {
+        if self.document_performance_mode.is_constrained() {
+            self._diagnostics_debounce = None;
+            self.editor.update(cx, |editor, cx| {
+                editor.set_lsp_diagnostics(Vec::new(), cx);
+            });
+            cx.emit(QueryEditorEvent::DiagnosticsChanged {
+                diagnostics: Vec::new(),
+            });
+            cx.notify();
+            return;
+        }
+
         let settings = ZqlzSettings::global(cx);
         if !settings.editor.lsp_enabled || !settings.editor.lsp_diagnostics_enabled {
             self._diagnostics_debounce = None;
@@ -2296,9 +3002,11 @@ impl QueryEditor {
                 return;
             };
 
-            let _ = this.update(cx, |this, cx| {
+            if let Err(error) = this.update(cx, |this, cx| {
                 this.apply_lsp_diagnostics(text_content, lsp_diagnostics, cx);
-            });
+            }) {
+                tracing::warn!(error = %error, "Failed to apply query diagnostics");
+            }
         }));
     }
 
@@ -2326,7 +3034,11 @@ impl QueryEditor {
     }
 
     pub fn document_symbols(&self, cx: &App) -> Vec<QueryDocumentSymbol> {
-        query_document_symbols(self.content(cx).as_ref())
+        if self.document_performance_mode.is_constrained() {
+            return Vec::new();
+        }
+
+        query_document_symbols(self.driver_type.as_deref(), self.content(cx).as_ref())
     }
 
     /// Get diagnostic counts from the current editor state
@@ -2389,10 +3101,13 @@ impl QueryEditor {
 
     /// Set the SQL content
     pub fn set_text(&mut self, sql: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.document_performance_mode = QueryEditorDocumentPerformanceMode::from_text(sql);
         self.editor.update(cx, |editor, cx| {
             editor.clear_inline_suggestion(cx);
             editor.set_text(sql.to_string(), window, cx)
         });
+        self.apply_document_performance_mode(cx);
+        self.apply_format_provider_to_editor(cx);
         self._last_diagnostics_text = Some(sql.to_string());
     }
 
@@ -2480,28 +3195,11 @@ impl QueryEditor {
         }
 
         let full_sql = self.get_executable_sql(cx);
-        let statements = split_statements(&full_sql);
-        if statements.len() <= 1 {
-            return full_sql;
-        }
-
         let cursor_offset = self.editor.read(cx).get_cursor_offset(cx);
-        let mut search_start = 0;
-
-        for statement in statements {
-            if let Some(relative_start) = full_sql[search_start..].find(&statement) {
-                let statement_start = search_start + relative_start;
-                let statement_end = statement_start + statement.len();
-
-                if cursor_offset >= statement_start && cursor_offset <= statement_end {
-                    return statement;
-                }
-
-                search_start = statement_end;
-            }
-        }
-
-        full_sql
+        let syntax_profile = QueryEditorSyntaxProfile::from_driver(self.driver_type.as_deref());
+        syntax_profile
+            .execution_unit(&full_sql, cursor_offset)
+            .source
     }
 
     /// Navigate to a specific position in the editor
@@ -2901,6 +3599,14 @@ impl QueryEditor {
 
     /// Format the SQL query using production-level formatter
     fn format_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.document_performance_mode.is_constrained() {
+            tracing::debug!(
+                mode = ?self.document_performance_mode,
+                "Skipping format for large query editor document"
+            );
+            return;
+        }
+
         self.editor.update(cx, |editor, cx| {
             editor.format_sql(cx);
         });
@@ -3048,13 +3754,20 @@ impl QueryEditor {
                                             PopupMenuItem::new(conn_name_clone)
                                                 .checked(is_current)
                                                 .on_click(move |_event, _window, cx| {
-                                                    _ = entity.update(cx, |_this, cx| {
+                                                    if let Err(error) =
+                                                        entity.update(cx, |_this, cx| {
                                                         cx.emit(
                                                             QueryEditorEvent::SwitchConnection {
                                                                 connection_id: conn_id,
                                                             },
                                                         );
-                                                    });
+                                                        })
+                                                    {
+                                                        tracing::warn!(
+                                                            error = %error,
+                                                            "Failed to dispatch query editor connection switch"
+                                                        );
+                                                    }
                                                 }),
                                         );
                                     }
@@ -3091,11 +3804,18 @@ impl QueryEditor {
                                             PopupMenuItem::new(db_name_clone.clone())
                                                 .checked(is_current)
                                                 .on_click(move |_event, _window, cx| {
-                                                    _ = entity.update(cx, |_this, cx| {
+                                                    if let Err(error) =
+                                                        entity.update(cx, |_this, cx| {
                                                         cx.emit(QueryEditorEvent::SwitchDatabase {
                                                             database_name: db_name_clone.clone(),
                                                         });
-                                                    });
+                                                        })
+                                                    {
+                                                        tracing::warn!(
+                                                            error = %error,
+                                                            "Failed to dispatch query editor database switch"
+                                                        );
+                                                    }
                                                 }),
                                         );
                                     }
@@ -3132,7 +3852,8 @@ impl QueryEditor {
                                             PopupMenuItem::new(schema_name_clone.clone())
                                                 .checked(is_current)
                                                 .on_click(move |_event, _window, cx| {
-                                                    _ = entity.update(cx, |this, cx| {
+                                                    if let Err(error) =
+                                                        entity.update(cx, |this, cx| {
                                                         this.current_schema =
                                                             Some(schema_name_clone.clone());
                                                         this.clear_schema_dependent_ui_state();
@@ -3145,7 +3866,13 @@ impl QueryEditor {
                                                         }
                                                         this.trigger_lsp_schema_refresh(cx);
                                                         cx.notify();
-                                                    });
+                                                        })
+                                                    {
+                                                        tracing::warn!(
+                                                            error = %error,
+                                                            "Failed to dispatch query editor schema switch"
+                                                        );
+                                                    }
                                                 }),
                                         );
                                     }
@@ -3233,15 +3960,22 @@ impl QueryEditor {
                                             .checked(entry.checked)
                                             .disabled(disabled)
                                             .on_click(move |_event, _window, cx| {
-                                                _ = entity.update(cx, |this, cx| match action {
-                                                    QueryEditorRunMenuAction::Run => {
-                                                        this.emit_execute_query(cx);
-                                                    }
-                                                    QueryEditorRunMenuAction::RunCurrentStatement => {
-                                                        this.emit_execute_selection(cx);
-                                                    }
-                                                    QueryEditorRunMenuAction::ContinueOnError => {}
-                                                });
+                                                if let Err(error) =
+                                                    entity.update(cx, |this, cx| match action {
+                                                        QueryEditorRunMenuAction::Run => {
+                                                            this.emit_execute_query(cx);
+                                                        }
+                                                        QueryEditorRunMenuAction::RunCurrentStatement => {
+                                                            this.emit_execute_selection(cx);
+                                                        }
+                                                        QueryEditorRunMenuAction::ContinueOnError => {}
+                                                    })
+                                                {
+                                                    tracing::warn!(
+                                                        error = %error,
+                                                        "Failed to dispatch query editor run menu action"
+                                                    );
+                                                }
                                             });
                                         menu = menu.item(item);
                                     }
@@ -3295,12 +4029,43 @@ impl QueryEditor {
     /// Render the SQL editor area using the custom TextEditor
     fn render_editor(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let fonts = ZqlzSettings::global(cx).fonts.clone();
+        let performance_banner = self.document_performance_mode.status_label().map(|label| {
+            let detail = self
+                .document_performance_mode
+                .status_detail()
+                .unwrap_or_default();
+            (label, detail)
+        });
+        let theme = cx.theme();
+
         div()
             .size_full()
+            .relative()
             .text_size(px(fonts.editor_font_size))
             .font_family(fonts.editor_font_family.clone())
             .font_weight(gpui::FontWeight::from(fonts.editor_font_weight as f32))
             .child(self.editor.clone())
+            .when_some(performance_banner, |this, (label, detail)| {
+                this.child(
+                    h_flex()
+                        .absolute()
+                        .top_2()
+                        .right_2()
+                        .max_w(px(460.0))
+                        .gap_2()
+                        .items_center()
+                        .px_2()
+                        .py_1()
+                        .rounded(px(6.0))
+                        .border_1()
+                        .border_color(theme.warning.opacity(0.45))
+                        .bg(theme.warning.opacity(0.12))
+                        .text_xs()
+                        .text_color(theme.foreground)
+                        .child(div().font_weight(gpui::FontWeight::MEDIUM).child(label))
+                        .child(div().text_color(theme.muted_foreground).child(detail)),
+                )
+            })
     }
 
     /// Render the template params panel (JSON editor) - shown only in template mode
@@ -3623,14 +4388,87 @@ fn save_schema_cache_to_disk(
 #[cfg(test)]
 mod tests {
     use super::{
-        AppEditorSettings, CursorBlink, CursorShape, DiagnosticInfo, DiagnosticInfoSeverity,
-        EditorMode, QueryDocumentSymbol, QueryEditor, QueryEditorRunMenuAction,
-        QueryEditorStatusInput, ScrollBeyondLastLine, SoftWrapMode, query_document_symbols,
-        schema_cache_scope,
+        AppEditorSettings, COMPLETION_CONTEXT_BYTES, CursorBlink, CursorShape, DiagnosticInfo,
+        DiagnosticInfoSeverity, DriverSyntaxCompletionAdapter, EditorMode, QueryDocumentSymbol,
+        QueryEditor, QueryEditorDocumentPerformanceMode, QueryEditorRunMenuAction,
+        QueryEditorStatusInput, QueryEditorSyntaxProfile, ScrollBeyondLastLine, SoftWrapMode,
+        SqlLspCompletionAdapter, driver_type_to_highlight_language,
+        format_provider_for_driver_context, line_comment_prefix_for_driver, query_document_symbols,
+        schema_cache_scope, syntax_term_overrides_for_driver,
     };
+    use crate::EditorObjectType;
     use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
     use std::path::Path;
     use zqlz_text_editor::{DocumentIdentity, TextEditor};
+
+    fn symbol_heads(symbols: &[QueryDocumentSymbol]) -> Vec<(String, usize, usize)> {
+        symbols
+            .iter()
+            .map(|symbol| (symbol.label.clone(), symbol.line, symbol.column))
+            .collect()
+    }
+
+    #[test]
+    fn document_performance_mode_uses_byte_and_long_line_thresholds() {
+        let small = "SELECT 1";
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::from_text(small),
+            QueryEditorDocumentPerformanceMode::Normal
+        );
+
+        let large = format!("{}\n", "x".repeat(4096))
+            .repeat((super::LARGE_DOCUMENT_BYTE_THRESHOLD / 4096) + 1);
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::from_text(&large),
+            QueryEditorDocumentPerformanceMode::Large
+        );
+
+        let huge_line = "x".repeat(super::LARGE_DOCUMENT_MAX_LINE_THRESHOLD);
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::from_text(&huge_line),
+            QueryEditorDocumentPerformanceMode::HugeDump
+        );
+    }
+
+    #[test]
+    fn document_performance_mode_exposes_user_visible_status_copy() {
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::Normal.status_label(),
+            None
+        );
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::Large.status_label(),
+            Some("Large document mode")
+        );
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::Large.status_detail(),
+            Some("Viewport syntax and bounded completions stay enabled.")
+        );
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::HugeDump.status_label(),
+            Some("Huge dump mode")
+        );
+        assert_eq!(
+            QueryEditorDocumentPerformanceMode::HugeDump.status_detail(),
+            Some("Syntax, diagnostics, wrapping, and LSP are reduced.")
+        );
+    }
+
+    #[test]
+    fn full_document_lsp_guard_uses_live_rope_metrics() {
+        let small = ropey::Rope::from_str("SELECT * FROM customers");
+        assert!(super::allow_full_document_lsp(&small));
+
+        let large = ropey::Rope::from_str(
+            &format!("{}\n", "SELECT 1;".repeat(1024))
+                .repeat((super::LARGE_DOCUMENT_BYTE_THRESHOLD / 8192) + 2),
+        );
+        assert!(!super::allow_full_document_lsp(&large));
+
+        let huge_line =
+            ropey::Rope::from_str(&"x".repeat(super::LARGE_DOCUMENT_MAX_LINE_THRESHOLD));
+        assert!(!super::allow_full_document_lsp(&huge_line));
+    }
 
     #[test]
     fn problem_index_forward_wraps_to_start() {
@@ -3682,6 +4520,85 @@ mod tests {
     }
 
     #[test]
+    fn driver_type_to_highlight_language_uses_core_dialect_registry() {
+        assert_eq!(
+            driver_type_to_highlight_language(Some("postgresql")),
+            "postgresql"
+        );
+        assert_eq!(
+            driver_type_to_highlight_language(Some(" PostgreSQL ")),
+            "postgresql"
+        );
+        assert_eq!(driver_type_to_highlight_language(Some("duckdb")), "duckdb");
+        assert_eq!(driver_type_to_highlight_language(Some("mssql")), "mssql");
+        assert_eq!(
+            driver_type_to_highlight_language(Some("sqlserver")),
+            "mssql"
+        );
+        assert_eq!(driver_type_to_highlight_language(Some("turso")), "sqlite");
+        assert_eq!(driver_type_to_highlight_language(Some("redis")), "redis");
+        assert_eq!(
+            driver_type_to_highlight_language(Some("mongodb")),
+            "mongodb"
+        );
+        assert_eq!(driver_type_to_highlight_language(Some("mongo")), "mongodb");
+        assert_eq!(
+            driver_type_to_highlight_language(Some(" Mongo ")),
+            "mongodb"
+        );
+        assert_eq!(driver_type_to_highlight_language(None), "sql");
+    }
+
+    #[test]
+    fn syntax_term_overrides_are_loaded_from_driver_bundle() {
+        let overrides =
+            syntax_term_overrides_for_driver(Some("postgresql")).expect("postgres terms");
+
+        assert!(overrides.keywords.iter().any(|term| term == "TABLE"));
+        assert!(
+            overrides
+                .functions
+                .iter()
+                .any(|term| term.eq_ignore_ascii_case("pg_stat_statements_reset"))
+        );
+        assert!(overrides.types.iter().any(|term| term == "JSONPATH"));
+        assert!(syntax_term_overrides_for_driver(Some("unknown")).is_none());
+    }
+
+    #[test]
+    fn query_editor_syntax_profile_collects_driver_owned_editor_contract() {
+        let redis = QueryEditorSyntaxProfile::from_driver(Some("redis"));
+        assert_eq!(redis.language_profile, "redis");
+        assert_eq!(redis.line_comment_prefix, Some(Some("#")));
+        assert!(!redis.supports_sql_lsp);
+        assert_eq!(redis.completion_triggers, vec![' ']);
+        assert!(redis.completion_word_chars.contains(&':'));
+        assert_eq!(
+            redis
+                .capabilities
+                .as_ref()
+                .expect("redis capabilities")
+                .auto_close_pairs,
+            vec![('"', '"')]
+        );
+        assert!(
+            redis
+                .syntax_terms
+                .as_ref()
+                .expect("redis terms")
+                .keywords
+                .iter()
+                .any(|term| term == "GET")
+        );
+
+        let fallback = QueryEditorSyntaxProfile::from_driver(None);
+        assert_eq!(fallback.language_profile, "sql");
+        assert!(fallback.capabilities.is_none());
+        assert!(fallback.syntax_terms.is_none());
+        assert!(fallback.supports_sql_lsp);
+    }
+
+    #[test]
     fn document_identity_from_path_can_be_used_for_document_first_construction() {
         let identity = DocumentIdentity::from_path("/tmp/query.sql").expect("external identity");
 
@@ -3726,6 +4643,7 @@ mod tests {
             cursor_column: 4,
             selection_chars: Some(12),
             mode: EditorMode::Sql,
+            performance_mode: QueryEditorDocumentPerformanceMode::Normal,
             connection_name: None,
             has_connection: false,
             database: None,
@@ -3736,6 +4654,7 @@ mod tests {
         assert_eq!(labels.cursor, "Ln 3, Col 5");
         assert_eq!(labels.selection.as_deref(), Some("12 selected"));
         assert_eq!(labels.mode, "SQL");
+        assert_eq!(labels.performance, None);
         assert_eq!(labels.connection, "No Connection");
         assert_eq!(labels.database, "No Database");
         assert_eq!(labels.diagnostics, "No Problems");
@@ -3749,6 +4668,7 @@ mod tests {
             cursor_column: 0,
             selection_chars: None,
             mode: EditorMode::Template,
+            performance_mode: QueryEditorDocumentPerformanceMode::HugeDump,
             connection_name: Some("postgres@localhost"),
             has_connection: true,
             database: Some("erp_lab"),
@@ -3759,6 +4679,7 @@ mod tests {
         assert_eq!(labels.cursor, "Ln 1, Col 1");
         assert_eq!(labels.selection, None);
         assert_eq!(labels.mode, "Template");
+        assert_eq!(labels.performance.as_deref(), Some("Huge dump mode"));
         assert_eq!(labels.connection, "postgres@localhost");
         assert_eq!(labels.database, "erp_lab");
         assert_eq!(labels.diagnostics, "1 error");
@@ -3794,6 +4715,8 @@ mod tests {
             Some("select *\nfrom customers"),
             0,
             EditorMode::Sql,
+            None,
+            "postgresql",
         );
 
         assert_eq!(preview.label, "Run Selection");
@@ -3806,8 +4729,14 @@ mod tests {
     fn run_target_preview_describes_current_statement() {
         let sql = "select 1;\n\nselect * from accounts where id = 1;\nselect 3;";
         let cursor_offset = sql.find("accounts").expect("cursor target");
-        let preview =
-            QueryEditor::run_target_preview_from_parts(sql, None, cursor_offset, EditorMode::Sql);
+        let preview = QueryEditor::run_target_preview_from_parts(
+            sql,
+            None,
+            cursor_offset,
+            EditorMode::Sql,
+            None,
+            "postgresql",
+        );
 
         assert_eq!(preview.label, "Run Current Statement");
         assert!(!preview.is_selection);
@@ -3817,12 +4746,87 @@ mod tests {
     }
 
     #[test]
+    fn run_target_preview_uses_span_offsets_for_duplicate_statements() {
+        let sql = "select 1;\nselect 1;\nselect 2;";
+        let second_select = sql.rfind("select 1").expect("second statement");
+        let preview = QueryEditor::run_target_preview_from_parts(
+            sql,
+            None,
+            second_select + "select".len(),
+            EditorMode::Sql,
+            None,
+            "postgresql",
+        );
+
+        assert_eq!(preview.label, "Run Current Statement");
+        assert_eq!(preview.detail, "Ln 2");
+        assert_eq!(preview.preview, "select 1");
+    }
+
+    #[test]
+    fn run_target_preview_uses_nearest_statement_when_cursor_is_between_statements() {
+        let sql = "select 1;\n\nselect 2;";
+        let cursor_offset = sql.find("\n\n").expect("gap") + 1;
+        let preview = QueryEditor::run_target_preview_from_parts(
+            sql,
+            None,
+            cursor_offset,
+            EditorMode::Sql,
+            None,
+            "postgresql",
+        );
+
+        assert_eq!(preview.label, "Run Current Statement");
+        assert_eq!(preview.detail, "Ln 1");
+        assert_eq!(preview.preview, "select 1");
+    }
+
+    #[test]
+    fn run_target_preview_uses_current_line_for_command_profiles() {
+        let source = "GET user:1\nJSON.GET user:1 $.profile\nSET user:2 Ada";
+        let cursor_offset = source.find("$.profile").expect("json path");
+        let preview = QueryEditor::run_target_preview_from_parts(
+            source,
+            None,
+            cursor_offset,
+            EditorMode::Sql,
+            None,
+            "redis",
+        );
+
+        assert_eq!(preview.label, "Run Current Statement");
+        assert_eq!(preview.detail, "Ln 2");
+        assert_eq!(preview.preview, "JSON.GET user:1 $.profile");
+    }
+
+    #[test]
+    fn run_target_preview_prefers_driver_capabilities_over_legacy_profile() {
+        let source = "GET user:1\nJSON.GET user:1 $.profile\nSET user:2 Ada";
+        let cursor_offset = source.find("$.profile").expect("json path");
+        let capabilities = zqlz_core::get_syntax_driver_capabilities("redis");
+        let preview = QueryEditor::run_target_preview_from_parts(
+            source,
+            None,
+            cursor_offset,
+            EditorMode::Sql,
+            Some(&capabilities),
+            "postgresql",
+        );
+
+        assert_eq!(preview.label, "Run Current Statement");
+        assert_eq!(preview.detail, "Ln 2");
+        assert_eq!(preview.preview, "JSON.GET user:1 $.profile");
+    }
+
+    #[test]
     fn run_target_preview_describes_rendered_template_without_selection() {
         let preview = QueryEditor::run_target_preview_from_parts(
             "select * from {{ table_name }}",
             None,
             0,
             EditorMode::Template,
+            None,
+            "postgresql",
         );
 
         assert_eq!(preview.label, "Run Rendered Template");
@@ -3959,30 +4963,616 @@ mod tests {
     }
 
     #[test]
+    fn performance_feature_policy_restores_user_settings_when_document_returns_to_normal() {
+        let settings = AppEditorSettings {
+            highlight_enabled: true,
+            bracket_matching: true,
+            show_gutter_diagnostics: true,
+            selection_highlight: true,
+            word_wrap: true,
+            auto_indent: true,
+            ..AppEditorSettings::default()
+        };
+
+        let constrained = super::QueryEditorFeaturePolicy::from_settings(
+            &settings,
+            QueryEditorDocumentPerformanceMode::HugeDump,
+        );
+        assert_eq!(
+            constrained,
+            super::QueryEditorFeaturePolicy {
+                highlight_enabled: false,
+                bracket_matching: false,
+                show_gutter_diagnostics: false,
+                selection_highlight: false,
+                soft_wrap: false,
+                auto_indent: false,
+            }
+        );
+
+        let normal = super::QueryEditorFeaturePolicy::from_settings(
+            &settings,
+            QueryEditorDocumentPerformanceMode::Normal,
+        );
+        assert_eq!(
+            normal,
+            super::QueryEditorFeaturePolicy {
+                highlight_enabled: true,
+                bracket_matching: true,
+                show_gutter_diagnostics: true,
+                selection_highlight: true,
+                soft_wrap: true,
+                auto_indent: true,
+            }
+        );
+    }
+
+    #[test]
+    fn completion_mode_keeps_driver_syntax_completions_when_lsp_is_disabled() {
+        let settings = AppEditorSettings {
+            lsp_enabled: false,
+            lsp_completions_enabled: true,
+            ..AppEditorSettings::default()
+        };
+
+        assert_eq!(
+            super::completion_mode_for_driver(Some("redis"), &settings),
+            super::QueryEditorCompletionMode::DriverSyntax
+        );
+        assert_eq!(
+            super::completion_mode_for_driver(Some("mongodb"), &settings),
+            super::QueryEditorCompletionMode::DriverSyntax
+        );
+        assert_eq!(
+            super::completion_mode_for_driver(Some("postgres"), &settings),
+            super::QueryEditorCompletionMode::Disabled
+        );
+    }
+
+    #[test]
+    fn completion_mode_respects_completion_toggle_for_all_drivers() {
+        let settings = AppEditorSettings {
+            lsp_enabled: true,
+            lsp_completions_enabled: false,
+            ..AppEditorSettings::default()
+        };
+
+        assert_eq!(
+            super::completion_mode_for_driver(Some("redis"), &settings),
+            super::QueryEditorCompletionMode::Disabled
+        );
+        assert_eq!(
+            super::completion_mode_for_driver(Some("postgres"), &settings),
+            super::QueryEditorCompletionMode::Disabled
+        );
+    }
+
+    #[test]
     fn query_document_symbols_split_statements_and_track_lines() {
         let symbols = query_document_symbols(
+            Some("postgres"),
             "select * from users;\n\ncreate table audit_log (id int);\nupdate users set name = 'a;b';",
         );
 
         assert_eq!(
-            symbols,
+            symbol_heads(&symbols),
             vec![
-                QueryDocumentSymbol {
-                    label: "Query".to_string(),
-                    line: 0,
-                    column: 0,
-                },
-                QueryDocumentSymbol {
-                    label: "CREATE audit_log".to_string(),
-                    line: 2,
-                    column: 0,
-                },
-                QueryDocumentSymbol {
-                    label: "UPDATE users".to_string(),
-                    line: 3,
-                    column: 0,
-                },
+                ("Query".to_string(), 0, 0),
+                ("CREATE audit_log".to_string(), 2, 0),
+                ("UPDATE users".to_string(), 3, 0),
             ]
         );
+    }
+
+    #[test]
+    fn query_document_symbols_ignore_semicolons_in_sql_protected_ranges() {
+        let symbols = query_document_symbols(
+            Some("postgres"),
+            "select $fn$ begin perform ';'; end $fn$;\n\
+             update `user;table` set name = 'a;b';\n\
+             select 1 /* ; ignored */;",
+        );
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("Query".to_string(), 0, 0),
+                ("UPDATE user;table".to_string(), 1, 0),
+                ("Query".to_string(), 2, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_document_symbols_ignore_protected_words_when_labeling_targets() {
+        let symbols = query_document_symbols(
+            Some("postgres"),
+            "/* create table fake_target */ create table \"audit log\" (id int);\n\
+             select 'drop table users';\n\
+             update accounts set note = '-- table orders';",
+        );
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("CREATE audit log".to_string(), 0, 0),
+                ("Query".to_string(), 1, 0),
+                ("UPDATE accounts".to_string(), 2, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_document_symbols_preserve_qualified_quoted_targets() {
+        let symbols = query_document_symbols(
+            Some("postgres"),
+            "create table \"public\".\"audit log\" (id int);\n\
+             update [dbo].[Users] set name = 'Ada';\n\
+             drop view reporting.monthly_sales;",
+        );
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("CREATE public.audit log".to_string(), 0, 0),
+                ("UPDATE dbo.Users".to_string(), 1, 0),
+                ("DROP reporting.monthly_sales".to_string(), 2, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_document_symbols_skip_ddl_modifiers_for_targets() {
+        let symbols = query_document_symbols(
+            Some("postgres"),
+            "create or replace view reporting.monthly_sales as select 1;\n\
+             create unique index concurrently idx_sales on reporting.monthly_sales(id);\n\
+             drop table if exists stale_sales;",
+        );
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("CREATE reporting.monthly_sales".to_string(), 0, 0),
+                ("CREATE idx_sales".to_string(), 1, 0),
+                ("DROP stale_sales".to_string(), 2, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn query_document_symbols_include_source_and_target_ranges() {
+        let sql = "create table \"public\".\"audit log\" (id int);\nselect 1;";
+        let symbols = query_document_symbols(Some("postgres"), sql);
+
+        assert_eq!(symbols.len(), 2);
+        assert_eq!(symbols[0].source_range, 0..42);
+        assert_eq!(
+            &sql[symbols[0].source_range.clone()],
+            "create table \"public\".\"audit log\" (id int)"
+        );
+        let target_range = symbols[0].target_range.clone().expect("target range");
+        assert_eq!(&sql[target_range], r#""public"."audit log""#);
+        assert_eq!(symbols[1].source_range, 44..52);
+        assert_eq!(symbols[1].target_range, None);
+    }
+
+    #[test]
+    fn query_document_symbols_use_redis_command_outline() {
+        let query = "# warm cache\nSET session:1 value\nGET session:1";
+        let symbols = query_document_symbols(Some("redis"), query);
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("SET session:1".to_string(), 1, 0),
+                ("GET session:1".to_string(), 2, 0),
+            ]
+        );
+        let target_range = symbols[0].target_range.clone().expect("redis key range");
+        assert_eq!(&query[target_range], "session:1");
+    }
+
+    #[test]
+    fn query_document_symbols_use_mongodb_collection_outline() {
+        let query = r#"// ignored
+db.orders.find({ status: "open" })
+db.users.updateOne({ _id: 1 }, { $set: { name: "Ada" } })"#;
+        let symbols = query_document_symbols(Some("mongodb"), query);
+
+        assert_eq!(
+            symbol_heads(&symbols),
+            vec![
+                ("find orders".to_string(), 1, 0),
+                ("updateOne users".to_string(), 2, 0),
+            ]
+        );
+        let target_range = symbols[1]
+            .target_range
+            .clone()
+            .expect("mongo collection range");
+        assert_eq!(&query[target_range], "users");
+    }
+
+    #[test]
+    fn completion_context_limits_large_documents_to_cursor_line_window() {
+        let sql = format!(
+            "{}\nselect * from customers where customer_id = 1;\n{}",
+            "x".repeat(COMPLETION_CONTEXT_BYTES),
+            "y".repeat(COMPLETION_CONTEXT_BYTES)
+        );
+        let rope = ropey::Rope::from_str(&sql);
+        let offset = sql.find("customer_id").expect("cursor target");
+
+        let (context, context_offset) =
+            SqlLspCompletionAdapter::completion_context("postgresql", &rope, offset);
+
+        assert!(context.len() < COMPLETION_CONTEXT_BYTES);
+        assert!(context.contains("customer_id"));
+        assert_eq!(
+            &context[context_offset..context_offset + "customer_id".len()],
+            "customer_id"
+        );
+        assert!(!context.contains(&"x".repeat(1024)));
+        assert!(!context.contains(&"y".repeat(1024)));
+    }
+
+    #[test]
+    fn completion_context_keeps_current_statement_window_for_large_documents() {
+        let sql = format!(
+            "{};\nwith recent_orders as (\n  select * from orders\n)\nselect * from recent_orders where order_id = 1;\n{};",
+            "select 1 as filler ".repeat(COMPLETION_CONTEXT_BYTES / 16),
+            "select 2 as filler ".repeat(COMPLETION_CONTEXT_BYTES / 16)
+        );
+        let rope = ropey::Rope::from_str(&sql);
+        let offset = sql.find("order_id").expect("cursor target");
+
+        let (context, context_offset) =
+            SqlLspCompletionAdapter::completion_context("postgresql", &rope, offset);
+
+        assert!(context.len() < COMPLETION_CONTEXT_BYTES);
+        assert!(context.starts_with("with recent_orders"));
+        assert!(context.contains("select * from orders"));
+        assert!(context.contains("order_id"));
+        assert!(!context.contains("select 1 as filler"));
+        assert!(!context.contains("select 2 as filler"));
+        assert_eq!(
+            &context[context_offset..context_offset + "order_id".len()],
+            "order_id"
+        );
+    }
+
+    #[test]
+    fn completion_context_uses_driver_execution_unit_for_command_profiles() {
+        let query = format!(
+            "{}\nGET stale:1\nSET session:1 Ada Lovelace\nGET fresh:1\n{}",
+            "x".repeat(COMPLETION_CONTEXT_BYTES),
+            "y".repeat(COMPLETION_CONTEXT_BYTES)
+        );
+        let rope = ropey::Rope::from_str(&query);
+        let offset = query.find("Lovelace").expect("cursor target");
+
+        let (context, context_offset) =
+            SqlLspCompletionAdapter::completion_context("redis", &rope, offset);
+
+        assert_eq!(context, "SET session:1 Ada Lovelace");
+        assert_eq!(&context[context_offset..], "Lovelace");
+    }
+
+    #[test]
+    fn completion_context_prefers_driver_capabilities_over_legacy_profile() {
+        let query = format!(
+            "{}\nGET stale:1\nSET session:1 Ada Lovelace\nGET fresh:1\n{}",
+            "x".repeat(COMPLETION_CONTEXT_BYTES),
+            "y".repeat(COMPLETION_CONTEXT_BYTES)
+        );
+        let rope = ropey::Rope::from_str(&query);
+        let offset = query.find("Lovelace").expect("cursor target");
+        let capabilities = zqlz_core::get_syntax_driver_capabilities("redis");
+
+        let (context, context_offset) =
+            SqlLspCompletionAdapter::completion_context_for_capabilities(
+                Some(&capabilities),
+                "postgresql",
+                &rope,
+                offset,
+            );
+
+        assert_eq!(context, "SET session:1 Ada Lovelace");
+        assert_eq!(&context[context_offset..], "Lovelace");
+    }
+
+    #[test]
+    fn completion_context_keeps_utf8_boundaries() {
+        let sql = format!(
+            "{}\nselect 'ééé' as café;\n{}",
+            "x".repeat(COMPLETION_CONTEXT_BYTES),
+            "y".repeat(COMPLETION_CONTEXT_BYTES)
+        );
+        let rope = ropey::Rope::from_str(&sql);
+        let offset = sql.find("café").expect("cursor target") + "caf".len() + 1;
+
+        let (context, context_offset) =
+            SqlLspCompletionAdapter::completion_context("postgresql", &rope, offset);
+
+        assert!(context.is_char_boundary(context_offset));
+        assert!(context.contains("café"));
+    }
+
+    #[test]
+    fn completion_context_for_mode_bounds_stale_normal_large_documents() {
+        let sql = format!(
+            "{}\nselect * from customers where customer_id = 1;\n{}",
+            "x".repeat(COMPLETION_CONTEXT_BYTES),
+            "y".repeat(COMPLETION_CONTEXT_BYTES)
+        );
+        let rope = ropey::Rope::from_str(&sql);
+        let offset = sql.find("customer_id").expect("cursor target");
+
+        let (context, context_offset) = SqlLspCompletionAdapter::completion_context_for_mode(
+            QueryEditorDocumentPerformanceMode::Normal,
+            "postgresql",
+            &rope,
+            offset,
+        );
+
+        assert!(context.len() < COMPLETION_CONTEXT_BYTES);
+        assert!(context.contains("customer_id"));
+        assert_eq!(
+            &context[context_offset..context_offset + "customer_id".len()],
+            "customer_id"
+        );
+        assert!(!context.contains(&"x".repeat(1024)));
+        assert!(!context.contains(&"y".repeat(1024)));
+    }
+
+    #[test]
+    fn completion_context_for_mode_keeps_small_normal_documents_whole() {
+        let sql = "select * from customers where customer_id = 1";
+        let rope = ropey::Rope::from_str(sql);
+        let offset = sql.find("customer_id").expect("cursor target");
+
+        let (context, context_offset) = SqlLspCompletionAdapter::completion_context_for_mode(
+            QueryEditorDocumentPerformanceMode::Normal,
+            "postgresql",
+            &rope,
+            offset,
+        );
+
+        assert_eq!(context, sql);
+        assert_eq!(context_offset, offset);
+    }
+
+    #[test]
+    fn completion_trigger_context_is_profile_aware() {
+        let sql_profile = QueryEditorSyntaxProfile::from_driver(Some("postgres"));
+        let sql_dot = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &sql_profile.completion_triggers,
+            &sql_profile.completion_word_chars,
+            ".",
+        )
+        .expect("sql dot trigger");
+        assert_eq!(
+            sql_dot.trigger_kind,
+            lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
+        );
+        assert_eq!(sql_dot.trigger_character.as_deref(), Some("."));
+
+        let parameter = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &sql_profile.completion_triggers,
+            &sql_profile.completion_word_chars,
+            "$",
+        )
+        .expect("parameter word trigger");
+        assert_eq!(
+            parameter.trigger_kind,
+            lsp_types::CompletionTriggerKind::INVOKED
+        );
+
+        let redis_profile = QueryEditorSyntaxProfile::from_driver(Some("redis"));
+        let redis_space = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &redis_profile.completion_triggers,
+            &redis_profile.completion_word_chars,
+            " ",
+        )
+        .expect("redis argument trigger");
+        assert_eq!(
+            redis_space.trigger_kind,
+            lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
+        );
+        assert_eq!(redis_space.trigger_character.as_deref(), Some(" "));
+        assert!(
+            SqlLspCompletionAdapter::completion_trigger_for_characters(
+                &redis_profile.completion_triggers,
+                &redis_profile.completion_word_chars,
+                ".",
+            )
+            .is_none()
+        );
+        let redis_key_separator = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &redis_profile.completion_triggers,
+            &redis_profile.completion_word_chars,
+            ":",
+        )
+        .expect("redis key separator word trigger");
+        assert_eq!(
+            redis_key_separator.trigger_kind,
+            lsp_types::CompletionTriggerKind::INVOKED
+        );
+
+        let mongo_profile = QueryEditorSyntaxProfile::from_driver(Some("mongodb"));
+        let mongo_colon = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &mongo_profile.completion_triggers,
+            &mongo_profile.completion_word_chars,
+            ":",
+        )
+        .expect("mongo field value trigger");
+        assert_eq!(
+            mongo_colon.trigger_kind,
+            lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER
+        );
+        assert_eq!(mongo_colon.trigger_character.as_deref(), Some(":"));
+        assert!(
+            SqlLspCompletionAdapter::completion_trigger_for_characters(
+                &mongo_profile.completion_triggers,
+                &mongo_profile.completion_word_chars,
+                "(",
+            )
+            .is_none()
+        );
+        let mongo_operator = SqlLspCompletionAdapter::completion_trigger_for_characters(
+            &mongo_profile.completion_triggers,
+            &mongo_profile.completion_word_chars,
+            "$",
+        )
+        .expect("mongo operator word trigger");
+        assert_eq!(
+            mongo_operator.trigger_kind,
+            lsp_types::CompletionTriggerKind::INVOKED
+        );
+    }
+
+    #[test]
+    fn driver_syntax_completion_adapter_uses_driver_terms_and_word_chars() {
+        let profile = QueryEditorSyntaxProfile::from_driver(Some("redis"));
+        let adapter = DriverSyntaxCompletionAdapter::new(
+            QueryEditorDocumentPerformanceMode::Normal,
+            profile.completion_triggers,
+            profile.completion_word_chars.clone(),
+            profile.completions,
+            profile.syntax_terms.expect("redis terms"),
+        );
+        let text = ropey::Rope::from_str("JSON.");
+        let prefix = DriverSyntaxCompletionAdapter::completion_prefix(&text, "JSON.".len(), &['.']);
+        let completions = adapter.term_completions_for_prefix(&prefix);
+
+        assert_eq!(prefix, "JSON.");
+        assert!(completions.iter().any(|item| item.label == "JSON.GET"));
+        assert!(completions.iter().any(|item| item.label == "JSON.SET"));
+        assert!(
+            adapter
+                .term_completions_for_prefix("HGET")
+                .iter()
+                .any(|item| item.label == "HGETALL")
+        );
+    }
+
+    #[test]
+    fn driver_syntax_completion_adapter_uses_mongodb_terms_and_operator_word_chars() {
+        let profile = QueryEditorSyntaxProfile::from_driver(Some("mongodb"));
+        let mongo_word_chars = profile.completion_word_chars.clone();
+        let mongo_triggers = profile.completion_triggers.clone();
+        let adapter = DriverSyntaxCompletionAdapter::new(
+            QueryEditorDocumentPerformanceMode::Normal,
+            mongo_triggers.clone(),
+            mongo_word_chars.clone(),
+            profile.completions,
+            profile.syntax_terms.expect("mongodb terms"),
+        );
+
+        assert!(mongo_word_chars.contains(&'$'));
+        assert!(mongo_triggers.contains(&':'));
+
+        let text = ropey::Rope::from_str("$gr");
+        let prefix =
+            DriverSyntaxCompletionAdapter::completion_prefix(&text, "$gr".len(), &mongo_word_chars);
+        let completions = adapter.term_completions_for_prefix(&prefix);
+
+        assert_eq!(prefix, "$gr");
+        assert!(completions.iter().any(|item| item.label == "$group"));
+        assert!(
+            adapter
+                .term_completions_for_prefix("create")
+                .iter()
+                .any(|item| item.label == "createIndex"
+                    && item.kind == Some(lsp_types::CompletionItemKind::FUNCTION))
+        );
+    }
+
+    #[test]
+    fn driver_syntax_completion_adapter_uses_driver_completion_metadata() {
+        let profile = QueryEditorSyntaxProfile::from_driver(Some("redis"));
+        let adapter = DriverSyntaxCompletionAdapter::new(
+            QueryEditorDocumentPerformanceMode::Normal,
+            profile.completion_triggers,
+            profile.completion_word_chars,
+            profile.completions,
+            profile.syntax_terms.expect("redis terms"),
+        );
+
+        let completions = adapter.term_completions_for_prefix("set");
+        let set = completions
+            .iter()
+            .find(|item| item.label == "SET")
+            .expect("SET completion");
+
+        assert_eq!(set.kind, Some(lsp_types::CompletionItemKind::KEYWORD));
+        assert_eq!(set.detail.as_deref(), Some("Driver keyword: Mutation"));
+        assert_eq!(set.insert_text.as_deref(), Some("SET ${1:key} ${2:value}"));
+        assert_eq!(
+            set.insert_text_format,
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        );
+        assert!(matches!(
+            &set.documentation,
+            Some(lsp_types::Documentation::MarkupContent(content))
+                if content.value.contains("Set key to hold the string value")
+        ));
+    }
+
+    #[test]
+    fn format_provider_for_driver_context_formats_redis_commands() {
+        let provider = format_provider_for_driver_context(
+            "redis".to_string(),
+            EditorObjectType::Query.display_name(),
+        )
+        .expect("redis formatter");
+
+        let formatted =
+            provider("  set    user:1    \"Ada  Lovelace\"\n# keep comment\n get\tuser:1  ")
+                .expect("formatted redis");
+
+        assert_eq!(
+            formatted,
+            "SET user:1 \"Ada  Lovelace\"\n# keep comment\nGET user:1"
+        );
+    }
+
+    #[test]
+    fn format_provider_for_driver_context_formats_mongodb_documents() {
+        let provider = format_provider_for_driver_context(
+            "mongodb".to_string(),
+            EditorObjectType::Query.display_name(),
+        )
+        .expect("mongodb formatter");
+
+        let formatted = provider(r#"{"active":true,"name":"Ada"}"#).expect("formatted mongodb");
+
+        assert!(formatted.starts_with("{\n"));
+        assert!(formatted.contains("\"active\": true"));
+        assert!(formatted.contains("\"name\": \"Ada\""));
+        assert!(formatted.ends_with("\n}"));
+    }
+
+    #[test]
+    fn format_provider_for_driver_context_skips_unknown_drivers() {
+        assert!(format_provider_for_driver_context("unknown".to_string(), "Query").is_none());
+    }
+
+    #[test]
+    fn line_comment_prefix_is_driver_metadata_owned() {
+        assert_eq!(
+            line_comment_prefix_for_driver(Some("postgres")),
+            Some(Some("--"))
+        );
+        assert_eq!(
+            line_comment_prefix_for_driver(Some("mongodb")),
+            Some(Some("//"))
+        );
+        assert_eq!(
+            line_comment_prefix_for_driver(Some("redis")),
+            Some(Some("#"))
+        );
+        assert_eq!(line_comment_prefix_for_driver(Some("unknown")), None);
     }
 }

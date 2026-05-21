@@ -7,7 +7,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
-use zqlz_core::{Connection, QueryResult, Result};
+use zqlz_core::{Connection, QueryResult, Result, split_sql_statements};
+
+use crate::engine::QueryEngine;
 
 /// Configuration options for batch execution
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -561,14 +563,7 @@ async fn execute_single_statement(
     conn: &Arc<dyn Connection>,
     sql: &str,
 ) -> Result<(Option<QueryResult>, u64)> {
-    let trimmed = sql.trim().to_uppercase();
-    let is_query = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("DESCRIBE")
-        || trimmed.starts_with("EXPLAIN");
-
-    if is_query {
+    if statement_returns_rows(sql) {
         let result = conn.query(sql, &[]).await?;
         Ok((Some(result), 0))
     } else {
@@ -582,14 +577,7 @@ async fn execute_single_in_transaction(
     tx: &dyn zqlz_core::Transaction,
     sql: &str,
 ) -> Result<(Option<QueryResult>, u64)> {
-    let trimmed = sql.trim().to_uppercase();
-    let is_query = trimmed.starts_with("SELECT")
-        || trimmed.starts_with("WITH")
-        || trimmed.starts_with("SHOW")
-        || trimmed.starts_with("DESCRIBE")
-        || trimmed.starts_with("EXPLAIN");
-
-    if is_query {
+    if statement_returns_rows(sql) {
         let result = tx.query(sql, &[]).await?;
         Ok((Some(result), 0))
     } else {
@@ -598,164 +586,13 @@ async fn execute_single_in_transaction(
     }
 }
 
+pub(crate) fn statement_returns_rows(sql: &str) -> bool {
+    QueryEngine::new().is_query(sql)
+}
+
 /// Split a multi-statement SQL string into individual statements
 ///
-/// This is a simple implementation that splits on semicolons while respecting
-/// string literals and comments. For complex SQL dialects, consider using
-/// a proper SQL parser.
+/// Splits on semicolons while respecting core SQL protected ranges.
 pub fn split_statements(sql: &str) -> Vec<String> {
-    let mut statements = Vec::new();
-    let mut current = String::new();
-    let mut in_string = false;
-    let mut string_char = '"';
-    let mut dollar_quote_tag: Option<String> = None;
-    let mut in_line_comment = false;
-    let mut in_block_comment = false;
-    let chars: Vec<char> = sql.chars().collect();
-    let len = chars.len();
-    let mut i = 0;
-
-    while i < len {
-        let c = chars[i];
-        let next = if i + 1 < len {
-            Some(chars[i + 1])
-        } else {
-            None
-        };
-
-        if let Some(tag) = dollar_quote_tag.clone() {
-            if chars_match(&chars, i, &tag) {
-                current.push_str(&tag);
-                dollar_quote_tag = None;
-                i += tag.len();
-            } else {
-                current.push(c);
-                i += 1;
-            }
-            continue;
-        }
-
-        // Handle line comments
-        if !in_string && !in_block_comment && c == '-' && next == Some('-') {
-            in_line_comment = true;
-            current.push(c);
-            i += 1;
-            continue;
-        }
-
-        if in_line_comment {
-            current.push(c);
-            if c == '\n' {
-                in_line_comment = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Handle block comments
-        if !in_string && !in_line_comment && c == '/' && next == Some('*') {
-            in_block_comment = true;
-            current.push(c);
-            i += 1;
-            continue;
-        }
-
-        if in_block_comment {
-            current.push(c);
-            if c == '*' && next == Some('/') {
-                current.push(chars[i + 1]);
-                in_block_comment = false;
-                i += 2;
-                continue;
-            }
-            i += 1;
-            continue;
-        }
-
-        if !in_string
-            && c == '$'
-            && let Some(tag) = read_dollar_quote_tag(&chars, i)
-        {
-            current.push_str(&tag);
-            dollar_quote_tag = Some(tag.clone());
-            i += tag.len();
-            continue;
-        }
-
-        // Handle string literals
-        if !in_string && (c == '\'' || c == '"') {
-            in_string = true;
-            string_char = c;
-            current.push(c);
-            i += 1;
-            continue;
-        }
-
-        if in_string {
-            current.push(c);
-            if c == string_char {
-                // Check for escaped quote (doubled)
-                if next == Some(string_char) {
-                    current.push(chars[i + 1]);
-                    i += 2;
-                    continue;
-                }
-                in_string = false;
-            }
-            i += 1;
-            continue;
-        }
-
-        // Handle statement separator
-        if c == ';' {
-            let trimmed = current.trim();
-            if !trimmed.is_empty() {
-                statements.push(trimmed.to_string());
-            }
-            current.clear();
-            i += 1;
-            continue;
-        }
-
-        current.push(c);
-        i += 1;
-    }
-
-    // Don't forget the last statement (without trailing semicolon)
-    let trimmed = current.trim();
-    if !trimmed.is_empty() {
-        statements.push(trimmed.to_string());
-    }
-
-    statements
-}
-
-fn read_dollar_quote_tag(chars: &[char], start: usize) -> Option<String> {
-    let mut tag = String::from("$");
-    let mut index = start + 1;
-
-    while index < chars.len() {
-        let c = chars[index];
-        if c == '$' {
-            tag.push(c);
-            return Some(tag);
-        }
-        if index == start + 1 && c.is_ascii_digit() {
-            return None;
-        }
-        if !(c == '_' || c.is_ascii_alphanumeric()) {
-            return None;
-        }
-        tag.push(c);
-        index += 1;
-    }
-
-    None
-}
-
-fn chars_match(chars: &[char], start: usize, needle: &str) -> bool {
-    needle
-        .chars()
-        .enumerate()
-        .all(|(offset, c)| chars.get(start + offset) == Some(&c))
+    split_sql_statements(sql)
 }

@@ -5,7 +5,7 @@ use std::borrow::Cow;
 use std::sync::Arc;
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
 };
 
 use crate::TursoConnection;
@@ -74,6 +74,10 @@ impl DatabaseDriver for TursoDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         zqlz_driver_sqlite::sqlite_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        zqlz_driver_sqlite::SqliteDriver::new().dialect_bundle()
     }
 
     #[tracing::instrument(skip(self, config), fields(url = config.get_string("url").as_deref()))]
@@ -152,6 +156,18 @@ mod tests {
                 .keywords
                 .iter()
                 .any(|keyword| keyword.keyword == "PRAGMA")
+        );
+    }
+
+    #[test]
+    fn turso_reuses_sqlite_dialect_bundle() {
+        let bundle = TursoDriver::new()
+            .dialect_bundle()
+            .expect("Turso should reuse SQLite dialect bundle");
+
+        assert_eq!(
+            bundle.config.syntax_highlighting.profile.as_deref(),
+            Some("sqlite")
         );
     }
 }

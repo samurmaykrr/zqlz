@@ -1690,7 +1690,10 @@ impl SchemaService {
     ) -> ServiceResult<Vec<SchemaColumnInfo>> {
         let cache_key = Self::scoped_column_cache_key(table_name, schema);
         if let Some(cached_columns) = self.cache.get_columns(connection_id, &cache_key) {
-            if cached_columns.iter().all(|column| column.data_type.is_empty()) {
+            if cached_columns
+                .iter()
+                .all(|column| column.data_type.is_empty())
+            {
                 tracing::warn!(
                     table_name = %table_name,
                     schema = ?schema,

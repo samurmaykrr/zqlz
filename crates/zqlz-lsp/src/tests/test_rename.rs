@@ -1,7 +1,6 @@
 //! Tests for rename symbol functionality
 
 use crate::SqlLsp;
-use crate::keywords::SQL_KEYWORDS;
 use lsp_types::{Position, Range, Uri};
 use std::sync::Arc;
 use zqlz_services::SchemaService;
@@ -150,6 +149,26 @@ fn test_rename_qualified_column() {
     assert_eq!(edits[0].new_text, "new_column");
 }
 
+#[test]
+fn test_rename_qualified_column_does_not_cross_qualifiers() {
+    let lsp = create_test_lsp();
+    let sql = "SELECT users.user_id, orders.user_id FROM users JOIN orders ON users.user_id = orders.user_id";
+    let text = Rope::from(sql);
+    let offset = sql.find("users.user_id").unwrap() + "users.".len() + 2;
+
+    let result = lsp.rename(&text, offset, "account_id");
+
+    assert!(result.is_some());
+    let edits = edits_for_internal_uri(result.unwrap());
+
+    assert_eq!(edits.len(), 2, "should rename only users.user_id refs");
+    assert!(edits.iter().all(|edit| {
+        let start = edit.range.start.character as usize;
+        let prefix_start = start.saturating_sub("users.".len());
+        &sql[prefix_start..start] == "users."
+    }));
+}
+
 /// Test renaming a table name
 #[test]
 fn test_rename_table_name() {
@@ -191,6 +210,23 @@ fn test_rename_excludes_partial_matches() {
     // Should only replace standalone 'user', not 'user_name'
     // Looking for exact word boundary matches
     assert!(!edits.is_empty());
+}
+
+#[test]
+fn test_rename_ignores_strings_and_comments() {
+    let lsp = create_test_lsp();
+    let sql = "SELECT user_name, 'user_name' AS label FROM users -- user_name";
+    let text = Rope::from(sql);
+    let offset = sql.find("user_name").expect("active identifier");
+
+    let result = lsp.rename(&text, offset, "display_name");
+
+    assert!(result.is_some());
+    let edits = edits_for_internal_uri(result.unwrap());
+
+    assert_eq!(edits.len(), 1, "rename should edit active SQL only");
+    assert_eq!(edits[0].range.start.character, 7);
+    assert_eq!(edits[0].range.end.character, 16);
 }
 
 /// Test renaming handles underscores correctly
@@ -237,6 +273,9 @@ fn test_rename_empty_text_returns_none() {
 
 #[test]
 fn test_rename_probe_identifier_stays_valid() {
-    let probe_upper = RENAME_PROBE_IDENTIFIER.to_uppercase();
-    assert!(!SQL_KEYWORDS.iter().any(|keyword| *keyword == probe_upper));
+    let lsp = create_test_lsp();
+    let text = Rope::from(format!("SELECT {RENAME_PROBE_IDENTIFIER} FROM users"));
+    let offset = "SELECT ".len() + 4;
+
+    assert!(lsp.rename(&text, offset, "renamed_probe").is_some());
 }

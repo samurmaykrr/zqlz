@@ -8,5 +8,7 @@ mod driver;
 #[cfg(test)]
 mod driver_tests;
 mod schema;
+#[cfg(test)]
+mod schema_tests;
 
 pub use driver::*;

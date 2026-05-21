@@ -1,7 +1,10 @@
 //! Unit tests for ClickHouse driver
 
 use super::*;
-use zqlz_core::{ConnectionConfig, DatabaseDriver, Value};
+use zqlz_core::{
+    ConnectionConfig, DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability,
+    TreeSitterGrammar, Value, syntax_driver_capabilities_from_bundle,
+};
 
 mod driver_metadata_tests {
     use super::*;
@@ -41,6 +44,29 @@ mod driver_metadata_tests {
     fn test_clickhouse_default() {
         let driver = ClickHouseDriver;
         assert_eq!(driver.id(), "clickhouse");
+    }
+
+    #[test]
+    fn clickhouse_dialect_bundle_owns_editor_syntax_capabilities() {
+        let driver = ClickHouseDriver::new();
+        let bundle = driver
+            .dialect_bundle()
+            .expect("ClickHouse driver should expose dialect bundle");
+        let capabilities = syntax_driver_capabilities_from_bundle(bundle);
+
+        assert_eq!(capabilities.profile, "clickhouse");
+        assert_eq!(capabilities.tree_sitter_grammar, TreeSitterGrammar::Sql);
+        assert_eq!(
+            capabilities.highlight_query_language,
+            HighlightQueryLanguage::ClickHouse
+        );
+        assert_eq!(
+            capabilities.parameter_placeholders,
+            ParameterPlaceholderCapability::disabled()
+        );
+        assert!(capabilities.sql_overlays);
+        assert!(!capabilities.command_syntax);
+        assert!(!capabilities.document_syntax);
     }
 }
 

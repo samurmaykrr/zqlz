@@ -1,6 +1,7 @@
 //! Tests for JOIN clause completions with foreign key suggestions
 
 use super::test_helpers::*;
+use lsp_types::CompletionItemKind;
 use zqlz_ui::widgets::Rope;
 
 #[test]
@@ -151,6 +152,28 @@ fn test_join_with_alias() {
     assert!(
         !completions.is_empty(),
         "Should have completions in ON clause"
+    );
+}
+
+#[test]
+fn test_join_clause_condition_keywords_use_driver_metadata() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users u JOIN audit_log a O");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+
+    let on = completions
+        .iter()
+        .find(|completion| completion.label == "ON")
+        .expect("ON keyword completion");
+    assert_eq!(on.kind, Some(CompletionItemKind::KEYWORD));
+    assert!(
+        on.detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SQL Keyword")),
+        "ON detail should come from dialect keyword metadata path: {:?}",
+        on.detail
     );
 }
 

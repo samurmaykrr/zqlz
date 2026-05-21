@@ -3,8 +3,9 @@
 use super::schema::*;
 use zqlz_core::{
     ColumnInfo, ConstraintInfo, ConstraintType, DatabaseInfo, ForeignKeyAction, ForeignKeyInfo,
-    IndexInfo, PrimaryKeyInfo, SchemaInfo, SequenceInfo, TableDetails, TableInfo, TableType,
-    TriggerEvent, TriggerForEach, TriggerInfo, TriggerTiming, TypeInfo, TypeKind, ViewInfo,
+    IndexInfo, ObjectFormDdlRequest, ObjectFormMode, ObjectFormValue, PrimaryKeyInfo, SchemaInfo,
+    SequenceInfo, TableDetails, TableInfo, TableType, TriggerEvent, TriggerForEach, TriggerInfo,
+    TriggerTiming, TypeInfo, TypeKind, ViewInfo,
 };
 
 // Helper to create test DatabaseInfo
@@ -25,6 +26,15 @@ fn test_schema_info() -> SchemaInfo {
         owner: Some("dbo".to_string()),
         comment: None,
     }
+}
+
+fn form_values(
+    entries: &[(&str, ObjectFormValue)],
+) -> std::collections::BTreeMap<String, ObjectFormValue> {
+    entries
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
 }
 
 // Helper to create test TableInfo
@@ -286,6 +296,71 @@ fn test_view_info_creation() {
     assert_eq!(view.name, "ActiveUsers");
     assert!(!view.is_materialized);
     assert!(view.definition.is_some());
+}
+
+#[test]
+fn test_mssql_manifest_exposes_core_kinds_and_forms() {
+    let manifest = mssql_objects_panel_manifest();
+    manifest.validate().expect("valid manifest");
+    let kind_ids: Vec<&str> = manifest
+        .object_kinds
+        .iter()
+        .map(|kind| kind.id.as_str())
+        .collect();
+    assert!(kind_ids.contains(&"database"));
+    assert!(kind_ids.contains(&"schema"));
+    assert!(kind_ids.contains(&"table"));
+    assert!(kind_ids.contains(&"procedure"));
+    assert!(
+        manifest
+            .toolbar_actions
+            .iter()
+            .any(|action| action.object_form.is_some())
+    );
+}
+
+#[test]
+fn test_mssql_identifier_quoting_escapes_brackets() {
+    assert_eq!(mssql_quote_identifier("a]b"), "[a]]b]");
+}
+
+#[test]
+fn test_mssql_table_form_generates_qualified_create_table() {
+    let ddl = mssql_object_form_ddl(&ObjectFormDdlRequest {
+        kind_id: "table".to_string(),
+        mode: ObjectFormMode::Create,
+        object_ref: None,
+        values: form_values(&[
+            ("schema", ObjectFormValue::String("dbo".to_string())),
+            ("name", ObjectFormValue::String("Users".to_string())),
+            (
+                "columns",
+                ObjectFormValue::String("[Id] int NOT NULL".to_string()),
+            ),
+        ]),
+    })
+    .expect("ddl");
+
+    assert_eq!(
+        ddl,
+        vec!["CREATE TABLE [dbo].[Users] (\n[Id] int NOT NULL\n)"]
+    );
+}
+
+#[test]
+fn test_mssql_drop_form_requires_confirmation() {
+    let error = mssql_object_form_ddl(&ObjectFormDdlRequest {
+        kind_id: "table".to_string(),
+        mode: ObjectFormMode::Drop,
+        object_ref: None,
+        values: form_values(&[
+            ("schema", ObjectFormValue::String("dbo".to_string())),
+            ("name", ObjectFormValue::String("Users".to_string())),
+        ]),
+    })
+    .expect_err("confirmation required");
+
+    assert!(error.to_string().contains("Drop confirmation"));
 }
 
 #[test]

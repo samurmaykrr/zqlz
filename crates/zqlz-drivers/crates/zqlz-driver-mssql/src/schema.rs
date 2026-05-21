@@ -3,10 +3,14 @@
 use async_trait::async_trait;
 use zqlz_core::{
     ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
-    Dependency, ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ParameterInfo,
-    ParameterMode, PrimaryKeyInfo, ProcedureInfo, Result, SchemaInfo, SchemaIntrospection,
-    SequenceInfo, TableDetails, TableInfo, TableType, TriggerEvent, TriggerForEach, TriggerInfo,
-    TriggerTiming, TypeInfo, TypeKind, ViewInfo, ZqlzError,
+    Dependency, ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectFormDdlRequest,
+    ObjectFormField, ObjectFormFieldKind, ObjectFormMode, ObjectFormSection, ObjectFormSpec,
+    ObjectFormSpecRequest, ObjectFormValue, ObjectsPanelAction, ObjectsPanelColumn,
+    ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectKind, ObjectsPanelObjectRef,
+    ObjectsPanelRow, ParameterInfo, ParameterMode, PrimaryKeyInfo, ProcedureInfo, Result,
+    SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails, TableInfo, TableType,
+    TriggerEvent, TriggerForEach, TriggerInfo, TriggerTiming, TypeInfo, TypeKind, ViewInfo,
+    ZqlzError,
 };
 
 use super::MssqlConnection;
@@ -223,6 +227,46 @@ impl SchemaIntrospection for MssqlConnection {
             .collect();
 
         Ok(views)
+    }
+
+    async fn list_objects_panel_data_for_kind(
+        &self,
+        schema: Option<&str>,
+        kind_id: &str,
+    ) -> Result<ObjectsPanelData> {
+        match kind_id {
+            "database" => mssql_database_objects_panel_data(self.list_databases().await?),
+            "schema" => mssql_schema_objects_panel_data(self.list_schemas().await?),
+            "table" => mssql_table_objects_panel_data(self.list_tables(schema).await?),
+            "view" => mssql_view_objects_panel_data(self.list_views(schema).await?),
+            "function" => mssql_function_objects_panel_data(self.list_functions(schema).await?),
+            "procedure" => mssql_procedure_objects_panel_data(self.list_procedures(schema).await?),
+            "trigger" => mssql_trigger_objects_panel_data(self.list_triggers(schema, None).await?),
+            "sequence" => mssql_sequence_objects_panel_data(self.list_sequences(schema).await?),
+            "type" => mssql_type_objects_panel_data(self.list_types(schema).await?),
+            _ => Ok(ObjectsPanelData::new(mssql_objects_panel_columns())),
+        }
+    }
+
+    async fn list_objects_panel_manifest(
+        &self,
+        _schema: Option<&str>,
+    ) -> Result<ObjectsPanelManifest> {
+        Ok(mssql_objects_panel_manifest())
+    }
+
+    async fn object_form_spec(
+        &self,
+        request: &ObjectFormSpecRequest,
+    ) -> Result<Option<ObjectFormSpec>> {
+        Ok(mssql_object_form_spec(request))
+    }
+
+    async fn generate_object_form_ddl(
+        &self,
+        request: &ObjectFormDdlRequest,
+    ) -> Result<Vec<String>> {
+        mssql_object_form_ddl(request)
     }
 
     /// Get detailed table information
@@ -1063,6 +1107,472 @@ impl MssqlConnection {
             .collect();
 
         Ok(params)
+    }
+}
+
+fn mssql_objects_panel_columns() -> Vec<ObjectsPanelColumn> {
+    vec![
+        ObjectsPanelColumn::new("name", "Name")
+            .width(280.0)
+            .min_width(120.0)
+            .sortable(),
+        ObjectsPanelColumn::new("schema", "Schema")
+            .width(160.0)
+            .min_width(90.0)
+            .sortable(),
+        ObjectsPanelColumn::new("type", "Type")
+            .width(160.0)
+            .min_width(90.0)
+            .sortable(),
+        ObjectsPanelColumn::new("rows", "Rows")
+            .width(90.0)
+            .min_width(60.0)
+            .sortable()
+            .text_right(),
+        ObjectsPanelColumn::new("size", "Size")
+            .width(100.0)
+            .min_width(70.0)
+            .sortable()
+            .text_right(),
+    ]
+}
+
+fn mssql_row(
+    kind_id: &str,
+    name: String,
+    schema: Option<String>,
+    type_label: String,
+    rows: Option<i64>,
+    size: Option<i64>,
+) -> ObjectsPanelRow {
+    let mut values = std::collections::BTreeMap::new();
+    values.insert("name".to_string(), name.clone());
+    values.insert(
+        "schema".to_string(),
+        schema.clone().unwrap_or_else(|| "-".to_string()),
+    );
+    values.insert("type".to_string(), type_label);
+    values.insert(
+        "rows".to_string(),
+        rows.map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    values.insert(
+        "size".to_string(),
+        size.map(|value| value.to_string())
+            .unwrap_or_else(|| "-".to_string()),
+    );
+    ObjectsPanelRow {
+        name: name.clone(),
+        schema: schema.clone(),
+        object_type: kind_id.to_string(),
+        object_ref: Some(ObjectsPanelObjectRef::new(kind_id, name).with_schema_option(schema)),
+        values,
+        redis_database_index: None,
+        key_value_info: None,
+    }
+}
+
+fn mssql_database_objects_panel_data(databases: Vec<DatabaseInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for database in databases {
+        data.rows.push(mssql_row(
+            "database",
+            database.name,
+            None,
+            "Database".to_string(),
+            None,
+            database.size_bytes,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_schema_objects_panel_data(schemas: Vec<SchemaInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for schema in schemas {
+        data.rows.push(mssql_row(
+            "schema",
+            schema.name,
+            None,
+            "Schema".to_string(),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_table_objects_panel_data(tables: Vec<TableInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for table in tables {
+        data.rows.push(mssql_row(
+            "table",
+            table.name,
+            table.schema,
+            "Table".to_string(),
+            table.row_count,
+            table.size_bytes,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_view_objects_panel_data(views: Vec<ViewInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for view in views {
+        data.rows.push(mssql_row(
+            "view",
+            view.name,
+            view.schema,
+            "View".to_string(),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_function_objects_panel_data(functions: Vec<FunctionInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for function in functions {
+        data.rows.push(mssql_row(
+            "function",
+            function.name,
+            function.schema,
+            "Function".to_string(),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_procedure_objects_panel_data(procedures: Vec<ProcedureInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for procedure in procedures {
+        data.rows.push(mssql_row(
+            "procedure",
+            procedure.name,
+            procedure.schema,
+            "Procedure".to_string(),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_trigger_objects_panel_data(triggers: Vec<TriggerInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for trigger in triggers {
+        data.rows.push(mssql_row(
+            "trigger",
+            trigger.name,
+            trigger.schema,
+            "Trigger".to_string(),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_sequence_objects_panel_data(sequences: Vec<SequenceInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for sequence in sequences {
+        data.rows.push(mssql_row(
+            "sequence",
+            sequence.name,
+            sequence.schema,
+            "Sequence".to_string(),
+            sequence.current_value,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+fn mssql_type_objects_panel_data(types: Vec<TypeInfo>) -> Result<ObjectsPanelData> {
+    let mut data = ObjectsPanelData::new(mssql_objects_panel_columns());
+    for data_type in types {
+        data.rows.push(mssql_row(
+            "type",
+            data_type.name,
+            data_type.schema,
+            format!("{:?}", data_type.type_kind),
+            None,
+            None,
+        ));
+    }
+    Ok(data)
+}
+
+pub(crate) fn mssql_objects_panel_manifest() -> ObjectsPanelManifest {
+    let columns = mssql_objects_panel_columns();
+    let row_actions = |kind_id: &str| {
+        vec![
+            ObjectsPanelAction::new("open", "Open").group("open"),
+            ObjectsPanelAction::new("design", "Design")
+                .group("open")
+                .single_selection(),
+            ObjectsPanelAction::new("copy_name", "Copy Name").group("clipboard"),
+            ObjectsPanelAction::new("copy_qualified_name", "Copy Qualified Name")
+                .group("clipboard"),
+            ObjectsPanelAction::new("view_history", "View History")
+                .group("metadata")
+                .single_selection(),
+            ObjectsPanelAction::new("delete", "Drop")
+                .group("danger")
+                .destructive()
+                .object_form(kind_id, ObjectFormMode::Drop),
+            ObjectsPanelAction::new("refresh", "Refresh").group("system"),
+        ]
+    };
+    let kinds = vec![
+        ("database", "Database", "Databases", "database"),
+        ("schema", "Schema", "Schemas", "schema"),
+        ("table", "Table", "Tables", "table"),
+        ("view", "View", "Views", "view"),
+        ("function", "Function", "Functions", "function"),
+        ("procedure", "Procedure", "Procedures", "procedure"),
+        ("trigger", "Trigger", "Triggers", "trigger"),
+        ("sequence", "Sequence", "Sequences", "sequence"),
+        ("type", "Type", "Types", "type"),
+    ]
+    .into_iter()
+    .map(|(id, singular, plural, icon)| {
+        ObjectsPanelObjectKind::new(id, singular, plural)
+            .icon_key(icon)
+            .columns(columns.clone())
+            .row_actions(row_actions(id))
+            .default_row_action("open")
+    })
+    .collect();
+
+    ObjectsPanelManifest {
+        object_kinds: kinds,
+        toolbar_actions: vec![
+            ObjectsPanelAction::new("refresh", "Refresh")
+                .icon_key("refresh")
+                .refreshes_objects_panel(),
+            ObjectsPanelAction::new("new_schema", "New Schema")
+                .icon_key("create")
+                .create_object_kind("schema")
+                .object_form("schema", ObjectFormMode::Create),
+            ObjectsPanelAction::new("new_table", "New Table")
+                .icon_key("create")
+                .create_object_kind("table")
+                .object_form("table", ObjectFormMode::Create),
+            ObjectsPanelAction::new("new_view", "New View")
+                .icon_key("create")
+                .create_object_kind("view")
+                .object_form("view", ObjectFormMode::Create),
+            ObjectsPanelAction::new("new_procedure", "New Procedure")
+                .icon_key("create")
+                .create_object_kind("procedure")
+                .object_form("procedure", ObjectFormMode::Create),
+            ObjectsPanelAction::new("new_function", "New Function")
+                .icon_key("create")
+                .create_object_kind("function")
+                .object_form("function", ObjectFormMode::Create),
+            ObjectsPanelAction::new("new_trigger", "New Trigger")
+                .icon_key("create")
+                .create_object_kind("trigger")
+                .object_form("trigger", ObjectFormMode::Create),
+        ],
+    }
+}
+
+fn mssql_object_form_spec(request: &ObjectFormSpecRequest) -> Option<ObjectFormSpec> {
+    let schema = request
+        .object_ref
+        .as_ref()
+        .and_then(|object_ref| object_ref.schema.clone())
+        .unwrap_or_else(|| "dbo".to_string());
+    let name = request
+        .object_ref
+        .as_ref()
+        .map(|object_ref| object_ref.name.clone())
+        .unwrap_or_default();
+    let fields = match (request.kind_id.as_str(), request.mode) {
+        ("schema", ObjectFormMode::Create) => {
+            vec![ObjectFormField::new("name", "Name", ObjectFormFieldKind::Text).required()]
+        }
+        ("table", ObjectFormMode::Create) => vec![
+            ObjectFormField::new("schema", "Schema", ObjectFormFieldKind::Text)
+                .default_value(ObjectFormValue::String(schema)),
+            ObjectFormField::new("name", "Name", ObjectFormFieldKind::Text).required(),
+            ObjectFormField::new("columns", "Columns", ObjectFormFieldKind::TextArea)
+                .default_value(ObjectFormValue::String(
+                    "[Id] int IDENTITY(1,1) NOT NULL,\n[Name] nvarchar(255) NOT NULL".to_string(),
+                ))
+                .required(),
+        ],
+        ("view", ObjectFormMode::Create) => vec![
+            ObjectFormField::new("schema", "Schema", ObjectFormFieldKind::Text)
+                .default_value(ObjectFormValue::String(schema)),
+            ObjectFormField::new("name", "Name", ObjectFormFieldKind::Text).required(),
+            ObjectFormField::new("query", "Query", ObjectFormFieldKind::SqlExpression)
+                .default_value(ObjectFormValue::String("SELECT 1 AS value".to_string()))
+                .required(),
+        ],
+        ("procedure" | "function" | "trigger", ObjectFormMode::Create) => vec![
+            ObjectFormField::new("schema", "Schema", ObjectFormFieldKind::Text)
+                .default_value(ObjectFormValue::String(schema)),
+            ObjectFormField::new("name", "Name", ObjectFormFieldKind::Text).required(),
+            ObjectFormField::new("body", "Body", ObjectFormFieldKind::TextArea).required(),
+        ],
+        (_, ObjectFormMode::Drop) => vec![
+            ObjectFormField::new("schema", "Schema", ObjectFormFieldKind::Text)
+                .default_value(ObjectFormValue::String(schema))
+                .read_only(),
+            ObjectFormField::new("name", "Name", ObjectFormFieldKind::Text)
+                .default_value(ObjectFormValue::String(name))
+                .read_only(),
+            ObjectFormField::new("confirm", "Confirm", ObjectFormFieldKind::Checkbox).required(),
+        ],
+        _ => return None,
+    };
+    Some(
+        ObjectFormSpec::new(&request.kind_id, request.mode, "SQL Server Object")
+            .sections(vec![ObjectFormSection::new(fields)]),
+    )
+}
+
+fn mssql_form_string(
+    values: &std::collections::BTreeMap<String, ObjectFormValue>,
+    key: &str,
+) -> String {
+    values
+        .get(key)
+        .and_then(|value| value.as_string())
+        .unwrap_or("")
+        .trim()
+        .to_string()
+}
+
+pub(crate) fn mssql_quote_identifier(identifier: &str) -> String {
+    format!("[{}]", identifier.replace(']', "]]"))
+}
+
+fn mssql_qualified_name(schema: &str, name: &str) -> String {
+    format!(
+        "{}.{}",
+        mssql_quote_identifier(schema),
+        mssql_quote_identifier(name)
+    )
+}
+
+pub(crate) fn mssql_object_form_ddl(request: &ObjectFormDdlRequest) -> Result<Vec<String>> {
+    let name = mssql_form_string(&request.values, "name");
+    let schema = mssql_form_string(&request.values, "schema");
+    let schema = if schema.is_empty() { "dbo" } else { &schema };
+    match (request.kind_id.as_str(), request.mode) {
+        ("schema", ObjectFormMode::Create) => {
+            if name.is_empty() {
+                return Err(ZqlzError::Driver("Schema name is required".to_string()));
+            }
+            Ok(vec![format!(
+                "CREATE SCHEMA {}",
+                mssql_quote_identifier(&name)
+            )])
+        }
+        ("table", ObjectFormMode::Create) => {
+            if name.is_empty() {
+                return Err(ZqlzError::Driver("Table name is required".to_string()));
+            }
+            let columns = mssql_form_string(&request.values, "columns");
+            if columns.is_empty() {
+                return Err(ZqlzError::Driver("Columns are required".to_string()));
+            }
+            Ok(vec![format!(
+                "CREATE TABLE {} (\n{}\n)",
+                mssql_qualified_name(schema, &name),
+                columns
+            )])
+        }
+        ("view", ObjectFormMode::Create) => {
+            if name.is_empty() {
+                return Err(ZqlzError::Driver("View name is required".to_string()));
+            }
+            let query = mssql_form_string(&request.values, "query");
+            if query.is_empty() {
+                return Err(ZqlzError::Driver("Query is required".to_string()));
+            }
+            Ok(vec![format!(
+                "CREATE VIEW {} AS {}",
+                mssql_qualified_name(schema, &name),
+                query
+            )])
+        }
+        ("procedure", ObjectFormMode::Create)
+        | ("function", ObjectFormMode::Create)
+        | ("trigger", ObjectFormMode::Create) => {
+            let body = mssql_form_string(&request.values, "body");
+            if body.is_empty() {
+                return Err(ZqlzError::Driver("Body is required".to_string()));
+            }
+            Ok(vec![body])
+        }
+        (_, ObjectFormMode::Drop) => {
+            let confirmed = request
+                .values
+                .get("confirm")
+                .and_then(|value| value.as_bool())
+                .unwrap_or(false);
+            if !confirmed {
+                return Err(ZqlzError::Driver(
+                    "Drop confirmation is required".to_string(),
+                ));
+            }
+            let object_name = if name.is_empty() {
+                request
+                    .object_ref
+                    .as_ref()
+                    .map(|object_ref| object_ref.name.as_str())
+                    .unwrap_or("")
+            } else {
+                &name
+            };
+            let object_schema = request
+                .object_ref
+                .as_ref()
+                .and_then(|object_ref| object_ref.schema.as_deref())
+                .unwrap_or(schema);
+            if object_name.is_empty() {
+                return Err(ZqlzError::Driver("Object name is required".to_string()));
+            }
+            let kind = match request.kind_id.as_str() {
+                "schema" => {
+                    return Ok(vec![format!(
+                        "DROP SCHEMA {}",
+                        mssql_quote_identifier(object_name)
+                    )]);
+                }
+                "table" => "TABLE",
+                "view" => "VIEW",
+                "procedure" => "PROCEDURE",
+                "function" => "FUNCTION",
+                "trigger" => "TRIGGER",
+                "sequence" => "SEQUENCE",
+                _ => {
+                    return Err(ZqlzError::NotSupported(format!(
+                        "Dropping SQL Server {} is not supported",
+                        request.kind_id
+                    )));
+                }
+            };
+            Ok(vec![format!(
+                "DROP {} {}",
+                kind,
+                mssql_qualified_name(object_schema, object_name)
+            )])
+        }
+        _ => Err(ZqlzError::NotSupported(format!(
+            "SQL Server object form is not supported for {} {:?}",
+            request.kind_id, request.mode
+        ))),
     }
 }
 

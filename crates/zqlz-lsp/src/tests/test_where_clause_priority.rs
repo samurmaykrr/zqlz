@@ -145,6 +145,46 @@ fn test_where_clause_typing_column_name() {
 }
 
 #[test]
+fn test_where_clause_condition_keywords_use_driver_metadata() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users WHERE A");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let and_keyword = completions
+        .iter()
+        .find(|completion| completion.label == "AND")
+        .expect("AND keyword completion");
+
+    assert_eq!(and_keyword.kind, Some(CompletionItemKind::KEYWORD));
+    assert!(
+        and_keyword
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SQL Keyword")),
+        "AND detail should come from dialect keyword metadata path: {:?}",
+        and_keyword.detail
+    );
+}
+
+#[test]
+fn test_where_clause_operator_completions_use_core_syntax_metadata() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users WHERE user_id ");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let equals_operator = completions
+        .iter()
+        .find(|completion| completion.label == "= (equals)")
+        .expect("equals operator completion");
+
+    assert_eq!(equals_operator.kind, Some(CompletionItemKind::OPERATOR));
+    assert_eq!(equals_operator.insert_text.as_deref(), Some("= "));
+    assert_eq!(equals_operator.sort_text.as_deref(), Some("9_operator_eq"));
+}
+
+#[test]
 fn test_select_clause_shows_aggregate_functions() {
     let mut lsp = create_test_lsp();
 

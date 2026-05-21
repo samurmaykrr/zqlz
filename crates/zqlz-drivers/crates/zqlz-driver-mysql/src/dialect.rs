@@ -285,6 +285,12 @@ fn mysql_keywords() -> Vec<KeywordInfo> {
             KeywordCategory::Ddl,
             "Auto-increment column",
         ),
+        KeywordInfo::with_desc("UNSIGNED", KeywordCategory::Ddl, "Disallow negative values"),
+        KeywordInfo::with_desc(
+            "ZEROFILL",
+            KeywordCategory::Ddl,
+            "Pad numeric display values with zeros",
+        ),
         KeywordInfo::with_desc("GENERATED", KeywordCategory::Ddl, "Generated column"),
         KeywordInfo::with_desc(
             "ON DELETE",

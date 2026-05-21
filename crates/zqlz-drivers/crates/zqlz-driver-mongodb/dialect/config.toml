@@ -1,0 +1,181 @@
+id = "mongodb"
+display_name = "MongoDB Query Language"
+language_type = "document"
+
+[grammar]
+type = "tree-sitter"
+name = "javascript"
+
+[parser]
+skip_sql_validation = true
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "\""
+string_quote = "\""
+case_sensitive = true
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "mongodb"
+grammar = "javascript"
+highlight_query = "mongodb"
+parameter_placeholders = "disabled"
+brackets = "tree-sitter"
+execution_unit = "whole-document"
+document_symbols = "mongodb-collections"
+overlays = "document"
+command_syntax = false
+document_syntax = true
+sql_overlays = false
+dollar_quoted_strings = false
+completion_triggers = [".", ":", "{", "[", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = []
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_highlighting.folding]
+begin_end_blocks = false
+case_blocks = false
+function_definitions = false
+parenthesis_blocks = true
+
+[comments]
+line_comment = "//"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+db.orders.aggregate([
+  { "$match": { "status": "paid", "total": { "$gte": 100 } } },
+  { "$group": { "_id": "$customerId", "revenue": { "$sum": "$total" } } },
+  { "$sort": { "revenue": -1, "note": "aggregate should stay string" } }
+]);
+db.orders.createIndex({ "customerId": 1 }, { unique: true }) // createIndex ignored
+"""
+
+expected_outline = [
+  "aggregate orders",
+  "createIndex orders",
+]
+
+[[syntax_quality.expected]]
+token = "db"
+kind = "Identifier"
+
+[[syntax_quality.expected]]
+token = "orders"
+kind = "Identifier"
+
+[[syntax_quality.expected]]
+token = "aggregate"
+kind = "Function"
+
+[[syntax_quality.expected]]
+token = "createIndex"
+kind = "Function"
+
+[[syntax_quality.expected]]
+token = "$match"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$gte"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$group"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$sort"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$customerId"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$sum"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "$total"
+kind = "Operator"
+
+[[syntax_quality.expected]]
+token = "unique"
+kind = "Identifier"
+
+[[syntax_quality.expected]]
+token = "true"
+kind = "Boolean"
+
+[[syntax_quality.expected]]
+token = "100"
+kind = "Number"
+
+[[syntax_quality.expected]]
+token = "\"aggregate should stay string\""
+kind = "String"
+
+[[syntax_quality.expected]]
+token = "// createIndex ignored"
+kind = "Comment"
+
+[[syntax_quality.rejected]]
+token = "\"aggregate should stay string\""
+kind = "Function"
+
+[[syntax_quality.rejected]]
+token = "// createIndex ignored"
+kind = "Function"
+
+[syntax_terms]
+keywords = [
+  "true",
+  "false",
+  "null",
+  "$match",
+  "$group",
+  "$sort",
+  "$project",
+  "$limit",
+  "$skip",
+  "$lookup",
+  "$unwind",
+  "$set",
+  "$sum",
+  "$avg",
+  "$min",
+  "$max",
+  "$gte",
+  "$lte",
+  "$gt",
+  "$lt",
+  "$in",
+  "$nin",
+]
+functions = [
+  "aggregate",
+  "find",
+  "findOne",
+  "insertOne",
+  "insertMany",
+  "updateOne",
+  "updateMany",
+  "deleteOne",
+  "deleteMany",
+  "createIndex",
+  "countDocuments",
+  "distinct",
+]
+types = [
+  "ObjectId",
+  "ISODate",
+  "Decimal128",
+  "BinData",
+]

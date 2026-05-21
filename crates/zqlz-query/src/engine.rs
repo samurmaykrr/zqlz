@@ -3,6 +3,7 @@
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use sqlparser::tokenizer::{Token, Tokenizer};
 use std::sync::Arc;
 use zqlz_core::{Connection, QueryResult, Result, StatementResult, Value};
 
@@ -136,12 +137,16 @@ impl QueryEngine {
     /// Parse SQL and determine if it's a query or statement
     pub fn is_query(&self, sql: &str) -> bool {
         tracing::trace!(sql_preview = %sql.chars().take(50).collect::<String>(), "checking if SQL is query");
-        let trimmed = sql.trim().to_uppercase();
-        trimmed.starts_with("SELECT")
-            || trimmed.starts_with("WITH")
-            || trimmed.starts_with("SHOW")
-            || trimmed.starts_with("DESCRIBE")
-            || trimmed.starts_with("EXPLAIN")
+        let dialect = GenericDialect {};
+        match Parser::parse_sql(&dialect, sql) {
+            Ok(statements) => statements.first().is_some_and(statement_returns_rows),
+            Err(_) => first_sql_word(sql, &dialect).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "SELECT" | "WITH" | "SHOW" | "DESCRIBE" | "EXPLAIN"
+                )
+            }),
+        }
     }
 
     /// Returns `true` if the SQL contains any DDL statement that modifies the
@@ -152,32 +157,15 @@ impl QueryEngine {
     pub fn is_schema_modifying(&self, sql: &str) -> bool {
         let dialect = GenericDialect {};
         let Ok(statements) = Parser::parse_sql(&dialect, sql) else {
-            // Fallback: keyword scan for the common DDL prefixes
-            let upper = sql.trim().to_uppercase();
-            return upper.starts_with("CREATE ")
-                || upper.starts_with("ALTER ")
-                || upper.starts_with("DROP ")
-                || upper.starts_with("RENAME ")
-                || upper.starts_with("TRUNCATE ");
+            return first_sql_word(sql, &dialect).is_some_and(|word| {
+                matches!(
+                    word.as_str(),
+                    "CREATE" | "ALTER" | "DROP" | "RENAME" | "TRUNCATE"
+                )
+            });
         };
 
-        statements.iter().any(|stmt| {
-            matches!(
-                stmt,
-                Statement::CreateTable { .. }
-                    | Statement::CreateView { .. }
-                    | Statement::CreateIndex { .. }
-                    | Statement::CreateFunction { .. }
-                    | Statement::CreateProcedure { .. }
-                    | Statement::CreateTrigger { .. }
-                    | Statement::AlterTable { .. }
-                    | Statement::AlterView { .. }
-                    | Statement::AlterIndex { .. }
-                    | Statement::Drop { .. }
-                    | Statement::DropFunction { .. }
-                    | Statement::Truncate { .. }
-            )
-        })
+        statements.iter().any(statement_modifies_schema)
     }
 
     /// Analyze SQL statement for destructive operations that require confirmation
@@ -435,9 +423,78 @@ impl Default for QueryEngine {
     }
 }
 
+fn first_sql_word(sql: &str, dialect: &dyn sqlparser::dialect::Dialect) -> Option<String> {
+    let mut tokenizer = Tokenizer::new(dialect, sql);
+    let tokens = tokenizer.tokenize().ok()?;
+    tokens.into_iter().find_map(|token| match token {
+        Token::Word(word) if word.quote_style.is_none() => Some(word.value.to_ascii_uppercase()),
+        _ => None,
+    })
+}
+
+fn statement_returns_rows(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::Query(_)
+            | Statement::ShowFunctions { .. }
+            | Statement::ShowVariable { .. }
+            | Statement::ShowStatus { .. }
+            | Statement::ShowVariables { .. }
+            | Statement::ShowCreate { .. }
+            | Statement::ShowColumns { .. }
+            | Statement::ShowDatabases { .. }
+            | Statement::ShowSchemas { .. }
+            | Statement::ShowTables { .. }
+            | Statement::ShowViews { .. }
+            | Statement::ShowCollation { .. }
+            | Statement::ExplainTable { .. }
+            | Statement::Explain { .. }
+    )
+}
+
+fn statement_modifies_schema(statement: &Statement) -> bool {
+    matches!(
+        statement,
+        Statement::CreateTable { .. }
+            | Statement::CreateView { .. }
+            | Statement::CreateIndex { .. }
+            | Statement::CreateFunction { .. }
+            | Statement::CreateProcedure { .. }
+            | Statement::CreateTrigger { .. }
+            | Statement::AlterTable { .. }
+            | Statement::AlterView { .. }
+            | Statement::AlterIndex { .. }
+            | Statement::Drop { .. }
+            | Statement::DropFunction { .. }
+            | Statement::Truncate { .. }
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn is_query_uses_parser_and_tokenizer_not_raw_prefixes() {
+        let engine = QueryEngine::new();
+
+        assert!(engine.is_query("/* route me */ SELECT * FROM users"));
+        assert!(engine.is_query("WITH active AS (SELECT 1) SELECT * FROM active"));
+        assert!(!engine.is_query("/* SELECT */ DROP TABLE users"));
+        assert!(!engine.is_query("'SELECT'"));
+        assert!(!engine.is_query("selective value"));
+    }
+
+    #[test]
+    fn schema_modifying_uses_parser_and_tokenizer_not_raw_prefixes() {
+        let engine = QueryEngine::new();
+
+        assert!(engine.is_schema_modifying("/* migrate */ CREATE TABLE users (id INT)"));
+        assert!(engine.is_schema_modifying("ALTER TABLE users ADD COLUMN name TEXT"));
+        assert!(!engine.is_schema_modifying("/* DROP */ SELECT * FROM users"));
+        assert!(!engine.is_schema_modifying("'DROP TABLE users'"));
+        assert!(!engine.is_schema_modifying("dropper value"));
+    }
 
     #[test]
     fn test_generate_delete_by_pk_single_column() {

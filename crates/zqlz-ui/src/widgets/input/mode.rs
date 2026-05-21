@@ -17,6 +17,7 @@ pub(crate) enum InputMode {
         multi_line: bool,
         tab: TabSize,
         rows: usize,
+        line_number: bool,
     },
     /// An auto grow input mode.
     AutoGrow {
@@ -54,6 +55,7 @@ impl InputMode {
             multi_line: false,
             tab: TabSize::default(),
             rows: 1,
+            line_number: false,
         }
     }
 
@@ -183,6 +185,11 @@ impl InputMode {
     pub(super) fn line_number(&self) -> bool {
         match self {
             InputMode::CodeEditor {
+                line_number,
+                multi_line,
+                ..
+            } => *line_number && *multi_line,
+            InputMode::PlainText {
                 line_number,
                 multi_line,
                 ..
@@ -337,6 +344,7 @@ mod tests {
             multi_line: true,
             tab: TabSize::default(),
             rows: 5,
+            line_number: false,
         };
         assert!(!mode.is_code_editor());
         assert!(mode.is_multi_line());
@@ -345,6 +353,14 @@ mod tests {
         assert_eq!(mode.rows(), 5);
         assert_eq!(mode.max_rows(), usize::MAX);
         assert_eq!(mode.min_rows(), 1);
+
+        let mode = InputMode::PlainText {
+            multi_line: true,
+            tab: TabSize::default(),
+            rows: 5,
+            line_number: true,
+        };
+        assert!(mode.line_number());
 
         let mode = InputMode::plain_text();
         assert!(!mode.is_code_editor());

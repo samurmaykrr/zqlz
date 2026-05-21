@@ -20,19 +20,20 @@ use uuid::Uuid;
 use zqlz_core::{
     ColumnMeta, CommentStyles, Connection, ConnectionConfig, ConnectionField,
     ConnectionFieldSchema, ConnectionScope, ConstraintInfo, DataTypeCategory, DataTypeInfo,
-    DatabaseDriver, DatabaseInfo, DatabaseObject, Dependency, DialectInfo, DocumentAdminObjectInfo,
-    DocumentAggregateRequest, DocumentCellUpdateRequest, DocumentCollectionInfo,
-    DocumentDatabaseInfo, DocumentDatabaseObjects, DocumentDeleteOutcome, DocumentDeleteRequest,
-    DocumentFunctionInfo, DocumentGridFsBucketInfo, DocumentIndexInfo, DocumentInferredField,
-    DocumentQueryRequest, DocumentReplaceRequest, DocumentSaveRequest, DocumentSchemaSampleRequest,
-    DocumentStore, DriverCapabilities, DriverCategory, DropTableOptions, DropTriggerOptions,
-    DropViewOptions, ExplainConfig, ExplainParserKind, ForeignKeyInfo, FunctionCategory,
-    FunctionInfo, IndexInfo, KeywordCategory, KeywordInfo, ObjectFormDdlRequest, ObjectFormField,
-    ObjectFormFieldKind, ObjectFormMode, ObjectFormSection, ObjectFormSpec, ObjectFormSpecRequest,
-    ObjectFormValue, ObjectsPanelData, ObjectsPanelManifest, PrimaryKeyInfo, ProcedureInfo,
-    QueryResult, ResolvedConnectionScope, Result, Row, SchemaInfo, SchemaIntrospection,
-    SequenceInfo, SqlFunctionInfo, SqlObjectName, StatementResult, TableDetails, TableInfo,
-    Transaction, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
+    DatabaseDriver, DatabaseInfo, DatabaseObject, Dependency, DialectBundle, DialectInfo,
+    DocumentAdminObjectInfo, DocumentAggregateRequest, DocumentCellUpdateRequest,
+    DocumentCollectionInfo, DocumentDatabaseInfo, DocumentDatabaseObjects, DocumentDeleteOutcome,
+    DocumentDeleteRequest, DocumentFunctionInfo, DocumentGridFsBucketInfo, DocumentIndexInfo,
+    DocumentInferredField, DocumentQueryRequest, DocumentReplaceRequest, DocumentSaveRequest,
+    DocumentSchemaSampleRequest, DocumentStore, DriverCapabilities, DriverCategory,
+    DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
+    ForeignKeyInfo, FunctionCategory, FunctionInfo, IndexInfo, KeywordCategory, KeywordInfo,
+    ObjectFormDdlRequest, ObjectFormField, ObjectFormFieldKind, ObjectFormMode, ObjectFormSection,
+    ObjectFormSpec, ObjectFormSpecRequest, ObjectFormValue, ObjectsPanelData, ObjectsPanelManifest,
+    PrimaryKeyInfo, ProcedureInfo, QueryResult, ResolvedConnectionScope, Result, Row, SchemaInfo,
+    SchemaIntrospection, SequenceInfo, SqlFunctionInfo, SqlObjectName, StatementResult,
+    TableDetails, TableInfo, Transaction, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
+    dialect_bundle_from_legacy_info,
 };
 
 use crate::objects_panel;
@@ -43,6 +44,14 @@ use crate::objects_panel;
 /// flexible, JSON-like BSON documents. This driver provides connectivity
 /// and query execution capabilities for MongoDB.
 pub struct MongoDbDriver;
+
+const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+fn get_dialect_bundle() -> &'static DialectBundle {
+    static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
+    BUNDLE
+        .get_or_init(|| dialect_bundle_from_legacy_info(CONFIG_TOML, &mongodb_dialect(), "MongoDB"))
+}
 
 fn mongodb_runtime() -> Result<&'static Runtime> {
     static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -113,6 +122,10 @@ impl DatabaseDriver for MongoDbDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         mongodb_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        Some(get_dialect_bundle())
     }
 
     fn capabilities(&self) -> DriverCapabilities {
@@ -3435,7 +3448,36 @@ fn dtype(
 mod option_tests {
     use super::*;
     use std::collections::BTreeMap;
-    use zqlz_core::DatabaseDriver;
+    use zqlz_core::{
+        DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability, TreeSitterGrammar,
+        syntax_driver_capabilities_from_bundle,
+    };
+
+    #[test]
+    fn mongodb_dialect_bundle_owns_editor_syntax_capabilities() {
+        let driver = MongoDbDriver::new();
+        let bundle = driver
+            .dialect_bundle()
+            .expect("MongoDB driver should expose dialect bundle");
+        let capabilities = syntax_driver_capabilities_from_bundle(bundle);
+
+        assert_eq!(capabilities.profile, "mongodb");
+        assert_eq!(
+            capabilities.tree_sitter_grammar,
+            TreeSitterGrammar::Javascript
+        );
+        assert_eq!(
+            capabilities.highlight_query_language,
+            HighlightQueryLanguage::MongoDb
+        );
+        assert_eq!(
+            capabilities.parameter_placeholders,
+            ParameterPlaceholderCapability::disabled()
+        );
+        assert!(capabilities.document_syntax);
+        assert!(!capabilities.command_syntax);
+        assert!(!capabilities.sql_overlays);
+    }
 
     #[test]
     fn mongodb_schema_exposes_common_options() {

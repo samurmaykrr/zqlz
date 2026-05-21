@@ -28,7 +28,12 @@ pub use zqlz_driver_redis as redis;
 pub mod explain;
 mod registry;
 
-pub use registry::{DriverRegistry, get_dialect_bundle, get_dialect_info};
+pub use registry::{
+    DriverRegistry, DriverSyntaxMetadata, get_completion_triggers_for_driver,
+    get_completion_word_chars_for_driver, get_dialect_bundle, get_dialect_info,
+    get_driver_capabilities, get_highlight_language_for_driver, get_syntax_capabilities_for_driver,
+    get_syntax_metadata_for_driver, supports_sql_lsp_for_driver,
+};
 
 /// Re-export commonly used types from zqlz-core
 pub use zqlz_core::{

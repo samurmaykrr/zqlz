@@ -1,8 +1,11 @@
 //! Tests for SQL diagnostics and error reporting
 
 use super::test_helpers::*;
-use lsp_types::DiagnosticSeverity;
-use zqlz_ui::widgets::Rope;
+use lsp_types::{DiagnosticSeverity, NumberOrString};
+use zqlz_core::dialect_config::{SyntaxHighlightingConfig, SyntaxOverlayModeName};
+use zqlz_core::{DialectConfig, LanguageType, ParserConfig};
+use zqlz_ui::widgets::input::Position;
+use zqlz_ui::widgets::{Rope, RopeExt};
 
 /// Helper to filter only syntax errors (not schema validation or best practices)
 fn syntax_errors(diagnostics: &[lsp_types::Diagnostic]) -> Vec<&lsp_types::Diagnostic> {
@@ -14,6 +17,45 @@ fn syntax_errors(diagnostics: &[lsp_types::Diagnostic]) -> Vec<&lsp_types::Diagn
                 && d.source.as_deref() != Some("best-practices")
         })
         .collect()
+}
+
+fn best_practice_messages(diagnostics: &[lsp_types::Diagnostic]) -> Vec<&str> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.source.as_deref() == Some("best-practices"))
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+fn security_messages(diagnostics: &[lsp_types::Diagnostic]) -> Vec<&str> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.source.as_deref() == Some("security"))
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect()
+}
+
+fn diagnostic_code_is(diagnostic: &lsp_types::Diagnostic, expected_code: &str) -> bool {
+    matches!(
+        diagnostic.code.as_ref(),
+        Some(NumberOrString::String(code)) if code == expected_code
+    )
+}
+
+fn diagnostic_text<'a>(
+    source: &'a str,
+    diagnostic: &lsp_types::Diagnostic,
+    text: &Rope,
+) -> &'a str {
+    let start = text.position_to_offset(&Position::new(
+        diagnostic.range.start.line,
+        diagnostic.range.start.character,
+    ));
+    let end = text.position_to_offset(&Position::new(
+        diagnostic.range.end.line,
+        diagnostic.range.end.character,
+    ));
+    &source[start..end]
 }
 
 #[test]
@@ -28,6 +70,103 @@ fn test_valid_sql_no_diagnostics() {
         errors.is_empty(),
         "Valid SQL should have no syntax errors, got: {:?}",
         errors
+    );
+}
+
+#[test]
+fn test_select_wildcard_best_practice_uses_ast_projection() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT users.* FROM users");
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        best_practices
+            .iter()
+            .any(|message| message.contains("explicit column names")),
+        "qualified SELECT wildcard should be detected from AST: {best_practices:?}"
+    );
+}
+
+#[test]
+fn sqlparser_syntax_range_uses_parser_token_location() {
+    let mut lsp = create_test_lsp();
+    let source = "SELECT * FORM users";
+    let text = Rope::from(source);
+    let diagnostics = lsp.validate_sql(&text);
+    let sqlparser_error = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("sqlparser")
+                && diagnostic_code_is(
+                    diagnostic,
+                    crate::diagnostics::DIAGNOSTIC_CODE_SQLPARSER_SYNTAX,
+                )
+        })
+        .expect("sqlparser syntax diagnostic");
+
+    assert_eq!(
+        diagnostic_text(source, sqlparser_error, &text),
+        "FORM",
+        "sqlparser syntax diagnostics should underline parser error token"
+    );
+}
+
+#[test]
+fn test_select_wildcard_diagnostic_has_stable_code() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM users");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let wildcard_warning = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic_code_is(
+                diagnostic,
+                crate::diagnostics::DIAGNOSTIC_CODE_SELECT_WILDCARD,
+            )
+        })
+        .expect("SELECT wildcard diagnostic code");
+
+    assert_eq!(wildcard_warning.source.as_deref(), Some("best-practices"));
+}
+
+#[test]
+fn test_select_wildcard_range_skips_arithmetic_star() {
+    let mut lsp = create_test_lsp();
+    let sql = "SELECT price * qty, * FROM orders";
+    let text = Rope::from(sql);
+    let diagnostics = lsp.validate_sql(&text);
+    let wildcard_warning = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("best-practices")
+                && diagnostic.message.contains("explicit column names")
+        })
+        .expect("wildcard warning");
+
+    let wildcard_offset = sql.rfind('*').expect("projection wildcard");
+    let wildcard_position = text.offset_to_position(wildcard_offset);
+
+    assert_eq!(wildcard_warning.range.start.line, wildcard_position.line);
+    assert_eq!(
+        wildcard_warning.range.start.character, wildcard_position.character,
+        "SELECT wildcard warning should underline projection wildcard, not arithmetic star"
+    );
+}
+
+#[test]
+fn test_select_star_inside_string_or_comment_is_not_wildcard_best_practice() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT 'select * from users' AS note -- select * from comments");
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        !best_practices
+            .iter()
+            .any(|message| message.contains("explicit column names")),
+        "protected text should not trigger SELECT wildcard warning: {best_practices:?}"
     );
 }
 
@@ -47,6 +186,252 @@ fn test_mongodb_shell_query_skips_sql_diagnostics() {
         diagnostics.is_empty(),
         "MongoDB shell query should not be validated as SQL, got: {:?}",
         diagnostics
+    );
+}
+
+#[test]
+fn test_mongodb_alias_uses_driver_bundle_for_diagnostics() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::MongoDB);
+    lsp.driver_type = "mongo".to_string();
+    let text = Rope::from(r#"db.users.find({ active: true }).limit(10)"#);
+
+    let diagnostics = lsp.validate_sql(&text);
+
+    assert!(
+        diagnostics.is_empty(),
+        "MongoDB alias should use driver bundle and skip SQL diagnostics, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn command_custom_validator_uses_syntax_profile_not_config_id() {
+    let mut diagnostics = crate::SqlDiagnostics::new();
+    let text = Rope::from("GET");
+    let config = DialectConfig {
+        id: "redis-compatible".to_string(),
+        display_name: "Redis Compatible".to_string(),
+        language_type: LanguageType::Command,
+        parser: ParserConfig {
+            skip_sql_validation: true,
+            skip_tree_sitter_errors: true,
+            custom_validator: true,
+        },
+        syntax_highlighting: SyntaxHighlightingConfig {
+            profile: Some(" Redis ".to_string()),
+            overlays: SyntaxOverlayModeName::Command,
+            command_syntax: true,
+            sql_overlays: false,
+            ..SyntaxHighlightingConfig::default()
+        },
+        ..DialectConfig::default()
+    };
+
+    let diagnostics = diagnostics.analyze_with_dialect(&text, None, Some(&config));
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("GET requires exactly 1 argument")),
+        "Redis-compatible profile should use Redis validator, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn diagnostics_sqlparser_dialect_uses_core_driver_aliases() {
+    let mut diagnostics = crate::SqlDiagnostics::new();
+    let text = Rope::from("SELECT [display name] FROM users");
+    let config = DialectConfig {
+        id: "turso".to_string(),
+        display_name: "Turso".to_string(),
+        parser: ParserConfig {
+            skip_sql_validation: false,
+            skip_tree_sitter_errors: true,
+            custom_validator: false,
+        },
+        ..DialectConfig::default()
+    };
+
+    let diagnostics = diagnostics.analyze_with_dialect(&text, None, Some(&config));
+
+    assert!(
+        syntax_errors(&diagnostics).is_empty(),
+        "Turso alias should use SQLite sqlparser dialect, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn schema_validation_uses_active_sqlparser_dialect() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT missing_column::TEXT FROM users");
+
+    let diagnostics = lsp.validate_sql(&text);
+
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_column")
+        }),
+        "PostgreSQL cast syntax should still run schema validation, got: {:?}",
+        diagnostics
+    );
+}
+
+#[test]
+fn schema_validation_unknown_column_range_uses_token_location() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT missing_column FROM users");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_column")
+        })
+        .expect("missing column schema diagnostic");
+
+    assert_eq!(diagnostic.range.start.line, 0);
+    assert_eq!(diagnostic.range.start.character, 7);
+    assert_eq!(diagnostic.range.end.character, 21);
+}
+
+#[test]
+fn schema_validation_unknown_table_range_uses_token_location() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM missing_table");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_table")
+        })
+        .expect("missing table schema diagnostic");
+
+    assert_eq!(diagnostic.range.start.line, 0);
+    assert_eq!(diagnostic.range.start.character, 14);
+    assert_eq!(diagnostic.range.end.character, 27);
+}
+
+#[test]
+fn schema_validation_qualified_unknown_table_range_uses_leaf_token_location() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT * FROM public.missing_table");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_table")
+        })
+        .expect("qualified missing table schema diagnostic");
+
+    assert_eq!(diagnostic.range.start.line, 0);
+    assert_eq!(diagnostic.range.start.character, 21);
+    assert_eq!(diagnostic.range.end.character, 34);
+}
+
+#[test]
+fn schema_validation_repeated_unknown_column_ranges_use_token_occurrences() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT missing_column FROM users WHERE missing_column = 1");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let ranges: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_column")
+        })
+        .map(|diagnostic| diagnostic.range)
+        .collect();
+
+    assert_eq!(ranges.len(), 2, "expected two missing-column diagnostics");
+    assert_eq!(ranges[0].start.character, 7);
+    assert_eq!(ranges[0].end.character, 21);
+    assert_eq!(ranges[1].start.character, 39);
+    assert_eq!(ranges[1].end.character, 53);
+}
+
+#[test]
+fn schema_validation_same_text_table_and_column_ranges_do_not_share_occurrences() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT ghost FROM ghost");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let column_diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("Column 'ghost'")
+        })
+        .expect("missing column schema diagnostic");
+    let table_diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("Table 'ghost'")
+        })
+        .expect("missing table schema diagnostic");
+
+    assert_eq!(column_diagnostic.range.start.character, 7);
+    assert_eq!(column_diagnostic.range.end.character, 12);
+    assert_eq!(table_diagnostic.range.start.character, 18);
+    assert_eq!(table_diagnostic.range.end.character, 23);
+}
+
+#[test]
+fn schema_validation_qualified_column_range_uses_qualified_occurrence() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT missing_column, u.missing_column FROM users u");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let ranges: Vec<_> = diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.source.as_deref() == Some("schema")
+                && diagnostic.message.contains("missing_column")
+        })
+        .map(|diagnostic| diagnostic.range)
+        .collect();
+
+    assert_eq!(ranges.len(), 2, "expected two missing-column diagnostics");
+    assert_eq!(ranges[0].start.character, 7);
+    assert_eq!(ranges[0].end.character, 21);
+    assert_eq!(ranges[1].start.character, 25);
+    assert_eq!(ranges[1].end.character, 39);
+}
+
+#[test]
+fn test_drop_inside_string_literal_is_not_sql_injection_diagnostic() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("INSERT INTO audit_log (message) VALUES ('; DROP TABLE users')");
+    let diagnostics = lsp.validate_sql(&text);
+    let security = security_messages(&diagnostics);
+
+    assert!(
+        security.is_empty(),
+        "DROP text inside string literal should not trigger security diagnostic: {security:?}"
+    );
+}
+
+#[test]
+fn test_chained_drop_statement_reports_potential_sql_injection() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT 1; DROP TABLE users");
+    let diagnostics = lsp.validate_sql(&text);
+    let security = security_messages(&diagnostics);
+
+    assert!(
+        security
+            .iter()
+            .any(|message| message.contains("Potential SQL injection")),
+        "actual chained DROP should trigger security diagnostic: {security:?}"
     );
 }
 
@@ -82,11 +467,23 @@ fn test_unclosed_parenthesis() {
 #[test]
 fn test_unclosed_quote() {
     let mut lsp = create_test_lsp();
-    let text = Rope::from("SELECT * FROM users WHERE name = 'john");
+    let sql = "SELECT * FROM users WHERE name = 'john";
+    let text = Rope::from(sql);
 
     let diagnostics = lsp.validate_sql(&text);
 
     assert!(!diagnostics.is_empty(), "Unclosed quote should be detected");
+    let tokenizer_diagnostic = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("sqlparser")
+                && diagnostic.message.starts_with("SQL Tokenizer Error:")
+        })
+        .expect("structured tokenizer diagnostic");
+    assert_eq!(
+        tokenizer_diagnostic.range.start.character, 33,
+        "unclosed quote range should use tokenizer location, not parser prose"
+    );
 }
 
 #[test]
@@ -729,6 +1126,44 @@ FROM [ users ] u",
 }
 
 #[test]
+fn test_sqlite_create_trigger_is_not_reported_as_syntax_error() {
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::SQLite);
+    let text = Rope::from(
+        r#"CREATE TRIGGER trg_user_sessions_insert_purge_old
+AFTER
+INSERT
+    ON user_sessions
+BEGIN
+DELETE FROM
+        user_sessions
+WHERE
+        deleted_at IS NOT NULL
+        AND deleted_at < datetime('now', '-7 days');
+DELETE FROM
+        user_sessions
+WHERE
+        deleted_at IS NULL
+        AND (
+            (
+                user_id IS NULL
+                AND last_activity_time < datetime('now', '-30 days')
+            )
+            OR (
+                user_id IS NOT NULL
+                AND last_activity_time < datetime('now', '-180 days')
+            )
+        );
+END"#,
+    );
+
+    let diagnostics = lsp.validate_sql(&text);
+    assert_no_syntax_errors(
+        &diagnostics,
+        "SQLite CREATE TRIGGER DDL should not show parser diagnostics",
+    );
+}
+
+#[test]
 fn test_valid_select_with_join() {
     let mut lsp = create_test_lsp();
     let text = Rope::from(
@@ -755,6 +1190,136 @@ fn test_valid_update() {
     let text = Rope::from("UPDATE users SET name = 'Jane' WHERE id = 1");
     let diagnostics = lsp.validate_sql(&text);
     assert_no_syntax_errors(&diagnostics, "Valid UPDATE");
+}
+
+#[test]
+fn test_create_table_updated_identifier_does_not_trigger_update_without_where() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from(
+        r#"CREATE TABLE "server_widget_queue" (
+  "server_widget_queue_id" TEXT NOT NULL,
+  "updated_at" TEXT DEFAULT NULL,
+  "updated_by" TEXT DEFAULT NULL,
+  PRIMARY KEY ("server_widget_queue_id")
+)"#,
+    );
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        !best_practices
+            .iter()
+            .any(|message| message.contains("UPDATE without WHERE")),
+        "quoted column names containing updated should not trigger UPDATE warning: {best_practices:?}"
+    );
+}
+
+#[test]
+fn test_create_table_mixed_quoted_columns_do_not_trigger_dml_without_where() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from(
+        r#"CREATE TABLE "categories" (
+  "category_id" text(255) NOT NULL,
+  "title" text,
+  "created_at" text,
+  "created_by" text(255),
+  "updated_at" text,
+  "updated_by" text(255),
+  "deleted_at" text,
+  "deleted_by" text(255)
+)"#,
+    );
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        !best_practices
+            .iter()
+            .any(|message| message.contains("without WHERE")),
+        "CREATE TABLE identifiers should not be treated as active DML statements: {best_practices:?}"
+    );
+}
+
+#[test]
+fn test_update_without_where_best_practice_uses_active_keyword_only() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from(
+        r#"-- UPDATE users SET name = 'commented'
+UPDATE users SET updated_at = 'where is text literal'"#,
+    );
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        best_practices
+            .iter()
+            .any(|message| message.contains("UPDATE without WHERE")),
+        "real UPDATE without WHERE should still warn: {best_practices:?}"
+    );
+}
+
+#[test]
+fn test_update_without_where_diagnostic_has_stable_code() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("UPDATE users SET name = 'Jane'");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let warning = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic_code_is(
+                diagnostic,
+                crate::diagnostics::DIAGNOSTIC_CODE_DML_WITHOUT_WHERE,
+            )
+        })
+        .expect("DML without WHERE diagnostic code");
+
+    assert_eq!(warning.source.as_deref(), Some("best-practices"));
+}
+
+#[test]
+fn test_update_without_where_range_after_expanding_unicode_prefix() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT 'İ'; UPDATE users SET name = 'Jane'");
+    let diagnostics = lsp.validate_sql(&text);
+
+    let warning = diagnostics
+        .iter()
+        .find(|diagnostic| {
+            diagnostic.source.as_deref() == Some("best-practices")
+                && diagnostic.message.contains("UPDATE without WHERE")
+        })
+        .expect("expected UPDATE without WHERE warning");
+
+    assert_eq!(
+        warning.range.start.character, 12,
+        "warning should point at UPDATE after Unicode prefix, got {:?}",
+        warning.range
+    );
+    assert_eq!(
+        warning.range.end.character, 18,
+        "warning should end after UPDATE, got {:?}",
+        warning.range
+    );
+}
+
+#[test]
+fn test_where_inside_string_or_comment_does_not_hide_update_without_where() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from(
+        r#"UPDATE users
+SET note = 'where only appears in string'
+-- where only appears in comment"#,
+    );
+    let diagnostics = lsp.validate_sql(&text);
+    let best_practices = best_practice_messages(&diagnostics);
+
+    assert!(
+        best_practices
+            .iter()
+            .any(|message| message.contains("UPDATE without WHERE")),
+        "AST should report missing WHERE even when protected text contains where: {best_practices:?}"
+    );
 }
 
 #[test]

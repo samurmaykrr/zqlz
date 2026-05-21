@@ -74,6 +74,7 @@ impl MainView {
                 let original_value = cell_data.current_value.clone();
                 let is_key_value = connection.driver_category() == DriverCategory::KeyValue;
                 let is_document = connection.driver_category() == DriverCategory::Document;
+                let cell_editor_panel = self.cell_editor_panel.clone();
                 let schema_qualifier = if !is_key_value && !is_document {
                     source_viewer.as_ref().and_then(|v| {
                         v.read_with(cx, |viewer, _cx| {
@@ -159,6 +160,10 @@ impl MainView {
                                     );
                                 });
                             }
+
+                            _ = cell_editor_panel.update(cx, |editor, cx| {
+                                editor.mark_current_cell_saved(typed_value.clone(), cx);
+                            });
 
                             _ = cx.update(|window, cx| {
                                 window.push_notification(

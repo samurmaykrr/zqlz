@@ -1,7 +1,68 @@
 //! Tests for SQL context detection
 
 use super::test_helpers::*;
+use crate::{AstSqlContext, ContextAnalyzer};
 use zqlz_ui::widgets::Rope;
+
+#[test]
+fn keyword_relevance_ignores_clause_keywords_inside_protected_text() {
+    let analyzer = ContextAnalyzer::new().expect("context analyzer");
+    let text = Rope::from("-- select from where\n");
+    let context = analyzer.analyze(&text, text.len());
+
+    assert!(
+        !matches!(context, AstSqlContext::FromClause),
+        "protected FROM text should not force table completion context: {context:?}"
+    );
+}
+
+#[test]
+fn keyword_relevance_ignores_clause_keywords_inside_quoted_identifiers() {
+    let analyzer = ContextAnalyzer::new().expect("context analyzer");
+    let text = Rope::from(r#"SELECT "from" "#);
+    let context = analyzer.analyze(&text, text.len());
+
+    assert!(
+        !matches!(context, AstSqlContext::FromClause),
+        "quoted FROM identifier must not force FROM-clause relevance: {context:?}"
+    );
+
+    let mut lsp = create_test_lsp();
+    let completions = lsp.get_completions(&text, text.len());
+
+    assert!(
+        has_completion(&completions, "FROM"),
+        "SELECT context should still suggest FROM after quoted identifier, got: {:?}",
+        completions
+            .iter()
+            .map(|completion| &completion.label)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn context_lookback_ignores_clause_words_inside_string_literals() {
+    let analyzer = ContextAnalyzer::new().expect("context analyzer");
+    let text = Rope::from("SELECT '-- FROM users");
+    let context = analyzer.analyze(&text, text.len());
+
+    assert!(
+        !matches!(context, AstSqlContext::FromClause),
+        "string literal FROM must not force table completion context: {context:?}"
+    );
+}
+
+#[test]
+fn context_lookback_ignores_clause_words_inside_quoted_identifiers() {
+    let analyzer = ContextAnalyzer::new().expect("context analyzer");
+    let text = Rope::from("SELECT \"UPDATE\"");
+    let context = analyzer.analyze(&text, text.len());
+
+    assert!(
+        !matches!(context, AstSqlContext::FromClause),
+        "quoted UPDATE identifier must not force table completion context: {context:?}"
+    );
+}
 
 #[test]
 fn test_context_general_empty_query() {

@@ -286,20 +286,14 @@ pub fn plan_query_connection_switch(
     selected_connection_id: Uuid,
     candidates: &[QueryConnectionCandidate],
     active_connection_ids: &[Uuid],
-    previous_active_database: Option<&str>,
+    _previous_active_database: Option<&str>,
 ) -> QueryConnectionSwitchPlanningOutcome {
     match resolve_query_connection_switch(selected_connection_id, candidates, active_connection_ids)
     {
         QueryConnectionSwitchResolution::Ready(selection) => {
-            let should_refresh_connection_surfaces =
-                should_refresh_connection_surfaces_for_database_selection(
-                    previous_active_database,
-                    selection.default_database_name.as_deref(),
-                );
-
             QueryConnectionSwitchPlanningOutcome::Ready(QueryConnectionSwitchPlan {
                 selection,
-                should_refresh_connection_surfaces,
+                should_refresh_connection_surfaces: false,
             })
         }
         QueryConnectionSwitchResolution::MissingSavedConnection => {
@@ -930,7 +924,7 @@ mod tests {
     }
 
     #[test]
-    fn plan_query_connection_switch_returns_ready_with_refresh_policy() {
+    fn plan_query_connection_switch_does_not_refresh_connection_surfaces() {
         let selected_connection_id = Uuid::new_v4();
         let candidates = vec![QueryConnectionCandidate {
             connection_id: selected_connection_id,
@@ -949,7 +943,7 @@ mod tests {
         match outcome {
             QueryConnectionSwitchPlanningOutcome::Ready(plan) => {
                 assert_eq!(plan.selection.connection_id, selected_connection_id);
-                assert!(plan.should_refresh_connection_surfaces);
+                assert!(!plan.should_refresh_connection_surfaces);
             }
             unexpected => panic!("expected Ready planning outcome, got {unexpected:?}"),
         }

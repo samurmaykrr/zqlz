@@ -797,7 +797,21 @@ impl TextElement {
         // Combine marker styles
         styles = gpui::combine_highlights(diagnostic_styles, styles).collect();
 
-        Some(styles)
+        Some(
+            styles
+                .into_iter()
+                .filter_map(|(range, style)| {
+                    let start = range.start.max(visible_byte_range.start);
+                    let end = range.end.min(visible_byte_range.end);
+                    (start < end).then(|| {
+                        (
+                            start - visible_byte_range.start..end - visible_byte_range.start,
+                            style,
+                        )
+                    })
+                })
+                .collect(),
+        )
     }
 }
 
@@ -1033,9 +1047,11 @@ impl Element for TextElement {
 
                 runs.extend(highlight_styles.iter().map(|(range, style)| {
                     let mut run = text_style.clone().highlight(*style).to_run(range.len());
+                    let absolute_range =
+                        visible_start_offset + range.start..visible_start_offset + range.end;
                     if let Some(ime_marked_range) = &state.ime_marked_range
-                        && range.start >= ime_marked_range.start
-                        && range.end <= ime_marked_range.end
+                        && absolute_range.start >= ime_marked_range.start
+                        && absolute_range.end <= ime_marked_range.end
                     {
                         run.color = marked_run.color;
                         run.strikethrough = marked_run.strikethrough;

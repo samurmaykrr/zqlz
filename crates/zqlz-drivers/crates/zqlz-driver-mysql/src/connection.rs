@@ -487,7 +487,12 @@ fn mysql_value_to_value(
 
 fn mysql_column_metadata(
     mysql_columns: &[mysql_async::Column],
-) -> (Vec<ColumnMeta>, Vec<String>, Vec<ColumnType>, Vec<ColumnFlags>) {
+) -> (
+    Vec<ColumnMeta>,
+    Vec<String>,
+    Vec<ColumnType>,
+    Vec<ColumnFlags>,
+) {
     let mut columns = Vec::new();
     let mut column_names = Vec::new();
     let mut column_types = Vec::new();
@@ -1183,10 +1188,9 @@ impl Connection for MySqlConnection {
 
                 let (columns, column_names, column_types, column_flags) =
                     mysql_column_metadata(result.columns_ref());
-                let mysql_rows: Vec<MySqlRow> = result
-                    .collect_and_drop()
-                    .await
-                    .map_err(|e| ZqlzError::Query(format!("Failed to collect query rows: {}", e)))?;
+                let mysql_rows: Vec<MySqlRow> = result.collect_and_drop().await.map_err(|e| {
+                    ZqlzError::Query(format!("Failed to collect query rows: {}", e))
+                })?;
 
                 let mut rows = Vec::new();
                 for mysql_row in mysql_rows {
@@ -1536,39 +1540,39 @@ impl Transaction for MySqlTransaction {
         let sql = render_mysql_sql_with_params(sql, params)?;
         let start_time = std::time::Instant::now();
 
-        let (rows_data, columns, column_names, column_types, column_flags) =
-            get_mysql_runtime()
-                .spawn(async move {
-                    let mut guard = conn_mutex.lock().await;
-                    if let Some(ref mut conn) = *guard {
-                        let result = conn.query_iter(&sql).await.map_err(|e| {
-                            ZqlzError::Query(format!("Failed to execute query: {}", e))
-                        })?;
+        let (rows_data, columns, column_names, column_types, column_flags) = get_mysql_runtime()
+            .spawn(async move {
+                let mut guard = conn_mutex.lock().await;
+                if let Some(ref mut conn) = *guard {
+                    let result = conn
+                        .query_iter(&sql)
+                        .await
+                        .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
 
-                        let (columns, column_names, column_types, column_flags) =
-                            mysql_column_metadata(result.columns_ref());
-                        let rows: Vec<MySqlRow> = result.collect_and_drop().await.map_err(|e| {
-                            ZqlzError::Query(format!("Failed to collect query rows: {}", e))
-                        })?;
+                    let (columns, column_names, column_types, column_flags) =
+                        mysql_column_metadata(result.columns_ref());
+                    let rows: Vec<MySqlRow> = result.collect_and_drop().await.map_err(|e| {
+                        ZqlzError::Query(format!("Failed to collect query rows: {}", e))
+                    })?;
 
-                        Ok::<
-                            (
-                                Vec<MySqlRow>,
-                                Vec<ColumnMeta>,
-                                Vec<String>,
-                                Vec<ColumnType>,
-                                Vec<ColumnFlags>,
-                            ),
-                            ZqlzError,
-                        >((rows, columns, column_names, column_types, column_flags))
-                    } else {
-                        Err(ZqlzError::Query(
-                            "Transaction connection no longer available".into(),
-                        ))
-                    }
-                })
-                .await
-                .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
+                    Ok::<
+                        (
+                            Vec<MySqlRow>,
+                            Vec<ColumnMeta>,
+                            Vec<String>,
+                            Vec<ColumnType>,
+                            Vec<ColumnFlags>,
+                        ),
+                        ZqlzError,
+                    >((rows, columns, column_names, column_types, column_flags))
+                } else {
+                    Err(ZqlzError::Query(
+                        "Transaction connection no longer available".into(),
+                    ))
+                }
+            })
+            .await
+            .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
 
         // Convert MySQL rows to ZQLZ rows
         let mut rows = Vec::new();

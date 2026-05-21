@@ -63,6 +63,7 @@ actions!(
         IndentLine,
         DedentLine,
         ToggleLineComment,
+        ToggleBlockComment,
         // Selection features (feat-016/017/018)
         SelectLine,
         SelectNextOccurrence,

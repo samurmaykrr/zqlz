@@ -35,6 +35,8 @@ pub struct MockConnection {
     pub query_log: Arc<parking_lot::Mutex<Vec<String>>>,
     /// Schema arguments passed to list_tables, for scope assertions.
     pub list_tables_schemas: Arc<parking_lot::Mutex<Vec<Option<String>>>>,
+    /// Last cell update request, for service-layer update assertions.
+    pub last_cell_update: Arc<parking_lot::Mutex<Option<CellUpdateRequest>>>,
 }
 
 impl MockConnection {
@@ -50,6 +52,7 @@ impl MockConnection {
             generate_ddl_count: Arc::new(parking_lot::Mutex::new(0)),
             query_log: Arc::new(parking_lot::Mutex::new(Vec::new())),
             list_tables_schemas: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            last_cell_update: Arc::new(parking_lot::Mutex::new(None)),
         }
     }
 
@@ -102,6 +105,11 @@ impl MockConnection {
     #[allow(dead_code)]
     pub fn list_tables_schemas(&self) -> Vec<Option<String>> {
         self.list_tables_schemas.lock().clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn last_cell_update(&self) -> Option<CellUpdateRequest> {
+        self.last_cell_update.lock().clone()
     }
 
     async fn current_scalar_string(&self, sql: &str) -> Result<Option<String>> {
@@ -527,10 +535,11 @@ impl Connection for MockConnection {
         Ok("SELECT 0 as total_queries".to_string())
     }
 
-    async fn update_cell(&self, _request: CellUpdateRequest) -> Result<u64> {
+    async fn update_cell(&self, request: CellUpdateRequest) -> Result<u64> {
         if self.should_fail {
             Err(ZqlzError::Query("Update failed".into()))
         } else {
+            *self.last_cell_update.lock() = Some(request);
             Ok(1)
         }
     }
@@ -731,6 +740,10 @@ impl SchemaIntrospection for MockConnection {
             "users" => Ok(Some(PrimaryKeyInfo {
                 name: Some("pk_users".to_string()),
                 columns: vec!["id".to_string()],
+            })),
+            "composite_nullable" => Ok(Some(PrimaryKeyInfo {
+                name: Some("pk_composite_nullable".to_string()),
+                columns: vec!["content_id".to_string(), "status_id".to_string()],
             })),
             _ => Ok(None),
         }

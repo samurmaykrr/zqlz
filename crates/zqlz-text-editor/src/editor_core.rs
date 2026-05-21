@@ -3,372 +3,35 @@ use crate::{
     selection::{SelectionEntry, SelectionMode},
 };
 
-pub type ExtraCursor = (Cursor, Selection);
+mod editor_core_queries;
+mod editor_core_types;
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StructuralRange {
-    pub start: usize,
-    pub end: usize,
-    pub open: char,
-    pub close: char,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectionHistoryEntry {
-    pub collection: SelectionsCollection,
-}
-
-impl SelectionHistoryEntry {
-    pub fn new(collection: SelectionsCollection) -> Self {
-        Self { collection }
-    }
-
-    pub fn primary(&self) -> Option<&SelectionEntry> {
-        self.collection.primary()
-    }
-
-    pub fn extra_cursors(&self) -> Vec<ExtraCursor> {
-        self.collection
-            .primary_and_extras()
-            .map(|(_, _, extras)| extras)
-            .unwrap_or_default()
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectionState {
-    pub collection: SelectionsCollection,
-}
-
-impl SelectionState {
-    pub fn new(collection: SelectionsCollection) -> Self {
-        Self { collection }
-    }
-
-    pub fn primary(&self) -> Option<&SelectionEntry> {
-        self.collection.primary()
-    }
-
-    pub fn cursor(&self) -> Option<&Cursor> {
-        self.primary().map(|entry| &entry.cursor)
-    }
-
-    pub fn selection(&self) -> Option<&Selection> {
-        self.primary().map(|entry| &entry.selection)
-    }
-
-    pub fn extra_cursors(&self) -> Vec<ExtraCursor> {
-        self.collection
-            .primary_and_extras()
-            .map(|(_, _, extras)| extras)
-            .unwrap_or_default()
-    }
-
-    pub fn expect_cursor(&self) -> &Cursor {
-        self.cursor()
-            .expect("selection state should always have a primary cursor")
-    }
-
-    pub fn expect_selection(&self) -> &Selection {
-        self.selection()
-            .expect("selection state should always have a primary selection")
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MultiCursorEditPlan {
-    pub slot: usize,
-    pub start: usize,
-    pub end: usize,
-    pub replacement: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MultiCursorCommandPlan {
-    pub edits: Vec<MultiCursorEditPlan>,
-    pub final_offsets: Vec<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TextReplacementEdit {
-    pub range: std::ops::Range<usize>,
-    pub replacement: String,
-}
-
-impl TextReplacementEdit {
-    pub fn insert(offset: usize, text: impl Into<String>) -> Self {
-        Self {
-            range: offset..offset,
-            replacement: text.into(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectionRotationEdit {
-    pub range: std::ops::Range<usize>,
-    pub replacement: String,
-}
-
-impl From<SelectionRotationEdit> for TextReplacementEdit {
-    fn from(value: SelectionRotationEdit) -> Self {
-        Self {
-            range: value.range,
-            replacement: value.replacement,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PrimarySelectionDeletionPlan {
-    Linear {
-        range: std::ops::Range<usize>,
-        cursor_position: Position,
-    },
-    Block {
-        ranges: Vec<std::ops::Range<usize>>,
-        cursor_position: Position,
-    },
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectedLineBlockPlan {
-    pub first_line: usize,
-    pub last_line: usize,
-    pub byte_range: std::ops::Range<usize>,
-    pub has_trailing_newline: bool,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SelectedLineDeletionPlan {
-    pub first_line: usize,
-    pub byte_range: std::ops::Range<usize>,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TextInsertionPlan {
-    pub offset: usize,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DuplicateSelectedLinesPlan {
-    pub insertions: Vec<TextInsertionPlan>,
-    pub target_line: usize,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MoveSelectedLinesPlan {
-    pub byte_range: std::ops::Range<usize>,
-    pub replacement: String,
-    pub target_line: usize,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WholeLineCopyPlan {
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WholeLineCutPlan {
-    pub text: String,
-    pub delete_range: std::ops::Range<usize>,
-    pub target_line: usize,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WholeLinePastePlan {
-    pub offset: usize,
-    pub text: String,
-    pub target_line: usize,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct NewlineInsertionPlan {
-    pub offset: usize,
-    pub text: String,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CutToEndOfLinePlan {
-    pub text: String,
-    pub delete_range: std::ops::Range<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct JoinLinesPlan {
-    pub delete_range: std::ops::Range<usize>,
-    pub insert_offset: usize,
-    pub insert_text: String,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TransposeCharsPlan {
-    pub replace_range: std::ops::Range<usize>,
-    pub replacement: String,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LineIndentEdit {
-    pub offset: usize,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LineDedentEdit {
-    pub range: std::ops::Range<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct IndentLinesPlan {
-    pub edits: Vec<LineIndentEdit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DedentLinesPlan {
-    pub edits: Vec<LineDedentEdit>,
-    pub target_position: Position,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LineCommentEdit {
-    Insert { offset: usize, text: String },
-    Delete { range: std::ops::Range<usize> },
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum LinePrefixEditMode {
-    Indent,
-    Dedent,
-    ToggleComment,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ToggleLineCommentPlan {
-    pub edits: Vec<LineCommentEdit>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum PostApplySelection {
-    Keep,
-    MovePrimaryCursor(Position),
-    MovePrimaryCursorToOffset(usize),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PlannedEditBatch {
-    pub edits: Vec<TextReplacementEdit>,
-    pub post_apply_selection: PostApplySelection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutoIndentNewlinePlan {
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InsertAtCursorPlan {
-    pub offset: usize,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InsertTextPlan {
-    pub replace_range: std::ops::Range<usize>,
-    pub insert_offset: usize,
-    pub replaced_text: String,
-    pub inserted_text: String,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeleteBeforeCursorPlan {
-    pub primary_range: std::ops::Range<usize>,
-    pub paired_closer_range: Option<std::ops::Range<usize>>,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeleteAtCursorPlan {
-    pub range: std::ops::Range<usize>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DeleteSubwordPlan {
-    pub range: std::ops::Range<usize>,
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SelectedTextPlan {
-    Linear(String),
-    Block(Vec<String>),
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutoSurroundSelectionPlan {
-    pub edits: Vec<TextReplacementEdit>,
-    pub selection: Selection,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct AutoCloseBracketPlan {
-    pub batch: PlannedEditBatch,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PrimaryReplacementPlan {
-    pub batch: PlannedEditBatch,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct MarkedTextReplacementPlan {
-    pub batch: PlannedEditBatch,
-    pub marked_range: Option<std::ops::Range<usize>>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SkipClosingBracketPlan {
-    pub target_offset: usize,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct WordTarget {
-    pub range: std::ops::Range<usize>,
-    pub text: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CompletionQueryPlan {
-    pub trigger_offset: usize,
-    pub current_prefix: String,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct SignatureHelpQueryPlan {
-    pub function_name: String,
-    pub active_parameter: u32,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RenameQueryPlan {
-    pub current_name: String,
-    pub ranges: Vec<std::ops::Range<usize>>,
-}
+pub use editor_core_types::*;
 
 pub struct EditorCoreSnapshot<'a> {
     buffer: &'a TextBuffer,
     selections_collection: SelectionsCollection,
     last_select_line_was_extend: bool,
     selection_history: Vec<SelectionHistoryEntry>,
+}
+
+fn should_add_newline_indent_after_line(line_text: &str, indent_after_keywords: &[&str]) -> bool {
+    let trimmed = line_text.trim_end();
+    let Some(last_character) = trimmed.chars().next_back() else {
+        return false;
+    };
+
+    if matches!(last_character, '(' | '[' | '{') {
+        return true;
+    }
+
+    let upper = trimmed.to_uppercase();
+    let last_word = upper
+        .rsplit_once(char::is_whitespace)
+        .map(|(_, word)| word)
+        .unwrap_or(&upper);
+
+    indent_after_keywords.contains(&last_word)
 }
 
 impl<'a> EditorCoreSnapshot<'a> {
@@ -447,8 +110,17 @@ impl<'a> EditorCoreSnapshot<'a> {
         self,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<MultiCursorCommandPlan> {
-        self.with_core(|core| core.multi_cursor_newline_plan(auto_indent_enabled, indent_unit))
+        self.with_core(|core| {
+            core.multi_cursor_newline_plan(
+                auto_indent_enabled,
+                indent_unit,
+                comment_prefix,
+                indent_after_keywords,
+            )
+        })
     }
 
     pub fn multi_cursor_indent_plan(self, indent: &str) -> Option<MultiCursorCommandPlan> {
@@ -701,8 +373,11 @@ impl<'a> EditorCoreSnapshot<'a> {
         indent_size: usize,
         use_tabs: bool,
         mode: LinePrefixEditMode,
+        comment_prefix: Option<&str>,
     ) -> Option<PlannedEditBatch> {
-        self.with_core(|core| core.line_prefix_edit_batch(indent_size, use_tabs, mode))
+        self.with_core(|core| {
+            core.line_prefix_edit_batch(indent_size, use_tabs, mode, comment_prefix)
+        })
     }
 
     pub fn indent_lines_plan(self, indent_size: usize, use_tabs: bool) -> Option<IndentLinesPlan> {
@@ -713,16 +388,33 @@ impl<'a> EditorCoreSnapshot<'a> {
         self.with_core(|core| core.dedent_lines_plan(indent_size))
     }
 
-    pub fn toggle_line_comment_plan(self) -> Option<ToggleLineCommentPlan> {
-        self.with_core(|core| core.toggle_line_comment_plan())
+    pub fn toggle_line_comment_plan(self, comment_prefix: &str) -> Option<ToggleLineCommentPlan> {
+        self.with_core(|core| core.toggle_line_comment_plan(comment_prefix))
+    }
+
+    pub fn toggle_block_comment_plan(
+        self,
+        start_delimiter: &str,
+        end_delimiter: &str,
+    ) -> Option<ToggleBlockCommentPlan> {
+        self.with_core(|core| core.toggle_block_comment_plan(start_delimiter, end_delimiter))
     }
 
     pub fn auto_indent_newline_text(
         self,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<AutoIndentNewlinePlan> {
-        self.with_core(|core| core.auto_indent_newline_text(auto_indent_enabled, indent_unit))
+        self.with_core(|core| {
+            core.auto_indent_newline_text(
+                auto_indent_enabled,
+                indent_unit,
+                comment_prefix,
+                indent_after_keywords,
+            )
+        })
     }
 
     pub fn auto_indent_newline_text_for_line(
@@ -730,9 +422,17 @@ impl<'a> EditorCoreSnapshot<'a> {
         line: usize,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<AutoIndentNewlinePlan> {
         self.with_core(|core| {
-            core.auto_indent_newline_text_for_line(line, auto_indent_enabled, indent_unit)
+            core.auto_indent_newline_text_for_line(
+                line,
+                auto_indent_enabled,
+                indent_unit,
+                comment_prefix,
+                indent_after_keywords,
+            )
         })
     }
 
@@ -799,12 +499,29 @@ impl<'a> EditorCoreSnapshot<'a> {
         self.with_core(|core| core.find_word_range_at_offset(offset))
     }
 
+    pub fn find_word_range_at_offset_with_extra_chars(
+        self,
+        offset: usize,
+        extra_word_chars: &[char],
+    ) -> Option<std::ops::Range<usize>> {
+        self.with_core(|core| {
+            core.find_word_range_at_offset_with_extra_chars(offset, extra_word_chars)
+        })
+    }
+
     pub fn selection_or_word_under_cursor_text(self) -> Option<String> {
         self.with_core(|core| core.selection_or_word_under_cursor_text())
     }
 
     pub fn completion_query_plan(self) -> CompletionQueryPlan {
         self.with_core(|core| core.completion_query_plan())
+    }
+
+    pub fn completion_query_plan_with_extra_chars(
+        self,
+        extra_word_chars: &[char],
+    ) -> CompletionQueryPlan {
+        self.with_core(|core| core.completion_query_plan_with_extra_chars(extra_word_chars))
     }
 
     pub fn word_target_at_offset(self, offset: usize) -> Option<WordTarget> {
@@ -971,7 +688,8 @@ impl<'a> EditorCore<'a> {
     }
 
     pub fn restore_selection_state(&mut self, state: SelectionState) {
-        let _ = self.set_selection_collection(state.collection);
+        let restored = self.set_selection_collection(state.collection);
+        debug_assert!(restored);
     }
 
     fn restore_selection_history_entry(&mut self, entry: &SelectionHistoryEntry) -> bool {
@@ -1663,7 +1381,8 @@ impl<'a> EditorCore<'a> {
         };
         let collection =
             SelectionsCollection::single(primary.cursor, Selection::at(primary.selection.head()));
-        let _ = self.set_selection_collection(collection);
+        let collapsed = self.set_selection_collection(collection);
+        debug_assert!(collapsed);
     }
 
     pub fn add_extra_cursor(&mut self, position: Position, with_selection: Option<Selection>) {
@@ -1685,13 +1404,15 @@ impl<'a> EditorCore<'a> {
             self.selections_collection.primary().map(|_| 0).unwrap_or(0),
             self.selections_collection.len(),
         ) {
-            let _ = self.set_normalized_selection_collection(collection);
+            let added = self.set_normalized_selection_collection(collection);
+            debug_assert!(added);
         }
     }
 
     pub fn normalize_extra_cursors(&mut self) {
         let normalized = self.selections_collection.normalized();
-        let _ = self.set_selection_collection(normalized);
+        let normalized = self.set_selection_collection(normalized);
+        debug_assert!(normalized);
     }
 
     pub fn split_selection_into_lines(&mut self) -> bool {
@@ -1728,7 +1449,8 @@ impl<'a> EditorCore<'a> {
             collection.push(Cursor::at(head), Selection::from_anchor_head(anchor, head));
         }
 
-        let _ = self.set_selection_collection(collection);
+        let split = self.set_selection_collection(collection);
+        debug_assert!(split);
         self.normalize_extra_cursors();
         true
     }
@@ -2044,11 +1766,19 @@ impl<'a> EditorCore<'a> {
         &self,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<MultiCursorCommandPlan> {
         let edits = self.plan_multi_cursor_newline_edits(|line| {
-            self.auto_indent_newline_text_for_line(line, auto_indent_enabled, indent_unit)
-                .map(|plan| plan.text)
-                .unwrap_or_else(|| "\n".to_string())
+            self.auto_indent_newline_text_for_line(
+                line,
+                auto_indent_enabled,
+                indent_unit,
+                comment_prefix,
+                indent_after_keywords,
+            )
+            .map(|plan| plan.text)
+            .unwrap_or_else(|| "\n".to_string())
         });
         self.prepare_multi_cursor_command_plan(edits)
     }
@@ -3007,6 +2737,7 @@ impl<'a> EditorCore<'a> {
         indent_size: usize,
         use_tabs: bool,
         mode: LinePrefixEditMode,
+        comment_prefix: Option<&str>,
     ) -> Option<PlannedEditBatch> {
         match mode {
             LinePrefixEditMode::Indent => {
@@ -3039,8 +2770,9 @@ impl<'a> EditorCore<'a> {
                 })
             }
             LinePrefixEditMode::ToggleComment => {
+                let comment_prefix = comment_prefix?;
                 let edits = self
-                    .toggle_line_comment_plan()?
+                    .toggle_line_comment_plan(comment_prefix)?
                     .edits
                     .into_iter()
                     .map(|edit| match edit {
@@ -3136,12 +2868,16 @@ impl<'a> EditorCore<'a> {
         })
     }
 
-    pub fn toggle_line_comment_plan(&self) -> Option<ToggleLineCommentPlan> {
+    pub fn toggle_line_comment_plan(&self, comment_prefix: &str) -> Option<ToggleLineCommentPlan> {
+        if comment_prefix.is_empty() {
+            return None;
+        }
+
         let (first_line, last_line) = self.selected_line_range();
         let all_commented = (first_line..=last_line).all(|line| {
             self.buffer
                 .line(line)
-                .map(|text| text.trim_start().starts_with("--"))
+                .map(|text| text.trim_start().starts_with(comment_prefix))
                 .unwrap_or(false)
         });
 
@@ -3157,13 +2893,17 @@ impl<'a> EditorCore<'a> {
                 let leading_whitespace = line_text
                     .chars()
                     .take_while(|character| character.is_whitespace())
-                    .count();
+                    .map(char::len_utf8)
+                    .sum::<usize>();
                 let after_whitespace = line_start + leading_whitespace;
                 let trimmed = &line_text[leading_whitespace..];
-                let strip_length = if trimmed.starts_with("-- ") {
-                    3
-                } else if trimmed.starts_with("--") {
-                    2
+                let strip_length = if trimmed
+                    .strip_prefix(comment_prefix)
+                    .is_some_and(|remaining| remaining.starts_with(' '))
+                {
+                    comment_prefix.len() + 1
+                } else if trimmed.starts_with(comment_prefix) {
+                    comment_prefix.len()
                 } else {
                     0
                 };
@@ -3184,10 +2924,11 @@ impl<'a> EditorCore<'a> {
                 let leading_whitespace = line_text
                     .chars()
                     .take_while(|character| character.is_whitespace())
-                    .count();
+                    .map(char::len_utf8)
+                    .sum::<usize>();
                 edits.push(LineCommentEdit::Insert {
                     offset: line_start + leading_whitespace,
-                    text: "-- ".to_string(),
+                    text: format!("{comment_prefix} "),
                 });
             }
         }
@@ -3195,13 +2936,75 @@ impl<'a> EditorCore<'a> {
         Some(ToggleLineCommentPlan { edits })
     }
 
+    pub fn toggle_block_comment_plan(
+        &self,
+        start_delimiter: &str,
+        end_delimiter: &str,
+    ) -> Option<ToggleBlockCommentPlan> {
+        if start_delimiter.is_empty() || end_delimiter.is_empty() {
+            return None;
+        }
+
+        let mut ranges = self.selection_ranges_with_fallback(|position| {
+            let offset = self.buffer.position_to_offset(position).ok()?;
+            Some(offset..offset)
+        });
+        ranges.sort_by(|left, right| right.start.cmp(&left.start));
+        ranges.dedup_by(|left, right| left.start == right.start && left.end == right.end);
+
+        let mut edits = Vec::new();
+        for range in ranges {
+            let original = self.buffer.text_for_range(range.clone()).ok()?;
+            let trimmed_start_len = original.len() - original.trim_start().len();
+            let trimmed_end_len = original.len() - original.trim_end().len();
+            let content_start = range.start + trimmed_start_len;
+            let content_end = range.end.saturating_sub(trimmed_end_len);
+            let content = &original[trimmed_start_len..original.len() - trimmed_end_len];
+
+            if content.starts_with(start_delimiter) && content.ends_with(end_delimiter) {
+                edits.push(TextReplacementEdit {
+                    range: content_end - end_delimiter.len()..content_end,
+                    replacement: String::new(),
+                });
+                edits.push(TextReplacementEdit {
+                    range: content_start..content_start + start_delimiter.len(),
+                    replacement: String::new(),
+                });
+            } else {
+                edits.push(TextReplacementEdit::insert(
+                    content_end,
+                    end_delimiter.to_string(),
+                ));
+                edits.push(TextReplacementEdit::insert(
+                    content_start,
+                    start_delimiter.to_string(),
+                ));
+            }
+        }
+
+        Some(ToggleBlockCommentPlan {
+            batch: PlannedEditBatch {
+                edits,
+                post_apply_selection: PostApplySelection::Keep,
+            },
+        })
+    }
+
     pub fn auto_indent_newline_text(
         &self,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<AutoIndentNewlinePlan> {
         let line = self.cursor.position().line;
-        self.auto_indent_newline_text_for_line(line, auto_indent_enabled, indent_unit)
+        self.auto_indent_newline_text_for_line(
+            line,
+            auto_indent_enabled,
+            indent_unit,
+            comment_prefix,
+            indent_after_keywords,
+        )
     }
 
     pub fn auto_indent_newline_text_for_line(
@@ -3209,6 +3012,8 @@ impl<'a> EditorCore<'a> {
         line: usize,
         auto_indent_enabled: bool,
         indent_unit: &str,
+        comment_prefix: Option<&str>,
+        indent_after_keywords: &[&str],
     ) -> Option<AutoIndentNewlinePlan> {
         if !auto_indent_enabled {
             return Some(AutoIndentNewlinePlan {
@@ -3217,17 +3022,19 @@ impl<'a> EditorCore<'a> {
         }
 
         let indent = self.leading_whitespace_for_line(line)?;
-        let extra_indent = if let Some(line_text) = self.buffer.line(line) {
-            let trimmed = line_text.trim_end().to_uppercase();
-            let last_word = trimmed
-                .rsplit_once(char::is_whitespace)
-                .map(|(_, word)| word)
-                .unwrap_or(&trimmed);
+        if let (Some(line_text), Some(comment_prefix)) = (self.buffer.line(line), comment_prefix)
+            && !comment_prefix.is_empty()
+        {
+            let trimmed_start = line_text.trim_start();
+            if trimmed_start.starts_with(comment_prefix) {
+                return Some(AutoIndentNewlinePlan {
+                    text: format!("\n{indent}{comment_prefix} "),
+                });
+            }
+        }
 
-            if matches!(
-                last_word,
-                "BEGIN" | "THEN" | "ELSE" | "LOOP" | "AS" | "DECLARE" | "("
-            ) {
+        let extra_indent = if let Some(line_text) = self.buffer.line(line) {
+            if should_add_newline_indent_after_line(&line_text, indent_after_keywords) {
                 indent_unit.to_string()
             } else {
                 String::new()
@@ -3602,216 +3409,6 @@ impl<'a> EditorCore<'a> {
         })
     }
 
-    pub fn find_all_occurrences(&self, needle: &str) -> Vec<std::ops::Range<usize>> {
-        if needle.is_empty() {
-            return Vec::new();
-        }
-
-        SearchEngine::new(
-            needle,
-            &TextFindOptions {
-                case_sensitive: true,
-                whole_word: false,
-                regex: false,
-            },
-        )
-        .map(|engine| {
-            engine
-                .find_all_in_rope(&self.buffer.rope())
-                .into_iter()
-                .map(|matched| matched.range())
-                .collect()
-        })
-        .unwrap_or_default()
-    }
-
-    pub fn find_word_range_at_offset(&self, offset: usize) -> Option<std::ops::Range<usize>> {
-        if offset > self.buffer.len() {
-            return None;
-        }
-
-        let offset = self.buffer.floor_char_boundary(offset);
-
-        if matches!(self.buffer.char_at(offset), Some('"') | Some('`')) {
-            let quote = self.buffer.char_at(offset)?;
-            let quote_end = self.buffer.next_char_boundary(offset).ok()?;
-
-            let mut search_offset = quote_end;
-            while let Some((start, end, character)) =
-                Self::char_at_offset(self.buffer, search_offset)
-            {
-                if character == quote {
-                    return Some(offset..end);
-                }
-                search_offset = end.max(start + character.len_utf8());
-            }
-
-            let mut search_offset = offset;
-            while let Some((start, _, character)) =
-                Self::char_before_offset(self.buffer, search_offset)
-            {
-                if character == quote {
-                    return Some(start..quote_end);
-                }
-                search_offset = start;
-            }
-        }
-
-        fn is_word_char(character: char) -> bool {
-            character.is_alphanumeric() || character == '_'
-        }
-
-        let mut start = offset;
-        while let Some((previous_start, _, character)) =
-            Self::char_before_offset(self.buffer, start)
-        {
-            if is_word_char(character) {
-                start = previous_start;
-            } else {
-                break;
-            }
-        }
-
-        let mut end = offset;
-        while let Some((_, next_end, character)) = Self::char_at_offset(self.buffer, end) {
-            if is_word_char(character) {
-                end = next_end;
-            } else {
-                break;
-            }
-        }
-
-        (start < end).then_some(start..end)
-    }
-
-    pub fn selection_or_word_under_cursor_text(&self) -> Option<String> {
-        if let Some(SelectedTextPlan::Linear(text)) = self.selected_text_plan() {
-            return Some(text);
-        }
-
-        let cursor_offset = self
-            .buffer
-            .position_to_offset(self.cursor.position())
-            .ok()?;
-        let range = self.find_word_range_at_offset(cursor_offset)?;
-        self.buffer.text_for_range(range).ok()
-    }
-
-    pub fn completion_query_plan(&self) -> CompletionQueryPlan {
-        let cursor_offset = self.cursor.offset(self.buffer);
-        let trigger_offset = self
-            .find_word_range_at_offset(cursor_offset)
-            .map(|range| range.start)
-            .unwrap_or(cursor_offset);
-        let current_prefix = self
-            .buffer
-            .text_for_range(trigger_offset..cursor_offset)
-            .unwrap_or_default();
-
-        CompletionQueryPlan {
-            trigger_offset,
-            current_prefix,
-        }
-    }
-
-    pub fn word_target_at_offset(&self, offset: usize) -> Option<WordTarget> {
-        let range = self.find_word_range_at_offset(offset)?;
-        let text = self.buffer.text_for_range(range.clone()).ok()?;
-        Some(WordTarget { range, text })
-    }
-
-    pub fn rename_target_at_cursor(&self) -> Option<WordTarget> {
-        let cursor_offset = self.cursor.offset(self.buffer);
-        self.word_target_at_offset(cursor_offset)
-    }
-
-    pub fn signature_help_query_plan(
-        &self,
-        structural_open_paren: Option<usize>,
-    ) -> Option<SignatureHelpQueryPlan> {
-        let cursor_offset = self.cursor.offset(self.buffer);
-        let search_start = cursor_offset.saturating_sub(256);
-        let search_end = (cursor_offset + 256).min(self.buffer.len());
-        let text = self.buffer.text_for_range(search_start..search_end).ok()?;
-        let local_cursor_offset = cursor_offset.saturating_sub(search_start).min(text.len());
-        let before_cursor = &text[..local_cursor_offset];
-
-        let mut depth = 0usize;
-        let mut call_open_paren = None;
-        for (index, character) in before_cursor.char_indices().rev() {
-            match character {
-                ')' => depth = depth.saturating_add(1),
-                '(' => {
-                    if depth == 0 {
-                        call_open_paren = Some(index);
-                        break;
-                    }
-                    depth = depth.saturating_sub(1);
-                }
-                _ => {}
-            }
-        }
-
-        let open_paren = structural_open_paren
-            .map(|offset| offset.saturating_sub(search_start))
-            .or(call_open_paren)?;
-
-        let before_paren = before_cursor[..open_paren].trim_end();
-        let name_end = before_paren.len();
-        let mut name_start = name_end;
-        for (index, character) in before_paren.char_indices().rev() {
-            if character.is_alphanumeric() || character == '_' {
-                name_start = index;
-            } else {
-                break;
-            }
-        }
-        if name_start >= name_end {
-            return None;
-        }
-
-        let function_name = before_paren[name_start..name_end].to_string();
-        let mut nested = 0usize;
-        let mut active_parameter = 0u32;
-        for character in before_cursor[open_paren + 1..].chars() {
-            match character {
-                '(' => nested = nested.saturating_add(1),
-                ')' => nested = nested.saturating_sub(1),
-                ',' if nested == 0 => active_parameter = active_parameter.saturating_add(1),
-                _ => {}
-            }
-        }
-
-        Some(SignatureHelpQueryPlan {
-            function_name,
-            active_parameter,
-        })
-    }
-
-    pub fn rename_query_plan(&self, new_name: &str) -> Option<RenameQueryPlan> {
-        if !Self::is_valid_identifier(new_name) {
-            return None;
-        }
-
-        let WordTarget {
-            range: _range,
-            text: current_name,
-        } = self.rename_target_at_cursor()?;
-        if current_name == new_name {
-            return None;
-        }
-
-        let ranges = Self::find_identifier_occurrences(self.buffer, &current_name);
-        if ranges.is_empty() {
-            return None;
-        }
-
-        Some(RenameQueryPlan {
-            current_name,
-            ranges,
-        })
-    }
-
     pub fn is_multiline_selection(&self) -> bool {
         if !self.selection.has_selection() {
             return false;
@@ -3831,43 +3428,6 @@ impl<'a> EditorCore<'a> {
         ));
         self.set_primary_cursor_and_selection_fields(selection.head(), selection);
         true
-    }
-
-    fn is_valid_identifier(name: &str) -> bool {
-        let mut characters = name.chars();
-        let Some(first) = characters.next() else {
-            return false;
-        };
-        if !(first.is_ascii_alphabetic() || first == '_') {
-            return false;
-        }
-        characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
-    }
-
-    fn find_identifier_occurrences(
-        buffer: &TextBuffer,
-        identifier: &str,
-    ) -> Vec<std::ops::Range<usize>> {
-        if identifier.is_empty() {
-            return Vec::new();
-        }
-
-        SearchEngine::new(
-            identifier,
-            &TextFindOptions {
-                case_sensitive: true,
-                whole_word: true,
-                regex: false,
-            },
-        )
-        .map(|engine| {
-            engine
-                .find_all_in_rope(&buffer.rope())
-                .into_iter()
-                .map(|matched| matched.range())
-                .collect()
-        })
-        .unwrap_or_default()
     }
 
     fn position_for_offset(&self, offset: usize) -> Option<Position> {
@@ -4278,8 +3838,9 @@ mod tests {
         NewlineInsertionPlan, PlannedEditBatch, PostApplySelection, PrimaryReplacementPlan,
         PrimarySelectionDeletionPlan, SelectedLineBlockPlan, SelectedLineDeletionPlan,
         SelectedTextPlan, SelectionHistoryEntry, SelectionRotationEdit, SkipClosingBracketPlan,
-        StructuralRange, TextInsertionPlan, TextReplacementEdit, ToggleLineCommentPlan,
-        TransposeCharsPlan, WholeLineCopyPlan, WholeLineCutPlan, WholeLinePastePlan, WordTarget,
+        StructuralRange, TextInsertionPlan, TextReplacementEdit, ToggleBlockCommentPlan,
+        ToggleLineCommentPlan, TransposeCharsPlan, WholeLineCopyPlan, WholeLineCutPlan,
+        WholeLinePastePlan, WordTarget,
     };
     use crate::{
         Cursor, Position, Selection, SelectionsCollection, TextBuffer, selection::SelectionMode,
@@ -6875,7 +6436,7 @@ mod tests {
 
         assert_eq!(
             test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
-                .toggle_line_comment_plan(),
+                .toggle_line_comment_plan("--"),
             Some(ToggleLineCommentPlan {
                 edits: vec![
                     LineCommentEdit::Insert {
@@ -6916,7 +6477,7 @@ mod tests {
         );
 
         assert_eq!(
-            core.toggle_line_comment_plan(),
+            core.toggle_line_comment_plan("--"),
             Some(ToggleLineCommentPlan {
                 edits: vec![
                     LineCommentEdit::Delete { range: 2..5 },
@@ -6934,10 +6495,108 @@ mod tests {
 
         assert_eq!(
             test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
-                .toggle_line_comment_plan(),
+                .toggle_line_comment_plan("--"),
             Some(ToggleLineCommentPlan {
                 edits: vec![LineCommentEdit::Delete { range: 0..3 }],
             })
+        );
+    }
+
+    #[test]
+    fn toggle_block_comment_plan_wraps_selected_text_with_delimiters() {
+        let buffer = TextBuffer::new("select * from accounts");
+        let cursor = Cursor::at(Position::new(0, 6));
+        let selection = Selection::from_anchor_head(Position::new(0, 0), Position::new(0, 6));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .toggle_block_comment_plan("/*", "*/"),
+            Some(ToggleBlockCommentPlan {
+                batch: PlannedEditBatch {
+                    edits: vec![
+                        TextReplacementEdit::insert(6, "*/"),
+                        TextReplacementEdit::insert(0, "/*"),
+                    ],
+                    post_apply_selection: PostApplySelection::Keep,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn toggle_block_comment_plan_unwraps_selected_block_comment() {
+        let buffer = TextBuffer::new("  /*select 1*/");
+        let cursor = Cursor::at(Position::new(0, 14));
+        let selection = Selection::from_anchor_head(Position::new(0, 0), Position::new(0, 14));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .toggle_block_comment_plan("/*", "*/"),
+            Some(ToggleBlockCommentPlan {
+                batch: PlannedEditBatch {
+                    edits: vec![
+                        TextReplacementEdit {
+                            range: 12..14,
+                            replacement: String::new(),
+                        },
+                        TextReplacementEdit {
+                            range: 2..4,
+                            replacement: String::new(),
+                        },
+                    ],
+                    post_apply_selection: PostApplySelection::Keep,
+                },
+            })
+        );
+    }
+
+    #[test]
+    fn toggle_line_comment_plan_uses_custom_comment_prefix() {
+        let buffer = TextBuffer::new("  db.categories.find()\n  // db.users.find()");
+        let cursor = Cursor::at(Position::new(0, 0));
+        let selection = Selection::from_anchor_head(Position::new(0, 0), Position::new(0, 2));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .toggle_line_comment_plan("//"),
+            Some(ToggleLineCommentPlan {
+                edits: vec![LineCommentEdit::Insert {
+                    offset: 2,
+                    text: "// ".to_string(),
+                }],
+            })
+        );
+
+        let selection = Selection::from_anchor_head(Position::new(1, 0), Position::new(1, 2));
+        assert_eq!(
+            test_core_snapshot(
+                &buffer,
+                Cursor::at(Position::new(1, 0)),
+                selection,
+                Vec::new(),
+                Vec::new()
+            )
+            .toggle_line_comment_plan("//"),
+            Some(ToggleLineCommentPlan {
+                edits: vec![LineCommentEdit::Delete { range: 25..28 }],
+            })
+        );
+    }
+
+    #[test]
+    fn line_prefix_edit_batch_noops_when_profile_has_no_line_comments() {
+        let buffer = TextBuffer::new("GET key");
+        let snapshot = test_core_snapshot(
+            &buffer,
+            Cursor::at(Position::new(0, 0)),
+            Selection::at(Position::new(0, 0)),
+            Vec::new(),
+            Vec::new(),
+        );
+
+        assert_eq!(
+            snapshot.line_prefix_edit_batch(4, false, LinePrefixEditMode::ToggleComment, None),
+            None
         );
     }
 
@@ -6949,9 +6608,36 @@ mod tests {
 
         assert_eq!(
             test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
-                .auto_indent_newline_text(true, "    "),
+                .auto_indent_newline_text(true, "    ", None, &[]),
             Some(AutoIndentNewlinePlan {
                 text: "\n    ".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn auto_indent_newline_text_extends_line_comments_when_supported() {
+        let buffer = TextBuffer::new("  -- explain plan");
+        let cursor = Cursor::at(Position::new(0, 17));
+        let selection = Selection::at(Position::new(0, 17));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .auto_indent_newline_text(true, "    ", Some("--"), &[]),
+            Some(AutoIndentNewlinePlan {
+                text: "\n  -- ".to_string(),
+            })
+        );
+
+        let buffer = TextBuffer::new("  // db.categories.find()");
+        let cursor = Cursor::at(Position::new(0, 23));
+        let selection = Selection::at(Position::new(0, 23));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .auto_indent_newline_text(true, "    ", Some("//"), &[]),
+            Some(AutoIndentNewlinePlan {
+                text: "\n  // ".to_string(),
             })
         );
     }
@@ -6981,11 +6667,61 @@ mod tests {
         );
 
         assert_eq!(
-            core.auto_indent_newline_text(true, "  "),
+            core.auto_indent_newline_text(true, "  ", None, &["BEGIN"]),
             Some(AutoIndentNewlinePlan {
                 text: "\n  ".to_string(),
             })
         );
+    }
+
+    #[test]
+    fn auto_indent_newline_text_uses_driver_owned_indent_keywords() {
+        let buffer = TextBuffer::new("BEGIN");
+        let cursor = Cursor::at(Position::new(0, 5));
+        let selection = Selection::at(Position::new(0, 5));
+
+        let snapshot = test_core_snapshot(
+            &buffer,
+            cursor.clone(),
+            selection.clone(),
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(
+            snapshot.auto_indent_newline_text(true, "  ", None, &[]),
+            Some(AutoIndentNewlinePlan {
+                text: "\n".to_string(),
+            })
+        );
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .auto_indent_newline_text(true, "  ", None, &["BEGIN"]),
+            Some(AutoIndentNewlinePlan {
+                text: "\n  ".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn auto_indent_newline_text_adds_extra_indent_after_open_delimiters() {
+        for line_text in [
+            "db.users.find({",
+            "SELECT json_build_object(",
+            "WHERE id IN [",
+        ] {
+            let buffer = TextBuffer::new(line_text);
+            let cursor = Cursor::at(Position::new(0, line_text.len()));
+            let selection = Selection::at(Position::new(0, line_text.len()));
+
+            assert_eq!(
+                test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                    .auto_indent_newline_text(true, "    ", None, &[]),
+                Some(AutoIndentNewlinePlan {
+                    text: "\n    ".to_string(),
+                })
+            );
+        }
     }
 
     #[test]
@@ -7002,14 +6738,14 @@ mod tests {
                 Vec::new(),
                 Vec::new(),
             )
-            .auto_indent_newline_text(false, "\t"),
+            .auto_indent_newline_text(false, "\t", None, &["LOOP"]),
             Some(AutoIndentNewlinePlan {
                 text: "\n".to_string(),
             })
         );
         assert_eq!(
             test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
-                .auto_indent_newline_text(true, "\t"),
+                .auto_indent_newline_text(true, "\t", None, &["LOOP"]),
             Some(AutoIndentNewlinePlan {
                 text: "\n\t".to_string(),
             })
@@ -7624,6 +7360,97 @@ mod tests {
     }
 
     #[test]
+    fn find_word_range_at_offset_uses_extra_word_chars_when_requested() {
+        let buffer = TextBuffer::new("$group user:1 plain");
+        let cursor = Cursor::at(Position::new(0, 3));
+        let selection = Selection::at(Position::new(0, 3));
+        assert_eq!(
+            test_core_snapshot(
+                &buffer,
+                cursor.clone(),
+                selection.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .find_word_range_at_offset(3),
+            Some(1..6)
+        );
+        assert_eq!(
+            test_core_snapshot(
+                &buffer,
+                cursor.clone(),
+                selection.clone(),
+                Vec::new(),
+                Vec::new(),
+            )
+            .find_word_range_at_offset_with_extra_chars(3, &['$']),
+            Some(0..6)
+        );
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new(),)
+                .find_word_range_at_offset_with_extra_chars(11, &[':', '-']),
+            Some(7..13)
+        );
+    }
+
+    #[test]
+    fn find_word_range_at_offset_expands_mssql_bracket_identifier() {
+        let text = "SELECT [User Name] FROM [dbo].[Events]";
+        let buffer = TextBuffer::new(text);
+
+        let user_name_start = text.find("[User Name]").expect("bracket identifier");
+        let user_name_end = user_name_start + "[User Name]".len();
+        for offset in [
+            user_name_start,
+            text.find("User").expect("inner user"),
+            text.find("Name").expect("inner name"),
+            user_name_end - 1,
+        ] {
+            assert_eq!(
+                test_core_snapshot(
+                    &buffer,
+                    Cursor::at(Position::new(0, 9)),
+                    Selection::at(Position::new(0, 9)),
+                    Vec::new(),
+                    Vec::new(),
+                )
+                .find_word_range_at_offset(offset),
+                Some(user_name_start..user_name_end)
+            );
+        }
+
+        let dbo_start = text.find("[dbo]").expect("dbo identifier");
+        assert_eq!(
+            test_core_snapshot(
+                &buffer,
+                Cursor::at(Position::new(0, 9)),
+                Selection::at(Position::new(0, 9)),
+                Vec::new(),
+                Vec::new(),
+            )
+            .find_word_range_at_offset(dbo_start + 2),
+            Some(dbo_start..dbo_start + "[dbo]".len())
+        );
+    }
+
+    #[test]
+    fn find_word_range_at_offset_does_not_cross_lines_for_unclosed_bracket_identifier() {
+        let text = "SELECT [User Name\nFROM users";
+        let buffer = TextBuffer::new(text);
+        let cursor = Cursor::at(Position::new(0, 9));
+        let selection = Selection::at(Position::new(0, 9));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new())
+                .find_word_range_at_offset(text.find("User").expect("inner user")),
+            Some(
+                text.find("User").expect("inner user")
+                    ..text.find("User").expect("inner user") + "User".len()
+            )
+        );
+    }
+
+    #[test]
     fn selection_or_word_under_cursor_text_prefers_linear_selection_then_word() {
         let buffer = TextBuffer::new("alpha beta");
         let cursor = Cursor::at(Position::new(0, 7));
@@ -7697,6 +7524,22 @@ mod tests {
             CompletionQueryPlan {
                 trigger_offset: 7,
                 current_prefix: "foo_bar".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn completion_query_plan_uses_extra_word_chars_when_requested() {
+        let buffer = TextBuffer::new("$gr");
+        let cursor = Cursor::at(Position::new(0, 3));
+        let selection = Selection::at(Position::new(0, 3));
+
+        assert_eq!(
+            test_core_snapshot(&buffer, cursor, selection, Vec::new(), Vec::new(),)
+                .completion_query_plan_with_extra_chars(&['$']),
+            CompletionQueryPlan {
+                trigger_offset: 0,
+                current_prefix: "$gr".to_string(),
             }
         );
     }
@@ -8344,7 +8187,7 @@ mod tests {
         );
 
         let plan = core
-            .multi_cursor_newline_plan(true, "  ")
+            .multi_cursor_newline_plan(true, "  ", None, &[])
             .expect("expected multi-cursor newline plan");
 
         assert_eq!(plan.final_offsets, vec![5, 8]);
@@ -8361,7 +8204,7 @@ mod tests {
                     slot: 0,
                     start: 0,
                     end: 5,
-                    replacement: "\n  ".to_string(),
+                    replacement: "\n".to_string(),
                 },
             ]
         );
@@ -8536,7 +8379,7 @@ mod tests {
         );
 
         let batch = snapshot
-            .line_prefix_edit_batch(2, false, LinePrefixEditMode::Indent)
+            .line_prefix_edit_batch(2, false, LinePrefixEditMode::Indent, None)
             .expect("indent batch");
 
         assert_eq!(
@@ -8576,7 +8419,7 @@ mod tests {
         );
 
         let batch = core
-            .line_prefix_edit_batch(4, false, LinePrefixEditMode::Dedent)
+            .line_prefix_edit_batch(4, false, LinePrefixEditMode::Dedent, None)
             .expect("dedent batch");
 
         assert_eq!(
@@ -8609,7 +8452,7 @@ mod tests {
         );
 
         let batch = snapshot
-            .line_prefix_edit_batch(4, false, LinePrefixEditMode::ToggleComment)
+            .line_prefix_edit_batch(4, false, LinePrefixEditMode::ToggleComment, Some("--"))
             .expect("comment batch");
 
         assert_eq!(

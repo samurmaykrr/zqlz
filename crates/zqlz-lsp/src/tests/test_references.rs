@@ -1,6 +1,9 @@
 //! Tests for find references functionality
 
 use crate::tests::test_helpers::create_test_lsp;
+use crate::{SchemaCache, SqlLsp, TableInfo, ViewInfo};
+use std::sync::Arc;
+use zqlz_services::SchemaService;
 use zqlz_ui::widgets::Rope;
 
 #[test]
@@ -36,6 +39,43 @@ fn test_references_for_column_name() {
         result.len() >= 2,
         "Should find at least 2 references to 'username', found {}",
         result.len()
+    );
+}
+
+#[test]
+fn test_references_ignore_strings_and_comments() {
+    let lsp = create_test_lsp();
+    let text = Rope::from(
+        "SELECT username FROM users -- username in comment\nWHERE username = 'username in string'",
+    );
+    let offset = text.to_string().find("username").unwrap() + 4;
+
+    let result = lsp.get_references(&text, offset);
+    let source_ranges: Vec<_> = result
+        .iter()
+        .filter(|location| location.uri.as_str() == "sql://internal")
+        .map(|location| location.range)
+        .collect();
+
+    assert_eq!(
+        source_ranges.len(),
+        2,
+        "Only active SQL identifiers should count as references. Got: {:?}",
+        source_ranges
+    );
+}
+
+#[test]
+fn test_references_from_string_literal_return_empty() {
+    let lsp = create_test_lsp();
+    let text = Rope::from("SELECT username FROM users WHERE username = 'username in string'");
+    let offset = text.to_string().rfind("username").unwrap() + 4;
+
+    let result = lsp.get_references(&text, offset);
+
+    assert!(
+        result.is_empty(),
+        "Reference lookup from inside string literal should be empty, got {result:?}"
     );
 }
 
@@ -96,6 +136,32 @@ fn test_references_for_qualified_column() {
 }
 
 #[test]
+fn test_references_for_qualified_column_do_not_cross_qualifiers() {
+    let lsp = create_test_lsp();
+    let sql = "SELECT users.user_id, orders.user_id FROM users JOIN orders ON users.user_id = orders.user_id";
+    let text = Rope::from(sql);
+    let offset = sql.find("users.user_id").unwrap() + "users.".len() + 2;
+
+    let result = lsp.get_references(&text, offset);
+    let internal_ranges: Vec<_> = result
+        .iter()
+        .filter(|location| location.uri.as_str() == "sql://internal")
+        .map(|location| location.range)
+        .collect();
+
+    assert_eq!(
+        internal_ranges.len(),
+        2,
+        "qualified references should stay scoped to same qualifier: {internal_ranges:?}"
+    );
+    assert!(internal_ranges.iter().all(|range| {
+        let start = range.start.character as usize;
+        let prefix_start = start.saturating_sub("users.".len());
+        &sql[prefix_start..start] == "users."
+    }));
+}
+
+#[test]
 fn test_references_for_unknown_symbol() {
     let lsp = create_test_lsp();
 
@@ -111,6 +177,63 @@ fn test_references_for_unknown_symbol() {
         !result.is_empty(),
         "Should find at least 1 reference to 'unknown_field' in the query itself"
     );
+}
+
+#[test]
+fn test_table_references_only_include_views_with_matching_definitions() {
+    let schema_service = Arc::new(SchemaService::new());
+    let mut lsp = SqlLsp::new(schema_service);
+    let mut cache = SchemaCache::default();
+
+    cache.tables.insert(
+        "users".to_string(),
+        TableInfo {
+            name: "users".to_string(),
+            schema: None,
+            comment: None,
+            row_count: None,
+            table_type: zqlz_core::TableType::Table,
+        },
+    );
+    cache.views.insert(
+        "user_summary".to_string(),
+        ViewInfo {
+            name: "user_summary".to_string(),
+            schema: None,
+            definition: Some("SELECT id FROM users".to_string()),
+            is_materialized: false,
+        },
+    );
+    cache.views.insert(
+        "audit_summary".to_string(),
+        ViewInfo {
+            name: "audit_summary".to_string(),
+            schema: None,
+            definition: Some("SELECT id FROM audit_log".to_string()),
+            is_materialized: false,
+        },
+    );
+    cache.views.insert(
+        "opaque_view".to_string(),
+        ViewInfo {
+            name: "opaque_view".to_string(),
+            schema: None,
+            definition: None,
+            is_materialized: false,
+        },
+    );
+    lsp.set_schema_cache(cache);
+
+    let text = Rope::from("SELECT * FROM users");
+    let offset = text.to_string().find("users").unwrap() + 1;
+    let result = lsp.get_references(&text, offset);
+    let view_uris: Vec<_> = result
+        .iter()
+        .map(|location| location.uri.as_str().to_string())
+        .filter(|uri| uri.starts_with("sql://internal/view/"))
+        .collect();
+
+    assert_eq!(view_uris, vec!["sql://internal/view/user_summary"]);
 }
 
 #[test]

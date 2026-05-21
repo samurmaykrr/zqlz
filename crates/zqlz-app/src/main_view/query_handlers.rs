@@ -797,6 +797,10 @@ impl MainView {
 
         self.configure_query_editor_switchers(&query_editor, window, cx);
 
+        self.workspace_state.update(cx, |state, cx| {
+            state.set_active_editor(Some(editor_id), cx);
+        });
+
         let focus_handle = query_editor.read(cx).editor_focus_handle(cx);
         window.focus(&focus_handle, cx);
 
@@ -818,6 +822,7 @@ impl MainView {
     pub(super) fn detach_query_editor_subscription(&mut self, query_editor: &Entity<QueryEditor>) {
         let entity_id = query_editor.entity_id();
         self.query_editor_subscriptions.remove(&entity_id);
+        self.query_editor_ids.remove(&entity_id);
         self.query_editors.retain(|weak_editor| {
             weak_editor
                 .upgrade()
@@ -850,6 +855,8 @@ impl MainView {
 
         self.query_editor_subscriptions
             .insert(query_editor.entity_id(), subscription);
+        self.query_editor_ids
+            .insert(query_editor.entity_id(), editor_id);
         self.query_editors.push(query_editor.downgrade());
     }
 
@@ -1518,12 +1525,6 @@ impl MainView {
                             state.set_active_connection(Some(*connection_id), cx);
                             state.set_active_database(default_database.clone(), cx);
                         });
-
-                        if let Some(database_name) = default_database.as_ref() {
-                            _this.connection_sidebar.update(cx, |sidebar, cx| {
-                                sidebar.set_database_loading(*connection_id, database_name, true, cx);
-                            });
-                        }
 
                         if should_refresh_connection_surfaces {
                             _this.request_refresh(RefreshScope::ConnectionSurfaces(*connection_id), cx);

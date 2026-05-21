@@ -193,6 +193,7 @@ impl CellEditorPanel {
         let editor_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .multi_line(true)
+                .line_number(true)
                 .soft_wrap(true)
                 .placeholder("Enter value...")
         });
@@ -293,6 +294,7 @@ impl CellEditorPanel {
                 self.text_view_input = Some(cx.new(|cx| {
                     InputState::new(window, cx)
                         .multi_line(true)
+                        .line_number(true)
                         .soft_wrap(true)
                         .placeholder("(decoded text)")
                 }));
@@ -321,7 +323,7 @@ impl CellEditorPanel {
         self.hex_horizontal_scroll_handle = ScrollHandle::new();
 
         let value = cell_data.current_value.display_for_editor();
-        let language = self.detect_language(&cell_data.column_type, &value);
+        let language = Self::detect_language(&cell_data.column_type, &value);
         let is_json = self.is_json_column(&cell_data.column_type);
         let placeholder = SharedString::from(Self::type_profile(&cell_data).placeholder);
 
@@ -341,6 +343,8 @@ impl CellEditorPanel {
             if let Some(lang) = language {
                 tracing::info!("Enabling syntax highlighting for language: {}", lang);
                 input = input.code_editor(lang).line_number(true);
+            } else {
+                input = input.line_number(true);
             }
 
             input
@@ -358,6 +362,21 @@ impl CellEditorPanel {
         self.is_modified = false;
         self.validation_error = None;
 
+        cx.notify();
+    }
+
+    pub fn mark_current_cell_saved(&mut self, value: Value, cx: &mut Context<Self>) {
+        let Some(cell_data) = self.cell_data.as_mut() else {
+            return;
+        };
+
+        cell_data.current_value = value.clone();
+
+        if let Some(row_value) = cell_data.all_row_values.get_mut(cell_data.col_index) {
+            *row_value = value;
+        }
+
+        self.is_modified = false;
         cx.notify();
     }
 
@@ -634,10 +653,10 @@ impl CellEditorPanel {
     /// Column type has priority because it is the least ambiguous signal.
     /// Content heuristics are a fallback so JSON stored in generic TEXT columns
     /// still gets highlighting and line numbers.
-    fn detect_language(&self, column_type: &str, value: &str) -> Option<&'static str> {
+    fn detect_language(column_type: &str, value: &str) -> Option<&'static str> {
         let lower = column_type.to_lowercase();
 
-        if self.is_json_column(column_type)
+        if Value::is_json_data_type(column_type)
             || Self::is_array_column(column_type)
             || Self::base_column_type(column_type) == "set"
         {
@@ -2087,6 +2106,26 @@ mod tests {
             "507f1f77bcf86cd799439011"
         ));
         assert!(!CellEditorPanel::is_valid_object_id("2"));
+    }
+
+    #[test]
+    fn language_detection_keeps_plain_text_unhighlighted() {
+        assert_eq!(
+            CellEditorPanel::detect_language("TEXT", "first line\nsecond line"),
+            None
+        );
+    }
+
+    #[test]
+    fn language_detection_enables_json_code_editor() {
+        assert_eq!(
+            CellEditorPanel::detect_language("TEXT", "{\"items\":[1,2]}"),
+            Some("json")
+        );
+        assert_eq!(
+            CellEditorPanel::detect_language("JSONB", "plain"),
+            Some("json")
+        );
     }
 
     #[test]

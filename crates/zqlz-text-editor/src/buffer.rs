@@ -747,6 +747,14 @@ impl TextBuffer {
         self.rope.len_lines()
     }
 
+    pub fn max_line_byte_len(&self) -> usize {
+        (0..self.rope.len_lines())
+            .filter_map(|line_index| self.rope.get_line(line_index))
+            .map(|line| line.len_bytes())
+            .max()
+            .unwrap_or(0)
+    }
+
     /// Returns the text of a specific line, including its line ending.
     ///
     /// Returns `None` if the line index is out of bounds.
@@ -1367,6 +1375,16 @@ impl BufferSnapshot {
         Some(self.rope.byte_to_line(offset))
     }
 
+    /// Returns the nearest character boundary at or before the given byte offset.
+    pub fn floor_char_boundary(&self, offset: usize) -> Option<usize> {
+        if offset > self.rope.len_bytes() {
+            return None;
+        }
+
+        let char_offset = self.rope.try_byte_to_char(offset).ok()?;
+        self.rope.try_char_to_byte(char_offset).ok()
+    }
+
     /// Converts a position to a byte offset within the snapshot.
     pub fn position_to_offset(&self, pos: Position) -> Result<usize> {
         if pos.line >= self.rope.len_lines() {
@@ -1484,6 +1502,15 @@ mod tests {
         assert_eq!(buffer.line(0), Some("Line 1\n".to_string()));
         assert_eq!(buffer.line(1), Some("Line 2\n".to_string()));
         assert_eq!(buffer.line(2), Some("Line 3".to_string()));
+    }
+
+    #[test]
+    fn max_line_byte_len_tracks_rope_lines_without_flattening_text() {
+        let buffer = TextBuffer::new("short\nmuch longer line\néé");
+        assert_eq!(buffer.max_line_byte_len(), "much longer line\n".len());
+
+        let buffer = TextBuffer::new("short\nmuch longer line");
+        assert_eq!(buffer.max_line_byte_len(), "much longer line".len());
     }
 
     #[test]

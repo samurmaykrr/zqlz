@@ -33,8 +33,8 @@ pub enum LanguageType {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum GrammarType {
-    /// Use tree-sitter grammar (specify name)
-    TreeSitter(String),
+    /// Use tree-sitter grammar named by [`GrammarConfig::name`].
+    TreeSitter,
     /// No tree-sitter grammar, use keyword-based highlighting
     #[default]
     None,
@@ -145,6 +145,15 @@ pub struct DialectConfig {
     /// Syntax features
     #[serde(default)]
     pub syntax: SyntaxConfig,
+    /// Syntax highlighting and editor behavior.
+    #[serde(default)]
+    pub syntax_highlighting: SyntaxHighlightingConfig,
+    /// Driver-owned syntax tokens layered on top of base SQL terms.
+    #[serde(default)]
+    pub syntax_terms: SyntaxTermsConfig,
+    /// Driver-owned syntax quality fixture used by editor probes.
+    #[serde(default)]
+    pub syntax_quality: SyntaxQualityConfig,
     /// Comment styles
     #[serde(default)]
     pub comments: CommentsConfig,
@@ -159,11 +168,215 @@ impl Default for DialectConfig {
             grammar: GrammarConfig::default(),
             parser: ParserConfig::default(),
             syntax: SyntaxConfig::default(),
+            syntax_highlighting: SyntaxHighlightingConfig::default(),
+            syntax_terms: SyntaxTermsConfig::default(),
+            syntax_quality: SyntaxQualityConfig::default(),
             comments: CommentsConfig {
                 line_comment: Some("--".to_string()),
                 block_comment_start: Some("/*".to_string()),
                 block_comment_end: Some("*/".to_string()),
             },
+        }
+    }
+}
+
+/// Driver-owned syntax tokens used by fast editor overlays.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntaxTermsConfig {
+    #[serde(default)]
+    pub keywords: Vec<String>,
+    #[serde(default)]
+    pub functions: Vec<String>,
+    #[serde(default)]
+    pub types: Vec<String>,
+}
+
+/// Expected or rejected token assignment in a driver-owned syntax fixture.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntaxQualityTokenConfig {
+    pub token: String,
+    pub kind: String,
+}
+
+/// Driver-owned syntax fixture for static editor/highlighter probes.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntaxQualityConfig {
+    #[serde(default)]
+    pub text: Option<String>,
+    #[serde(default)]
+    pub expected: Vec<SyntaxQualityTokenConfig>,
+    #[serde(default)]
+    pub rejected: Vec<SyntaxQualityTokenConfig>,
+    #[serde(default)]
+    pub expected_outline: Vec<String>,
+}
+
+/// Tree-sitter grammar selected by a dialect bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SyntaxGrammarName {
+    #[default]
+    Sql,
+    Javascript,
+    None,
+}
+
+/// Highlight query family selected by a dialect bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxHighlightQueryName {
+    None,
+    #[default]
+    Sql,
+    Postgresql,
+    Mysql,
+    Sqlite,
+    Clickhouse,
+    Mongodb,
+    Redis,
+}
+
+/// Bind placeholder syntax supported by editor overlays and parameter tooling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxParameterPlaceholderMode {
+    Disabled,
+    SqlNoQuestionMark,
+    #[default]
+    SqlQuestionMark,
+}
+
+/// Bracket matching strategy selected by a dialect bundle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxBracketCapabilityName {
+    #[default]
+    TreeSitter,
+    Standard,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxExecutionUnitModeName {
+    #[default]
+    SqlStatement,
+    CommandLine,
+    WholeDocument,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxDocumentSymbolModeName {
+    #[default]
+    SqlStatements,
+    CommandCommands,
+    MongodbCollections,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SyntaxOverlayModeName {
+    #[default]
+    Sql,
+    Command,
+    Document,
+    None,
+}
+
+/// Declarative editor syntax behavior loaded from config.toml.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SyntaxHighlightingConfig {
+    /// Canonical syntax profile shared by aliases and driver variants.
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// Tree-sitter grammar selected for parsing/highlighting.
+    #[serde(default)]
+    pub grammar: SyntaxGrammarName,
+    /// Highlight query family selected from bundled query assets.
+    #[serde(default)]
+    pub highlight_query: SyntaxHighlightQueryName,
+    /// Placeholder mode for parameter overlays/binders.
+    #[serde(default)]
+    pub parameter_placeholders: SyntaxParameterPlaceholderMode,
+    /// Bracket matching behavior for editor structural navigation/highlights.
+    #[serde(default)]
+    pub brackets: SyntaxBracketCapabilityName,
+    /// Query execution unit selection used by editor run-target logic.
+    #[serde(default)]
+    pub execution_unit: SyntaxExecutionUnitModeName,
+    /// Outline/document symbol extraction behavior.
+    #[serde(default)]
+    pub document_symbols: SyntaxDocumentSymbolModeName,
+    /// Driver-specific protected range and overlay token behavior.
+    #[serde(default)]
+    pub overlays: SyntaxOverlayModeName,
+    /// Enable command-token overlay mode.
+    #[serde(default)]
+    pub command_syntax: bool,
+    /// Enable document-token overlay mode.
+    #[serde(default)]
+    pub document_syntax: bool,
+    /// Enable SQL overlays for literals, params, dialect words, and identifiers.
+    #[serde(default = "default_true")]
+    pub sql_overlays: bool,
+    /// Protect and paint PostgreSQL dollar-quoted strings.
+    #[serde(default)]
+    pub dollar_quoted_strings: bool,
+    /// Single-character edits that should request completion immediately.
+    #[serde(default)]
+    pub completion_triggers: Vec<String>,
+    /// Extra non-alphanumeric characters treated as completion word input.
+    #[serde(default)]
+    pub completion_word_chars: Vec<String>,
+    /// Uppercase trailing words that request one extra indent unit on newline.
+    #[serde(default)]
+    pub indent_after_keywords: Vec<String>,
+    /// Two-character opener/closer pairs used for auto-close and auto-surround.
+    #[serde(default)]
+    pub auto_close_pairs: Vec<String>,
+    /// Folding behavior selected by driver syntax metadata.
+    #[serde(default)]
+    pub folding: SyntaxFoldingConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct SyntaxFoldingConfig {
+    #[serde(default)]
+    pub begin_end_blocks: Option<bool>,
+    #[serde(default)]
+    pub case_blocks: Option<bool>,
+    #[serde(default)]
+    pub function_definitions: Option<bool>,
+    #[serde(default)]
+    pub parenthesis_blocks: Option<bool>,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for SyntaxHighlightingConfig {
+    fn default() -> Self {
+        Self {
+            profile: None,
+            grammar: SyntaxGrammarName::Sql,
+            highlight_query: SyntaxHighlightQueryName::Sql,
+            parameter_placeholders: SyntaxParameterPlaceholderMode::SqlQuestionMark,
+            brackets: SyntaxBracketCapabilityName::TreeSitter,
+            execution_unit: SyntaxExecutionUnitModeName::SqlStatement,
+            document_symbols: SyntaxDocumentSymbolModeName::SqlStatements,
+            overlays: SyntaxOverlayModeName::Sql,
+            command_syntax: false,
+            document_syntax: false,
+            sql_overlays: true,
+            dollar_quoted_strings: false,
+            completion_triggers: Vec::new(),
+            completion_word_chars: Vec::new(),
+            indent_after_keywords: Vec::new(),
+            auto_close_pairs: Vec::new(),
+            folding: SyntaxFoldingConfig::default(),
         }
     }
 }
@@ -184,11 +397,36 @@ impl DialectConfig {
         self.parser.skip_tree_sitter_errors
             || matches!(self.grammar.grammar_type, GrammarType::None)
     }
+
+    /// Resolve the custom validator implementation declared by this dialect.
+    pub fn custom_validator_kind(&self) -> Option<CustomValidatorKind> {
+        if !self.parser.custom_validator {
+            return None;
+        }
+
+        let profile = self
+            .syntax_highlighting
+            .profile
+            .as_deref()
+            .unwrap_or(self.id.as_str());
+        let capabilities = crate::get_syntax_driver_capabilities(profile);
+
+        match capabilities.profile {
+            "redis" => Some(CustomValidatorKind::Redis),
+            _ => None,
+        }
+    }
 }
 
 // ============================================================================
 // Completions Configuration (completions.toml)
 // ============================================================================
+
+/// Custom validator implementation selected by driver syntax metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CustomValidatorKind {
+    Redis,
+}
 
 /// Keyword category for grouping in completions
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -670,68 +908,232 @@ impl From<DataTypeCategory> for LegacyDataTypeCategory {
     }
 }
 
+impl From<LegacyKeywordCategory> for KeywordCategory {
+    fn from(cat: LegacyKeywordCategory) -> Self {
+        match cat {
+            LegacyKeywordCategory::Dql => KeywordCategory::Query,
+            LegacyKeywordCategory::Dml => KeywordCategory::Mutation,
+            LegacyKeywordCategory::Ddl => KeywordCategory::Definition,
+            LegacyKeywordCategory::Dcl => KeywordCategory::Control,
+            LegacyKeywordCategory::Transaction => KeywordCategory::Transaction,
+            LegacyKeywordCategory::Clause => KeywordCategory::Clause,
+            LegacyKeywordCategory::Operator => KeywordCategory::Operator,
+            LegacyKeywordCategory::DatabaseSpecific => KeywordCategory::Server,
+            LegacyKeywordCategory::Other => KeywordCategory::Other,
+        }
+    }
+}
+
+impl From<LegacyFunctionCategory> for FunctionCategory {
+    fn from(cat: LegacyFunctionCategory) -> Self {
+        match cat {
+            LegacyFunctionCategory::Aggregate => FunctionCategory::Aggregate,
+            LegacyFunctionCategory::Window => FunctionCategory::Window,
+            LegacyFunctionCategory::String => FunctionCategory::String,
+            LegacyFunctionCategory::Numeric => FunctionCategory::Numeric,
+            LegacyFunctionCategory::DateTime => FunctionCategory::Datetime,
+            LegacyFunctionCategory::Conversion => FunctionCategory::Conversion,
+            LegacyFunctionCategory::Conditional => FunctionCategory::Conditional,
+            LegacyFunctionCategory::Json => FunctionCategory::Json,
+            LegacyFunctionCategory::Array => FunctionCategory::Array,
+            LegacyFunctionCategory::DatabaseSpecific => FunctionCategory::Database,
+            LegacyFunctionCategory::Other => FunctionCategory::Other,
+        }
+    }
+}
+
+impl From<LegacyDataTypeCategory> for DataTypeCategory {
+    fn from(cat: LegacyDataTypeCategory) -> Self {
+        match cat {
+            LegacyDataTypeCategory::Integer => DataTypeCategory::Integer,
+            LegacyDataTypeCategory::Float => DataTypeCategory::Float,
+            LegacyDataTypeCategory::Decimal => DataTypeCategory::Decimal,
+            LegacyDataTypeCategory::String => DataTypeCategory::String,
+            LegacyDataTypeCategory::Binary => DataTypeCategory::Binary,
+            LegacyDataTypeCategory::Boolean => DataTypeCategory::Boolean,
+            LegacyDataTypeCategory::Date => DataTypeCategory::Date,
+            LegacyDataTypeCategory::Time => DataTypeCategory::Time,
+            LegacyDataTypeCategory::DateTime => DataTypeCategory::Datetime,
+            LegacyDataTypeCategory::Interval => DataTypeCategory::Interval,
+            LegacyDataTypeCategory::Json => DataTypeCategory::Json,
+            LegacyDataTypeCategory::Array => DataTypeCategory::Array,
+            LegacyDataTypeCategory::Uuid => DataTypeCategory::Uuid,
+            LegacyDataTypeCategory::Network => DataTypeCategory::Network,
+            LegacyDataTypeCategory::Geometry => DataTypeCategory::Geometry,
+            LegacyDataTypeCategory::Other => DataTypeCategory::Other,
+        }
+    }
+}
+
+/// Build declarative completion metadata from an existing legacy dialect.
+///
+/// This lets drivers migrate syntax/editor capabilities to dialect bundles
+/// without duplicating or dropping mature completion metadata during migration.
+pub fn completions_config_from_dialect_info(dialect: &DialectInfo) -> CompletionsConfig {
+    CompletionsConfig {
+        keywords: dialect
+            .keywords
+            .iter()
+            .map(|keyword| KeywordDef {
+                name: keyword.keyword.to_string(),
+                category: keyword.category.into(),
+                description: keyword.description.as_ref().map(ToString::to_string),
+                documentation: keyword.documentation.as_ref().map(ToString::to_string),
+                snippet: None,
+            })
+            .collect(),
+        functions: dialect
+            .functions
+            .iter()
+            .map(|function| FunctionDef {
+                name: function.name.to_string(),
+                category: function.category.into(),
+                signature: function
+                    .signatures
+                    .first()
+                    .map(|signature| signature.signature.to_string()),
+                return_type: function.return_type.as_ref().map(ToString::to_string),
+                description: function.description.as_ref().map(ToString::to_string),
+                documentation: None,
+            })
+            .collect(),
+        data_types: dialect
+            .data_types
+            .iter()
+            .map(|data_type| DataTypeDef {
+                name: data_type.name.to_string(),
+                category: data_type.category.into(),
+                aliases: data_type.aliases.iter().map(ToString::to_string).collect(),
+                accepts_length: data_type.accepts_length,
+                accepts_scale: data_type.accepts_scale,
+                description: data_type.description.as_ref().map(ToString::to_string),
+            })
+            .collect(),
+        snippets: Vec::new(),
+    }
+}
+
+pub fn dialect_bundle_from_legacy_info(
+    config_toml: &str,
+    dialect: &DialectInfo,
+    dialect_name: &str,
+) -> DialectBundle {
+    let config: DialectConfig = toml::from_str(config_toml).unwrap_or_else(|error| {
+        panic!("Failed to parse {dialect_name} dialect config.toml: {error}")
+    });
+    let completions = completions_config_from_dialect_info(dialect);
+
+    DialectBundle::new(config, completions)
+}
+
 impl From<&DialectBundle> for DialectInfo {
     fn from(bundle: &DialectBundle) -> Self {
         let config = &bundle.config;
         let completions = &bundle.completions;
+        let mut keywords: Vec<KeywordInfo> = completions
+            .keywords
+            .iter()
+            .map(|k| {
+                let mut info = KeywordInfo::new(
+                    Box::leak(k.name.clone().into_boxed_str()),
+                    k.category.into(),
+                );
+                if let Some(desc) = &k.description {
+                    info.description = Some(Cow::Owned(desc.clone()));
+                }
+                if let Some(doc) = &k.documentation {
+                    info.documentation = Some(Cow::Owned(doc.clone()));
+                }
+                info
+            })
+            .collect();
+        for keyword in &config.syntax_terms.keywords {
+            if !keywords
+                .iter()
+                .any(|info| info.keyword.eq_ignore_ascii_case(keyword))
+            {
+                keywords.push(KeywordInfo::new(
+                    Box::leak(keyword.clone().into_boxed_str()),
+                    crate::keyword_term_category(keyword),
+                ));
+            }
+        }
+
+        let mut functions: Vec<SqlFunctionInfo> = completions
+            .functions
+            .iter()
+            .map(|f| {
+                let mut info = SqlFunctionInfo::new(
+                    Box::leak(f.name.clone().into_boxed_str()),
+                    f.category.into(),
+                );
+                if let Some(sig) = &f.signature {
+                    info = info.with_signature(Box::leak(sig.clone().into_boxed_str()));
+                }
+                if let Some(desc) = &f.description {
+                    info.description = Some(Cow::Owned(desc.clone()));
+                }
+                if let Some(ret) = &f.return_type {
+                    info.return_type = Some(Cow::Owned(ret.clone()));
+                }
+                info
+            })
+            .collect();
+        for function in &config.syntax_terms.functions {
+            if !functions
+                .iter()
+                .any(|info| info.name.eq_ignore_ascii_case(function))
+            {
+                functions.push(SqlFunctionInfo::new(
+                    Box::leak(function.clone().into_boxed_str()),
+                    crate::function_term_category(function),
+                ));
+            }
+        }
+
+        let mut data_types: Vec<LegacyDataTypeInfo> = completions
+            .data_types
+            .iter()
+            .map(|t| {
+                let mut info = LegacyDataTypeInfo::new(
+                    Box::leak(t.name.clone().into_boxed_str()),
+                    t.category.into(),
+                );
+                info.aliases = t.aliases.iter().map(|a| Cow::Owned(a.clone())).collect();
+                info.accepts_length = t.accepts_length;
+                info.accepts_scale = t.accepts_scale;
+                if let Some(desc) = &t.description {
+                    info.description = Some(Cow::Owned(desc.clone()));
+                }
+                info
+            })
+            .collect();
+        for data_type in &config.syntax_terms.types {
+            if config
+                .syntax_terms
+                .keywords
+                .iter()
+                .any(|keyword| keyword.eq_ignore_ascii_case(data_type))
+            {
+                continue;
+            }
+            if !data_types
+                .iter()
+                .any(|info| info.name.eq_ignore_ascii_case(data_type))
+            {
+                data_types.push(LegacyDataTypeInfo::new(
+                    Box::leak(data_type.clone().into_boxed_str()),
+                    LegacyDataTypeCategory::Other,
+                ));
+            }
+        }
 
         DialectInfo {
             id: Cow::Owned(config.id.clone()),
             display_name: Cow::Owned(config.display_name.clone()),
-            keywords: completions
-                .keywords
-                .iter()
-                .map(|k| {
-                    let mut info = KeywordInfo::new(
-                        Box::leak(k.name.clone().into_boxed_str()),
-                        k.category.into(),
-                    );
-                    if let Some(desc) = &k.description {
-                        info.description = Some(Cow::Owned(desc.clone()));
-                    }
-                    if let Some(doc) = &k.documentation {
-                        info.documentation = Some(Cow::Owned(doc.clone()));
-                    }
-                    info
-                })
-                .collect(),
-            functions: completions
-                .functions
-                .iter()
-                .map(|f| {
-                    let mut info = SqlFunctionInfo::new(
-                        Box::leak(f.name.clone().into_boxed_str()),
-                        f.category.into(),
-                    );
-                    if let Some(sig) = &f.signature {
-                        info = info.with_signature(Box::leak(sig.clone().into_boxed_str()));
-                    }
-                    if let Some(desc) = &f.description {
-                        info.description = Some(Cow::Owned(desc.clone()));
-                    }
-                    if let Some(ret) = &f.return_type {
-                        info.return_type = Some(Cow::Owned(ret.clone()));
-                    }
-                    info
-                })
-                .collect(),
-            data_types: completions
-                .data_types
-                .iter()
-                .map(|t| {
-                    let mut info = LegacyDataTypeInfo::new(
-                        Box::leak(t.name.clone().into_boxed_str()),
-                        t.category.into(),
-                    );
-                    info.aliases = t.aliases.iter().map(|a| Cow::Owned(a.clone())).collect();
-                    info.accepts_length = t.accepts_length;
-                    info.accepts_scale = t.accepts_scale;
-                    if let Some(desc) = &t.description {
-                        info.description = Some(Cow::Owned(desc.clone()));
-                    }
-                    info
-                })
-                .collect(),
+            keywords,
+            functions,
+            data_types,
             table_options: vec![],
             auto_increment: None,
             identifier_quote: config.syntax.identifier_quote,
@@ -792,9 +1194,39 @@ mod tests {
                 string_quote: '"',
                 case_sensitive: true,
                 statement_terminator: '\n',
-                supports_comments: false,
+                supports_comments: true,
             },
-            comments: CommentsConfig::default(),
+            syntax_highlighting: SyntaxHighlightingConfig {
+                profile: Some("redis".to_string()),
+                grammar: SyntaxGrammarName::None,
+                highlight_query: SyntaxHighlightQueryName::Redis,
+                parameter_placeholders: SyntaxParameterPlaceholderMode::Disabled,
+                brackets: SyntaxBracketCapabilityName::Standard,
+                execution_unit: SyntaxExecutionUnitModeName::CommandLine,
+                document_symbols: SyntaxDocumentSymbolModeName::CommandCommands,
+                overlays: SyntaxOverlayModeName::Command,
+                command_syntax: true,
+                document_syntax: false,
+                sql_overlays: false,
+                dollar_quoted_strings: false,
+                completion_triggers: vec![" ".to_string()],
+                completion_word_chars: vec![":".to_string(), "-".to_string()],
+                indent_after_keywords: Vec::new(),
+                auto_close_pairs: vec!["\"\"".to_string()],
+                folding: SyntaxFoldingConfig {
+                    begin_end_blocks: Some(false),
+                    case_blocks: Some(false),
+                    function_definitions: Some(false),
+                    parenthesis_blocks: Some(false),
+                },
+            },
+            syntax_terms: SyntaxTermsConfig::default(),
+            syntax_quality: SyntaxQualityConfig::default(),
+            comments: CommentsConfig {
+                line_comment: Some("#".to_string()),
+                block_comment_start: None,
+                block_comment_end: None,
+            },
         };
 
         assert!(!config.is_sql());
@@ -804,7 +1236,7 @@ mod tests {
 
     #[test]
     fn test_parse_config_toml() {
-        let toml_str = r#"
+        let toml_str = r##"
 id = "redis"
 display_name = "Redis Commands"
 language_type = "command"
@@ -823,14 +1255,121 @@ case_sensitive = true
 statement_terminator = """
 
 """
-supports_comments = false
-"#;
+supports_comments = true
+
+[syntax_highlighting]
+profile = "redis"
+grammar = "none"
+highlight_query = "redis"
+parameter_placeholders = "disabled"
+brackets = "standard"
+execution_unit = "command-line"
+document_symbols = "command-commands"
+overlays = "command"
+command_syntax = true
+sql_overlays = false
+completion_triggers = [" "]
+completion_word_chars = [":", "-"]
+auto_close_pairs = ["\"\""]
+
+[comments]
+line_comment = "#"
+
+[syntax_quality]
+text = "GET user:1"
+
+[[syntax_quality.expected]]
+token = "GET"
+kind = "Keyword"
+"##;
 
         let config: DialectConfig = toml::from_str(toml_str).unwrap();
         assert_eq!(config.id, "redis");
         assert_eq!(config.language_type, LanguageType::Command);
         assert!(config.skip_sql_validation());
         assert_eq!(config.syntax.statement_terminator, '\n');
+        assert_eq!(
+            config.syntax_highlighting.highlight_query,
+            SyntaxHighlightQueryName::Redis
+        );
+        assert_eq!(
+            config.syntax_highlighting.brackets,
+            SyntaxBracketCapabilityName::Standard
+        );
+        assert_eq!(
+            config.syntax_highlighting.execution_unit,
+            SyntaxExecutionUnitModeName::CommandLine
+        );
+        assert_eq!(
+            config.syntax_highlighting.document_symbols,
+            SyntaxDocumentSymbolModeName::CommandCommands
+        );
+        assert_eq!(
+            config.syntax_highlighting.overlays,
+            SyntaxOverlayModeName::Command
+        );
+        assert!(config.syntax_highlighting.command_syntax);
+        assert!(!config.syntax_highlighting.sql_overlays);
+        assert_eq!(config.syntax_highlighting.completion_triggers, vec![" "]);
+        assert_eq!(
+            config.syntax_highlighting.completion_word_chars,
+            vec![":", "-"]
+        );
+        assert!(config.syntax_highlighting.indent_after_keywords.is_empty());
+        assert_eq!(config.syntax_highlighting.auto_close_pairs, vec!["\"\""]);
+        assert_eq!(config.comments.line_comment.as_deref(), Some("#"));
+        assert_eq!(config.syntax_quality.text.as_deref(), Some("GET user:1"));
+        assert_eq!(config.syntax_quality.expected[0].token, "GET");
+        assert_eq!(config.syntax_quality.expected[0].kind, "Keyword");
+    }
+
+    #[test]
+    fn test_parse_tree_sitter_grammar_config_toml() {
+        let toml_str = r#"
+id = "postgresql"
+display_name = "PostgreSQL"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[syntax_highlighting]
+profile = "postgresql"
+grammar = "sql"
+highlight_query = "postgresql"
+"#;
+
+        let config: DialectConfig = toml::from_str(toml_str).unwrap();
+        assert_eq!(config.grammar.grammar_type, GrammarType::TreeSitter);
+        assert_eq!(config.grammar.name.as_deref(), Some("sql"));
+        assert!(!config.skip_tree_sitter_errors());
+    }
+
+    #[test]
+    fn custom_validator_kind_uses_driver_syntax_profile() {
+        let config = DialectConfig {
+            id: "redis-compatible".to_string(),
+            display_name: "Redis Compatible".to_string(),
+            language_type: LanguageType::Command,
+            parser: ParserConfig {
+                skip_sql_validation: true,
+                skip_tree_sitter_errors: true,
+                custom_validator: true,
+            },
+            syntax_highlighting: SyntaxHighlightingConfig {
+                profile: Some(" Redis ".to_string()),
+                overlays: SyntaxOverlayModeName::Command,
+                command_syntax: true,
+                sql_overlays: false,
+                ..SyntaxHighlightingConfig::default()
+            },
+            ..DialectConfig::default()
+        };
+
+        assert_eq!(
+            config.custom_validator_kind(),
+            Some(CustomValidatorKind::Redis)
+        );
     }
 
     #[test]

@@ -1601,6 +1601,11 @@ impl MainView {
 
     fn close_active_workspace_item(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         tracing::info!("CloseActiveTab action handler triggered!");
+        if window.has_active_dialog(cx) {
+            tracing::debug!("Ignoring close active tab action while dialog is open");
+            return;
+        }
+
         let close_intent = self
             .workspace_controller
             .read(cx)

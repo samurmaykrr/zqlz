@@ -331,6 +331,10 @@ impl TextDocument {
         self.buffer.len()
     }
 
+    pub fn max_line_byte_len(&self) -> usize {
+        self.buffer.max_line_byte_len()
+    }
+
     pub fn start_buffer_transaction(&mut self) -> crate::TransactionId {
         self.buffer.start_transaction_at()
     }
@@ -573,6 +577,10 @@ impl TextDocument {
         self.language_pipeline.has_syntax_highlighting()
     }
 
+    pub fn syntax_language_profile(&self) -> &'static str {
+        self.language_pipeline.syntax_language_profile()
+    }
+
     pub fn syntax_revision(&self) -> usize {
         self.language_pipeline.syntax_snapshot().revision()
     }
@@ -637,6 +645,36 @@ impl TextDocument {
     pub fn set_syntax_language_profile(&mut self, language_profile: &'static str) -> bool {
         self.language_pipeline
             .set_syntax_language_profile(language_profile)
+    }
+
+    pub fn set_syntax_term_overrides(
+        &mut self,
+        overrides: crate::syntax::SyntaxTermOverrides,
+    ) -> bool {
+        self.language_pipeline.set_syntax_term_overrides(overrides)
+    }
+
+    pub fn set_driver_syntax_terms(
+        &mut self,
+        overrides: crate::syntax::SyntaxTermOverrides,
+    ) -> bool {
+        self.language_pipeline.set_driver_syntax_terms(overrides)
+    }
+
+    pub fn clear_syntax_term_overrides(&mut self) -> bool {
+        self.language_pipeline.clear_syntax_term_overrides()
+    }
+
+    pub fn set_syntax_capabilities_override(
+        &mut self,
+        capabilities: zqlz_core::SyntaxDriverCapabilities,
+    ) -> bool {
+        self.language_pipeline
+            .set_syntax_capabilities_override(capabilities)
+    }
+
+    pub fn clear_syntax_capabilities_override(&mut self) -> bool {
+        self.language_pipeline.clear_syntax_capabilities_override()
     }
 
     pub fn begin_syntax_reparse(

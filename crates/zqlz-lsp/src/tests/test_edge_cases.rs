@@ -43,6 +43,33 @@ fn test_offset_at_end() {
 }
 
 #[test]
+fn test_completion_offset_inside_multibyte_character_does_not_panic() {
+    let mut lsp = create_test_lsp();
+    let sql = "SELECT '😀' FROM users";
+    let text = Rope::from(sql);
+    let emoji_start = sql.find('😀').expect("emoji");
+    let offset_inside_emoji = emoji_start + 1;
+
+    let completions = lsp.get_completions(&text, offset_inside_emoji);
+
+    println!(
+        "Got {} completions for mid-codepoint offset",
+        completions.len()
+    );
+}
+
+#[test]
+fn test_context_analyzer_offset_inside_multibyte_character_does_not_panic() {
+    let analyzer = crate::ContextAnalyzer::new().expect("context analyzer");
+    let sql = "SELECT '😀' FROM users";
+    let text = Rope::from(sql);
+    let emoji_start = sql.find('😀').expect("emoji");
+    let offset_inside_emoji = emoji_start + 2;
+
+    let _context = analyzer.analyze(&text, offset_inside_emoji);
+}
+
+#[test]
 fn test_query_with_only_whitespace() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("   ");

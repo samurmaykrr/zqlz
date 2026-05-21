@@ -152,6 +152,73 @@ impl SqliteConnection {
         Ok(requested_name.to_string())
     }
 
+    async fn sqlite_table_row_estimates(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let sqlite_stat1_missing = self
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_stat1' LIMIT 1",
+                &[],
+            )
+            .await?
+            .rows
+            .is_empty();
+
+        if sqlite_stat1_missing {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let result = self
+            .query(
+                "SELECT tbl, MAX(CAST(substr(stat, 1, instr(stat || ' ', ' ') - 1) AS INTEGER))
+                 FROM sqlite_stat1
+                 GROUP BY tbl",
+                &[],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
+            .collect())
+    }
+
+    async fn sqlite_index_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let result = self
+            .query(
+                "SELECT tbl_name, COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'index'
+                   AND name NOT LIKE 'sqlite_autoindex_%'
+                 GROUP BY tbl_name",
+                &[],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
+            .collect())
+    }
+
+    async fn sqlite_trigger_counts(&self) -> Result<std::collections::HashMap<String, i64>> {
+        let result = self
+            .query(
+                "SELECT tbl_name, COUNT(*)
+                 FROM sqlite_master
+                 WHERE type = 'trigger'
+                 GROUP BY tbl_name",
+                &[],
+            )
+            .await?;
+
+        Ok(result
+            .rows
+            .iter()
+            .filter_map(|row| Some((row.get(0)?.as_str()?.to_string(), row.get(1)?.as_i64()?)))
+            .collect())
+    }
+
     /// Open a SQLite database
     pub fn open(path: &str) -> Result<Self> {
         Self::open_with_options(SqliteOpenOptions::new(path))
@@ -374,64 +441,6 @@ impl SqliteConnection {
             let results = self.execute_batch(sql).await?;
             Ok(ExecuteMultiResult::Statement(results))
         }
-    }
-
-    /// Get the row count for a specific table
-    /// Returns an error if the table doesn't exist or query fails
-    async fn get_table_row_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM \"{}\"",
-            Self::sqlite_identifier_literal(table_name)
-        );
-        let result = self.query(&sql, &[]).await?;
-
-        if let Some(row) = result.rows.first()
-            && let Some(value) = row.get(0)
-        {
-            return value
-                .as_i64()
-                .ok_or_else(|| ZqlzError::Query("Row count is not an integer".into()));
-        }
-
-        Err(ZqlzError::Query("Failed to get row count".into()))
-    }
-
-    /// Get the number of indexes for a specific table
-    async fn get_table_index_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM pragma_index_list('{}')",
-            Self::sqlite_string_literal(table_name)
-        );
-        let result = self.query(&sql, &[]).await?;
-
-        if let Some(row) = result.rows.first()
-            && let Some(value) = row.get(0)
-        {
-            return value
-                .as_i64()
-                .ok_or_else(|| ZqlzError::Query("Index count is not an integer".into()));
-        }
-
-        Ok(0)
-    }
-
-    /// Get the number of triggers for a specific table
-    async fn get_table_trigger_count(&self, table_name: &str) -> Result<i64> {
-        let sql = format!(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = '{}'",
-            Self::sqlite_string_literal(table_name)
-        );
-        let result = self.query(&sql, &[]).await?;
-
-        if let Some(row) = result.rows.first()
-            && let Some(value) = row.get(0)
-        {
-            return value
-                .as_i64()
-                .ok_or_else(|| ZqlzError::Query("Trigger count is not an integer".into()));
-        }
-
-        Ok(0)
     }
 }
 
@@ -1110,6 +1119,9 @@ impl SchemaIntrospection for SqliteConnection {
             .await?;
 
         let mut tables = Vec::new();
+        let row_estimates = self.sqlite_table_row_estimates().await.unwrap_or_default();
+        let index_counts = self.sqlite_index_counts().await.unwrap_or_default();
+        let trigger_counts = self.sqlite_trigger_counts().await.unwrap_or_default();
 
         for row in &result.rows {
             let name = row
@@ -1120,31 +1132,16 @@ impl SchemaIntrospection for SqliteConnection {
             let table_type =
                 Self::classify_sqlite_table_type(row.get(1).and_then(|value| value.as_str()));
 
-            // Virtual tables can require external modules to instantiate. Avoid
-            // COUNT(*) during discovery so they still appear in schema listings even
-            // when their runtime backing is unavailable.
-            let row_count = if matches!(table_type, TableType::VirtualTable) {
-                None
-            } else {
-                self.get_table_row_count(&name).await.ok()
-            };
-
-            // Fetch index count for this table
-            let index_count = self.get_table_index_count(&name).await.ok();
-
-            // Fetch trigger count for this table
-            let trigger_count = self.get_table_trigger_count(&name).await.ok();
-
             tables.push(TableInfo {
-                name,
+                name: name.clone(),
                 schema: Some("main".to_string()),
                 table_type,
                 owner: None,
-                row_count,
+                row_count: row_estimates.get(&name).copied(),
                 size_bytes: None,
                 comment: None,
-                index_count,
-                trigger_count,
+                index_count: index_counts.get(&name).copied(),
+                trigger_count: trigger_counts.get(&name).copied(),
                 key_value_info: None,
             });
         }
@@ -1546,6 +1543,10 @@ impl SchemaIntrospection for SqliteConnection {
         ];
 
         let mut rows = Vec::new();
+        let row_estimates = self.sqlite_table_row_estimates().await.unwrap_or_default();
+        let index_counts = self.sqlite_index_counts().await.unwrap_or_default();
+        let trigger_counts = self.sqlite_trigger_counts().await.unwrap_or_default();
+
         for row in &result.rows {
             let name = row
                 .get(0)
@@ -1564,35 +1565,29 @@ impl SchemaIntrospection for SqliteConnection {
                 TableType::View
             };
 
-            let row_count = if matches!(table_type, TableType::VirtualTable) {
-                "-".to_string()
-            } else {
-                self.get_table_row_count(&name)
-                    .await
-                    .ok()
-                    .map(|c| c.to_string())
-                    .unwrap_or_else(|| "-".to_string())
-            };
-
-            let index_count = self
-                .get_table_index_count(&name)
-                .await
-                .ok()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
-
-            let trigger_count = self
-                .get_table_trigger_count(&name)
-                .await
-                .ok()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "-".to_string());
-
             let mut values = std::collections::BTreeMap::new();
             values.insert("name".to_string(), name.clone());
-            values.insert("row_count".to_string(), row_count);
-            values.insert("index_count".to_string(), index_count);
-            values.insert("trigger_count".to_string(), trigger_count);
+            values.insert(
+                "row_count".to_string(),
+                row_estimates
+                    .get(&name)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "-".to_string()),
+            );
+            values.insert(
+                "index_count".to_string(),
+                index_counts
+                    .get(&name)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "0".to_string()),
+            );
+            values.insert(
+                "trigger_count".to_string(),
+                trigger_counts
+                    .get(&name)
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| "0".to_string()),
+            );
             if matches!(table_type, TableType::VirtualTable) {
                 values.insert("type".to_string(), table_type.display_name().to_string());
             }
@@ -1850,8 +1845,8 @@ fn rusqlite_to_value(row: &rusqlite::Row, idx: usize) -> Result<Value> {
 
 #[cfg(test)]
 mod tests {
-    use super::{object_type_to_sqlite, value_to_rusqlite};
-    use zqlz_core::{ObjectType, Value, ZqlzError};
+    use super::{SqliteConnection, object_type_to_sqlite, value_to_rusqlite};
+    use zqlz_core::{Connection, ObjectType, SchemaIntrospection, Value, ZqlzError};
 
     #[test]
     fn object_type_to_sqlite_maps_supported_types() {
@@ -1887,6 +1882,56 @@ mod tests {
         assert_eq!(
             value,
             rusqlite::types::Value::Text("[\"one\",2,null]".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_objects_panel_loads_table_counts_without_per_table_fanout() {
+        let connection = SqliteConnection::open(":memory:").expect("open sqlite memory db");
+        connection
+            .execute(
+                "CREATE TABLE users (id INTEGER PRIMARY KEY, email TEXT)",
+                &[],
+            )
+            .await
+            .expect("create users table");
+        connection
+            .execute("CREATE INDEX users_email_idx ON users(email)", &[])
+            .await
+            .expect("create users index");
+        connection
+            .execute(
+                "CREATE TRIGGER users_ai AFTER INSERT ON users BEGIN SELECT 1; END",
+                &[],
+            )
+            .await
+            .expect("create users trigger");
+        connection
+            .execute(
+                "INSERT INTO users (email) VALUES ('a@example.com'), ('b@example.com')",
+                &[],
+            )
+            .await
+            .expect("insert users");
+
+        let data = connection
+            .list_tables_extended(None)
+            .await
+            .expect("list sqlite objects panel data");
+        let users = data
+            .rows
+            .iter()
+            .find(|row| row.name == "users")
+            .expect("users table row exists");
+
+        assert!(users.values.contains_key("row_count"));
+        assert_eq!(
+            users.values.get("index_count").map(String::as_str),
+            Some("1")
+        );
+        assert_eq!(
+            users.values.get("trigger_count").map(String::as_str),
+            Some("1")
         );
     }
 }

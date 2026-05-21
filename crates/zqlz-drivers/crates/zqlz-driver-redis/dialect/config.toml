@@ -21,7 +21,95 @@ case_sensitive = true
 statement_terminator = """
 
 """
-supports_comments = false
+supports_comments = true
+
+[syntax_highlighting]
+profile = "redis"
+grammar = "none"
+highlight_query = "redis"
+parameter_placeholders = "disabled"
+brackets = "standard"
+execution_unit = "command-line"
+document_symbols = "command-commands"
+overlays = "command"
+command_syntax = true
+document_syntax = false
+sql_overlays = false
+dollar_quoted_strings = false
+completion_triggers = [" "]
+completion_word_chars = [":", "-"]
+indent_after_keywords = []
+auto_close_pairs = ["\"\""]
+
+[syntax_highlighting.folding]
+begin_end_blocks = false
+case_blocks = false
+function_definitions = false
+parenthesis_blocks = false
 
 [comments]
-# Redis commands don't support comments
+line_comment = "#"
+
+[syntax_terms]
+keywords = ["APPEND", "AUTH", "COUNT", "CONFIG", "DECR", "DEL", "DISCARD", "EXEC", "EXISTS", "EX", "EXPIRE", "FLUSHALL", "FLUSHDB", "GET", "HDEL", "HGET", "HGETALL", "HSET", "INCR", "INFO", "JSON.GET", "JSON.SET", "KEYS", "LPOP", "LPUSH", "LRANGE", "MULTI", "MATCH", "NX", "PING", "PX", "PUBLISH", "RPOP", "RPUSH", "SADD", "SCAN", "SELECT", "SET", "SMEMBERS", "SREM", "SUBSCRIBE", "TTL", "UNSUBSCRIBE", "UNWATCH", "WATCH", "WITHSCORES", "XX", "ZADD", "ZRANGE", "ZREM"]
+functions = []
+types = []
+
+[syntax_quality]
+text = """
+HGETALL user:42
+JSON.SET user:42 $.profile "Ada Lovelace"
+JSON.GET user:42 $.profile
+SET user:42:name "Ada Lovelace" NX PX 30000 # cached profile
+"""
+
+expected_outline = [
+  "HGETALL user:42",
+  "JSON.SET user:42",
+  "JSON.GET user:42",
+  "SET user:42:name",
+]
+
+[[syntax_quality.expected]]
+token = "HGETALL"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "JSON.SET"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "JSON.GET"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "SET"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "NX"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "PX"
+kind = "Keyword"
+
+[[syntax_quality.expected]]
+token = "30000"
+kind = "Number"
+
+[[syntax_quality.expected]]
+token = "\"Ada Lovelace\""
+kind = "String"
+
+[[syntax_quality.expected]]
+token = "# cached profile"
+kind = "Comment"
+
+[[syntax_quality.rejected]]
+token = "\"Ada Lovelace\""
+kind = "Keyword"
+
+[[syntax_quality.rejected]]
+token = "# cached profile"
+kind = "Keyword"

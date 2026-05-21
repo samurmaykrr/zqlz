@@ -83,7 +83,7 @@ use crate::components::{
 };
 use crate::workspace::WorkspaceController;
 use crate::workspace_state::{
-    DiagnosticSeverity, EditorDiagnostic, RefreshScope, WorkspaceSession,
+    DiagnosticSeverity, EditorDiagnostic, EditorId, RefreshScope, WorkspaceSession,
     WorkspaceSessionViewerKind, WorkspaceState, WorkspaceStateEvent,
 };
 use zqlz_query::{DiagnosticInfo, DiagnosticInfoSeverity};
@@ -140,6 +140,7 @@ pub struct MainView {
     tab_context_menu: Option<Entity<TabContextMenuState>>,
     query_editors: Vec<WeakEntity<crate::components::QueryEditor>>,
     query_editor_subscriptions: HashMap<EntityId, Subscription>,
+    query_editor_ids: HashMap<EntityId, EditorId>,
     table_viewer_subscriptions: HashMap<EntityId, Subscription>,
     command_palette: Option<Entity<CommandPalette>>,
     command_palette_closing: bool,
@@ -188,6 +189,11 @@ impl MainView {
         self.workspace_controller.update(cx, |workspace, cx| {
             workspace.activate_panel_by_id(panel_id, window, cx);
         });
+        if let Some(editor_id) = self.query_editor_ids.get(&panel_id).copied() {
+            self.workspace_state.update(cx, |state, cx| {
+                state.set_active_editor(Some(editor_id), cx);
+            });
+        }
         let focus_handle = editor.read(cx).editor_focus_handle(cx);
         window.focus(&focus_handle, cx);
     }
@@ -560,6 +566,7 @@ impl MainView {
             tab_context_menu: None,
             query_editors: Vec::new(),
             query_editor_subscriptions: HashMap::new(),
+            query_editor_ids: HashMap::new(),
             table_viewer_subscriptions: HashMap::new(),
             command_palette: None,
             command_palette_closing: false,
