@@ -266,6 +266,13 @@ pub struct ParsedCommand {
     pub arg_tokens: Vec<PositionedToken>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletionContext {
+    pub current_tokens: Vec<String>,
+    pub command_path: Vec<String>,
+    pub active_prefix: Option<String>,
+}
+
 /// Parse tokenized input into commands
 pub fn parse_commands(tokens: &[PositionedToken]) -> Vec<ParsedCommand> {
     let mut commands = Vec::new();
@@ -313,6 +320,168 @@ pub fn parse_commands(tokens: &[PositionedToken]) -> Vec<ParsedCommand> {
     }
 
     commands
+}
+
+pub fn command_completion_context(
+    input: &str,
+    cursor_offset: usize,
+    is_manual_trigger: bool,
+) -> Option<CommandCompletionContext> {
+    let cursor_offset = clamp_to_char_boundary(input, cursor_offset);
+    let before_cursor = &input[..cursor_offset];
+    if !is_manual_trigger && before_cursor.trim_end_matches([' ', '\t']).is_empty() {
+        return None;
+    }
+
+    let line_start = before_cursor.rfind('\n').map_or(0, |index| index + 1);
+    let current_line = &before_cursor[line_start..];
+    let mut tokenizer = CommandTokenizer::new(current_line, false);
+    let tokens = tokenizer.tokenize();
+
+    if tokens.iter().any(|token| {
+        matches!(token.token, Token::Comment(_)) && token.start <= current_line.trim_start().len()
+    }) {
+        return None;
+    }
+
+    let commands = parse_commands(&tokens);
+    let current_tokens: Vec<String> = match commands.as_slice() {
+        [] => Vec::new(),
+        [command] => std::iter::once(command.command.clone())
+            .chain(command.args.iter().cloned())
+            .collect(),
+        _ => return None,
+    };
+
+    if current_tokens.is_empty() {
+        return Some(CommandCompletionContext {
+            current_tokens,
+            command_path: Vec::new(),
+            active_prefix: None,
+        });
+    }
+
+    let trailing_space = current_line.ends_with([' ', '\t']);
+    let active_prefix = (!trailing_space)
+        .then(|| current_tokens.last().cloned())
+        .flatten();
+    let command_path = if trailing_space {
+        current_tokens.clone()
+    } else {
+        current_tokens
+            .get(..current_tokens.len().saturating_sub(1))
+            .unwrap_or_default()
+            .to_vec()
+    };
+
+    Some(CommandCompletionContext {
+        current_tokens,
+        command_path,
+        active_prefix,
+    })
+}
+
+pub fn command_completion_insert_text(snippet: &str, command_path: &[&str]) -> String {
+    if command_path.is_empty() {
+        return snippet.to_string();
+    }
+
+    let prefix = command_path.join(" ");
+    snippet
+        .strip_prefix(&prefix)
+        .map(str::trim_start)
+        .filter(|remaining| !remaining.is_empty())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| {
+            snippet
+                .split_whitespace()
+                .nth(command_path.len())
+                .map(|subcommand| format!("{subcommand} "))
+                .unwrap_or_default()
+        })
+}
+
+fn clamp_to_char_boundary(text: &str, offset: usize) -> usize {
+    let mut offset = offset.min(text.len());
+    while offset > 0 && !text.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+pub fn command_matches_prefix(command: &str, prefix: &str) -> bool {
+    prefix.is_empty() || command.starts_with(prefix)
+}
+
+pub fn command_prefix_value(prefix: &str) -> Option<&str> {
+    (!prefix.is_empty()).then_some(prefix)
+}
+
+pub fn command_metadata_subcommand_candidate(
+    keyword: &crate::KeywordDef,
+    command_path: &[&str],
+    prefix: Option<&str>,
+) -> Option<String> {
+    command_subcommand_candidate(&keyword.name, command_path, prefix).or_else(|| {
+        keyword
+            .snippet
+            .as_deref()
+            .and_then(|snippet| command_subcommand_candidate(snippet, command_path, prefix))
+    })
+}
+
+pub fn command_metadata_top_level_candidate(
+    keyword: &crate::KeywordDef,
+    prefix: Option<&str>,
+) -> Option<String> {
+    command_top_level_candidate(&keyword.name, prefix).or_else(|| {
+        keyword
+            .snippet
+            .as_deref()
+            .and_then(|snippet| command_top_level_candidate(snippet, prefix))
+    })
+}
+
+pub fn command_top_level_candidate(command_text: &str, prefix: Option<&str>) -> Option<String> {
+    let candidate = command_text
+        .split_whitespace()
+        .next()
+        .map(str::to_ascii_uppercase)?;
+    if prefix.is_none_or(|prefix| candidate.starts_with(prefix)) {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
+pub fn command_subcommand_candidate(
+    command_text: &str,
+    command_path: &[&str],
+    prefix: Option<&str>,
+) -> Option<String> {
+    if command_path.is_empty() {
+        return None;
+    }
+
+    let parts: Vec<&str> = command_text.split_whitespace().collect();
+    if parts.len() <= command_path.len() {
+        return None;
+    }
+
+    let path_matches = parts[..command_path.len()]
+        .iter()
+        .zip(command_path.iter())
+        .all(|(part, path_segment)| part.eq_ignore_ascii_case(path_segment));
+    if !path_matches {
+        return None;
+    }
+
+    let candidate = parts[command_path.len()].to_ascii_uppercase();
+    if prefix.is_none_or(|prefix| candidate.starts_with(prefix)) {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]
@@ -373,5 +542,103 @@ mod tests {
         let commands = parse_commands(&tokens);
         assert_eq!(commands.len(), 2);
         assert_eq!(commands[0].args.len(), 2); // comment is ignored
+    }
+
+    #[test]
+    fn command_completion_insert_text_uses_metadata_suffix() {
+        assert_eq!(
+            command_completion_insert_text("CONFIG GET ${1:parameter}", &["CONFIG"]),
+            "GET ${1:parameter}"
+        );
+        assert_eq!(
+            command_completion_insert_text("CONFIG GET", &["CONFIG"]),
+            "GET"
+        );
+        assert_eq!(
+            command_completion_insert_text("ACL LIST ", &["ACL"]),
+            "LIST "
+        );
+    }
+
+    #[test]
+    fn command_subcommand_candidate_uses_path_and_prefix() {
+        assert_eq!(
+            command_subcommand_candidate("ACL LIST", &["ACL"], Some("LI")),
+            Some("LIST".to_string())
+        );
+        assert_eq!(
+            command_subcommand_candidate("ACL GETUSER", &["ACL"], Some("LI")),
+            None
+        );
+        assert_eq!(
+            command_subcommand_candidate("CONFIG GET ${1:parameter}", &["CONFIG"], None),
+            Some("GET".to_string())
+        );
+    }
+
+    #[test]
+    fn command_top_level_candidate_uses_metadata_name_and_snippet() {
+        assert_eq!(
+            command_top_level_candidate("CONFIG GET", Some("CO")),
+            Some("CONFIG".to_string())
+        );
+        assert_eq!(command_top_level_candidate("CONFIG GET", Some("GE")), None);
+
+        let keyword = crate::KeywordDef {
+            name: String::new(),
+            category: crate::dialect_config::KeywordCategory::Other,
+            snippet: Some("ACL LIST".to_string()),
+            description: None,
+            documentation: None,
+        };
+        assert_eq!(
+            command_metadata_top_level_candidate(&keyword, Some("AC")),
+            Some("ACL".to_string())
+        );
+    }
+
+    #[test]
+    fn command_completion_context_tracks_command_path_and_prefix() {
+        assert_eq!(
+            command_completion_context("CONFIG G", "CONFIG G".len(), false),
+            Some(CommandCompletionContext {
+                current_tokens: vec!["CONFIG".to_string(), "G".to_string()],
+                command_path: vec!["CONFIG".to_string()],
+                active_prefix: Some("G".to_string()),
+            })
+        );
+        assert_eq!(
+            command_completion_context("CONFIG ", "CONFIG ".len(), false),
+            Some(CommandCompletionContext {
+                current_tokens: vec!["CONFIG".to_string()],
+                command_path: vec!["CONFIG".to_string()],
+                active_prefix: None,
+            })
+        );
+    }
+
+    #[test]
+    fn command_completion_context_skips_comments_and_empty_auto_trigger() {
+        assert_eq!(command_completion_context("", 0, false), None);
+        assert_eq!(
+            command_completion_context("", 0, true),
+            Some(CommandCompletionContext {
+                current_tokens: Vec::new(),
+                command_path: Vec::new(),
+                active_prefix: None,
+            })
+        );
+        assert_eq!(
+            command_completion_context("# CONFIG ", "# CONFIG ".len(), true),
+            None
+        );
+        assert_eq!(
+            command_completion_context("SET key\nCONFIG G", "SET key\nCONFIG G".len(), false),
+            Some(CommandCompletionContext {
+                current_tokens: vec!["CONFIG".to_string(), "G".to_string()],
+                command_path: vec!["CONFIG".to_string()],
+                active_prefix: Some("G".to_string()),
+            })
+        );
     }
 }

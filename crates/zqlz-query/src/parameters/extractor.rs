@@ -3,8 +3,7 @@
 //! Extracts parameter placeholders from SQL queries, supporting multiple
 //! database parameter styles.
 
-use regex::Regex;
-use std::sync::LazyLock;
+use zqlz_core::{SqlParameterPlaceholderKind, sql_parameter_placeholders};
 
 /// A parameter extracted from a SQL query.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -69,27 +68,6 @@ pub struct ExtractionResult {
     pub style: Option<ParameterStyle>,
 }
 
-// Lazy-compiled regex patterns for parameter extraction
-static COLON_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static AT_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static DOLLAR_POSITIONAL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$(\d+)").expect("valid regex"));
-
-static DOLLAR_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static QUESTION_MARK_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\?").expect("valid regex"));
-
-// Regex to identify string literals and comments that should be skipped
-static STRING_LITERAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'(?:[^'\\]|\\.)*'|--[^\n]*|/\*[\s\S]*?\*/").expect("valid regex")
-});
-
 /// Extracts parameters from a SQL query string.
 ///
 /// This function supports multiple parameter styles:
@@ -134,83 +112,40 @@ pub fn extract_parameters(sql: &str) -> Vec<Parameter> {
 ///
 /// An `ExtractionResult` containing the parameters and detected style.
 pub fn extract_parameters_with_style(sql: &str) -> ExtractionResult {
-    // Replace string literals and comments with spaces to avoid extracting
-    // parameters from within them
-    let masked_sql = mask_strings_and_comments(sql);
-
     let mut parameters: Vec<Parameter> = Vec::new();
     let mut seen: std::collections::HashSet<Parameter> = std::collections::HashSet::new();
     let mut styles_found: Vec<ParameterStyle> = Vec::new();
 
-    // Extract colon-named parameters (:name)
-    for cap in COLON_NAMED_REGEX.captures_iter(&masked_sql) {
-        if let Some(name_match) = cap.get(1) {
-            let name = name_match.as_str().to_string();
-            let param = Parameter::Named(name);
-            if seen.insert(param.clone()) {
-                parameters.push(param);
-                if !styles_found.contains(&ParameterStyle::ColonNamed) {
-                    styles_found.push(ParameterStyle::ColonNamed);
-                }
+    let mut question_index = 0usize;
+    for placeholder in sql_parameter_placeholders(sql) {
+        let (param, style) = match placeholder.kind {
+            SqlParameterPlaceholderKind::Named(name) => {
+                let style = match sql.as_bytes().get(placeholder.start) {
+                    Some(b':') => ParameterStyle::ColonNamed,
+                    Some(b'@') => ParameterStyle::AtNamed,
+                    Some(b'$') => ParameterStyle::DollarNamed,
+                    _ => ParameterStyle::Mixed,
+                };
+                (Parameter::Named(name), style)
             }
-        }
-    }
+            SqlParameterPlaceholderKind::DollarPositional(position) => (
+                Parameter::Positional(position),
+                ParameterStyle::DollarPositional,
+            ),
+            SqlParameterPlaceholderKind::QuestionMark => {
+                question_index += 1;
+                (
+                    Parameter::Positional(question_index),
+                    ParameterStyle::QuestionMark,
+                )
+            }
+        };
 
-    // Extract at-named parameters (@name)
-    for cap in AT_NAMED_REGEX.captures_iter(&masked_sql) {
-        if let Some(name_match) = cap.get(1) {
-            let name = name_match.as_str().to_string();
-            let param = Parameter::Named(name);
-            if seen.insert(param.clone()) {
-                parameters.push(param);
-                if !styles_found.contains(&ParameterStyle::AtNamed) {
-                    styles_found.push(ParameterStyle::AtNamed);
-                }
-            }
+        if seen.insert(param.clone()) {
+            parameters.push(param);
         }
-    }
-
-    // Extract dollar-positional parameters ($1, $2, etc.)
-    for cap in DOLLAR_POSITIONAL_REGEX.captures_iter(&masked_sql) {
-        if let Some(num_match) = cap.get(1)
-            && let Ok(position) = num_match.as_str().parse::<usize>()
-        {
-            let param = Parameter::Positional(position);
-            if seen.insert(param.clone()) {
-                parameters.push(param);
-                if !styles_found.contains(&ParameterStyle::DollarPositional) {
-                    styles_found.push(ParameterStyle::DollarPositional);
-                }
-            }
-        }
-    }
-
-    // Extract dollar-named parameters ($name)
-    for cap in DOLLAR_NAMED_REGEX.captures_iter(&masked_sql) {
-        if let Some(name_match) = cap.get(1) {
-            let name = name_match.as_str().to_string();
-            let param = Parameter::Named(name);
-            if seen.insert(param.clone()) {
-                parameters.push(param);
-                if !styles_found.contains(&ParameterStyle::DollarNamed) {
-                    styles_found.push(ParameterStyle::DollarNamed);
-                }
-            }
-        }
-    }
-
-    // Extract question mark parameters (?)
-    // Each ? is a separate positional parameter
-    let question_count = QUESTION_MARK_REGEX.find_iter(&masked_sql).count();
-    if question_count > 0 {
-        for i in 1..=question_count {
-            let param = Parameter::Positional(i);
-            if seen.insert(param.clone()) {
-                parameters.push(param);
-            }
-        }
-        if !styles_found.contains(&ParameterStyle::QuestionMark) {
-            styles_found.push(ParameterStyle::QuestionMark);
+        if !styles_found.contains(&style) {
+            styles_found.push(style);
         }
     }
 
@@ -221,14 +156,4 @@ pub fn extract_parameters_with_style(sql: &str) -> ExtractionResult {
     };
 
     ExtractionResult { parameters, style }
-}
-
-/// Masks string literals and comments in SQL with spaces.
-///
-/// This prevents parameter extraction from finding placeholders within
-/// string literals or comments.
-fn mask_strings_and_comments(sql: &str) -> String {
-    STRING_LITERAL_REGEX
-        .replace_all(sql, |caps: &regex::Captures| " ".repeat(caps[0].len()))
-        .into_owned()
 }

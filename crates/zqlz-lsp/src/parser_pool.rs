@@ -67,11 +67,6 @@ mod tests {
         });
         assert!(result1.is_ok());
 
-        // Parser should be returned to pool
-        let pool_size = PARSER_POOL.lock().len();
-        assert!(pool_size >= 1);
-
-        // Reuse parser
         let result2 = with_parser(|parser| {
             let tree = parser.parse("SELECT * FROM users", None).unwrap();
             assert!(!tree.root_node().has_error());

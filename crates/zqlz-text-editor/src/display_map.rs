@@ -1,6 +1,8 @@
 use crate::{
     AnchoredCodeAction, AnchoredDiagnostic, AnchoredInlayHint, BufferSnapshot, FoldKind,
-    FoldRegion, Highlight, buffer::Position, syntax::HighlightKind,
+    FoldRegion, Highlight,
+    buffer::Position,
+    syntax::{HighlightKind, render_highlight_runs},
 };
 use gpui::Pixels;
 use std::{
@@ -268,6 +270,7 @@ struct DisplayChunkSnapshot {
 #[derive(Clone, Debug)]
 struct ViewportCacheEntry {
     visible_rows: Range<usize>,
+    max_text_bytes: Option<usize>,
     viewport: DisplayViewport,
 }
 
@@ -813,7 +816,8 @@ impl HighlightMap {
         let diagnostics = Arc::new(diagnostics.to_vec());
 
         if state.total_lines != line_count
-            || state.syntax_highlights.as_ref() != syntax_highlights.as_ref()
+            || !Arc::ptr_eq(&state.syntax_highlights, &syntax_highlights)
+                && state.syntax_highlights.as_ref() != syntax_highlights.as_ref()
         {
             state.highlight_indexes_by_line = Arc::new(indexes_by_line_for_offsets(
                 line_count,
@@ -825,7 +829,8 @@ impl HighlightMap {
         }
 
         if state.total_lines != line_count
-            || state.semantic_highlights.as_ref() != semantic_highlights.as_ref()
+            || !Arc::ptr_eq(&state.semantic_highlights, &semantic_highlights)
+                && state.semantic_highlights.as_ref() != semantic_highlights.as_ref()
         {
             state.semantic_highlight_indexes_by_line = Arc::new(indexes_by_line_for_offsets(
                 line_count,
@@ -1590,9 +1595,17 @@ impl DisplayChunkSnapshot {
     }
 
     fn text_chunks(&self, rows: Range<usize>) -> Vec<DisplayTextChunk> {
+        self.text_chunks_with_limit(rows, None)
+    }
+
+    fn text_chunks_with_limit(
+        &self,
+        rows: Range<usize>,
+        max_text_bytes: Option<usize>,
+    ) -> Vec<DisplayTextChunk> {
         self.row_infos(rows)
             .into_iter()
-            .map(|row_info| self.text_chunk_for_row(row_info.display_row, row_info))
+            .map(|row_info| self.text_chunk_for_row(row_info.display_row, row_info, max_text_bytes))
             .collect()
     }
 
@@ -1617,18 +1630,26 @@ impl DisplayChunkSnapshot {
     }
 
     fn viewport(&self, rows: Range<usize>) -> DisplayViewport {
+        self.viewport_with_text_limit(rows, None)
+    }
+
+    fn viewport_with_text_limit(
+        &self,
+        rows: Range<usize>,
+        max_text_bytes: Option<usize>,
+    ) -> DisplayViewport {
         if let Some(viewport) = self
             .viewport_cache
             .borrow()
             .as_ref()
-            .filter(|entry| entry.visible_rows == rows)
+            .filter(|entry| entry.visible_rows == rows && entry.max_text_bytes == max_text_bytes)
             .map(|entry| entry.viewport.clone())
         {
             return viewport;
         }
 
         let row_infos = Arc::new(self.row_infos(rows.clone()));
-        let text_chunks = Arc::new(self.text_chunks(rows.clone()));
+        let text_chunks = Arc::new(self.text_chunks_with_limit(rows.clone(), max_text_bytes));
         let block_widgets = Arc::new(
             self.block_widgets_for_rows(rows.clone())
                 .into_iter()
@@ -1644,28 +1665,72 @@ impl DisplayChunkSnapshot {
 
         *self.viewport_cache.borrow_mut() = Some(ViewportCacheEntry {
             visible_rows: rows,
+            max_text_bytes,
             viewport: viewport.clone(),
         });
         viewport
     }
 
-    fn text_chunk_for_row(&self, display_row: usize, row_info: RowInfo) -> DisplayTextChunk {
-        if let Some(chunk) = self.text_chunk_cache.borrow().get(&display_row).cloned() {
+    fn text_chunk_for_row(
+        &self,
+        display_row: usize,
+        row_info: RowInfo,
+        max_text_bytes: Option<usize>,
+    ) -> DisplayTextChunk {
+        if max_text_bytes.is_none()
+            && let Some(chunk) = self.text_chunk_cache.borrow().get(&display_row).cloned()
+        {
             return chunk;
         }
 
-        let line_text = self
-            .buffer
-            .line(row_info.buffer_line)
-            .unwrap_or_default()
-            .trim_end_matches('\n')
-            .trim_end_matches('\r')
-            .to_string();
         let start_offset = self.buffer.line_to_byte(row_info.buffer_line).unwrap_or(0);
-        let end_offset = start_offset + line_text.len();
+        let next_line_start = self.buffer.line_to_byte(row_info.buffer_line + 1);
+        let mut line_end_offset = next_line_start.unwrap_or_else(|| self.buffer.len());
+        if next_line_start.is_some()
+            && line_end_offset > start_offset
+            && self
+                .buffer
+                .slice(line_end_offset - 1..line_end_offset)
+                .ok()
+                .as_deref()
+                == Some("\n")
+        {
+            line_end_offset -= 1;
+        }
+        if line_end_offset > start_offset
+            && self
+                .buffer
+                .slice(line_end_offset - 1..line_end_offset)
+                .ok()
+                .as_deref()
+                == Some("\r")
+        {
+            line_end_offset -= 1;
+        }
+        let source_end_offset = if let Some(max_text_bytes) = max_text_bytes {
+            let raw_end = (start_offset + max_text_bytes).min(line_end_offset);
+            self.buffer
+                .floor_char_boundary(raw_end)
+                .unwrap_or(start_offset)
+                .max(start_offset)
+        } else {
+            line_end_offset
+        };
+        let mut line_text = self
+            .buffer
+            .slice(start_offset..source_end_offset)
+            .unwrap_or_default();
+        if source_end_offset < line_end_offset {
+            line_text.push_str(" ...");
+        }
+        let end_offset = source_end_offset;
 
-        let highlights =
-            self.composed_highlights_for_line(row_info.buffer_line, start_offset, end_offset);
+        let highlights = self.composed_highlights_for_line(
+            row_info.buffer_line,
+            start_offset,
+            end_offset,
+            &line_text,
+        );
 
         let diagnostics = self
             .highlight_snapshot
@@ -1702,9 +1767,11 @@ impl DisplayChunkSnapshot {
             diagnostics,
             inlay_hints,
         };
-        self.text_chunk_cache
-            .borrow_mut()
-            .insert(display_row, chunk.clone());
+        if max_text_bytes.is_none() {
+            self.text_chunk_cache
+                .borrow_mut()
+                .insert(display_row, chunk.clone());
+        }
         chunk
     }
 
@@ -1713,6 +1780,7 @@ impl DisplayChunkSnapshot {
         buffer_line: usize,
         start_offset: usize,
         end_offset: usize,
+        line_text: &str,
     ) -> Vec<ChunkHighlight> {
         let semantic_highlights =
             self.clipped_semantic_highlights(buffer_line, start_offset, end_offset);
@@ -1724,7 +1792,7 @@ impl DisplayChunkSnapshot {
         );
         highlights.extend(semantic_highlights);
         highlights.sort_by_key(|highlight| (highlight.start, highlight.end));
-        highlights
+        flatten_chunk_highlights(line_text, &highlights)
     }
 
     fn clipped_semantic_highlights(
@@ -1819,6 +1887,67 @@ fn subtract_highlight_overlaps(
     }
 
     remaining
+}
+
+fn flatten_chunk_highlights(text: &str, highlights: &[ChunkHighlight]) -> Vec<ChunkHighlight> {
+    if let Some(highlights) = sorted_chunk_highlights_fast_path(text, highlights) {
+        return highlights;
+    }
+
+    let highlights = highlights
+        .iter()
+        .map(|highlight| Highlight {
+            start: highlight.start,
+            end: highlight.end,
+            kind: highlight.kind,
+        })
+        .collect::<Vec<_>>();
+
+    render_highlight_runs(text, &highlights)
+        .into_iter()
+        .filter(|highlight| highlight.kind != HighlightKind::Default)
+        .map(|highlight| ChunkHighlight {
+            start: highlight.start,
+            end: highlight.end,
+            kind: highlight.kind,
+        })
+        .collect()
+}
+
+fn sorted_chunk_highlights_fast_path(
+    text: &str,
+    highlights: &[ChunkHighlight],
+) -> Option<Vec<ChunkHighlight>> {
+    let mut result: Vec<ChunkHighlight> = Vec::with_capacity(highlights.len());
+    let mut cursor = 0usize;
+
+    for highlight in highlights {
+        if highlight.kind == HighlightKind::Default {
+            continue;
+        }
+        if highlight.start < cursor
+            || highlight.start >= highlight.end
+            || highlight.end > text.len()
+            || !text.is_char_boundary(highlight.start)
+            || !text.is_char_boundary(highlight.end)
+        {
+            return None;
+        }
+
+        if let Some(previous) = result.last_mut()
+            && previous.end == highlight.start
+            && previous.kind == highlight.kind
+        {
+            previous.end = highlight.end;
+            cursor = highlight.end;
+            continue;
+        }
+
+        result.push(highlight.clone());
+        cursor = highlight.end;
+    }
+
+    Some(result)
 }
 
 impl DisplayViewport {
@@ -1933,6 +2062,15 @@ impl DisplaySnapshot {
 
     pub fn viewport(&self, rows: Range<usize>) -> DisplayViewport {
         self.chunk_snapshot.viewport(rows)
+    }
+
+    pub fn viewport_with_text_limit(
+        &self,
+        rows: Range<usize>,
+        max_text_bytes: Option<usize>,
+    ) -> DisplayViewport {
+        self.chunk_snapshot
+            .viewport_with_text_limit(rows, max_text_bytes)
     }
 
     pub fn text_chunks(&self, rows: Range<usize>) -> Vec<DisplayTextChunk> {
@@ -2356,6 +2494,65 @@ mod tests {
     }
 
     #[test]
+    fn sorted_chunk_highlights_fast_path_merges_adjacent_same_kind_runs() {
+        let highlights = sorted_chunk_highlights_fast_path(
+            "SELECT alpha",
+            &[
+                ChunkHighlight {
+                    start: 0,
+                    end: 3,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 3,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+        )
+        .expect("sorted highlight fast path");
+
+        assert_eq!(
+            highlights,
+            vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Identifier,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn sorted_chunk_highlights_fast_path_rejects_utf8_boundary_splits() {
+        let text = "SELECT 'café'";
+        let invalid_end = text.find('é').expect("accented char") + 1;
+
+        assert!(
+            sorted_chunk_highlights_fast_path(
+                text,
+                &[ChunkHighlight {
+                    start: 0,
+                    end: invalid_end,
+                    kind: HighlightKind::String,
+                }],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
     fn semantic_highlights_take_precedence_over_overlapping_syntax_chunks() {
         let buffer = TextBuffer::new("select count(*)");
         let display_map = DisplayMap::from_display_lines(vec![0]);
@@ -2401,6 +2598,59 @@ mod tests {
                 },
             ]
         );
+    }
+
+    #[test]
+    fn text_chunks_flatten_overlapping_syntax_highlights_before_paint() {
+        let buffer = TextBuffer::new(r#"COUNT("_database_functions")"#);
+        let display_map = DisplayMap::from_display_lines(vec![0]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            Arc::new(vec![
+                Highlight {
+                    start: 0,
+                    end: 5,
+                    kind: HighlightKind::Function,
+                },
+                Highlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Identifier,
+                },
+                Highlight {
+                    start: 6,
+                    end: buffer.len(),
+                    kind: HighlightKind::Identifier,
+                },
+                Highlight {
+                    start: 6,
+                    end: buffer.len(),
+                    kind: HighlightKind::String,
+                },
+            ]),
+            &[],
+            Arc::new(vec![]),
+            &[],
+        );
+
+        let chunk = &snapshot.text_chunks(0..1)[0];
+        assert!(
+            chunk
+                .highlights
+                .windows(2)
+                .all(|pair| pair[0].end <= pair[1].start)
+        );
+        assert!(chunk.highlights.iter().any(|highlight| {
+            highlight.start == 0 && highlight.end == 5 && highlight.kind == HighlightKind::Function
+        }));
+        assert!(chunk.highlights.iter().any(|highlight| {
+            highlight.start == 5
+                && highlight.end == buffer.len()
+                && highlight.kind == HighlightKind::Identifier
+        }));
     }
 
     #[test]
@@ -2690,6 +2940,45 @@ mod tests {
         );
         assert_eq!(snapshot.inlay_snapshot().inlay_indexes_for_line(2), &[0]);
         assert_eq!(snapshot.block_snapshot().block_indexes_for_line(2), &[0]);
+    }
+
+    #[test]
+    fn highlight_index_cache_reuses_same_highlight_arc_without_deep_compare() {
+        let buffer = TextBuffer::new("alpha\nbeta");
+        let display_map = DisplayMap::from_display_lines(vec![0, 1]);
+        let highlights = Arc::new(vec![Highlight {
+            start: 0,
+            end: 5,
+            kind: HighlightKind::Keyword,
+        }]);
+
+        let first = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            highlights.clone(),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+        let first_indexes = first.highlight_snapshot().highlight_indexes_by_line.clone();
+
+        let second = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            highlights,
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        assert!(Arc::ptr_eq(
+            &first_indexes,
+            &second.highlight_snapshot().highlight_indexes_by_line
+        ));
     }
 
     #[test]
@@ -3438,6 +3727,51 @@ mod tests {
         assert!(Arc::ptr_eq(&first.row_infos(), &second.row_infos()));
         assert!(Arc::ptr_eq(&first.text_chunks(), &second.text_chunks()));
         assert!(Arc::ptr_eq(&first.block_widgets(), &second.block_widgets()));
+    }
+
+    #[test]
+    fn viewport_with_text_limit_clips_long_lines_before_chunk_allocation() {
+        let long_line = "x".repeat(100);
+        let buffer = TextBuffer::new(format!("{long_line}\nshort"));
+        let display_map = DisplayMap::from_display_lines(vec![0, 1]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        let viewport = snapshot.viewport_with_text_limit(0..1, Some(8));
+        let chunks = viewport.text_chunks();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "xxxxxxxx ...");
+    }
+
+    #[test]
+    fn viewport_with_text_limit_preserves_utf8_boundaries() {
+        let buffer = TextBuffer::new("café-list\nshort");
+        let display_map = DisplayMap::from_display_lines(vec![0, 1]);
+        let snapshot = display_map.snapshot(
+            buffer.snapshot(),
+            &[],
+            &HashSet::new(),
+            false,
+            Arc::new(Vec::new()),
+            &[],
+            Arc::new(Vec::new()),
+            &[],
+        );
+
+        let viewport = snapshot.viewport_with_text_limit(0..1, Some(4));
+        let chunks = viewport.text_chunks();
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].text, "caf ...");
     }
 
     #[test]

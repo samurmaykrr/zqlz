@@ -16,6 +16,7 @@ use lsp_types::{
 use ropey::Rope;
 use std::rc::Rc;
 use std::sync::Arc;
+use zqlz_core::{SyntaxTermProfile, get_syntax_term_profile};
 
 use crate::{DocumentContext, TextEditor};
 
@@ -187,10 +188,14 @@ impl LspUiState {
             return;
         }
 
+        let selected_index = items
+            .iter()
+            .position(|item| item.preselect.unwrap_or(false))
+            .unwrap_or(0);
         self.completion_menu = Some(CompletionMenuState {
             items,
             trigger_offset,
-            selected_index: 0,
+            selected_index,
             scroll_offset: 0,
             scroll_accumulator: 0.0,
         });
@@ -244,21 +249,23 @@ impl LspUiState {
         };
 
         let prefix = prefix.to_lowercase();
-        cache
+        let mut scored_items = cache
             .all_items
             .iter()
-            .filter(|item| {
-                if prefix.is_empty() {
-                    return true;
-                }
-
-                let match_target = item
-                    .filter_text
-                    .as_ref()
-                    .unwrap_or(&item.label)
-                    .to_lowercase();
-                match_target.contains(&prefix)
+            .filter_map(|item| {
+                let score = completion_match_score(completion_match_target(item), &prefix)?;
+                Some((score, item))
             })
+            .collect::<Vec<_>>();
+        scored_items.sort_by(|(left_score, left_item), (right_score, right_item)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| completion_sort_key(left_item).cmp(completion_sort_key(right_item)))
+                .then_with(|| left_item.label.cmp(&right_item.label))
+        });
+        scored_items
+            .into_iter()
+            .map(|(_, item)| item)
             .cloned()
             .collect()
     }
@@ -648,10 +655,26 @@ impl LspRequestState {
 
             if prefix_extends_cache {
                 let prefix_lower = context.current_prefix.to_lowercase();
-                let filtered = cache
+                let mut scored_items = cache
                     .all_items
                     .iter()
-                    .filter(|item| item.label.to_lowercase().contains(&prefix_lower))
+                    .filter_map(|item| {
+                        let score =
+                            completion_match_score(completion_match_target(item), &prefix_lower)?;
+                        Some((score, item))
+                    })
+                    .collect::<Vec<_>>();
+                scored_items.sort_by(|(left_score, left_item), (right_score, right_item)| {
+                    left_score
+                        .cmp(right_score)
+                        .then_with(|| {
+                            completion_sort_key(left_item).cmp(completion_sort_key(right_item))
+                        })
+                        .then_with(|| left_item.label.cmp(&right_item.label))
+                });
+                let filtered = scored_items
+                    .into_iter()
+                    .map(|(_, item)| item)
                     .cloned()
                     .collect();
                 return CompletionResolution::CachedFilter {
@@ -697,6 +720,48 @@ impl LspRequestState {
     }
 }
 
+fn completion_match_target(item: &CompletionItem) -> &str {
+    item.filter_text.as_deref().unwrap_or(&item.label)
+}
+
+fn completion_sort_key(item: &CompletionItem) -> &str {
+    item.sort_text.as_deref().unwrap_or(&item.label)
+}
+
+fn completion_match_score(candidate: &str, normalized_query: &str) -> Option<usize> {
+    if normalized_query.is_empty() {
+        return Some(0);
+    }
+
+    let candidate = candidate.to_lowercase();
+    if candidate.starts_with(normalized_query) {
+        return Some(0);
+    }
+
+    if let Some(index) = candidate.find(normalized_query) {
+        return Some(100 + index);
+    }
+
+    let mut score = 1_000usize;
+    let mut query_chars = normalized_query.chars();
+    let Some(mut query_char) = query_chars.next() else {
+        return Some(0);
+    };
+
+    for (index, candidate_char) in candidate.chars().enumerate() {
+        if candidate_char == query_char {
+            score += index;
+            if let Some(next_query_char) = query_chars.next() {
+                query_char = next_query_char;
+            } else {
+                return Some(score);
+            }
+        }
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -705,6 +770,7 @@ mod tests {
     };
     use anyhow::anyhow;
     use lsp_types::{CompletionItem, Diagnostic, DiagnosticSeverity};
+    use ropey::Rope;
 
     #[test]
     fn request_state_rejects_stale_completion_tokens() {
@@ -974,6 +1040,51 @@ mod tests {
     }
 
     #[test]
+    fn ui_state_filters_cached_completions_with_filter_text() {
+        let mut state = LspUiState::new();
+        state.set_completion_cache(super::CompletionCache {
+            all_items: vec![CompletionItem {
+                label: "customer_name".to_string(),
+                filter_text: Some("name".to_string()),
+                ..Default::default()
+            }],
+            trigger_prefix: "n".to_string(),
+            trigger_offset: 3,
+        });
+
+        assert_eq!(state.visible_completions("nam").len(), 1);
+        assert!(state.visible_completions("customer").is_empty());
+    }
+
+    #[test]
+    fn ui_state_fuzzy_filters_and_ranks_cached_completions() {
+        let mut state = LspUiState::new();
+        state.set_completion_cache(super::CompletionCache {
+            all_items: vec![
+                CompletionItem {
+                    label: "GROUP_CONCAT".to_string(),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "COUNT".to_string(),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "CREATE".to_string(),
+                    ..Default::default()
+                },
+            ],
+            trigger_prefix: "g".to_string(),
+            trigger_offset: 3,
+        });
+
+        let completions = state.visible_completions("gc");
+
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].label, "GROUP_CONCAT");
+    }
+
+    #[test]
     fn ui_state_completion_helpers_select_and_scroll_visible_window() {
         let mut state = LspUiState::new();
         state.set_completion_items(
@@ -1018,6 +1129,34 @@ mod tests {
         let menu = state.completion_menu.as_ref().expect("completion menu");
         assert_eq!(menu.scroll_offset, 0);
         assert_eq!(menu.selected_index, 2);
+    }
+
+    #[test]
+    fn ui_state_selects_preselected_completion_item() {
+        let mut state = LspUiState::new();
+        state.set_completion_items(
+            vec![
+                CompletionItem {
+                    label: "COUNT".to_string(),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "GROUP_CONCAT".to_string(),
+                    preselect: Some(true),
+                    ..Default::default()
+                },
+            ],
+            0,
+        );
+
+        assert_eq!(
+            state
+                .completion_menu
+                .as_ref()
+                .expect("completion menu")
+                .selected_index,
+            1
+        );
     }
 
     #[test]
@@ -1085,6 +1224,120 @@ mod tests {
     }
 
     #[test]
+    fn request_state_filters_cached_completion_request_with_filter_text() {
+        let mut state = LspRequestState::new();
+        let cache = super::CompletionCache {
+            all_items: vec![CompletionItem {
+                label: "customer_name".to_string(),
+                filter_text: Some("name".to_string()),
+                ..Default::default()
+            }],
+            trigger_prefix: "n".to_string(),
+            trigger_offset: 3,
+        };
+
+        let resolution = state.resolve_completion_request(
+            Some(&cache),
+            true,
+            true,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 5,
+                trigger_offset: 3,
+                current_prefix: "nam".to_string(),
+            },
+        );
+
+        match resolution {
+            CompletionResolution::CachedFilter { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].label, "customer_name");
+            }
+            other => panic!("expected cached completion filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_state_fuzzy_filters_cached_completion_request() {
+        let mut state = LspRequestState::new();
+        let cache = super::CompletionCache {
+            all_items: vec![
+                CompletionItem {
+                    label: "GROUP_CONCAT".to_string(),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "COUNT".to_string(),
+                    ..Default::default()
+                },
+            ],
+            trigger_prefix: "g".to_string(),
+            trigger_offset: 3,
+        };
+
+        let resolution = state.resolve_completion_request(
+            Some(&cache),
+            true,
+            true,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 5,
+                trigger_offset: 3,
+                current_prefix: "gc".to_string(),
+            },
+        );
+
+        match resolution {
+            CompletionResolution::CachedFilter { items, .. } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(items[0].label, "GROUP_CONCAT");
+            }
+            other => panic!("expected cached completion filter, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn request_state_uses_sort_text_when_cached_scores_tie() {
+        let mut state = LspRequestState::new();
+        let cache = super::CompletionCache {
+            all_items: vec![
+                CompletionItem {
+                    label: "select_z".to_string(),
+                    sort_text: Some("2".to_string()),
+                    ..Default::default()
+                },
+                CompletionItem {
+                    label: "select_a".to_string(),
+                    sort_text: Some("1".to_string()),
+                    ..Default::default()
+                },
+            ],
+            trigger_prefix: "sel".to_string(),
+            trigger_offset: 3,
+        };
+
+        let resolution = state.resolve_completion_request(
+            Some(&cache),
+            true,
+            true,
+            CompletionRequestContext {
+                revision: 1,
+                cursor_offset: 5,
+                trigger_offset: 3,
+                current_prefix: "sel".to_string(),
+            },
+        );
+
+        match resolution {
+            CompletionResolution::CachedFilter { items, .. } => {
+                assert_eq!(items[0].label, "select_a");
+                assert_eq!(items[1].label, "select_z");
+            }
+            other => panic!("expected cached completion filter, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn request_state_clears_completions_without_provider_or_cache() {
         let mut state = LspRequestState::new();
 
@@ -1101,6 +1354,103 @@ mod tests {
         );
 
         assert!(matches!(resolution, CompletionResolution::Clear));
+    }
+
+    #[test]
+    fn sql_completion_provider_supports_subsequence_function_matching() {
+        let provider = super::SqlCompletionProvider::for_profile("sqlite");
+        let completions = provider.get_word_completions("gc");
+
+        assert!(
+            completions
+                .iter()
+                .any(|completion| completion.label == "GROUP_CONCAT")
+        );
+        assert_eq!(completions[0].label, "GROUP_CONCAT");
+    }
+
+    #[test]
+    fn sql_completion_provider_uses_driver_syntax_terms() {
+        let provider = super::SqlCompletionProvider::for_profile("redis");
+        let completions = provider.get_word_completions("json.g");
+
+        assert!(
+            completions
+                .iter()
+                .any(|completion| completion.label == "JSON.GET")
+        );
+        assert!(
+            completions
+                .iter()
+                .all(|completion| completion.detail.as_deref() != Some("SQL Keyword"))
+        );
+    }
+
+    #[test]
+    fn sql_completion_provider_uses_mongodb_types() {
+        let provider = super::SqlCompletionProvider::for_profile("mongodb");
+        let completions = provider.get_word_completions("object");
+
+        assert!(
+            completions
+                .iter()
+                .any(|completion| completion.label == "ObjectId")
+        );
+    }
+
+    #[test]
+    fn sql_completion_provider_uses_driver_word_chars_for_prefixes() {
+        let provider = super::SqlCompletionProvider::for_profile("mongodb");
+        let text = Rope::from_str("$gr");
+
+        assert_eq!(provider.completion_prefix(&text, "$gr".len()), "$gr");
+        assert!(
+            provider
+                .get_word_completions(&provider.completion_prefix(&text, "$gr".len()))
+                .iter()
+                .any(|completion| completion.label == "$group")
+        );
+    }
+
+    #[test]
+    fn sql_completion_provider_uses_driver_completion_triggers() {
+        let mongo = super::SqlCompletionProvider::for_profile("mongodb");
+        let trigger = mongo.completion_trigger_context_for_text(":");
+
+        assert_eq!(
+            trigger.and_then(|context| context.trigger_character),
+            Some(":".to_string())
+        );
+
+        let redis = super::SqlCompletionProvider::for_profile("redis");
+        let invoked = redis.completion_trigger_context_for_text(":");
+
+        assert!(matches!(
+            invoked.map(|context| context.trigger_kind),
+            Some(lsp_types::CompletionTriggerKind::INVOKED)
+        ));
+    }
+
+    #[test]
+    fn sql_completion_provider_hover_uses_driver_syntax_terms() {
+        let redis = super::SqlCompletionProvider::for_profile("redis");
+        let redis_hover = redis
+            .get_hover_documentation("JSON.GET")
+            .expect("redis command hover");
+        assert!(redis_hover.contains("JSON.GET keyword"));
+        assert!(redis_hover.contains("redis"));
+
+        let mongo = super::SqlCompletionProvider::for_profile("mongodb");
+        let mongo_hover = mongo
+            .get_hover_documentation("ObjectId")
+            .expect("mongodb type hover");
+        assert!(mongo_hover.contains("ObjectId type"));
+        assert!(mongo_hover.contains("mongodb"));
+
+        let redis_select = redis
+            .get_hover_documentation("SELECT")
+            .expect("redis SELECT command hover");
+        assert!(redis_select.contains("redis"));
     }
 
     #[test]
@@ -1171,251 +1521,175 @@ mod tests {
     }
 }
 
-/// SQL keywords for basic completion
-const SQL_KEYWORDS: &[&str] = &[
-    "SELECT",
-    "FROM",
-    "WHERE",
-    "AND",
-    "OR",
-    "NOT",
-    "IN",
-    "LIKE",
-    "BETWEEN",
-    "INSERT",
-    "INTO",
-    "VALUES",
-    "UPDATE",
-    "SET",
-    "DELETE",
-    "CREATE",
-    "TABLE",
-    "DROP",
-    "ALTER",
-    "INDEX",
-    "JOIN",
-    "LEFT",
-    "RIGHT",
-    "INNER",
-    "OUTER",
-    "FULL",
-    "CROSS",
-    "ON",
-    "GROUP",
-    "BY",
-    "HAVING",
-    "ORDER",
-    "ASC",
-    "DESC",
-    "LIMIT",
-    "OFFSET",
-    "DISTINCT",
-    "ALL",
-    "UNION",
-    "INTERSECT",
-    "EXCEPT",
-    "AS",
-    "CASE",
-    "WHEN",
-    "THEN",
-    "ELSE",
-    "END",
-    "NULL",
-    "IS",
-    "TRUE",
-    "FALSE",
-    "COUNT",
-    "SUM",
-    "AVG",
-    "MIN",
-    "MAX",
-    "PRIMARY",
-    "KEY",
-    "FOREIGN",
-    "REFERENCES",
-    "CONSTRAINT",
-    "UNIQUE",
-    "DEFAULT",
-    "INTEGER",
-    "TEXT",
-    "VARCHAR",
-    "BOOLEAN",
-    "REAL",
-    "BLOB",
-    "IF",
-    "EXISTS",
-    "AUTOINCREMENT",
-];
-
-/// SQL functions for basic completion
-const SQL_FUNCTIONS: &[&str] = &[
-    "COUNT",
-    "SUM",
-    "AVG",
-    "MIN",
-    "MAX",
-    "COALESCE",
-    "NULLIF",
-    "CAST",
-    "UPPER",
-    "LOWER",
-    "LENGTH",
-    "SUBSTR",
-    "TRIM",
-    "LTRIM",
-    "RTRIM",
-    "ABS",
-    "ROUND",
-    "CEIL",
-    "FLOOR",
-    "MOD",
-    "POWER",
-    "SQRT",
-    "DATE",
-    "TIME",
-    "DATETIME",
-    "STRFTIME",
-    "JULIANDAY",
-    "IFNULL",
-    "IIF",
-    "TYPEOF",
-    "PRINTF",
-    "INSTR",
-    "GLOB",
-    "HEX",
-    "QUOTE",
-    "RANDOM",
-    "RANDOMBLOB",
-    "ZEROBLOB",
-    "UNICODE",
-    "ROW_NUMBER",
-    "RANK",
-    "DENSE_RANK",
-    "NTILE",
-    "ROWID",
-    "LAST_INSERT_ROWID",
-    "CHANGES",
-    "TOTAL",
-    "GROUP_CONCAT",
-];
-
-/// Get documentation for a SQL keyword
-fn get_keyword_documentation(keyword: &str) -> Option<String> {
-    let docs = match keyword {
-        "SELECT" => "Retrieves data from one or more tables.",
-        "FROM" => "Specifies the table(s) to retrieve data from.",
-        "WHERE" => "Filters rows based on a condition.",
-        "INSERT" => "Inserts new rows into a table.",
-        "UPDATE" => "Modifies existing rows in a table.",
-        "DELETE" => "Removes rows from a table.",
-        "JOIN" | "LEFT" | "RIGHT" | "INNER" | "OUTER" => "Combines rows from two or more tables.",
-        "GROUP BY" => "Groups rows that have the same values in specified columns.",
-        "ORDER BY" => "Sorts the result set.",
-        "HAVING" => "Filters groups based on a condition.",
-        "DISTINCT" => "Removes duplicate rows from the result set.",
-        "LIMIT" => "Limits the number of rows returned.",
-        "OFFSET" => "Skips a specified number of rows.",
-        "UNION" => "Combines the result sets of two or more SELECT statements.",
-        "CREATE" => "Creates a new database object (table, index, etc.).",
-        "ALTER" => "Modifies an existing database object.",
-        "DROP" => "Deletes a database object.",
-        "NULL" => "Represents a missing or unknown value.",
-        "PRIMARY KEY" => "A column or set of columns that uniquely identifies each row.",
-        "FOREIGN KEY" => "A column that references the primary key of another table.",
-        _ => return None,
-    };
-    Some(docs.to_string())
+/// Basic syntax-term completion provider.
+pub struct SqlCompletionProvider {
+    syntax_profile: &'static str,
+    terms: SyntaxTermProfile,
+    completion_triggers: Vec<char>,
+    completion_word_chars: Vec<char>,
 }
-
-/// Get documentation for a SQL function
-fn get_function_documentation(func: &str) -> Option<String> {
-    let docs = match func {
-        "COUNT" => "Returns the number of rows that match a condition.",
-        "SUM" => "Returns the sum of a numeric column.",
-        "AVG" => "Returns the average value of a numeric column.",
-        "MIN" => "Returns the minimum value in a column.",
-        "MAX" => "Returns the maximum value in a column.",
-        "COALESCE" => "Returns the first non-null value in a list.",
-        "NULLIF" => "Returns NULL if two expressions are equal.",
-        "CAST" => "Converts a value from one data type to another.",
-        "UPPER" => "Converts a string to uppercase.",
-        "LOWER" => "Converts a string to lowercase.",
-        "LENGTH" => "Returns the length of a string.",
-        "SUBSTR" => "Returns a substring from a string.",
-        "TRIM" => "Removes leading and trailing spaces from a string.",
-        "ABS" => "Returns the absolute value of a number.",
-        "ROUND" => "Rounds a number to a specified number of decimals.",
-        "DATE" => "Returns the current date.",
-        "TIME" => "Returns the current time.",
-        "DATETIME" => "Returns the current date and time.",
-        "IFNULL" => "Returns an alternative value if an expression is NULL.",
-        "TYPEOF" => "Returns the data type of an expression.",
-        _ => return None,
-    };
-    Some(docs.to_string())
-}
-
-/// Basic SQL completion provider
-pub struct SqlCompletionProvider;
 
 impl SqlCompletionProvider {
     pub fn new() -> Self {
-        Self
+        Self::for_profile("sql")
+    }
+
+    pub fn for_profile(syntax_profile: &'static str) -> Self {
+        let capabilities = zqlz_core::get_syntax_driver_capabilities(syntax_profile);
+        Self {
+            syntax_profile: capabilities.profile,
+            terms: get_syntax_term_profile(capabilities.profile),
+            completion_triggers: capabilities.completion_triggers,
+            completion_word_chars: capabilities.completion_word_chars,
+        }
+    }
+
+    pub fn for_capabilities(capabilities: &zqlz_core::SyntaxDriverCapabilities) -> Self {
+        Self {
+            syntax_profile: capabilities.profile,
+            terms: get_syntax_term_profile(capabilities.profile),
+            completion_triggers: capabilities.completion_triggers.clone(),
+            completion_word_chars: capabilities.completion_word_chars.clone(),
+        }
     }
 
     /// Get completions for the current word
     pub fn get_word_completions(&self, prefix: &str) -> Vec<CompletionItem> {
         let prefix_lower = prefix.to_lowercase();
-        let mut items = Vec::new();
+        let mut scored_items = Vec::new();
 
-        // Add matching keywords
-        for keyword in SQL_KEYWORDS {
-            if keyword.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: keyword.to_string(),
-                    kind: Some(CompletionItemKind::KEYWORD),
-                    detail: Some("SQL Keyword".to_string()),
-                    ..Default::default()
-                });
-            }
-        }
+        self.extend_term_completions(
+            &mut scored_items,
+            self.terms
+                .base_keywords
+                .iter()
+                .chain(self.terms.dialect_keywords),
+            CompletionItemKind::KEYWORD,
+            "Keyword",
+            &prefix_lower,
+            false,
+        );
+        self.extend_term_completions(
+            &mut scored_items,
+            self.terms
+                .base_functions
+                .iter()
+                .chain(self.terms.dialect_functions),
+            CompletionItemKind::FUNCTION,
+            "Function",
+            &prefix_lower,
+            true,
+        );
+        self.extend_term_completions(
+            &mut scored_items,
+            self.terms.base_types.iter().chain(self.terms.dialect_types),
+            CompletionItemKind::TYPE_PARAMETER,
+            "Type",
+            &prefix_lower,
+            false,
+        );
 
-        // Add matching functions
-        for func in SQL_FUNCTIONS {
-            if func.to_lowercase().starts_with(&prefix_lower) {
-                items.push(CompletionItem {
-                    label: func.to_string(),
-                    kind: Some(CompletionItemKind::FUNCTION),
-                    detail: Some("SQL Function".to_string()),
-                    insert_text: Some(format!("{}(${{1:value}})", func)),
-                    insert_text_format: Some(InsertTextFormat::SNIPPET),
-                    ..Default::default()
-                });
-            }
-        }
-
+        scored_items.sort_by(|(left_score, left_item), (right_score, right_item)| {
+            left_score
+                .cmp(right_score)
+                .then_with(|| completion_sort_key(left_item).cmp(completion_sort_key(right_item)))
+                .then_with(|| left_item.label.cmp(&right_item.label))
+        });
+        let mut items = scored_items
+            .into_iter()
+            .map(|(_, item)| item)
+            .collect::<Vec<_>>();
+        items.dedup_by(|left, right| left.label == right.label);
         items
+    }
+
+    pub fn completion_prefix(&self, text: &Rope, byte_offset: usize) -> String {
+        completion_prefix_with_word_chars(text, byte_offset, &self.completion_word_chars)
+    }
+
+    pub fn completion_trigger_context_for_text(&self, new_text: &str) -> Option<CompletionContext> {
+        completion_trigger_context_for_characters(
+            &self.completion_triggers,
+            &self.completion_word_chars,
+            new_text,
+        )
+    }
+
+    fn extend_term_completions<'a>(
+        &self,
+        scored_items: &mut Vec<(usize, CompletionItem)>,
+        terms: impl Iterator<Item = &'a &'static str>,
+        kind: CompletionItemKind,
+        detail_kind: &str,
+        prefix_lower: &str,
+        snippet: bool,
+    ) {
+        for term in terms {
+            if let Some(score) = completion_match_score(term, prefix_lower) {
+                scored_items.push((
+                    score,
+                    CompletionItem {
+                        label: (*term).to_string(),
+                        kind: Some(kind),
+                        detail: Some(format!(
+                            "{} {} ({})",
+                            self.syntax_profile.to_uppercase(),
+                            detail_kind,
+                            self.syntax_profile
+                        )),
+                        insert_text: snippet.then(|| format!("{}(${{1:value}})", term)),
+                        insert_text_format: snippet.then_some(InsertTextFormat::SNIPPET),
+                        ..Default::default()
+                    },
+                ));
+            }
+        }
     }
 
     /// Get hover documentation for a word
     pub fn get_hover_documentation(&self, word: &str) -> Option<String> {
-        let word_upper = word.to_uppercase();
+        self.term_hover_documentation(
+            word,
+            self.terms
+                .base_keywords
+                .iter()
+                .chain(self.terms.dialect_keywords),
+            "keyword",
+        )
+        .or_else(|| {
+            self.term_hover_documentation(
+                word,
+                self.terms
+                    .base_functions
+                    .iter()
+                    .chain(self.terms.dialect_functions),
+                "function",
+            )
+        })
+        .or_else(|| {
+            self.term_hover_documentation(
+                word,
+                self.terms.base_types.iter().chain(self.terms.dialect_types),
+                "type",
+            )
+        })
+    }
 
-        // Check if it's a keyword
-        for keyword in SQL_KEYWORDS {
-            if *keyword == word_upper {
-                return get_keyword_documentation(keyword);
-            }
-        }
-
-        // Check if it's a function
-        for func in SQL_FUNCTIONS {
-            if *func == word_upper {
-                return get_function_documentation(func);
-            }
-        }
-
-        None
+    fn term_hover_documentation<'a>(
+        &self,
+        word: &str,
+        terms: impl Iterator<Item = &'a &'static str>,
+        kind: &str,
+    ) -> Option<String> {
+        terms
+            .copied()
+            .find(|term| term.eq_ignore_ascii_case(word))
+            .map(|term| {
+                format!(
+                    "{} {}\n\nSource: `{}` syntax metadata.",
+                    term, kind, self.syntax_profile
+                )
+            })
     }
 }
 
@@ -1477,8 +1751,7 @@ impl CompletionProvider for SqlCompletionProvider {
         _window: &mut Window,
         _cx: &mut Context<TextEditor>,
     ) -> Task<Result<CompletionResponse>> {
-        // Get the word prefix at the current position
-        let prefix = get_word_at_offset(text, offset);
+        let prefix = self.completion_prefix(text, offset);
 
         let items = self.get_word_completions(&prefix);
 
@@ -1491,33 +1764,7 @@ impl CompletionProvider for SqlCompletionProvider {
         new_text: &str,
         _cx: &mut Context<TextEditor>,
     ) -> Option<CompletionContext> {
-        if new_text.len() == 1 {
-            let ch = new_text.chars().next()?;
-
-            if matches!(ch, '.' | ' ' | '(' | ',') {
-                return Some(CompletionContext {
-                    trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
-                    trigger_character: Some(ch.to_string()),
-                });
-            }
-
-            if ch.is_alphanumeric() || ch == '_' {
-                return Some(CompletionContext {
-                    trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
-                    trigger_character: None,
-                });
-            }
-
-            return None;
-        }
-
-        new_text
-            .chars()
-            .any(|c| c.is_alphanumeric())
-            .then_some(CompletionContext {
-                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
-                trigger_character: None,
-            })
+        self.completion_trigger_context_for_text(new_text)
     }
 }
 
@@ -1528,6 +1775,14 @@ pub fn get_word_at_cursor(text: &Rope, offset: usize) -> String {
 
 /// Get the word prefix at the given byte offset.
 fn get_word_at_offset(text: &Rope, byte_offset: usize) -> String {
+    completion_prefix_with_word_chars(text, byte_offset, &[])
+}
+
+pub fn completion_prefix_with_word_chars(
+    text: &Rope,
+    byte_offset: usize,
+    extra_word_chars: &[char],
+) -> String {
     // All ropey char-indexed APIs require a char index, not a byte offset. Clamp
     // to len_chars() so that a cursor sitting exactly at end-of-buffer (where
     // byte_offset == len_bytes()) maps safely to the last char position.
@@ -1542,13 +1797,49 @@ fn get_word_at_offset(text: &Rope, byte_offset: usize) -> String {
     while char_start > 0 {
         let prev = char_start - 1;
         match text.get_char(prev) {
-            Some(ch) if ch.is_alphanumeric() || ch == '_' => char_start = prev,
+            Some(ch) if zqlz_core::syntax_completion_word_char(ch, extra_word_chars) => {
+                char_start = prev
+            }
             _ => break,
         }
     }
 
     // Extract the word slice using char indices (safe, no unwrap).
     text.slice(char_start..char_end).to_string()
+}
+
+pub fn completion_trigger_context_for_characters(
+    trigger_chars: &[char],
+    word_chars: &[char],
+    new_text: &str,
+) -> Option<CompletionContext> {
+    if new_text.len() == 1 {
+        let ch = new_text.chars().next()?;
+
+        if trigger_chars.contains(&ch) {
+            return Some(CompletionContext {
+                trigger_kind: lsp_types::CompletionTriggerKind::TRIGGER_CHARACTER,
+                trigger_character: Some(ch.to_string()),
+            });
+        }
+
+        if zqlz_core::syntax_completion_word_char(ch, word_chars) {
+            return Some(CompletionContext {
+                trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+                trigger_character: None,
+            });
+        }
+
+        return None;
+    }
+
+    new_text
+        .chars()
+        .any(|ch| zqlz_core::syntax_completion_word_char(ch, word_chars))
+        .then_some(CompletionContext {
+            trigger_kind: lsp_types::CompletionTriggerKind::INVOKED,
+            trigger_character: None,
+        })
 }
 
 /// Trait for providing hover information
@@ -1618,6 +1909,7 @@ pub trait CodeActionProvider: 'static {
         text: &Rope,
         offset: usize,
         document: &DocumentContext,
+        diagnostics: &[Diagnostic],
     ) -> Vec<CodeActionOrCommand>;
 }
 
@@ -2185,10 +2477,11 @@ impl Lsp {
         rope: &Rope,
         offset: usize,
         context: &DocumentContext,
+        diagnostics: &[Diagnostic],
     ) -> Option<Vec<CodeActionOrCommand>> {
         self.code_action_provider
             .as_ref()
-            .map(|provider| provider.code_actions(rope, offset, context))
+            .map(|provider| provider.code_actions(rope, offset, context, diagnostics))
     }
 
     /// Check if completions are available
@@ -2385,6 +2678,7 @@ mod provider_contract_tests {
             _text: &Rope,
             _offset: usize,
             _document: &DocumentContext,
+            _diagnostics: &[Diagnostic],
         ) -> Vec<CodeActionOrCommand> {
             vec![CodeActionOrCommand::Command(Command {
                 title: "fake action".to_string(),
@@ -2574,7 +2868,7 @@ mod provider_contract_tests {
         let rename = FakeRenameProvider.rename(&text, 0, "renamed", &document);
         assert!(rename.is_some());
 
-        let actions = FakeCodeActionProvider.code_actions(&text, 0, &document);
+        let actions = FakeCodeActionProvider.code_actions(&text, 0, &document, &[]);
         assert_eq!(actions.len(), 1);
     }
 

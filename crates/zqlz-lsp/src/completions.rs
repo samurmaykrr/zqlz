@@ -61,10 +61,17 @@ impl CompletionProvider for SqlCompletionProvider {
     ) -> bool {
         tracing::debug!("is_completion_trigger called with: '{}'", new_text);
 
-        if self.lsp.read().dialect == crate::SqlDialect::Redis
-            && (new_text == " " || new_text == "\n")
-        {
+        let lsp = self.lsp.read();
+        if lsp.uses_command_syntax() && (new_text == " " || new_text == "\n") {
             return true;
+        }
+
+        let syntax_capabilities = zqlz_core::get_syntax_driver_capabilities(&lsp.driver_type);
+        if syntax_capabilities.document_syntax {
+            return crate::document_completions::is_document_completion_trigger(
+                &syntax_capabilities,
+                new_text,
+            );
         }
 
         // Single character handling

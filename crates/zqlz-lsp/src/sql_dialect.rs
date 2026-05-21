@@ -12,11 +12,11 @@
 //! - Formatters use the correct dialect output rules
 //! - Non-SQL drivers (Redis, MongoDB) are excluded from SQL parsing
 
-use sqlparser::dialect::{
-    Dialect as SqlParserDialect, GenericDialect, MySqlDialect, PostgreSqlDialect, SQLiteDialect,
+use sqlparser::dialect::Dialect as SqlParserDialect;
+use zqlz_core::{
+    DialectInfo, FunctionCategory, KeywordCategory, dialects::SqlDialect as CoreSqlDialect,
 };
-use zqlz_core::{DialectInfo, dialects::SqlDialect as CoreSqlDialect};
-use zqlz_drivers::get_dialect_info;
+use zqlz_drivers::{get_dialect_info, get_driver_capabilities};
 
 /// SQL dialect parser configuration
 ///
@@ -60,24 +60,17 @@ impl SqlDialectConfig {
         let driver_id = driver_id.into();
         let dialect_info = get_dialect_info(&driver_id);
 
-        let (supports_returning, supports_upsert, supports_cte, supports_window_functions) =
-            match core_dialect {
-                CoreSqlDialect::PostgreSql => (true, true, true, true),
-                CoreSqlDialect::MySql => (false, false, true, true),
-                CoreSqlDialect::Sqlite => (true, true, true, true),
-                CoreSqlDialect::ClickHouse => (false, false, true, true),
-                CoreSqlDialect::Ansi => (false, false, true, true),
-            };
+        let capabilities = get_driver_capabilities(&driver_id).unwrap_or_default();
 
         Self {
             driver_id,
             display_name: display_name.into(),
             core_dialect,
             dialect_info,
-            supports_returning,
-            supports_upsert,
-            supports_cte,
-            supports_window_functions,
+            supports_returning: capabilities.supports_returning,
+            supports_upsert: capabilities.supports_upsert,
+            supports_cte: capabilities.supports_cte,
+            supports_window_functions: capabilities.supports_window_functions,
         }
     }
 
@@ -86,16 +79,7 @@ impl SqlDialectConfig {
     /// Returns a trait object that implements sqlparser's Dialect trait,
     /// which is used for parsing SQL statements.
     pub fn sqlparser_dialect(&self) -> Box<dyn SqlParserDialect> {
-        match self.core_dialect {
-            CoreSqlDialect::PostgreSql => Box::new(PostgreSqlDialect {}),
-            CoreSqlDialect::MySql => Box::new(MySqlDialect {}),
-            CoreSqlDialect::Sqlite => Box::new(SQLiteDialect {}),
-            CoreSqlDialect::ClickHouse => {
-                // ClickHouse uses PostgreSQL-like syntax with extensions
-                Box::new(PostgreSqlDialect {})
-            }
-            CoreSqlDialect::Ansi => Box::new(GenericDialect {}),
-        }
+        self.core_dialect.sqlparser_dialect()
     }
 
     /// Get all keywords for this dialect
@@ -208,86 +192,21 @@ impl SqlDialectConfig {
     ///
     /// This is useful for highlighting dialect-specific syntax.
     pub fn dialect_specific_keywords(&self) -> Vec<String> {
-        match self.core_dialect {
-            CoreSqlDialect::PostgreSql => vec![
-                "ILIKE".to_string(),
-                "RETURNING".to_string(),
-                "ON CONFLICT".to_string(),
-                "DO UPDATE".to_string(),
-                "DO NOTHING".to_string(),
-                "DISTINCT ON".to_string(),
-                "LATERAL".to_string(),
-                "ANALYZE".to_string(),
-                "VACUUM".to_string(),
-                "REINDEX".to_string(),
-                "SERIAL".to_string(),
-                "BIGSERIAL".to_string(),
-                "SMALLSERIAL".to_string(),
-                "JSONB".to_string(),
-                "TIMESTAMPTZ".to_string(),
-            ],
-            CoreSqlDialect::MySql => vec![
-                "UNSIGNED".to_string(),
-                "ZEROFILL".to_string(),
-                "AUTO_INCREMENT".to_string(),
-                "ENGINE".to_string(),
-                "CHARSET".to_string(),
-                "COLLATE".to_string(),
-                "TINYINT".to_string(),
-                "MEDIUMINT".to_string(),
-                "BIGINT".to_string(),
-                "LONGTEXT".to_string(),
-                "MEDIUMTEXT".to_string(),
-                "TINYTEXT".to_string(),
-            ],
-            CoreSqlDialect::Sqlite => vec![
-                "AUTOINCREMENT".to_string(),
-                "WITHOUT ROWID".to_string(),
-                "PRAGMA".to_string(),
-                "ATTACH".to_string(),
-                "DETACH".to_string(),
-            ],
-            CoreSqlDialect::ClickHouse => vec![
-                "ENGINE".to_string(),
-                "PARTITION BY".to_string(),
-                "ORDER BY".to_string(),
-                "SAMPLE BY".to_string(),
-                "TTL".to_string(),
-                "CODEC".to_string(),
-                "MATERIALIZE".to_string(),
-                "POPULATE".to_string(),
-                "FINAL".to_string(),
-            ],
-            CoreSqlDialect::Ansi => vec![],
-        }
+        self.dialect_info
+            .keywords
+            .iter()
+            .filter(|keyword| keyword.category == KeywordCategory::DatabaseSpecific)
+            .map(|keyword| keyword.keyword.to_string())
+            .collect()
     }
 
     /// Get dialect-specific functions that are not in ANSI SQL
     pub fn dialect_specific_functions(&self) -> Vec<String> {
-        let all_functions = self.functions();
-        let ansi_functions = vec![
-            "COUNT",
-            "SUM",
-            "AVG",
-            "MIN",
-            "MAX",
-            "UPPER",
-            "LOWER",
-            "TRIM",
-            "LENGTH",
-            "SUBSTRING",
-            "CONCAT",
-            "COALESCE",
-            "NULLIF",
-            "CAST",
-            "CURRENT_DATE",
-            "CURRENT_TIME",
-            "CURRENT_TIMESTAMP",
-        ];
-
-        all_functions
-            .into_iter()
-            .filter(|f| !ansi_functions.iter().any(|a| a.eq_ignore_ascii_case(f)))
+        self.dialect_info
+            .functions
+            .iter()
+            .filter(|function| function.category == FunctionCategory::DatabaseSpecific)
+            .map(|function| function.name.to_string())
             .collect()
     }
 }
@@ -296,44 +215,13 @@ impl SqlDialectConfig {
 ///
 /// Returns None for non-SQL drivers (Redis, MongoDB, etc.)
 pub fn get_sql_dialect_config(driver_id: &str) -> Option<SqlDialectConfig> {
-    match driver_id.to_lowercase().as_str() {
-        "postgres" | "postgresql" => Some(SqlDialectConfig::new(
-            "postgres",
-            "PostgreSQL",
-            CoreSqlDialect::PostgreSql,
-        )),
-        "mysql" | "mariadb" => Some(SqlDialectConfig::new(
-            "mysql",
-            "MySQL",
-            CoreSqlDialect::MySql,
-        )),
-        "sqlite" => Some(SqlDialectConfig::new(
-            "sqlite",
-            "SQLite",
-            CoreSqlDialect::Sqlite,
-        )),
-        "clickhouse" => Some(SqlDialectConfig::new(
-            "clickhouse",
-            "ClickHouse",
-            CoreSqlDialect::ClickHouse,
-        )),
-        "mssql" | "sqlserver" => {
-            // SQL Server not yet fully supported, but we can provide basic config
-            Some(SqlDialectConfig::new(
-                "mssql",
-                "SQL Server",
-                CoreSqlDialect::Ansi,
-            ))
-        }
-        "duckdb" => Some(SqlDialectConfig::new(
-            "duckdb",
-            "DuckDB",
-            CoreSqlDialect::PostgreSql, // DuckDB uses PostgreSQL-compatible syntax
-        )),
-        // Non-SQL drivers return None
-        "redis" | "mongodb" => None,
-        _ => None,
-    }
+    let core_dialect = zqlz_core::get_sql_dialect(driver_id)?;
+    let driver_id = driver_id.trim().to_ascii_lowercase();
+    Some(SqlDialectConfig::new(
+        driver_id,
+        core_dialect.display_name(),
+        core_dialect,
+    ))
 }
 
 /// Check if a driver uses SQL
@@ -364,9 +252,8 @@ mod tests {
         let functions = config.functions();
         assert!(!functions.is_empty());
 
-        let dialect_specific = config.dialect_specific_keywords();
-        assert!(dialect_specific.contains(&"ILIKE".to_string()));
-        assert!(dialect_specific.contains(&"RETURNING".to_string()));
+        assert!(config.is_valid_keyword("ILIKE"));
+        assert!(config.is_valid_keyword("RETURNING"));
     }
 
     #[test]
@@ -376,13 +263,12 @@ mod tests {
         assert_eq!(config.display_name, "MySQL");
         assert!(matches!(config.core_dialect, CoreSqlDialect::MySql));
         assert!(!config.supports_returning);
-        assert!(!config.supports_upsert);
+        assert!(config.supports_upsert);
         assert!(config.supports_cte);
         assert!(config.supports_window_functions);
 
-        let dialect_specific = config.dialect_specific_keywords();
-        assert!(dialect_specific.contains(&"UNSIGNED".to_string()));
-        assert!(dialect_specific.contains(&"AUTO_INCREMENT".to_string()));
+        assert!(config.is_valid_keyword("UNSIGNED"));
+        assert!(config.is_valid_keyword("AUTO_INCREMENT"));
     }
 
     #[test]
@@ -394,9 +280,8 @@ mod tests {
         assert!(config.supports_returning);
         assert!(config.supports_upsert);
 
-        let dialect_specific = config.dialect_specific_keywords();
-        assert!(dialect_specific.contains(&"AUTOINCREMENT".to_string()));
-        assert!(dialect_specific.contains(&"WITHOUT ROWID".to_string()));
+        assert!(config.is_valid_keyword("AUTOINCREMENT"));
+        assert!(config.is_valid_keyword("WITHOUT ROWID"));
     }
 
     #[test]
@@ -406,8 +291,33 @@ mod tests {
         assert_eq!(config.display_name, "ClickHouse");
         assert!(matches!(config.core_dialect, CoreSqlDialect::ClickHouse));
 
-        let dialect_specific = config.dialect_specific_keywords();
-        assert!(dialect_specific.contains(&"ENGINE".to_string()));
+        assert!(config.is_valid_keyword("ENGINE"));
+    }
+
+    #[test]
+    fn test_duckdb_config() {
+        let config = get_sql_dialect_config("duckdb").expect("duckdb should be supported");
+        assert_eq!(config.driver_id, "duckdb");
+        assert_eq!(config.display_name, "DuckDB");
+        assert!(matches!(config.core_dialect, CoreSqlDialect::DuckDb));
+        assert!(config.supports_returning);
+        assert!(config.supports_upsert);
+
+        assert!(config.is_valid_keyword("QUALIFY"));
+        assert!(config.is_valid_data_type("STRUCT"));
+    }
+
+    #[test]
+    fn test_mssql_config() {
+        let config = get_sql_dialect_config("sqlserver").expect("mssql should be supported");
+        assert_eq!(config.driver_id, "sqlserver");
+        assert_eq!(config.display_name, "Microsoft SQL Server");
+        assert!(matches!(config.core_dialect, CoreSqlDialect::MsSql));
+        assert!(config.supports_returning);
+        assert!(config.supports_upsert);
+
+        assert!(config.is_valid_keyword("TOP"));
+        assert!(config.is_valid_data_type("UNIQUEIDENTIFIER"));
     }
 
     #[test]
@@ -424,6 +334,10 @@ mod tests {
         assert!(is_sql_driver("mysql"));
         assert!(is_sql_driver("sqlite"));
         assert!(is_sql_driver("clickhouse"));
+        assert!(is_sql_driver("duckdb"));
+        assert!(is_sql_driver("mssql"));
+        assert!(is_sql_driver("sqlserver"));
+        assert!(is_sql_driver("turso"));
         assert!(!is_sql_driver("redis"));
         assert!(!is_sql_driver("mongodb"));
     }
@@ -458,6 +372,12 @@ mod tests {
 
         let mysql_config = get_sql_dialect_config("mysql").expect("mysql should be supported");
         let _dialect = mysql_config.sqlparser_dialect();
+
+        let duckdb_config = get_sql_dialect_config("duckdb").expect("duckdb should be supported");
+        let _dialect = duckdb_config.sqlparser_dialect();
+
+        let mssql_config = get_sql_dialect_config("mssql").expect("mssql should be supported");
+        let _dialect = mssql_config.sqlparser_dialect();
     }
 
     #[test]

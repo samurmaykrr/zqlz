@@ -2373,7 +2373,30 @@ fn redis_value_to_zqlz_value(value: &redis::Value) -> Value {
 #[cfg(test)]
 mod option_tests {
     use super::*;
-    use zqlz_core::DatabaseDriver;
+    use zqlz_core::{
+        DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability, TreeSitterGrammar,
+        syntax_driver_capabilities_from_bundle,
+    };
+
+    #[test]
+    fn redis_dialect_bundle_owns_editor_syntax_capabilities() {
+        let capabilities = syntax_driver_capabilities_from_bundle(get_dialect_bundle());
+
+        assert_eq!(capabilities.profile, "redis");
+        assert_eq!(capabilities.tree_sitter_grammar, TreeSitterGrammar::None);
+        assert_eq!(
+            capabilities.highlight_query_language,
+            HighlightQueryLanguage::Redis
+        );
+        assert_eq!(
+            capabilities.parameter_placeholders,
+            ParameterPlaceholderCapability::disabled()
+        );
+        assert!(capabilities.command_syntax);
+        assert!(!capabilities.document_syntax);
+        assert!(!capabilities.sql_overlays);
+        assert!(!capabilities.dollar_quoted_strings);
+    }
 
     #[test]
     fn redis_schema_includes_username() {

@@ -5,10 +5,10 @@
 
 use std::collections::HashMap;
 
-use regex::Regex;
-use std::sync::LazyLock;
 use thiserror::Error;
-use zqlz_core::{BindPlaceholderPolicy, Value};
+use zqlz_core::{
+    BindPlaceholderPolicy, SqlParameterPlaceholderKind, Value, sql_parameter_placeholders,
+};
 
 use super::{Parameter, extract_parameters_with_style};
 
@@ -57,23 +57,6 @@ pub struct BoundPositionalQuery {
     /// Bound values in execution order.
     pub values: Vec<Value>,
 }
-
-// Regex patterns for parameter replacement
-static COLON_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r":([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static AT_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"@([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static DOLLAR_NAMED_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$([a-zA-Z_][a-zA-Z0-9_]*)").expect("valid regex"));
-
-static DOLLAR_POSITIONAL_REGEX: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"\$(\d+)").expect("valid regex"));
-
-static STRING_LITERAL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'(?:[^'\\]|\\.)*'|--[^\n]*|/\*[\s\S]*?\*/").expect("valid regex")
-});
 
 /// Binds named parameters to a SQL query.
 ///
@@ -155,14 +138,11 @@ pub fn bind_named_with_policy(
         }
     };
 
-    // Build ranges to skip (string literals and comments)
-    let skip_ranges = build_skip_ranges(sql);
-
     let mut result = String::with_capacity(sql.len());
     let mut last_end = 0;
 
     // Process all named parameter patterns in order of appearance
-    let all_matches = find_all_named_params(sql, &skip_ranges);
+    let all_matches = find_all_named_params(sql);
 
     for (start, end, name) in all_matches {
         // Append text before this match
@@ -318,99 +298,53 @@ pub fn bind_positional_with_policy(
 }
 
 fn rewrite_question_mark_placeholders(sql: &str, policy: BindPlaceholderPolicy) -> String {
-    let skip_ranges = build_skip_ranges(sql);
     let mut result = String::with_capacity(sql.len());
     let mut parameter_index = 0usize;
-
-    for (index, ch) in sql.char_indices() {
-        if ch == '?' && !is_position_in_ranges(index, &skip_ranges) {
-            result.push_str(&policy.format(parameter_index));
-            parameter_index += 1;
-        } else {
-            result.push(ch);
-        }
-    }
-
-    result
-}
-
-fn rewrite_dollar_positional_placeholders(sql: &str, policy: BindPlaceholderPolicy) -> String {
-    let skip_ranges = build_skip_ranges(sql);
-    let mut result = String::with_capacity(sql.len());
     let mut last_end = 0usize;
 
-    for capture in DOLLAR_POSITIONAL_REGEX.captures_iter(sql) {
-        let (Some(full_match), Some(position_match)) = (capture.get(0), capture.get(1)) else {
-            continue;
-        };
-
-        if is_position_in_ranges(full_match.start(), &skip_ranges) {
+    for placeholder in sql_parameter_placeholders(sql) {
+        if !matches!(placeholder.kind, SqlParameterPlaceholderKind::QuestionMark) {
             continue;
         }
 
-        let Ok(position) = position_match.as_str().parse::<usize>() else {
-            continue;
-        };
-
-        result.push_str(&sql[last_end..full_match.start()]);
-        result.push_str(&policy.format(position.saturating_sub(1)));
-        last_end = full_match.end();
+        result.push_str(&sql[last_end..placeholder.start]);
+        result.push_str(&policy.format(parameter_index));
+        parameter_index += 1;
+        last_end = placeholder.end;
     }
 
     result.push_str(&sql[last_end..]);
     result
 }
 
-fn is_position_in_ranges(position: usize, ranges: &[(usize, usize)]) -> bool {
-    ranges
-        .iter()
-        .any(|(start, end)| position >= *start && position < *end)
+fn rewrite_dollar_positional_placeholders(sql: &str, policy: BindPlaceholderPolicy) -> String {
+    let mut result = String::with_capacity(sql.len());
+    let mut last_end = 0usize;
+
+    for placeholder in sql_parameter_placeholders(sql) {
+        let SqlParameterPlaceholderKind::DollarPositional(position) = placeholder.kind else {
+            continue;
+        };
+
+        result.push_str(&sql[last_end..placeholder.start]);
+        result.push_str(&policy.format(position.saturating_sub(1)));
+        last_end = placeholder.end;
+    }
+
+    result.push_str(&sql[last_end..]);
+    result
 }
 
 /// Find all named parameter matches in SQL, excluding those in strings/comments.
-fn find_all_named_params(sql: &str, skip_ranges: &[(usize, usize)]) -> Vec<(usize, usize, String)> {
-    let mut matches: Vec<(usize, usize, String)> = Vec::new();
-
-    // Helper to check if a position is within a skip range
-    let is_skipped =
-        |pos: usize| -> bool { skip_ranges.iter().any(|(s, e)| pos >= *s && pos < *e) };
-
-    // Find all colon-named params
-    for cap in COLON_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
-            && !is_skipped(full.start())
-        {
-            matches.push((full.start(), full.end(), name.as_str().to_string()));
-        }
-    }
-
-    // Find all at-named params
-    for cap in AT_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
-            && !is_skipped(full.start())
-        {
-            matches.push((full.start(), full.end(), name.as_str().to_string()));
-        }
-    }
-
-    // Find all dollar-named params (non-numeric)
-    for cap in DOLLAR_NAMED_REGEX.captures_iter(sql) {
-        if let (Some(full), Some(name)) = (cap.get(0), cap.get(1))
-            && !is_skipped(full.start())
-        {
-            matches.push((full.start(), full.end(), name.as_str().to_string()));
-        }
-    }
-
-    // Sort by start position to process in order
-    matches.sort_by_key(|(start, _, _)| *start);
-    matches
-}
-
-/// Build ranges of string literals and comments to skip during replacement.
-fn build_skip_ranges(sql: &str) -> Vec<(usize, usize)> {
-    STRING_LITERAL_REGEX
-        .find_iter(sql)
-        .map(|m| (m.start(), m.end()))
+fn find_all_named_params(sql: &str) -> Vec<(usize, usize, String)> {
+    sql_parameter_placeholders(sql)
+        .into_iter()
+        .filter_map(|placeholder| match placeholder.kind {
+            SqlParameterPlaceholderKind::Named(name) => {
+                Some((placeholder.start, placeholder.end, name))
+            }
+            SqlParameterPlaceholderKind::DollarPositional(_)
+            | SqlParameterPlaceholderKind::QuestionMark => None,
+        })
         .collect()
 }

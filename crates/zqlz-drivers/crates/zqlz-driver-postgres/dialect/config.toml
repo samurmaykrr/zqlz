@@ -1,0 +1,284 @@
+id = "postgresql"
+display_name = "PostgreSQL"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "\""
+string_quote = "'"
+case_sensitive = false
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "postgresql"
+grammar = "sql"
+highlight_query = "postgresql"
+parameter_placeholders = "sql-no-question-mark"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = true
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["ANALYZE", "BIGSERIAL", "BYTEA", "CITEXT", "CONCURRENTLY", "DO", "ILIKE", "JSONB", "LATERAL", "MATERIALIZED", "NOTIFY", "PLPGSQL", "REINDEX", "SERIAL", "SMALLSERIAL", "TABLE", "UNLOGGED", "VACUUM"]
+functions = ["ARRAY_AGG", "ARRAY_LENGTH", "BOOL_AND", "BOOL_OR", "DATE_PART", "DATE_TRUNC", "DENSE_RANK", "GENERATE_SERIES", "GEN_RANDOM_UUID", "JSON_BUILD_OBJECT", "JSONB_AGG", "JSONB_BUILD_OBJECT", "JSONB_EACH", "JSONB_OBJECT_AGG", "JSONB_SET", "NOW", "PG_STAT_STATEMENTS_RESET", "PG_TYPEOF", "REGEXP_REPLACE", "ROW_NUMBER", "SPLIT_PART", "STRING_AGG", "TO_CHAR", "TO_JSONB", "UNNEST"]
+types = ["BIGSERIAL", "BYTEA", "CIDR", "CITEXT", "INET", "INTERVAL", "JSONB", "JSONPATH", "MACADDR", "MACADDR8", "MONEY", "NAME", "SERIAL", "SMALLSERIAL", "TIMESTAMPTZ", "TIMETZ", "TSQUERY", "TSVECTOR", "UUID", "XML"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+CREATE TABLE "categories" (
+  "category_id" text(255) NOT NULL,
+  payload JSONB DEFAULT '{}'::jsonb,
+  owner_id UUID REFERENCES users(id),
+  amount NUMERIC(10, 2) CHECK (amount > 0),
+  updated_at TIMESTAMPTZ
+);
+SELECT * FROM "categories", LATERAL jsonb_each(payload) AS entry
+WHERE owner_id = $1 AND payload ? 'seo';
+SELECT row_number() OVER (PARTITION BY owner_id ORDER BY updated_at DESC) FROM "categories";
+SELECT DISTINCT CASE WHEN amount IN (10, 20) THEN amount ELSE 0 END AS bucket
+FROM "categories"
+NATURAL LEFT JOIN category_rollups USING (owner_id)
+WINDOW recent AS (PARTITION BY owner_id ORDER BY updated_at DESC);
+SELECT count(*) FILTER (WHERE amount IS NOT NULL) OVER recent FROM "categories"
+UNION ALL SELECT 0 EXCEPT SELECT 1 INTERSECT SELECT 2;
+WITH RECURSIVE category_tree AS (
+  SELECT category_id, owner_id FROM "categories" WHERE owner_id IS NULL
+  UNION ALL
+  SELECT c.category_id, c.owner_id FROM "categories" c JOIN category_tree t ON c.owner_id = t.category_id
+)
+SELECT category_id FROM category_tree ORDER BY category_id ASC LIMIT 10 OFFSET 5;
+ALTER TABLE "categories" ADD COLUMN archived_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_categories_owner_unique ON "categories"(owner_id);
+INSERT INTO "categories" (category_id) VALUES ('1') ON CONFLICT (category_id) DO UPDATE SET updated_at = NOW() RETURNING category_id;
+TRUNCATE TABLE category_audit RESTART IDENTITY CASCADE;
+GRANT SELECT ON TABLE "categories" TO app_role;
+REVOKE DELETE ON TABLE "categories" FROM app_role;
+REINDEX INDEX CONCURRENTLY idx_categories_owner;
+"""
+
+expected_outline = [
+  "CREATE categories",
+  "ALTER categories",
+  "INSERT categories",
+  "TRUNCATE category_audit",
+]
+
+[[syntax_quality.expected]]
+token = "CREATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "TABLE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "\"categories\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "\"category_id\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "payload"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "owner_id"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "amount"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "updated_at"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "text"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "NOT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "NULL"
+kind = "Null"
+[[syntax_quality.expected]]
+token = "JSONB"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "DEFAULT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "UUID"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "REFERENCES"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "users"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "CHECK"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "NUMERIC"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "TIMESTAMPTZ"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "LATERAL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "jsonb_each"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "row_number"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "OVER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "PARTITION"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DESC"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DISTINCT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "CASE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "WHEN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "IN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "THEN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ELSE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "END"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "NATURAL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "USING"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "WINDOW"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "FILTER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "UNION"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ALL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "EXCEPT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INTERSECT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "RECURSIVE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "OFFSET"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ALTER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ADD"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "COLUMN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "UNIQUE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INTO"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "TRUNCATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "RESTART"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "IDENTITY"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "CASCADE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "GRANT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "REVOKE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "$1"
+kind = "Parameter"
+[[syntax_quality.expected]]
+token = "?"
+kind = "Operator"
+[[syntax_quality.expected]]
+token = "'seo'"
+kind = "String"
+[[syntax_quality.expected]]
+token = "REINDEX"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INDEX"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "CONCURRENTLY"
+kind = "Keyword"
+
+[[syntax_quality.rejected]]
+token = "\"categories\""
+kind = "String"
+[[syntax_quality.rejected]]
+token = "\"category_id\""
+kind = "String"
+[[syntax_quality.rejected]]
+token = "payload"
+kind = "Type"
+[[syntax_quality.rejected]]
+token = "text"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "users"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "USING"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "FILTER"
+kind = "Function"

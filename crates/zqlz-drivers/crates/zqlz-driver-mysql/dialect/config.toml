@@ -1,0 +1,167 @@
+id = "mysql"
+display_name = "MySQL"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "`"
+string_quote = "'"
+case_sensitive = false
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "mysql"
+grammar = "sql"
+highlight_query = "mysql"
+parameter_placeholders = "sql-question-mark"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = false
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["ANALYZE", "AUTO_INCREMENT", "CHARSET", "COLLATE", "DUPLICATE", "ENGINE", "FORCE", "IGNORE", "KEY", "LOCK", "MODIFY", "OPTIMIZE", "REGEXP", "REPLACE", "SQL_CALC_FOUND_ROWS", "STRAIGHT_JOIN", "UNLOCK", "UNSIGNED", "ZEROFILL"]
+functions = ["CONCAT", "CONNECTION_ID", "DATE_FORMAT", "DATEDIFF", "DENSE_RANK", "GROUP_CONCAT", "IF", "JSON_ARRAY", "JSON_CONTAINS", "JSON_EXTRACT", "JSON_LENGTH", "JSON_OBJECT", "NOW", "ROW_NUMBER", "TIMESTAMPDIFF", "UUID"]
+types = ["BIGINT", "BINARY", "DATETIME", "ENUM", "JSON", "LONGBLOB", "LONGTEXT", "MEDIUMBLOB", "MEDIUMINT", "MEDIUMTEXT", "TINYBLOB", "TINYINT", "TINYTEXT", "UNSIGNED", "VARBINARY", "ZEROFILL"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+CREATE TABLE `orders` (
+  id BIGINT UNSIGNED AUTO_INCREMENT PRIMARY KEY,
+  status ENUM('new', 'paid') NOT NULL,
+  notes LONGTEXT,
+  total DECIMAL(12, 2),
+  created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  KEY idx_status (status)
+ ) ENGINE = InnoDB DEFAULT CHARSET = utf8mb4 COLLATE = utf8mb4_unicode_ci;
+INSERT IGNORE INTO `orders` VALUES (1, 'paid', 10.5);
+SELECT SQL_CALC_FOUND_ROWS * FROM `orders` WHERE status REGEXP '^p' LIMIT 10 OFFSET 5
+ON DUPLICATE KEY UPDATE total = VALUES(total);
+SELECT GROUP_CONCAT(status) FROM `orders` WHERE id BETWEEN 10 AND 20 AND id = ?;
+"""
+
+expected_outline = [
+  "CREATE orders",
+  "INSERT IGNORE",
+  "Query",
+]
+
+[[syntax_quality.expected]]
+token = "CREATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "`orders`"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "id"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "status"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "notes"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "total"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "created_at"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "BIGINT"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "UNSIGNED"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "AUTO_INCREMENT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ENUM"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "'paid'"
+kind = "String"
+[[syntax_quality.expected]]
+token = "LONGTEXT"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "DECIMAL"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "DATETIME"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "CURRENT_TIMESTAMP"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ENGINE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "CHARSET"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "COLLATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "idx_status"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "IGNORE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "SQL_CALC_FOUND_ROWS"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "REGEXP"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "OFFSET"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DUPLICATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "BETWEEN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "GROUP_CONCAT"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "?"
+kind = "Parameter"
+
+[[syntax_quality.rejected]]
+token = "UNSIGNED"
+kind = "Keyword"
+[[syntax_quality.rejected]]
+token = "`orders`"
+kind = "String"
+[[syntax_quality.rejected]]
+token = "status"
+kind = "Keyword"
+[[syntax_quality.rejected]]
+token = "DECIMAL"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "idx_status"
+kind = "Function"

@@ -6,6 +6,8 @@
 //! CTE references, and nested CTEs.
 
 use super::test_helpers::*;
+use crate::SqlDialect;
+use lsp_types::CompletionItemKind;
 use zqlz_ui::widgets::Rope;
 
 #[test]
@@ -125,6 +127,24 @@ fn test_cte_with_alias() {
 }
 
 #[test]
+fn test_cte_columns_use_active_driver_parser_dialect() {
+    let lsp = create_test_lsp_with_dialect(SqlDialect::PostgreSQL);
+    let text = Rope::from(
+        "WITH stats AS (SELECT DISTINCT ON (user_id) user_id FROM users) SELECT * FROM stats",
+    );
+
+    let columns = lsp
+        .derived_columns_for_identifier("stats", &text)
+        .expect("PostgreSQL CTE should parse with PostgreSQL dialect");
+
+    assert!(
+        columns.iter().any(|column| column == "user_id"),
+        "PostgreSQL CTE projection should use PostgreSQL parser dialect. Got: {:?}",
+        columns
+    );
+}
+
+#[test]
 fn test_cte_snippet_completion() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("wit");
@@ -191,6 +211,29 @@ fn test_cte_context_detection() {
     assert!(
         !completions.is_empty(),
         "Should provide completions inside CTE definition"
+    );
+}
+
+#[test]
+fn test_cte_keywords_use_driver_metadata() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("WITH user_data AS (S");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let select_keyword = completions
+        .iter()
+        .find(|completion| completion.label == "SELECT")
+        .expect("SELECT keyword completion");
+
+    assert_eq!(select_keyword.kind, Some(CompletionItemKind::KEYWORD));
+    assert!(
+        select_keyword
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("SQL Keyword")),
+        "SELECT detail should come from dialect keyword metadata path: {:?}",
+        select_keyword.detail
     );
 }
 

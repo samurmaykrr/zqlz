@@ -14,8 +14,12 @@ use std::{cell::RefCell, collections::HashMap, ops::Range, sync::Arc};
 use zqlz_ui::widgets::{ActiveTheme, ThemeColor, ThemeMode, highlighter::HighlightTheme};
 
 use crate::{
-    CursorShapeStyle, EditorAppearance, Selection, TextEditor, VisibleWrapLayout, buffer::Position,
-    display_map::DisplayViewport, scroll_state::CachedScrollbarBounds, syntax::HighlightKind,
+    CursorShapeStyle, EditorAppearance, LargeFilePolicyTier, Selection, TextEditor,
+    VisibleWrapLayout,
+    buffer::Position,
+    display_map::DisplayViewport,
+    scroll_state::CachedScrollbarBounds,
+    syntax::{Highlight, HighlightKind, render_highlight_runs},
 };
 
 /// The width of the cursor in pixels
@@ -32,6 +36,7 @@ const GUTTER_SEPARATOR_WIDTH: Pixels = px(1.0);
 const FOLD_CHEVRON_ZONE: Pixels = px(14.0);
 
 const MAX_DIAGNOSTIC_SQUIGGLES_PER_FRAME: usize = 400;
+const MAX_PLAIN_TEXT_SHAPED_LINE_BYTES: usize = 4096;
 
 /// Maximum number of completion items to show in the menu at once
 pub(crate) const MAX_COMPLETION_ITEMS: usize = 10;
@@ -146,9 +151,11 @@ struct ViewportTextStyleCacheKey {
     identifier_color: Hsla,
     operator_color: Hsla,
     function_color: Hsla,
+    parameter_color: Hsla,
     punctuation_color: Hsla,
     boolean_color: Hsla,
     null_color: Hsla,
+    type_color: Hsla,
     error_color: Hsla,
 }
 
@@ -212,6 +219,7 @@ struct ViewportLayoutBuildParams<'a> {
     font_size: Pixels,
     text_style: &'a ViewportTextStyleCacheKey,
     wrap_width: Option<Pixels>,
+    max_shaped_line_bytes: Option<usize>,
     wrap_column: usize,
     scroll_offset: f32,
     line_height: Pixels,
@@ -231,6 +239,7 @@ struct ViewportLayoutKeyInput {
     char_width: Pixels,
     bounds: Bounds<Pixels>,
     soft_wrap: bool,
+    max_shaped_line_bytes: Option<usize>,
 }
 
 struct WrappedPositionContext<'a> {
@@ -289,19 +298,20 @@ impl EditorElement {
             }];
         }
 
-        let mut runs = Vec::new();
-        for highlight in &chunk.highlights {
-            let run_start = chunk
-                .text
-                .floor_char_boundary(highlight.start.min(chunk.text.len()));
-            let run_end = chunk
-                .text
-                .ceil_char_boundary(highlight.end.min(chunk.text.len()));
-
-            if run_start < run_end {
-                runs.push((run_start, run_end, highlight.kind));
-            }
+        if let Some(runs) = Self::chunk_text_runs_fast_path(chunk, text_style) {
+            return runs;
         }
+
+        let highlights = chunk
+            .highlights
+            .iter()
+            .map(|highlight| Highlight {
+                start: highlight.start,
+                end: highlight.end,
+                kind: highlight.kind,
+            })
+            .collect::<Vec<_>>();
+        let runs = render_highlight_runs(&chunk.text, &highlights);
 
         if runs.is_empty() {
             return vec![TextRun {
@@ -314,58 +324,12 @@ impl EditorElement {
             }];
         }
 
-        runs.sort_by(|left, right| left.0.cmp(&right.0));
-
-        let mut result = Vec::new();
-        let mut current_pos = 0;
-        for (start, end, kind) in runs {
-            if end <= current_pos {
-                continue;
-            }
-
-            let start = start.max(current_pos);
-
-            if start > current_pos {
-                result.push(TextRun {
-                    len: start - current_pos,
-                    font: text_style.font.clone(),
-                    color: text_style.default_text_color,
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-            }
-
+        let mut result = Vec::with_capacity(runs.len());
+        for run in runs {
             result.push(TextRun {
-                len: end - start,
+                len: run.end.saturating_sub(run.start),
                 font: text_style.font.clone(),
-                color: match kind {
-                    HighlightKind::Keyword => text_style.keyword_color,
-                    HighlightKind::String => text_style.string_color,
-                    HighlightKind::Comment => text_style.comment_color,
-                    HighlightKind::Number => text_style.number_color,
-                    HighlightKind::Identifier => text_style.identifier_color,
-                    HighlightKind::Operator => text_style.operator_color,
-                    HighlightKind::Function => text_style.function_color,
-                    HighlightKind::Punctuation => text_style.punctuation_color,
-                    HighlightKind::Boolean => text_style.boolean_color,
-                    HighlightKind::Null => text_style.null_color,
-                    HighlightKind::Error => text_style.error_color,
-                    HighlightKind::Default => text_style.default_text_color,
-                },
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-
-            current_pos = end;
-        }
-
-        if current_pos < chunk.text.len() {
-            result.push(TextRun {
-                len: chunk.text.len() - current_pos,
-                font: text_style.font.clone(),
-                color: text_style.default_text_color,
+                color: Self::highlight_text_style_color(run.kind, text_style),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
@@ -373,6 +337,144 @@ impl EditorElement {
         }
 
         result
+    }
+
+    fn chunk_text_runs_fast_path(
+        chunk: &crate::display_map::DisplayTextChunk,
+        text_style: &ViewportTextStyleCacheKey,
+    ) -> Option<Vec<TextRun>> {
+        let mut result = Vec::with_capacity(chunk.highlights.len().saturating_mul(2) + 1);
+        let mut cursor = 0usize;
+        for highlight in &chunk.highlights {
+            if highlight.start < cursor
+                || highlight.start >= highlight.end
+                || highlight.end > chunk.text.len()
+            {
+                return None;
+            }
+            if !chunk.text.is_char_boundary(highlight.start)
+                || !chunk.text.is_char_boundary(highlight.end)
+            {
+                return None;
+            }
+            if cursor < highlight.start {
+                Self::push_text_run(
+                    &mut result,
+                    highlight.start - cursor,
+                    text_style.default_text_color,
+                    text_style,
+                );
+            }
+            Self::push_text_run(
+                &mut result,
+                highlight.end - highlight.start,
+                Self::highlight_text_style_color(highlight.kind, text_style),
+                text_style,
+            );
+            cursor = highlight.end;
+        }
+        if cursor < chunk.text.len() {
+            Self::push_text_run(
+                &mut result,
+                chunk.text.len() - cursor,
+                text_style.default_text_color,
+                text_style,
+            );
+        }
+
+        Some(result)
+    }
+
+    fn push_text_run(
+        runs: &mut Vec<TextRun>,
+        len: usize,
+        color: gpui::Hsla,
+        text_style: &ViewportTextStyleCacheKey,
+    ) {
+        if len == 0 {
+            return;
+        }
+        if let Some(previous) = runs.last_mut()
+            && previous.color == color
+        {
+            previous.len += len;
+            return;
+        }
+        runs.push(TextRun {
+            len,
+            font: text_style.font.clone(),
+            color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        });
+    }
+
+    fn highlight_text_style_color(
+        kind: HighlightKind,
+        text_style: &ViewportTextStyleCacheKey,
+    ) -> Hsla {
+        match kind {
+            HighlightKind::Keyword => text_style.keyword_color,
+            HighlightKind::String => text_style.string_color,
+            HighlightKind::Comment => text_style.comment_color,
+            HighlightKind::Number => text_style.number_color,
+            HighlightKind::Identifier => text_style.identifier_color,
+            HighlightKind::Operator => text_style.operator_color,
+            HighlightKind::Function => text_style.function_color,
+            HighlightKind::Parameter => text_style.parameter_color,
+            HighlightKind::Type => text_style.type_color,
+            HighlightKind::Punctuation => text_style.punctuation_color,
+            HighlightKind::Boolean => text_style.boolean_color,
+            HighlightKind::Null => text_style.null_color,
+            HighlightKind::Error => text_style.error_color,
+            HighlightKind::Default => text_style.default_text_color,
+        }
+    }
+
+    fn clip_chunk_for_shaping(
+        chunk: &crate::display_map::DisplayTextChunk,
+        max_bytes: usize,
+    ) -> crate::display_map::DisplayTextChunk {
+        if chunk.text.len() <= max_bytes {
+            return chunk.clone();
+        }
+
+        let end = chunk
+            .text
+            .floor_char_boundary(max_bytes.min(chunk.text.len()));
+        let mut text = chunk.text[..end].to_string();
+        text.push_str(" ...");
+        crate::display_map::DisplayTextChunk {
+            row_id: chunk.row_id,
+            display_row: chunk.display_row,
+            buffer_line: chunk.buffer_line,
+            start_offset: chunk.start_offset,
+            text,
+            highlights: chunk
+                .highlights
+                .iter()
+                .filter_map(|highlight| {
+                    let start = highlight.start.min(end);
+                    let end = highlight.end.min(end);
+                    (start < end).then_some(crate::display_map::ChunkHighlight {
+                        start,
+                        end,
+                        kind: highlight.kind,
+                    })
+                })
+                .collect(),
+            diagnostics: chunk
+                .diagnostics
+                .iter()
+                .filter_map(|range| {
+                    let start = range.start.min(end);
+                    let end = range.end.min(end);
+                    (start < end).then_some(start..end)
+                })
+                .collect(),
+            inlay_hints: Vec::new(),
+        }
     }
 
     fn build_viewport_layout_cache(
@@ -391,6 +493,7 @@ impl EditorElement {
             font_size,
             text_style,
             wrap_width,
+            max_shaped_line_bytes,
             wrap_column,
             scroll_offset,
             line_height,
@@ -430,6 +533,13 @@ impl EditorElement {
             let shaped_lines = text_chunks
                 .iter()
                 .map(|chunk| {
+                    let clipped_chunk;
+                    let chunk = if let Some(max_bytes) = max_shaped_line_bytes {
+                        clipped_chunk = Self::clip_chunk_for_shaping(chunk, max_bytes);
+                        &clipped_chunk
+                    } else {
+                        chunk
+                    };
                     let text_runs = Self::chunk_text_runs(chunk, text_style);
                     self.shape_line_cached(&chunk.text, font_size, &text_runs, window)
                 })
@@ -502,6 +612,7 @@ impl EditorElement {
             char_width,
             bounds,
             soft_wrap,
+            max_shaped_line_bytes,
         } = input;
 
         ViewportLayoutCacheKey {
@@ -519,6 +630,7 @@ impl EditorElement {
             bounds_width_bits: f32::from(bounds.size.width).to_bits(),
             bounds_height_bits: f32::from(bounds.size.height).to_bits(),
             soft_wrap,
+            max_shaped_line_bytes,
         }
     }
 
@@ -546,6 +658,8 @@ impl EditorElement {
             identifier_color: Self::highlight_color(HighlightKind::Identifier, cx),
             operator_color: Self::highlight_color(HighlightKind::Operator, cx),
             function_color: Self::highlight_color(HighlightKind::Function, cx),
+            parameter_color: Self::highlight_color(HighlightKind::Parameter, cx),
+            type_color: Self::highlight_color(HighlightKind::Type, cx),
             punctuation_color: Self::highlight_color(HighlightKind::Punctuation, cx),
             boolean_color: Self::highlight_color(HighlightKind::Boolean, cx),
             null_color: Self::highlight_color(HighlightKind::Null, cx),
@@ -701,6 +815,8 @@ impl EditorElement {
             HighlightKind::Identifier => colors.foreground,
             HighlightKind::Operator => colors.foreground,
             HighlightKind::Function => colors.cyan,
+            HighlightKind::Parameter => colors.cyan,
+            HighlightKind::Type => colors.magenta,
             HighlightKind::Punctuation => colors.foreground,
             HighlightKind::Boolean => colors.green,
             HighlightKind::Null => colors.magenta,
@@ -719,14 +835,15 @@ impl EditorElement {
         let active_color = Self::syntax_theme_color(kind, active_theme);
         let fallback_color = Self::syntax_theme_color(kind, fallback_theme);
         let default_palette_color = Self::default_syntax_palette_color(kind, colors);
-        let usable_palette_color = (default_palette_color.a > 0.0
-            && default_palette_color != default_text_color)
-            .then_some(default_palette_color);
+        let usable_palette_color =
+            Self::is_visible_syntax_color(kind, default_palette_color, default_text_color)
+                .then_some(default_palette_color);
 
         active_color
-            .filter(|color| *color != default_text_color)
+            .filter(|color| Self::is_visible_syntax_color(kind, *color, default_text_color))
             .or(usable_palette_color)
-            .or(fallback_color.filter(|color| *color != default_text_color))
+            .or(fallback_color
+                .filter(|color| Self::is_visible_syntax_color(kind, *color, default_text_color)))
             .or(active_color)
             .or(fallback_color)
             .unwrap_or_else(|| {
@@ -739,6 +856,37 @@ impl EditorElement {
             })
     }
 
+    fn is_visible_syntax_color(kind: HighlightKind, color: Hsla, default_text_color: Hsla) -> bool {
+        if color.a <= 0.0 {
+            return false;
+        }
+
+        if matches!(
+            kind,
+            HighlightKind::Identifier
+                | HighlightKind::Operator
+                | HighlightKind::Punctuation
+                | HighlightKind::Default
+        ) {
+            return true;
+        }
+
+        Self::hsla_distance(color, default_text_color) >= 0.08
+    }
+
+    fn hsla_distance(left: Hsla, right: Hsla) -> f32 {
+        let hue_distance = (left.h - right.h).abs().min(1.0 - (left.h - right.h).abs());
+        let saturation_distance = (left.s - right.s).abs();
+        let lightness_distance = (left.l - right.l).abs();
+
+        (hue_distance.mul_add(
+            hue_distance,
+            saturation_distance
+                .mul_add(saturation_distance, lightness_distance * lightness_distance),
+        ))
+        .sqrt()
+    }
+
     fn syntax_theme_color(kind: HighlightKind, theme: &HighlightTheme) -> Option<Hsla> {
         match kind {
             HighlightKind::Keyword => theme.keyword.and_then(|style| style.color),
@@ -748,6 +896,11 @@ impl EditorElement {
             HighlightKind::Identifier => theme.variable.and_then(|style| style.color),
             HighlightKind::Operator => theme.operator.and_then(|style| style.color),
             HighlightKind::Function => theme.function.and_then(|style| style.color),
+            HighlightKind::Parameter => theme
+                .variable_parameter
+                .and_then(|style| style.color)
+                .or_else(|| theme.variable.and_then(|style| style.color)),
+            HighlightKind::Type => theme.type_.and_then(|style| style.color),
             HighlightKind::Punctuation => theme.punctuation.and_then(|style| style.color),
             HighlightKind::Boolean => theme
                 .boolean
@@ -775,6 +928,8 @@ impl EditorElement {
             | HighlightKind::Comment
             | HighlightKind::Number
             | HighlightKind::Function
+            | HighlightKind::Parameter
+            | HighlightKind::Type
             | HighlightKind::Boolean
             | HighlightKind::Null => default_palette_color,
             HighlightKind::Error => colors.danger,
@@ -1150,6 +1305,7 @@ struct ViewportLayoutCacheKey {
     bounds_width_bits: u32,
     bounds_height_bits: u32,
     soft_wrap: bool,
+    max_shaped_line_bytes: Option<usize>,
 }
 
 #[derive(Clone)]
@@ -1298,6 +1454,12 @@ impl Element for EditorElement {
             )
         });
         let soft_wrap = document_snapshot.soft_wrap;
+        let max_shaped_line_bytes = (!soft_wrap
+            && matches!(
+                document_snapshot.large_file_policy.tier,
+                LargeFilePolicyTier::ReducedSemantic | LargeFilePolicyTier::PlainText
+            ))
+        .then_some(MAX_PLAIN_TEXT_SHAPED_LINE_BYTES);
         let show_line_numbers = editor_snapshot.show_line_numbers;
         let appearance = editor_snapshot.appearance;
         let show_folding = editor_snapshot.show_folding;
@@ -1397,7 +1559,7 @@ impl Element for EditorElement {
             wrap_snapshot.layout_for_rows(visible_range.clone(), scroll_offset, line_height);
         let viewport = document_snapshot
             .display_snapshot
-            .viewport(visible_range.clone());
+            .viewport_with_text_limit(visible_range.clone(), max_shaped_line_bytes);
         let viewport_text_style = Self::viewport_text_style_key(&font, cx);
         let viewport_layout_key = Self::viewport_layout_key(ViewportLayoutKeyInput {
             revision: document_snapshot.revision(),
@@ -1413,6 +1575,7 @@ impl Element for EditorElement {
             char_width,
             bounds,
             soft_wrap,
+            max_shaped_line_bytes,
         });
         let cached_viewport_layout = if let Some(cached) = self
             .renderer_caches
@@ -1432,6 +1595,7 @@ impl Element for EditorElement {
                     font_size,
                     text_style: &viewport_text_style,
                     wrap_width,
+                    max_shaped_line_bytes,
                     wrap_column: wrap_layout.wrap_column(),
                     scroll_offset,
                     line_height,
@@ -1755,12 +1919,12 @@ impl Element for EditorElement {
                             detail: item.detail.clone().map(|d| {
                                 let trimmed = d.trim_start_matches("SQL ").to_string();
                                 if let Some(paren) = trimmed.find('(') {
-                                    trimmed[..paren].trim_end().to_string()
+                                    sanitize_completion_text(&trimmed[..paren], 80)
                                 } else {
-                                    trimmed
+                                    sanitize_completion_text(&trimmed, 80)
                                 }
                             }),
-                            label: item.label,
+                            label: sanitize_completion_text(&item.label, 120),
                         })
                         .collect(),
                     cursor_bounds: menu_cursor_bounds,
@@ -2973,6 +3137,38 @@ fn kind_accent_color(badge: Option<&str>) -> Hsla {
     }
 }
 
+fn sanitize_completion_text(text: &str, max_chars: usize) -> String {
+    let mut sanitized = String::with_capacity(text.len().min(max_chars));
+    let mut last_was_space = true;
+    let mut char_count = 0usize;
+
+    for character in text.trim().chars() {
+        if char_count >= max_chars {
+            sanitized.push_str("...");
+            break;
+        }
+
+        if character.is_whitespace() {
+            if !last_was_space {
+                sanitized.push(' ');
+                char_count += 1;
+                last_was_space = true;
+            }
+            continue;
+        }
+
+        sanitized.push(character);
+        char_count += 1;
+        last_was_space = false;
+    }
+
+    if sanitized.is_empty() {
+        " ".to_string()
+    } else {
+        sanitized
+    }
+}
+
 impl EditorElement {
     /// Paint the ghost-text inline suggestion at the pre-calculated origin.
     ///
@@ -3941,6 +4137,7 @@ mod tests {
     use super::{
         CachedViewportLayout, EditorElement, TooltipLine, ViewportLayoutKeyInput,
         ViewportTextStyleCacheKey, build_body_runs, preprocess_hover_text,
+        sanitize_completion_text,
     };
     use crate::buffer::Position;
     use crate::display_map::{ChunkHighlight, DisplayRowId, DisplayTextChunk};
@@ -3964,9 +4161,11 @@ mod tests {
             identifier_color: rgb(0xd4d4d4).into(),
             operator_color: rgb(0xd4d4d4).into(),
             function_color: rgb(0xdcdcaa).into(),
+            parameter_color: rgb(0x9cdcfe).into(),
             punctuation_color: rgb(0xd4d4d4).into(),
             boolean_color: rgb(0x569cd6).into(),
             null_color: rgb(0x569cd6).into(),
+            type_color: rgb(0x4ec9b0).into(),
             error_color: rgb(0xf44747).into(),
         }
     }
@@ -4096,6 +4295,44 @@ mod tests {
             ),
             rgb(0x222222).into()
         );
+        assert_eq!(
+            EditorElement::generic_highlight_fallback_color(
+                crate::HighlightKind::Parameter,
+                &ThemeColor::default(),
+                rgb(0x222222).into(),
+                rgb(0x333333).into(),
+            ),
+            rgb(0x333333).into()
+        );
+    }
+
+    #[test]
+    fn parameter_highlight_color_prefers_variable_parameter_slot() {
+        let highlight_theme = HighlightTheme {
+            name: "Parameter".into(),
+            appearance: ThemeMode::Dark,
+            style: HighlightThemeStyle {
+                syntax: SyntaxColors {
+                    variable: Some(ThemeStyle {
+                        color: Some(rgb(0x111111).into()),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    variable_parameter: Some(ThemeStyle {
+                        color: Some(rgb(0x22aaee).into()),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+
+        assert_eq!(
+            EditorElement::syntax_theme_color(crate::HighlightKind::Parameter, &highlight_theme),
+            Some(rgb(0x22aaee).into())
+        );
     }
 
     #[test]
@@ -4146,6 +4383,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_highlight_color_avoids_near_foreground_theme_slots() {
+        let foreground = rgb(0x111111).into();
+        let muddy_keyword = rgb(0x151515).into();
+        let active_theme = HighlightTheme {
+            name: "Active".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                editor_foreground: Some(foreground),
+                syntax: SyntaxColors {
+                    keyword: Some(ThemeStyle {
+                        color: Some(muddy_keyword),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+        let fallback_theme = HighlightTheme {
+            name: "Fallback".into(),
+            appearance: ThemeMode::Light,
+            style: HighlightThemeStyle {
+                syntax: SyntaxColors {
+                    keyword: Some(ThemeStyle {
+                        color: Some(rgb(0x0433ff).into()),
+                        font_style: None,
+                        font_weight: None,
+                    }),
+                    ..SyntaxColors::default()
+                },
+                ..HighlightThemeStyle::default()
+            },
+        };
+
+        assert_ne!(
+            EditorElement::resolve_highlight_color(
+                crate::HighlightKind::Keyword,
+                &active_theme,
+                &fallback_theme,
+                &ThemeColor::default(),
+                foreground,
+            ),
+            muddy_keyword
+        );
+    }
+
+    #[test]
     fn default_syntax_palette_colors_are_visibly_distinct() {
         let theme = ThemeColor::light();
         let colors = theme.as_ref();
@@ -4178,6 +4463,64 @@ mod tests {
             EditorElement::default_syntax_palette_color(HighlightKind::Keyword, colors),
             colors.blue
         );
+    }
+
+    #[test]
+    fn sql_default_palette_keeps_core_classes_visibly_separated() {
+        let theme = ThemeColor::light();
+        let colors = theme.as_ref();
+        let foreground = colors.foreground;
+        let classes = [
+            HighlightKind::Keyword,
+            HighlightKind::String,
+            HighlightKind::Number,
+            HighlightKind::Type,
+            HighlightKind::Function,
+            HighlightKind::Null,
+            HighlightKind::Comment,
+        ];
+
+        for kind in classes {
+            assert!(
+                EditorElement::is_visible_syntax_color(
+                    kind,
+                    EditorElement::default_syntax_palette_color(kind, colors),
+                    foreground,
+                ),
+                "{kind:?} should not collapse into editor foreground"
+            );
+        }
+
+        assert!(
+            EditorElement::hsla_distance(
+                EditorElement::default_syntax_palette_color(HighlightKind::Keyword, colors),
+                EditorElement::default_syntax_palette_color(HighlightKind::Type, colors),
+            ) >= 0.08
+        );
+        assert!(
+            EditorElement::hsla_distance(
+                EditorElement::default_syntax_palette_color(HighlightKind::String, colors),
+                EditorElement::default_syntax_palette_color(HighlightKind::Type, colors),
+            ) >= 0.08
+        );
+    }
+
+    #[test]
+    fn completion_text_sanitizer_keeps_menu_rows_single_line() {
+        assert_eq!(
+            sanitize_completion_text("  customer\n\t\tname   value  ", 120),
+            "customer name value"
+        );
+        assert_eq!(sanitize_completion_text("\n\t", 120), " ");
+    }
+
+    #[test]
+    fn completion_text_sanitizer_bounds_long_labels() {
+        let label = "a".repeat(200);
+        let sanitized = sanitize_completion_text(&label, 40);
+
+        assert_eq!(sanitized.len(), 43);
+        assert!(sanitized.ends_with("..."));
     }
 
     #[test]
@@ -4271,6 +4614,77 @@ mod tests {
     }
 
     #[test]
+    fn chunk_text_runs_fast_path_handles_sorted_non_overlapping_highlights() {
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: "SELECT alpha".to_string(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 6,
+                    kind: HighlightKind::Keyword,
+                },
+                ChunkHighlight {
+                    start: 7,
+                    end: 12,
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        let runs = EditorElement::chunk_text_runs_fast_path(&chunk, &style).expect("fast path");
+
+        assert_eq!(
+            runs.iter().map(|run| run.len).sum::<usize>(),
+            chunk.text.len()
+        );
+        assert_eq!(runs.len(), 3);
+        assert_eq!(runs[0].color, style.keyword_color);
+        assert_eq!(runs[1].color, style.default_text_color);
+        assert_eq!(runs[2].color, style.identifier_color);
+    }
+
+    #[test]
+    fn chunk_text_runs_fast_path_rejects_overlapping_highlights() {
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: "COUNT(*)".to_string(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: 5,
+                    kind: HighlightKind::Function,
+                },
+                ChunkHighlight {
+                    start: 0,
+                    end: 8,
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        assert!(EditorElement::chunk_text_runs_fast_path(&chunk, &style).is_none());
+    }
+
+    #[test]
     fn chunk_text_runs_clips_overlapping_highlights_to_valid_ranges() {
         let text = "SELECT COUNT(*) FROM \"_database_functions\"".to_string();
         let chunk = DisplayTextChunk {
@@ -4334,6 +4748,82 @@ mod tests {
     }
 
     #[test]
+    fn chunk_text_runs_paint_mongo_operator_inside_string_fallback() {
+        let text = r#""$match""#.to_string();
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: text.clone(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: text.len(),
+                    kind: HighlightKind::String,
+                },
+                ChunkHighlight {
+                    start: 1,
+                    end: 7,
+                    kind: HighlightKind::Operator,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        let runs = EditorElement::chunk_text_runs(&chunk, &style);
+
+        assert_eq!(
+            runs.iter().map(|run| run.len).collect::<Vec<_>>(),
+            vec![1, 6, 1]
+        );
+        assert_eq!(runs[0].color, style.string_color);
+        assert_eq!(runs[1].color, style.operator_color);
+        assert_eq!(runs[2].color, style.string_color);
+    }
+
+    #[test]
+    fn chunk_text_runs_paint_quoted_identifier_over_string_fallback() {
+        let text = r#""categories""#.to_string();
+        let chunk = DisplayTextChunk {
+            row_id: DisplayRowId {
+                buffer_line: 0,
+                wrap_subrow: 0,
+            },
+            display_row: 0,
+            buffer_line: 0,
+            start_offset: 0,
+            text: text.clone(),
+            highlights: vec![
+                ChunkHighlight {
+                    start: 0,
+                    end: text.len(),
+                    kind: HighlightKind::String,
+                },
+                ChunkHighlight {
+                    start: 0,
+                    end: text.len(),
+                    kind: HighlightKind::Identifier,
+                },
+            ],
+            diagnostics: Vec::new(),
+            inlay_hints: Vec::new(),
+        };
+
+        let style = test_viewport_text_style_key();
+        let runs = EditorElement::chunk_text_runs(&chunk, &style);
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].len, text.len());
+        assert_eq!(runs[0].color, style.identifier_color);
+    }
+
+    #[test]
     fn viewport_layout_key_changes_only_when_layout_inputs_change() {
         let bounds = gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(400.0), px(200.0)));
         let style = test_viewport_text_style_key();
@@ -4351,6 +4841,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
         let same = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
             revision: 7,
@@ -4366,6 +4857,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
         let resized = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
             revision: 7,
@@ -4381,6 +4873,7 @@ mod tests {
             char_width: px(10.0),
             bounds: gpui::Bounds::new(point(px(0.0), px(0.0)), gpui::size(px(500.0), px(200.0))),
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
 
         assert_eq!(base, same);
@@ -4404,6 +4897,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
         let relative = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
             revision: 7,
@@ -4419,6 +4913,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
         let moved_cursor = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
             revision: 7,
@@ -4434,6 +4929,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
 
         assert_ne!(base, relative);
@@ -4457,6 +4953,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
         let updated_syntax = EditorElement::viewport_layout_key(ViewportLayoutKeyInput {
             revision: 7,
@@ -4472,6 +4969,7 @@ mod tests {
             char_width: px(10.0),
             bounds,
             soft_wrap: true,
+            max_shaped_line_bytes: None,
         });
 
         assert_ne!(base, updated_syntax);

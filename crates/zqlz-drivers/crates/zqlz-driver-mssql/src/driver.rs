@@ -3,13 +3,21 @@
 use crate::connection::MssqlConnection;
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     AutoIncrementInfo, AutoIncrementStyle, CommentStyles, Connection, ConnectionConfig,
     ConnectionField, ConnectionFieldSchema, DataTypeCategory, DataTypeInfo, DatabaseDriver,
-    DialectInfo, DriverCapabilities, ExplainConfig, FunctionCategory, KeywordCategory, KeywordInfo,
-    Result, SqlFunctionInfo, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, ExplainConfig, FunctionCategory,
+    KeywordCategory, KeywordInfo, Result, SqlFunctionInfo, ZqlzError,
+    dialect_bundle_from_legacy_info,
 };
+
+const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+fn get_dialect_bundle() -> &'static DialectBundle {
+    static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
+    BUNDLE.get_or_init(|| dialect_bundle_from_legacy_info(CONFIG_TOML, &mssql_dialect(), "MS SQL"))
+}
 
 /// MS SQL Server database driver
 pub struct MssqlDriver;
@@ -56,6 +64,10 @@ impl DatabaseDriver for MssqlDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         mssql_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        Some(get_dialect_bundle())
     }
 
     fn capabilities(&self) -> DriverCapabilities {

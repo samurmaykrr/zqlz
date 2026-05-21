@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use gpui::prelude::FluentBuilder;
 use gpui::*;
 use zqlz_analyzer::{QueryAnalysis, SeverityLevel, explain::PlanNode};
+use zqlz_core::get_dialect_language_name;
 use zqlz_ui::widgets::{ActiveTheme, h_flex, scroll::ScrollableElement, v_flex};
 
 use super::results_panel::ExplainResult;
@@ -532,26 +533,7 @@ impl<'a> ExplainAnalysisView<'a> {
     }
 
     fn provider_label(&self) -> String {
-        if let Some(provider_id) = self.result.provider_id.as_ref() {
-            return match provider_id.as_str() {
-                "postgres" | "postgresql" => "PostgreSQL".to_string(),
-                "sqlite" | "turso" => "SQLite".to_string(),
-                "mysql" | "mariadb" => "MySQL".to_string(),
-                other => other.to_string(),
-            };
-        }
-
-        let sql = self.result.sql.to_ascii_lowercase();
-        if sql.contains("::jsonb") || sql.contains("jsonb") || sql.contains("tstz") {
-            "PostgreSQL".to_string()
-        } else if self.result.query_plan.is_some() && self.result.raw_output.is_some() {
-            "SQLite".to_string()
-        } else {
-            self.result
-                .connection_name
-                .clone()
-                .unwrap_or_else(|| "SQL".to_string())
-        }
+        provider_label_for_result(self.result)
     }
 
     fn cost_threshold_percent(&self) -> usize {
@@ -619,5 +601,63 @@ impl<'a> ExplainAnalysisView<'a> {
 
     fn format_percent(value: f64) -> String {
         format!("{:.2}%", value * 100.0)
+    }
+}
+
+fn provider_label_for_result(result: &ExplainResult) -> String {
+    if let Some(provider_id) = result.provider_id.as_ref() {
+        return get_dialect_language_name(provider_id).to_string();
+    }
+
+    let sql = result.sql.to_ascii_lowercase();
+    if sql.contains("::jsonb") || sql.contains("jsonb") || sql.contains("tstz") {
+        "PostgreSQL".to_string()
+    } else if result.query_plan.is_some() && result.raw_output.is_some() {
+        "SQLite".to_string()
+    } else {
+        result
+            .connection_name
+            .clone()
+            .unwrap_or_else(|| "SQL".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ExplainResult, provider_label_for_result};
+
+    fn explain_result(provider_id: Option<&str>) -> ExplainResult {
+        ExplainResult {
+            sql: "SELECT 1".to_string(),
+            duration_ms: 0,
+            raw_output: None,
+            query_plan: None,
+            analyzed_plan: None,
+            provider_id: provider_id.map(ToOwned::to_owned),
+            error: None,
+            connection_name: Some("fallback".to_string()),
+            database_name: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn provider_label_uses_core_dialect_registry() {
+        assert_eq!(
+            provider_label_for_result(&explain_result(Some("postgresql"))),
+            "PostgreSQL"
+        );
+        assert_eq!(
+            provider_label_for_result(&explain_result(Some("sqlserver"))),
+            "Microsoft SQL Server"
+        );
+        assert_eq!(
+            provider_label_for_result(&explain_result(Some("mongo"))),
+            "MongoDB Shell"
+        );
+        assert_eq!(
+            provider_label_for_result(&explain_result(Some("unknown"))),
+            "unknown"
+        );
     }
 }

@@ -2,14 +2,24 @@
 
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    dialect_bundle_from_legacy_info,
     security::{SshAuthMethod, SshTunnelConfig, TlsConfig, TlsMode},
 };
 
 use crate::{MySqlConnectOptions, MySqlConnection, MysqlSshTunnel, MysqlTlsConnector};
+
+const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+fn get_dialect_bundle() -> &'static DialectBundle {
+    static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        dialect_bundle_from_legacy_info(CONFIG_TOML, &crate::mysql_dialect(), "MySQL")
+    })
+}
 
 /// MySQL database driver
 pub struct MySqlDriver;
@@ -44,6 +54,10 @@ impl DatabaseDriver for MySqlDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         crate::mysql_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        Some(get_dialect_bundle())
     }
 
     fn capabilities(&self) -> DriverCapabilities {
@@ -400,7 +414,34 @@ fn parse_optional_u64(config: &ConnectionConfig, key: &str) -> Result<Option<u64
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zqlz_core::DatabaseDriver;
+    use zqlz_core::{
+        DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability, TreeSitterGrammar,
+        syntax_driver_capabilities_from_bundle,
+    };
+
+    #[test]
+    fn mysql_dialect_bundle_owns_editor_syntax_capabilities() {
+        let driver = MySqlDriver::new();
+        let bundle = driver
+            .dialect_bundle()
+            .expect("MySQL driver should expose dialect bundle");
+        let capabilities = syntax_driver_capabilities_from_bundle(bundle);
+
+        assert_eq!(capabilities.profile, "mysql");
+        assert_eq!(capabilities.tree_sitter_grammar, TreeSitterGrammar::Sql);
+        assert_eq!(
+            capabilities.highlight_query_language,
+            HighlightQueryLanguage::MySql
+        );
+        assert_eq!(
+            capabilities.parameter_placeholders,
+            ParameterPlaceholderCapability::sql(true)
+        );
+        assert!(capabilities.sql_overlays);
+        assert!(!capabilities.dollar_quoted_strings);
+        assert!(!capabilities.command_syntax);
+        assert!(!capabilities.document_syntax);
+    }
 
     #[test]
     fn mysql_schema_has_ssl_and_ssh_fields() {

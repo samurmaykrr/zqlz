@@ -1,7 +1,10 @@
 //! Unit tests for DuckDB driver
 
 use super::*;
-use zqlz_core::{ConnectionConfig, DatabaseDriver};
+use zqlz_core::{
+    ConnectionConfig, DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability,
+    TreeSitterGrammar, syntax_driver_capabilities_from_bundle,
+};
 
 #[test]
 fn test_duckdb_driver_id() {
@@ -59,6 +62,30 @@ fn test_duckdb_dialect_info() {
     assert_eq!(dialect.string_quote, '\'');
     assert!(!dialect.case_sensitive_identifiers);
     assert_eq!(dialect.statement_terminator, ';');
+}
+
+#[test]
+fn duckdb_dialect_bundle_owns_editor_syntax_capabilities() {
+    let driver = DuckDbDriver::new();
+    let bundle = driver
+        .dialect_bundle()
+        .expect("DuckDB driver should expose dialect bundle");
+    let capabilities = syntax_driver_capabilities_from_bundle(bundle);
+
+    assert_eq!(capabilities.profile, "duckdb");
+    assert_eq!(capabilities.tree_sitter_grammar, TreeSitterGrammar::Sql);
+    assert_eq!(
+        capabilities.highlight_query_language,
+        HighlightQueryLanguage::PostgreSql
+    );
+    assert_eq!(
+        capabilities.parameter_placeholders,
+        ParameterPlaceholderCapability::sql(true)
+    );
+    assert!(capabilities.sql_overlays);
+    assert!(!capabilities.dollar_quoted_strings);
+    assert!(!capabilities.command_syntax);
+    assert!(!capabilities.document_syntax);
 }
 
 #[test]

@@ -8,6 +8,7 @@ use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_core::{Connection, DriverCategory, ExplainConfig, Value};
 
+use crate::batch::split_statements;
 use crate::engine::QueryEngine;
 use crate::error::{QueryServiceError, QueryServiceResult};
 use crate::explain;
@@ -363,114 +364,8 @@ impl QueryService {
 
     /// Split SQL into individual statements.
     ///
-    /// This implementation correctly handles:
-    /// - Semicolons inside single-quoted strings ('...')
-    /// - Semicolons inside double-quoted identifiers ("...")
-    /// - Semicolons inside single-line comments (--)
-    /// - Semicolons inside multi-line comments (/* ... */)
     fn split_statements(&self, sql: &str) -> Vec<String> {
-        let mut statements = Vec::new();
-        let mut current_statement = String::new();
-        let mut chars = sql.chars().peekable();
-
-        while let Some(c) = chars.next() {
-            match c {
-                // Single-quoted string
-                '\'' => {
-                    current_statement.push(c);
-                    // Consume until closing quote, handling escaped quotes ('')
-                    while let Some(sc) = chars.next() {
-                        current_statement.push(sc);
-                        if sc == '\'' {
-                            // Check for escaped quote ('')
-                            if chars.peek() == Some(&'\'') {
-                                if let Some(next_char) = chars.next() {
-                                    current_statement.push(next_char);
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                // Double-quoted identifier
-                '"' => {
-                    current_statement.push(c);
-                    // Consume until closing quote, handling escaped quotes ("")
-                    while let Some(sc) = chars.next() {
-                        current_statement.push(sc);
-                        if sc == '"' {
-                            // Check for escaped quote ("")
-                            if chars.peek() == Some(&'"') {
-                                if let Some(next_char) = chars.next() {
-                                    current_statement.push(next_char);
-                                }
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                }
-                // Possible comment start
-                '-' => {
-                    if chars.peek() == Some(&'-') {
-                        // Single-line comment
-                        current_statement.push(c);
-                        if let Some(next_char) = chars.next() {
-                            current_statement.push(next_char);
-                        }
-                        // Consume until newline
-                        for sc in chars.by_ref() {
-                            current_statement.push(sc);
-                            if sc == '\n' {
-                                break;
-                            }
-                        }
-                    } else {
-                        current_statement.push(c);
-                    }
-                }
-                '/' => {
-                    if chars.peek() == Some(&'*') {
-                        // Multi-line comment
-                        current_statement.push(c);
-                        if let Some(next_char) = chars.next() {
-                            current_statement.push(next_char);
-                        }
-                        // Consume until */
-                        let mut prev = '\0';
-                        for sc in chars.by_ref() {
-                            current_statement.push(sc);
-                            if prev == '*' && sc == '/' {
-                                break;
-                            }
-                            prev = sc;
-                        }
-                    } else {
-                        current_statement.push(c);
-                    }
-                }
-                // Statement terminator
-                ';' => {
-                    let trimmed = current_statement.trim();
-                    if !trimmed.is_empty() {
-                        statements.push(trimmed.to_string());
-                    }
-                    current_statement.clear();
-                }
-                _ => {
-                    current_statement.push(c);
-                }
-            }
-        }
-
-        // Don't forget the last statement (may not have a trailing semicolon)
-        let trimmed = current_statement.trim();
-        if !trimmed.is_empty() {
-            statements.push(trimmed.to_string());
-        }
-
-        statements
+        split_statements(sql)
     }
 
     /// Execute a statement (INSERT, UPDATE, DELETE, CREATE, etc.)

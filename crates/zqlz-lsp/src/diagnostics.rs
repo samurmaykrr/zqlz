@@ -1,16 +1,28 @@
 //! SQL Diagnostics and Linting with precise error positioning
 
 use crate::{SchemaCache, SchemaValidator, ValidationSeverity};
-use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+use lsp_types::{Diagnostic, DiagnosticSeverity, NumberOrString, Position, Range};
 use sqlparser::dialect::{Dialect as SqlParserDialect, GenericDialect};
-use sqlparser::parser::Parser;
+use std::collections::HashMap;
 use tree_sitter::Parser as TreeSitterParser;
-use zqlz_core::DialectConfig;
+use zqlz_core::{CustomValidatorKind, DialectConfig, SyntaxDiagnosticRules};
 use zqlz_ui::widgets::{Rope, RopeExt};
 
 pub struct SqlDiagnostics {
     ts_parser: Option<TreeSitterParser>,
     schema_validator: SchemaValidator,
+}
+
+pub const DIAGNOSTIC_CODE_SQLPARSER_SYNTAX: &str = "sqlparser.syntax";
+pub const DIAGNOSTIC_CODE_SQL_TOKENIZER: &str = "sqlparser.tokenizer";
+pub const DIAGNOSTIC_CODE_TREE_SITTER_SYNTAX: &str = "tree-sitter.syntax";
+pub const DIAGNOSTIC_CODE_SCHEMA_VALIDATION: &str = "schema.validation";
+pub const DIAGNOSTIC_CODE_SELECT_WILDCARD: &str = "best-practices.select-wildcard";
+pub const DIAGNOSTIC_CODE_SQL_INJECTION_PATTERN: &str = "security.sql-injection-pattern";
+pub const DIAGNOSTIC_CODE_DML_WITHOUT_WHERE: &str = "best-practices.dml-without-where";
+
+pub(crate) fn diagnostic_code(code: &'static str) -> Option<NumberOrString> {
+    Some(NumberOrString::String(code.to_string()))
 }
 
 impl SqlDiagnostics {
@@ -57,17 +69,16 @@ impl SqlDiagnostics {
             .map(|c| c.skip_tree_sitter_errors())
             .unwrap_or(false);
 
-        // Pick the sqlparser dialect that matches the active DB connection.
-        // GenericDialect is the fallback; it does not understand PostgreSQL-specific
-        // syntax like `expr::type` casts, which causes false-positive errors on valid
-        // PG SQL.  `get_sql_dialect_config` maps the driver id ("postgres", "mysql",
-        // …) to the correct dialect object via the existing `sql_dialect` module.
+        // Pick the sqlparser dialect from core driver metadata so aliases and
+        // driver-owned parser capabilities stay in one registry.
         let resolved_sql_dialect =
-            dialect_config.and_then(|c| crate::sql_dialect::get_sql_dialect_config(&c.id));
+            dialect_config.and_then(|config| zqlz_core::get_sql_dialect(&config.id));
         let using_generic_sqlparser = resolved_sql_dialect.is_none();
         let sqlparser_dialect: Box<dyn SqlParserDialect> = resolved_sql_dialect
-            .map(|sc| sc.sqlparser_dialect())
+            .map(|dialect| dialect.sqlparser_dialect())
             .unwrap_or_else(|| Box::new(GenericDialect {}));
+        let is_create_trigger_statement =
+            crate::diagnostics_syntax::is_create_trigger_statement(&sql);
 
         // Use sqlparser for syntax validation with error location (SQL dialects only).
         // We keep this pass authoritative for SQL syntax because it is dialect-aware
@@ -75,7 +86,12 @@ impl SqlDiagnostics {
         let sqlparser_diagnostics = if skip_sql {
             Vec::new()
         } else {
-            self.check_sqlparser_syntax(&sql, text, sqlparser_dialect.as_ref())
+            let fallback_range = self.first_tree_sitter_error_range(&sql, text);
+            crate::diagnostics_syntax::check_sqlparser_syntax(
+                &sql,
+                sqlparser_dialect.as_ref(),
+                fallback_range,
+            )
         };
         let has_sqlparser_syntax_error = sqlparser_diagnostics.iter().any(|diagnostic| {
             diagnostic.source.as_deref() == Some("sqlparser")
@@ -87,8 +103,10 @@ impl SqlDiagnostics {
         // false positives for valid dialect-specific syntax that sqlparser already accepted.
         // Example: SQLite allows bracketed identifiers (`[name]`), while the SQL grammar
         // behind tree-sitter can flag them as ERROR nodes.
-        let should_run_tree_sitter = !skip_tree_sitter
-            && (skip_sql || has_sqlparser_syntax_error || using_generic_sqlparser);
+        let should_run_tree_sitter = !is_create_trigger_statement
+            && !skip_sql
+            && !skip_tree_sitter
+            && (has_sqlparser_syntax_error || using_generic_sqlparser);
         if should_run_tree_sitter {
             diagnostics.extend(self.check_tree_sitter_errors(&sql, text));
         }
@@ -96,11 +114,22 @@ impl SqlDiagnostics {
         // Schema-aware validation (if schema is available and dialect is SQL)
         if !skip_sql {
             if let Some(schema) = schema_cache {
-                diagnostics.extend(self.check_schema_validation(&sql, schema));
+                diagnostics.extend(self.check_schema_validation(
+                    &sql,
+                    schema,
+                    sqlparser_dialect.as_ref(),
+                ));
             }
 
-            // Additional heuristic checks (SQL-specific)
-            diagnostics.extend(self.check_common_mistakes(&sql, text));
+            let diagnostic_rules = dialect_config
+                .map(|config| zqlz_core::get_syntax_driver_capabilities(&config.id).diagnostics)
+                .unwrap_or(zqlz_core::SQL_DIAGNOSTIC_RULES);
+            diagnostics.extend(self.check_common_mistakes(
+                &sql,
+                text,
+                sqlparser_dialect.as_ref(),
+                diagnostic_rules,
+            ));
         } else if let Some(config) = dialect_config {
             // For non-SQL dialects with custom validators, run custom validation
             if config.parser.custom_validator {
@@ -125,59 +154,23 @@ impl SqlDiagnostics {
         _text: &Rope,
         dialect_config: &zqlz_core::DialectConfig,
     ) -> Vec<Diagnostic> {
-        // Only Redis has custom validation for now
-        // Other command-based dialects would have their own validators
-        if dialect_config.id == "redis" {
-            use crate::redis_validator::RedisValidator;
+        match dialect_config.custom_validator_kind() {
+            Some(CustomValidatorKind::Redis) => {
+                use crate::redis_validator::RedisValidator;
 
-            let validator = RedisValidator::new();
-            let case_sensitive = dialect_config.syntax.case_sensitive;
-            return validator.validate_to_diagnostics(sql, case_sensitive);
+                let validator = RedisValidator::new();
+                let case_sensitive = dialect_config.syntax.case_sensitive;
+                validator.validate_to_diagnostics(sql, case_sensitive)
+            }
+            None => Vec::new(),
         }
-
-        // Fallback: no validation for unknown dialects
-        Vec::new()
     }
 
-    /// Check SQL syntax using sqlparser and extract error positions
-    fn check_sqlparser_syntax(
-        &self,
-        sql: &str,
-        text: &Rope,
-        dialect: &dyn SqlParserDialect,
-    ) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-
-        match Parser::parse_sql(dialect, sql) {
-            Ok(_statements) => {
-                // SQL is valid, no errors
-            }
-            Err(e) => {
-                // Try to extract position from error message
-                let error_msg = e.to_string();
-                let (line, col) = self.extract_error_position(&error_msg);
-
-                // Adjust position if we found valid coordinates
-                let position = if line > 0 || col > 0 {
-                    Position::new(line as u32, col as u32)
-                } else {
-                    Position::new(0, 0)
-                };
-
-                // Try to find the error token in the SQL text for better range
-                let range = self.find_error_range(text, position, &error_msg);
-
-                diagnostics.push(Diagnostic {
-                    range,
-                    severity: Some(DiagnosticSeverity::ERROR),
-                    message: format!("SQL Syntax Error: {}", error_msg),
-                    source: Some("sqlparser".to_string()),
-                    ..Default::default()
-                });
-            }
-        }
-
-        diagnostics
+    fn first_tree_sitter_error_range(&mut self, sql: &str, text: &Rope) -> Option<Range> {
+        let parser = self.ts_parser.as_mut()?;
+        let tree = parser.parse(sql, None)?;
+        let mut cursor = tree.walk();
+        first_error_node_range(&mut cursor, text)
     }
 
     /// Check for tree-sitter ERROR nodes with precise positioning
@@ -238,6 +231,7 @@ impl SqlDiagnostics {
                     Position::new(end_pos.line, end_pos.character),
                 ),
                 severity: Some(DiagnosticSeverity::ERROR),
+                code: diagnostic_code(DIAGNOSTIC_CODE_TREE_SITTER_SYNTAX),
                 message: format!("Syntax error near: '{}'", preview),
                 source: Some("tree-sitter".to_string()),
                 ..Default::default()
@@ -256,168 +250,106 @@ impl SqlDiagnostics {
         }
     }
 
-    /// Extract line and column from sqlparser error messages
-    fn extract_error_position(&self, error_msg: &str) -> (usize, usize) {
-        // sqlparser errors may contain "at line X, column Y" or "near 'token' at position X"
-        // This is a basic extraction; enhance as needed
-
-        // Try to extract "line X"
-        if let Some(line_pos) = error_msg.find("line ") {
-            let rest = &error_msg[line_pos + 5..];
-            if let Some(line_end) = rest.find(&[',', ' ', '\n'][..])
-                && let Ok(line) = rest[..line_end].parse::<usize>()
-            {
-                // Found line number
-                return (line.saturating_sub(1), 0); // Line numbers are 1-based
-            }
-        }
-
-        (0, 0)
-    }
-
-    /// Find a better range for the error by looking for tokens near the position
-    fn find_error_range(&self, text: &Rope, position: Position, error_msg: &str) -> Range {
-        // Try to extract the problematic token from error message
-        let token = self.extract_token_from_error(error_msg);
-
-        if let Some(token_text) = token {
-            // Search for the token near the error position
-            let line_idx = position.line as usize;
-            if let Some(line_content) = self.get_line(text, line_idx)
-                && let Some(token_pos) = line_content.find(&token_text)
-            {
-                let start_pos = Position::new(position.line, token_pos as u32);
-                let end_pos = Position::new(position.line, (token_pos + token_text.len()) as u32);
-                return Range::new(start_pos, end_pos);
-            }
-        }
-
-        // Fallback: use position or highlight whole line
-        Range::new(
-            position,
-            Position::new(position.line, position.character + 1),
-        )
-    }
-
-    /// Extract token from error message (e.g., "Expected 'FROM' but found 'WHERE'")
-    fn extract_token_from_error(&self, error_msg: &str) -> Option<String> {
-        // Look for patterns like "found 'token'" or "near 'token'"
-        if let Some(found_pos) = error_msg.find("found '") {
-            let rest = &error_msg[found_pos + 7..];
-            if let Some(end_pos) = rest.find('\'') {
-                return Some(rest[..end_pos].to_string());
-            }
-        }
-
-        if let Some(near_pos) = error_msg.find("near '") {
-            let rest = &error_msg[near_pos + 6..];
-            if let Some(end_pos) = rest.find('\'') {
-                return Some(rest[..end_pos].to_string());
-            }
-        }
-
-        None
-    }
-
-    /// Get a line from the Rope
-    fn get_line(&self, text: &Rope, line_idx: usize) -> Option<String> {
-        if line_idx >= text.lines_len() {
-            return None;
-        }
-        Some(text.slice_line(line_idx).to_string())
-    }
-
     /// Check schema-aware validation (unknown tables, columns, etc.)
-    fn check_schema_validation(&self, sql: &str, schema: &SchemaCache) -> Vec<Diagnostic> {
-        let issues = self.schema_validator.validate(sql, schema);
+    fn check_schema_validation(
+        &self,
+        sql: &str,
+        schema: &SchemaCache,
+        dialect: &dyn SqlParserDialect,
+    ) -> Vec<Diagnostic> {
+        let issues = self
+            .schema_validator
+            .validate_with_dialect(sql, schema, dialect);
 
         issues
             .into_iter()
-            .map(|issue| {
-                let severity = match issue.severity {
-                    ValidationSeverity::Error => DiagnosticSeverity::ERROR,
-                    ValidationSeverity::Warning => DiagnosticSeverity::WARNING,
-                    ValidationSeverity::Info => DiagnosticSeverity::INFORMATION,
-                };
+            .scan(
+                HashMap::<String, usize>::new(),
+                |symbol_occurrences, issue| {
+                    let severity = match issue.severity {
+                        ValidationSeverity::Error => DiagnosticSeverity::ERROR,
+                        ValidationSeverity::Warning => DiagnosticSeverity::WARNING,
+                        ValidationSeverity::Info => DiagnosticSeverity::INFORMATION,
+                    };
+                    let occurrence = issue.symbol.as_ref().map_or(0, |symbol| {
+                        let key = schema_issue_occurrence_key(&issue, symbol);
+                        let occurrence = *symbol_occurrences.get(&key).unwrap_or(&0);
+                        symbol_occurrences.insert(key, occurrence + 1);
+                        occurrence
+                    });
+                    let range = crate::diagnostics_schema::schema_issue_range(
+                        sql, dialect, &issue, occurrence,
+                    )
+                    .unwrap_or_else(|| {
+                        Range::new(
+                            Position::new(issue.line as u32, issue.column as u32),
+                            Position::new(issue.line as u32, (issue.column + 1) as u32),
+                        )
+                    });
 
-                Diagnostic {
-                    range: Range::new(
-                        Position::new(issue.line as u32, issue.column as u32),
-                        Position::new(issue.line as u32, (issue.column + 1) as u32),
-                    ),
-                    severity: Some(severity),
-                    message: issue.message,
-                    source: Some("schema".to_string()),
-                    ..Default::default()
-                }
-            })
+                    Some(Diagnostic {
+                        range,
+                        severity: Some(severity),
+                        code: diagnostic_code(DIAGNOSTIC_CODE_SCHEMA_VALIDATION),
+                        message: issue.message,
+                        source: Some("schema".to_string()),
+                        ..Default::default()
+                    })
+                },
+            )
             .collect()
     }
 
     /// Check for common SQL mistakes and best practices
-    fn check_common_mistakes(&self, sql: &str, text: &Rope) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
-        let sql_lower = sql.to_lowercase();
+    fn check_common_mistakes(
+        &self,
+        sql: &str,
+        text: &Rope,
+        dialect: &dyn SqlParserDialect,
+        rules: SyntaxDiagnosticRules,
+    ) -> Vec<Diagnostic> {
+        crate::best_practices::analyze_best_practices(sql, text, dialect, &rules)
+    }
+}
 
-        // Check for SELECT * with position
-        if let Some(select_star_pos) = sql_lower.find("select *") {
-            let pos = text.offset_to_position(select_star_pos);
-            diagnostics.push(Diagnostic {
-                range: Range::new(
-                    Position::new(pos.line, pos.character),
-                    Position::new(pos.line, pos.character + 8),
-                ),
-                severity: Some(DiagnosticSeverity::INFORMATION),
-                message: "Consider specifying explicit column names instead of SELECT *"
-                    .to_string(),
-                source: Some("best-practices".to_string()),
-                ..Default::default()
-            });
-        }
+fn schema_issue_occurrence_key(issue: &crate::ValidationIssue, symbol: &str) -> String {
+    format!(
+        "{:?}:{}:{}",
+        issue.symbol_role,
+        issue
+            .qualifier
+            .as_deref()
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default(),
+        symbol.to_ascii_lowercase()
+    )
+}
 
-        // Check for UPDATE/DELETE without WHERE
-        for keyword in ["update", "delete from"] {
-            if let Some(keyword_pos) = sql_lower.find(keyword) {
-                let rest_of_query = &sql_lower[keyword_pos..];
-                if !rest_of_query.contains("where") {
-                    let pos = text.offset_to_position(keyword_pos);
-                    let end_character = (pos.character as usize + keyword.len()) as u32;
-                    diagnostics.push(Diagnostic {
-                        range: Range::new(
-                            Position::new(pos.line, pos.character),
-                            Position::new(pos.line, end_character),
-                        ),
-                        severity: Some(DiagnosticSeverity::WARNING),
-                        message: format!(
-                            "{} without WHERE clause will affect all rows",
-                            keyword.to_uppercase()
-                        ),
-                        source: Some("best-practices".to_string()),
-                        ..Default::default()
-                    });
-                }
+fn first_error_node_range(cursor: &mut tree_sitter::TreeCursor, text: &Rope) -> Option<Range> {
+    let node = cursor.node();
+    if node.kind() == "ERROR" {
+        let start_pos = text.offset_to_position(node.start_byte());
+        let end_pos = text.offset_to_position(node.end_byte());
+        return Some(Range::new(
+            Position::new(start_pos.line, start_pos.character),
+            Position::new(end_pos.line, end_pos.character),
+        ));
+    }
+
+    if cursor.goto_first_child() {
+        loop {
+            if let Some(range) = first_error_node_range(cursor, text) {
+                cursor.goto_parent();
+                return Some(range);
+            }
+            if !cursor.goto_next_sibling() {
+                break;
             }
         }
-
-        // Check for potential SQL injection patterns
-        if (sql.contains("'; DROP") || sql.contains("\"; DROP"))
-            && let Some(drop_pos) = sql.to_uppercase().find("DROP")
-        {
-            let pos = text.offset_to_position(drop_pos);
-            diagnostics.push(Diagnostic {
-                range: Range::new(
-                    Position::new(pos.line, pos.character),
-                    Position::new(pos.line, pos.character + 4),
-                ),
-                severity: Some(DiagnosticSeverity::ERROR),
-                message: "Potential SQL injection pattern detected".to_string(),
-                source: Some("security".to_string()),
-                ..Default::default()
-            });
-        }
-
-        diagnostics
+        cursor.goto_parent();
     }
+
+    None
 }
 
 impl Default for SqlDiagnostics {

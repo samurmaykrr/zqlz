@@ -112,6 +112,127 @@ fn test_qualified_completion_with_alias() {
 }
 
 #[test]
+fn test_qualified_completion_does_not_resolve_alias_prefix() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT us. FROM users user_stats JOIN audit_log us_archive ON true");
+    let offset = text.to_string().find("us.").unwrap() + 3;
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"user_id".to_string()),
+        "Qualifier should not resolve to alias by prefix. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"username".to_string()),
+        "Qualifier should not resolve to alias by prefix. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_ignores_alias_like_text_in_comments() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("-- FROM users u\nSELECT u.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"user_id".to_string()),
+        "Comment text should not create table aliases. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"username".to_string()),
+        "Comment text should not create table aliases. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_ignores_alias_like_text_in_strings() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT 'FROM users u' AS note, u.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"user_id".to_string()),
+        "String text should not create table aliases. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"username".to_string()),
+        "String text should not create table aliases. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_ignores_cte_like_text_in_strings() {
+    let mut lsp = create_test_lsp();
+    let text =
+        Rope::from("SELECT 'WITH fake AS (SELECT user_id, username FROM users)' AS note, fake.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"user_id".to_string()),
+        "String text should not create CTE columns. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"username".to_string()),
+        "String text should not create CTE columns. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_ignores_derived_table_like_text_in_strings() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT '(SELECT user_id, username FROM users) fake' AS note, fake.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"user_id".to_string()),
+        "String text should not create derived-table columns. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"username".to_string()),
+        "String text should not create derived-table columns. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
 fn test_qualified_completion_multiple_tables() {
     let mut lsp = create_test_lsp();
     let text = Rope::from("SELECT * FROM users u, audit_log a WHERE u.");

@@ -151,6 +151,8 @@ pub struct SyntaxColors {
     #[serde(rename = "type")]
     pub type_: Option<ThemeStyle>,
     pub variable: Option<ThemeStyle>,
+    #[serde(rename = "variable.parameter")]
+    pub variable_parameter: Option<ThemeStyle>,
     #[serde(rename = "variable.special")]
     pub variable_special: Option<ThemeStyle>,
     pub variant: Option<ThemeStyle>,
@@ -253,7 +255,7 @@ impl SyntaxColors {
             "number" => self.number,
             "float" => self.number, // Map float to number
             "operator" => self.operator,
-            "parameter" => self.variable, // Map parameter to variable
+            "parameter" => self.variable_parameter.or(self.variable),
             "predictive" => self.predictive,
             "preproc" => self.preproc,
             "primary" => self.primary,
@@ -276,6 +278,7 @@ impl SyntaxColors {
             "type.builtin" => self.type_,       // Fallback to type
             "type.qualifier" => self.attribute, // Map type.qualifier to attribute
             "variable" => self.variable,
+            "variable.parameter" => self.variable_parameter,
             "variable.special" => self.variable_special,
             "variant" => self.variant,
             "conditional" => self.keyword, // Map conditional to keyword

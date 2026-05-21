@@ -574,20 +574,28 @@ impl InputState {
         self
     }
 
-    /// Set enable/disable line number, only for [`InputMode::CodeEditor`] mode.
+    /// Set enable/disable line number for multi-line plain text or code editor mode.
     pub fn line_number(mut self, line_number: bool) -> Self {
-        debug_assert!(self.mode.is_code_editor() && self.mode.is_multi_line());
-        if let InputMode::CodeEditor { line_number: l, .. } = &mut self.mode {
-            *l = line_number;
+        debug_assert!(self.mode.is_multi_line());
+        match &mut self.mode {
+            InputMode::PlainText { line_number: l, .. }
+            | InputMode::CodeEditor { line_number: l, .. } => {
+                *l = line_number;
+            }
+            InputMode::AutoGrow { .. } => {}
         }
         self
     }
 
-    /// Set line number, only for [`InputMode::CodeEditor`] mode.
+    /// Set line number for multi-line plain text or code editor mode.
     pub fn set_line_number(&mut self, line_number: bool, _: &mut Window, cx: &mut Context<Self>) {
-        debug_assert!(self.mode.is_code_editor() && self.mode.is_multi_line());
-        if let InputMode::CodeEditor { line_number: l, .. } = &mut self.mode {
-            *l = line_number;
+        debug_assert!(self.mode.is_multi_line());
+        match &mut self.mode {
+            InputMode::PlainText { line_number: l, .. }
+            | InputMode::CodeEditor { line_number: l, .. } => {
+                *l = line_number;
+            }
+            InputMode::AutoGrow { .. } => {}
         }
         cx.notify();
     }

@@ -1,0 +1,138 @@
+id = "clickhouse"
+display_name = "ClickHouse SQL"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "`"
+string_quote = "'"
+case_sensitive = true
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "clickhouse"
+grammar = "sql"
+highlight_query = "clickhouse"
+parameter_placeholders = "disabled"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = false
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["ARRAY", "CODEC", "DAY", "FINAL", "FORMAT", "LOWCARDINALITY", "MATERIALIZE", "MATERIALIZED", "PARTITION", "POPULATE", "PREWHERE", "SAMPLE", "SETTINGS", "TTL", "TUPLE"]
+functions = ["ARRAYJOIN", "ARRAYMAP", "COUNTIF", "DATEADD", "DATEDIFF", "FORMATDATETIME", "GROUPARRAY", "JSONEXTRACT", "JSONEXTRACTBOOL", "JSONEXTRACTINT", "JSONEXTRACTRAW", "JSONEXTRACTSTRING", "LENGTHUTF8", "MULTIIF", "QUANTILE", "TODECIMAL128", "TODATETIME", "TODATETIME64", "TOFLOAT64", "TOINT64", "TOSTARTOFINTERVAL", "TOSTARTOFMONTH", "TOUINT64", "TOUUID", "TOYYYYMM", "UNIQ", "UNIQEXACT"]
+types = ["AGGREGATEFUNCTION", "ARRAY", "DATE32", "DATETIME64", "DECIMAL128", "DECIMAL256", "DECIMAL32", "DECIMAL64", "ENUM16", "ENUM8", "FIXEDSTRING", "FLOAT32", "FLOAT64", "INT128", "INT16", "INT256", "INT32", "INT64", "INT8", "IPV4", "IPV6", "JSONEACHROW", "LOWCARDINALITY", "MAP", "MULTIPOLYGON", "NESTED", "NOTHING", "NULLABLE", "POINT", "POLYGON", "RING", "SIMPLEAGGREGATEFUNCTION", "STRING", "TUPLE", "UINT128", "UINT16", "UINT256", "UINT32", "UINT64", "UINT8"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+CREATE TABLE events (
+  id UInt64,
+  tags Array(String),
+  created_at DateTime64(3)
+) ENGINE = MergeTree()
+PARTITION BY toYYYYMM(created_at)
+ORDER BY (id, created_at)
+TTL created_at + INTERVAL 7 DAY
+SETTINGS index_granularity = 8192;
+SELECT uniq(id), countIf(id > 0) FROM events FINAL PREWHERE created_at >= now() - INTERVAL 1 DAY
+GROUP BY id WITH ROLLUP FORMAT JSONEachRow;
+"""
+
+expected_outline = [
+  "CREATE events",
+  "Query",
+]
+
+[[syntax_quality.expected]]
+token = "CREATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "events"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "UInt64"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "Array"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "String"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "DateTime64"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "ENGINE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "MergeTree"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "PARTITION"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "toYYYYMM"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "ORDER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "uniq"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "countIf"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "FINAL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "TTL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INTERVAL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DAY"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "SETTINGS"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "PREWHERE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ROLLUP"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "FORMAT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "JSONEachRow"
+kind = "Type"
+
+[[syntax_quality.rejected]]
+token = "MergeTree"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "events"
+kind = "Function"

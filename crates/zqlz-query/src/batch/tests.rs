@@ -311,6 +311,21 @@ mod batch_executor_tests {
         assert_eq!(executor.options().mode, ExecutionMode::Parallel);
         assert!(!executor.options().stop_on_error);
     }
+
+    #[test]
+    fn statement_type_uses_parser_aware_query_classifier() {
+        assert!(super::executor::statement_returns_rows(
+            "/* route me */ SELECT * FROM users"
+        ));
+        assert!(super::executor::statement_returns_rows(
+            "WITH active AS (SELECT 1) SELECT * FROM active"
+        ));
+        assert!(!super::executor::statement_returns_rows(
+            "/* SELECT */ DROP TABLE users"
+        ));
+        assert!(!super::executor::statement_returns_rows("'SELECT'"));
+        assert!(!super::executor::statement_returns_rows("selective value"));
+    }
 }
 
 mod split_statements_tests {

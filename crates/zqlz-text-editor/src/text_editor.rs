@@ -53,10 +53,16 @@ pub mod formatter;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use std::sync::Arc;
+use zqlz_core::{
+    SyntaxDriverCapabilities, markdown_fence_language_for_capabilities,
+    syntax_bracket_pairs_for_capabilities,
+};
 use zqlz_ui::widgets::input::{Input, InputEvent, InputState};
 use zqlz_ui::widgets::{ActiveTheme, Sizable, Size};
 
 pub type FormatProvider = std::rc::Rc<dyn Fn(&str) -> Option<String>>;
+
+const VISIBLE_SYNTAX_CONTEXT_LINES: usize = 8;
 
 #[derive(Default, Clone)]
 pub struct EditorLanguageProviders {
@@ -101,7 +107,11 @@ pub use find_replace::{
 };
 pub(crate) use find_state::EditorFindState;
 pub use find_state::FindSnapshot;
-pub use folding::{FoldKind, FoldRegion, FoldingDetector, detect_folds, detect_folds_in_range};
+pub use folding::{
+    FoldKind, FoldRegion, FoldingDetector, detect_folds, detect_folds_in_range,
+    detect_folds_in_range_with_block_comments, detect_folds_in_range_with_rules,
+    detect_folds_with_block_comments, detect_folds_with_rules,
+};
 pub use formatter::{
     FormatError, FormatterConfig, SqlFormatter, format_sql, format_sql_with_config,
 };
@@ -117,7 +127,8 @@ pub use lsp::{
     CodeActionProvider, CompletionMenuData, CompletionProvider, DefinitionProvider,
     DiagnosticProvider, EditorInlayHint, HoverProvider, HoverResolution, HoverState, InlayHintKind,
     InlayHintSide, Lsp, LspRequestState, ReferencesProvider, RenameProvider, RequestToken,
-    SqlCompletionProvider,
+    SqlCompletionProvider, completion_prefix_with_word_chars,
+    completion_trigger_context_for_characters,
 };
 pub use lsp_types::{CompletionItem, Hover, SignatureHelp};
 use overlay_state::{
@@ -144,6 +155,12 @@ pub use syntax::{
 
 const RENAME_PROBE_IDENTIFIER: &str = "__zqlz_rename_probe";
 
+struct CompletionAcceptance {
+    replacement_range: std::ops::Range<usize>,
+    inserted_text: String,
+    snippet: Option<Snippet>,
+}
+
 /// A text editor entity for editing SQL queries.
 ///
 /// The editor owns a TextBuffer (rope-based text storage), cursor state, and manages
@@ -167,7 +184,11 @@ pub struct TextEditor {
     /// LSP provider container for code intelligence features
     lsp: Lsp,
     lsp_diagnostics: Vec<lsp_types::Diagnostic>,
+    lsp_diagnostics_revision: Option<usize>,
     render_settings: EditorRenderSettings,
+    line_comment_prefix_override: Option<Option<&'static str>>,
+    syntax_capabilities: SyntaxDriverCapabilities,
+    syntax_capabilities_override: Option<SyntaxDriverCapabilities>,
     history: EditorHistoryState,
     cursor_state: EditorCursorState,
     scroll: EditorScrollState,
@@ -180,6 +201,8 @@ pub struct TextEditor {
 }
 
 impl EventEmitter<TextEditorEvent> for TextEditor {}
+
+const MAX_BRACKET_HIGHLIGHT_SCAN_BYTES: usize = 256 * 1024;
 
 impl TextEditor {
     fn primary_cursor(&self) -> Option<&Cursor> {
@@ -257,6 +280,26 @@ impl TextEditor {
         }
     }
 
+    fn line_comment_prefix(&self) -> Option<&'static str> {
+        self.line_comment_prefix_override
+            .unwrap_or(self.syntax_capabilities.line_comment_prefix)
+    }
+
+    fn block_comment_delimiters(&self) -> Option<(&'static str, &'static str)> {
+        self.syntax_capabilities.block_comment_delimiters
+    }
+
+    fn set_cached_syntax_capabilities(&mut self, capabilities: SyntaxDriverCapabilities) {
+        self.syntax_capabilities = capabilities;
+    }
+
+    fn refresh_cached_profile_capabilities(&mut self) {
+        if self.syntax_capabilities_override.is_none() {
+            self.syntax_capabilities =
+                zqlz_core::get_syntax_driver_capabilities(self.document.syntax_language_profile());
+        }
+    }
+
     fn selection_state(&self) -> SelectionState {
         self.editor_core_snapshot().selection_state()
     }
@@ -300,7 +343,11 @@ impl TextEditor {
             behavior: EditorBehaviorState::new(),
             lsp: Lsp::new(),
             lsp_diagnostics: Vec::new(),
+            lsp_diagnostics_revision: None,
             render_settings: EditorRenderSettings::default(),
+            line_comment_prefix_override: None,
+            syntax_capabilities: zqlz_core::get_syntax_driver_capabilities("sql"),
+            syntax_capabilities_override: None,
             history: EditorHistoryState::default(),
             cursor_state: EditorCursorState::default(),
             scroll: EditorScrollState::default(),
@@ -358,6 +405,7 @@ impl TextEditor {
         self.find.clear_state();
         self.lsp.clear_document_bound_ui();
         self.lsp_diagnostics.clear();
+        self.lsp_diagnostics_revision = None;
     }
 
     /// Create a new text editor with initial content
@@ -513,9 +561,18 @@ impl TextEditor {
     }
 
     fn visible_syntax_refresh_range(&self) -> Option<std::ops::Range<usize>> {
-        self.document_snapshot()
-            .syntax_refresh_strategy(self.scroll.viewport_lines(), self.scroll.vertical_offset())
-            .into_visible_range()
+        let buffer_snapshot = self.document.buffer_snapshot();
+        let language = self.language_pipeline_snapshot();
+        let visible_range = self
+            .document
+            .display_snapshot(buffer_snapshot, &language, self.behavior.soft_wrap())
+            .visible_byte_range(self.scroll.vertical_offset(), self.scroll.viewport_lines())?;
+        let buffer_snapshot = self.document.buffer_snapshot();
+        Some(expand_visible_syntax_refresh_range(
+            &buffer_snapshot,
+            visible_range,
+            VISIBLE_SYNTAX_CONTEXT_LINES,
+        ))
     }
 
     /// Get the current error diagnostics (for rendering squiggles)
@@ -685,6 +742,143 @@ impl TextEditor {
             return;
         }
 
+        self.refresh_cached_profile_capabilities();
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn set_syntax_term_overrides(
+        &mut self,
+        overrides: crate::syntax::SyntaxTermOverrides,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.document.set_syntax_term_overrides(overrides) {
+            return;
+        }
+
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn set_driver_syntax_terms(
+        &mut self,
+        overrides: crate::syntax::SyntaxTermOverrides,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.document.set_driver_syntax_terms(overrides) {
+            return;
+        }
+
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn clear_syntax_term_overrides(&mut self, cx: &mut Context<Self>) {
+        if !self.document.clear_syntax_term_overrides() {
+            return;
+        }
+
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn set_syntax_configuration(
+        &mut self,
+        language_profile: &'static str,
+        capabilities_override: Option<SyntaxDriverCapabilities>,
+        driver_syntax_terms: Option<crate::syntax::SyntaxTermOverrides>,
+        line_comment_prefix_override: Option<Option<&'static str>>,
+        cx: &mut Context<Self>,
+    ) {
+        let mut changed = false;
+
+        match capabilities_override {
+            Some(capabilities) => {
+                if self.syntax_capabilities_override.as_ref() != Some(&capabilities) {
+                    self.document
+                        .set_syntax_capabilities_override(capabilities.clone());
+                    self.set_cached_syntax_capabilities(capabilities.clone());
+                    self.syntax_capabilities_override = Some(capabilities);
+                    changed = true;
+                }
+            }
+            None => {
+                if self.syntax_capabilities_override.is_some() {
+                    self.document.clear_syntax_capabilities_override();
+                    self.syntax_capabilities_override = None;
+                    changed = true;
+                }
+            }
+        }
+
+        changed |= self.document.set_syntax_language_profile(language_profile);
+        self.refresh_cached_profile_capabilities();
+
+        changed |= match driver_syntax_terms {
+            Some(overrides) => self.document.set_driver_syntax_terms(overrides),
+            None => self.document.clear_syntax_term_overrides(),
+        };
+
+        if self.line_comment_prefix_override != line_comment_prefix_override {
+            self.line_comment_prefix_override = line_comment_prefix_override;
+            changed = true;
+        }
+
+        if !changed {
+            return;
+        }
+
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn set_line_comment_prefix_override(
+        &mut self,
+        comment_prefix: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.line_comment_prefix_override == Some(comment_prefix) {
+            return;
+        }
+
+        self.line_comment_prefix_override = Some(comment_prefix);
+        cx.notify();
+    }
+
+    pub fn clear_line_comment_prefix_override(&mut self, cx: &mut Context<Self>) {
+        if self.line_comment_prefix_override.is_none() {
+            return;
+        }
+
+        self.line_comment_prefix_override = None;
+        cx.notify();
+    }
+
+    pub fn set_syntax_capabilities_override(
+        &mut self,
+        capabilities: SyntaxDriverCapabilities,
+        cx: &mut Context<Self>,
+    ) {
+        if self.syntax_capabilities_override.as_ref() == Some(&capabilities) {
+            return;
+        }
+
+        self.document
+            .set_syntax_capabilities_override(capabilities.clone());
+        self.set_cached_syntax_capabilities(capabilities.clone());
+        self.syntax_capabilities_override = Some(capabilities);
+        self.update_syntax_highlights();
+        cx.notify();
+    }
+
+    pub fn clear_syntax_capabilities_override(&mut self, cx: &mut Context<Self>) {
+        if self.syntax_capabilities_override.is_none() {
+            return;
+        }
+
+        self.document.clear_syntax_capabilities_override();
+        self.syntax_capabilities_override = None;
+        self.refresh_cached_profile_capabilities();
         self.update_syntax_highlights();
         cx.notify();
     }
@@ -870,6 +1064,18 @@ impl TextEditor {
     /// lines hidden inside collapsed folds).
     pub fn display_line_count(&self) -> usize {
         self.document.display_line_count()
+    }
+
+    pub fn line_count(&self) -> usize {
+        self.document.line_count()
+    }
+
+    pub fn byte_len(&self) -> usize {
+        self.document.byte_len()
+    }
+
+    pub fn max_line_byte_len(&self) -> usize {
+        self.document.max_line_byte_len()
     }
 
     pub fn document_snapshot(&self) -> DocumentSnapshot {
@@ -1217,9 +1423,12 @@ impl TextEditor {
             return;
         }
 
+        let pairs = self.syntax_auto_close_pairs();
         let Some(batch) = self
             .editor_core_snapshot()
-            .delete_before_cursor_edit_batch(Self::bracket_closer)
+            .delete_before_cursor_edit_batch(|opener| {
+                Self::bracket_closer_for_pairs(pairs, opener)
+            })
         else {
             return;
         };
@@ -1630,48 +1839,27 @@ impl TextEditor {
         if !self.render_settings.bracket_matching_enabled() {
             return Vec::new();
         }
-
         let cursor_offset = self.current_cursor_offset();
         let rope = self.document.rope();
+        let scan_range = Self::bracket_highlight_scan_range(
+            rope.len_bytes(),
+            cursor_offset,
+            MAX_BRACKET_HIGHLIGHT_SCAN_BYTES,
+        );
+        let scan_range = Self::clamp_rope_byte_range(&rope, scan_range);
+        let text = rope.byte_slice(scan_range.clone()).to_string();
 
-        // Stack of (open_char, open_byte_offset) for currently open brackets.
-        let mut stack: Vec<(char, usize)> = Vec::new();
-        // Completed enclosing pairs (open_offset, close_offset).
-        let mut enclosing: Vec<(usize, usize)> = Vec::new();
-        let mut byte_offset = 0usize;
+        let pairs = syntax_bracket_pairs_for_capabilities(
+            &self.syntax_capabilities,
+            &text,
+            scan_range.start,
+            cursor_offset,
+        );
 
-        for ch in rope.chars() {
-            match ch {
-                '(' | '[' | '{' => {
-                    stack.push((ch, byte_offset));
-                }
-                ')' | ']' | '}' => {
-                    let expected_open = match ch {
-                        ')' => '(',
-                        ']' => '[',
-                        '}' => '{',
-                        _ => unreachable!(),
-                    };
-                    // Pop only if the top of the stack matches — unbalanced brackets are skipped.
-                    if stack.last().map(|(c, _)| *c) == Some(expected_open)
-                        && let Some((_, open_offset)) = stack.pop()
-                    {
-                        // This pair encloses the cursor if the open is before the cursor
-                        // and the close is at or after it.
-                        if open_offset < cursor_offset && byte_offset >= cursor_offset {
-                            enclosing.push((open_offset, byte_offset));
-                        }
-                    }
-                }
-                _ => {}
-            }
-            byte_offset += ch.len_utf8();
-        }
-
-        // `enclosing` is filled in close→open order because we record pairs when
-        // we encounter the closing bracket.  Reverse so the result is outermost-first.
-        enclosing.reverse();
-        enclosing
+        pairs
+            .into_iter()
+            .map(|pair| (pair.open, pair.close))
+            .collect()
     }
 
     pub fn innermost_enclosing_bracket_range(&self, offset: usize) -> Option<StructuralRange> {
@@ -1682,6 +1870,7 @@ impl TextEditor {
         let mut stack: Vec<(char, usize)> = Vec::new();
         let mut ranges = Vec::new();
         let rope = self.document.rope();
+        let pairs = self.syntax_auto_close_pairs();
         let mut byte_offset = 0usize;
 
         for ch in rope.chars() {
@@ -1689,11 +1878,13 @@ impl TextEditor {
                 break;
             }
 
-            match ch {
-                '(' | '[' | '{' => stack.push((ch, byte_offset)),
-                ')' | ']' | '}' => {
+            if Self::bracket_closer_for_pairs(pairs, ch).is_some() {
+                if pairs
+                    .iter()
+                    .any(|(open, close)| *open == ch && *close == ch)
+                    && stack.last().map(|(open, _)| *open) == Some(ch)
+                {
                     if let Some((open, start)) = stack.pop()
-                        && Self::bracket_closer(open) == Some(ch)
                         && start <= offset
                         && offset <= byte_offset
                     {
@@ -1704,25 +1895,21 @@ impl TextEditor {
                             close: ch,
                         });
                     }
+                } else {
+                    stack.push((ch, byte_offset));
                 }
-                '"' | '\'' | '`' => {
-                    if stack.last().map(|(open, _)| *open) == Some(ch) {
-                        if let Some((open, start)) = stack.pop()
-                            && start <= offset
-                            && offset <= byte_offset
-                        {
-                            ranges.push(StructuralRange {
-                                start,
-                                end: byte_offset,
-                                open,
-                                close: ch,
-                            });
-                        }
-                    } else {
-                        stack.push((ch, byte_offset));
-                    }
-                }
-                _ => {}
+            } else if pairs.iter().any(|(_open, close)| *close == ch)
+                && let Some((open, start)) = stack.pop()
+                && Self::bracket_closer_for_pairs(pairs, open) == Some(ch)
+                && start <= offset
+                && offset <= byte_offset
+            {
+                ranges.push(StructuralRange {
+                    start,
+                    end: byte_offset,
+                    open,
+                    close: ch,
+                });
             }
 
             byte_offset += ch.len_utf8();
@@ -1758,15 +1945,57 @@ impl TextEditor {
     // ============================================================================
 
     /// Given an opening bracket/quote character, return the matching closer.
-    fn bracket_closer(opener: char) -> Option<char> {
-        match opener {
-            '(' => Some(')'),
-            '[' => Some(']'),
-            '{' => Some('}'),
-            '\'' => Some('\''),
-            '"' => Some('"'),
-            _ => None,
+    fn bracket_closer_for_pairs(pairs: &[(char, char)], opener: char) -> Option<char> {
+        pairs
+            .iter()
+            .find_map(|(open, close)| (*open == opener).then_some(*close))
+    }
+
+    fn syntax_auto_close_pairs(&self) -> &[(char, char)] {
+        &self.syntax_capabilities.auto_close_pairs
+    }
+
+    fn bracket_highlight_scan_range(
+        byte_len: usize,
+        cursor_offset: usize,
+        max_scan_bytes: usize,
+    ) -> std::ops::Range<usize> {
+        if byte_len <= max_scan_bytes || max_scan_bytes == 0 {
+            return 0..byte_len;
         }
+
+        let half_window = max_scan_bytes / 2;
+        let mut start = cursor_offset.saturating_sub(half_window);
+        let mut end = start.saturating_add(max_scan_bytes).min(byte_len);
+
+        if end == byte_len {
+            start = end.saturating_sub(max_scan_bytes);
+        } else if start == 0 {
+            end = max_scan_bytes.min(byte_len);
+        }
+
+        start..end
+    }
+
+    fn clamp_rope_byte_range(
+        rope: &ropey::Rope,
+        range: std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        let len = rope.len_bytes();
+        let mut start = range.start.min(len);
+        let mut end = range.end.min(len);
+
+        while start > 0 && rope.try_byte_to_char(start).is_err() {
+            start -= 1;
+        }
+        while end < len && rope.try_byte_to_char(end).is_err() {
+            end += 1;
+        }
+        if end < start {
+            end = start;
+        }
+
+        start..end
     }
 
     /// Returns `true` when the character immediately after `cursor_offset` in the
@@ -2313,6 +2542,7 @@ impl TextEditor {
             self.document.settings().indent_size,
             self.document.settings().use_tabs,
             LinePrefixEditMode::Indent,
+            None,
         ) else {
             return;
         };
@@ -2333,6 +2563,7 @@ impl TextEditor {
             self.document.settings().indent_size,
             self.document.settings().use_tabs,
             LinePrefixEditMode::Dedent,
+            None,
         ) else {
             return;
         };
@@ -2346,15 +2577,17 @@ impl TextEditor {
         self.scroll_to_cursor();
     }
 
-    /// Toggle `--` SQL line comments on every line in the selection (or cursor line) (feat-015).
+    /// Toggle dialect line comments on every line in the selection (or cursor line) (feat-015).
     ///
-    /// If all selected lines are already commented, the `--` prefix is removed.
-    /// Otherwise `-- ` is prepended to the first non-whitespace column on each line.
+    /// If all selected lines are already commented, the dialect prefix is removed.
+    /// Otherwise the prefix plus a space is prepended to the first non-whitespace column.
     fn toggle_line_comment(&mut self) {
+        let comment_prefix = self.line_comment_prefix();
         let Some(batch) = self.editor_core_snapshot().line_prefix_edit_batch(
             self.document.settings().indent_size,
             self.document.settings().use_tabs,
             LinePrefixEditMode::ToggleComment,
+            comment_prefix,
         ) else {
             return;
         };
@@ -2366,6 +2599,27 @@ impl TextEditor {
         self.update_syntax_highlights();
         self.update_diagnostics();
         self.scroll_to_cursor();
+    }
+
+    pub fn toggle_block_comment(&mut self, cx: &mut Context<Self>) {
+        let Some((start_delimiter, end_delimiter)) = self.block_comment_delimiters() else {
+            return;
+        };
+        let Some(plan) = self
+            .editor_core_snapshot()
+            .toggle_block_comment_plan(start_delimiter, end_delimiter)
+        else {
+            return;
+        };
+
+        if !self.apply_planned_edit_batch(plan.batch, false) {
+            return;
+        }
+
+        self.update_syntax_highlights();
+        self.update_diagnostics();
+        self.scroll_to_cursor();
+        cx.notify();
     }
 
     // ============================================================================
@@ -2376,9 +2630,15 @@ impl TextEditor {
     /// new line so the cursor lands at the correct indentation level.
     fn insert_newline_with_auto_indent(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let indent_unit = self.indent_unit();
-        let Some(AutoIndentNewlinePlan { text }) = self
-            .editor_core_snapshot()
-            .auto_indent_newline_text(self.behavior.auto_indent_enabled(), &indent_unit)
+        let comment_prefix = self.line_comment_prefix();
+        let indent_after_keywords = self.indent_after_keywords();
+        let Some(AutoIndentNewlinePlan { text }) =
+            self.editor_core_snapshot().auto_indent_newline_text(
+                self.behavior.auto_indent_enabled(),
+                &indent_unit,
+                comment_prefix,
+                indent_after_keywords,
+            )
         else {
             return;
         };
@@ -2685,6 +2945,24 @@ impl TextEditor {
         self.format_provider = None;
     }
 
+    fn has_format_provider(&self) -> bool {
+        self.format_provider.is_some()
+    }
+
+    fn built_in_sql_formatter_enabled(&self) -> bool {
+        Self::built_in_sql_formatter_enabled_for_capabilities(&self.syntax_capabilities)
+    }
+
+    fn built_in_sql_formatter_enabled_for_capabilities(
+        capabilities: &SyntaxDriverCapabilities,
+    ) -> bool {
+        matches!(capabilities.formatter, zqlz_core::FormatterCapability::Sql)
+    }
+
+    fn can_format_current_document(&self) -> bool {
+        self.has_format_provider() || self.built_in_sql_formatter_enabled()
+    }
+
     pub fn clear_code_action_provider(&mut self) {
         self.lsp.clear_code_action_provider();
         self.document.clear_code_actions();
@@ -2716,8 +2994,9 @@ impl TextEditor {
             return Vec::new();
         }
 
-        let prefix = lsp::get_word_at_cursor(&self.document.rope(), self.current_cursor_offset())
-            .to_string();
+        let provider = SqlCompletionProvider::for_capabilities(&self.syntax_capabilities);
+        let prefix =
+            provider.completion_prefix(&self.document.rope(), self.current_cursor_offset());
         self.lsp.visible_completions(&prefix)
     }
 
@@ -2734,7 +3013,7 @@ impl TextEditor {
     /// Get hover at specific offset
     /// Returns hover information for the word at the given offset
     pub fn get_hover_at(&self, offset: usize, _cx: &App) -> Option<Hover> {
-        let provider = SqlCompletionProvider::new();
+        let provider = SqlCompletionProvider::for_capabilities(&self.syntax_capabilities);
 
         // Find the word at the given offset
         let word_range = self
@@ -2874,6 +3153,7 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         self.lsp_diagnostics = diagnostics.clone();
+        self.lsp_diagnostics_revision = Some(self.document.buffer_revision());
         self.set_diagnostics(diagnostics.into_iter().map(Into::into).collect(), cx);
     }
 
@@ -2938,7 +3218,11 @@ impl TextEditor {
         let CompletionQueryPlan {
             trigger_offset: word_start,
             current_prefix,
-        } = self.editor_core_snapshot().completion_query_plan();
+        } = self
+            .editor_core_snapshot()
+            .completion_query_plan_with_extra_chars(
+                &self.syntax_capabilities.completion_word_chars,
+            );
 
         let resolution = self.lsp.resolve_completion_request(
             large_file_policy.allow_async_provider_requests(),
@@ -3057,34 +3341,20 @@ impl TextEditor {
             return;
         };
 
-        // Get the completion text (insert_text or label)
-        let completion_text = item
-            .insert_text
-            .clone()
-            .unwrap_or_else(|| item.label.clone());
-        let snippet = if matches!(
-            item.insert_text_format,
-            Some(lsp_types::InsertTextFormat::SNIPPET)
-        ) {
-            Some(Snippet::parse(&completion_text))
-        } else {
-            None
-        };
-
-        // Delete the partial word that was typed
-        let trigger_offset = menu.trigger_offset;
         let cursor_offset = self.current_cursor_offset();
-        let inserted_text = snippet
-            .as_ref()
-            .map(|snippet| snippet.text.clone())
-            .unwrap_or_else(|| completion_text.clone());
+        let acceptance = Self::completion_acceptance_for_item(
+            &self.document,
+            item,
+            menu.trigger_offset,
+            cursor_offset,
+        );
 
         let replacement_batch = self
             .editor_core_snapshot()
             .primary_text_replacement_plan(
-                Some(trigger_offset..cursor_offset),
+                Some(acceptance.replacement_range.clone()),
                 None,
-                &inserted_text,
+                &acceptance.inserted_text,
             )
             .batch;
 
@@ -3097,14 +3367,64 @@ impl TextEditor {
         self.scroll_to_cursor();
         self.did_change_content(cx);
 
-        if let Some(snippet) = snippet
-            && let Some(selection) =
-                self.snippets
-                    .activate_snippet(&snippet, self.document.buffer(), trigger_offset)
+        if let Some(snippet) = acceptance.snippet
+            && let Some(selection) = self.snippets.activate_snippet(
+                &snippet,
+                self.document.buffer(),
+                acceptance.replacement_range.start,
+            )
         {
             self.mutate_selections(|core| core.set_primary_selection(selection));
         }
         cx.notify();
+    }
+
+    fn completion_acceptance_for_item(
+        document: &TextDocument,
+        item: &lsp_types::CompletionItem,
+        trigger_offset: usize,
+        cursor_offset: usize,
+    ) -> CompletionAcceptance {
+        let (completion_text, replacement_range) = item
+            .text_edit
+            .as_ref()
+            .and_then(|text_edit| match text_edit {
+                lsp_types::CompletionTextEdit::Edit(edit) => Some((
+                    edit.new_text.clone(),
+                    Self::lsp_range_to_byte_range(document, &edit.range).ok()?,
+                )),
+                lsp_types::CompletionTextEdit::InsertAndReplace(edit) => Some((
+                    edit.new_text.clone(),
+                    Self::lsp_range_to_byte_range(document, &edit.replace).ok()?,
+                )),
+            })
+            .unwrap_or_else(|| {
+                (
+                    item.insert_text
+                        .clone()
+                        .unwrap_or_else(|| item.label.clone()),
+                    trigger_offset..cursor_offset,
+                )
+            });
+
+        let snippet = if matches!(
+            item.insert_text_format,
+            Some(lsp_types::InsertTextFormat::SNIPPET)
+        ) {
+            Some(Snippet::parse(&completion_text))
+        } else {
+            None
+        };
+        let inserted_text = snippet
+            .as_ref()
+            .map(|snippet| snippet.text.clone())
+            .unwrap_or(completion_text);
+
+        CompletionAcceptance {
+            replacement_range,
+            inserted_text,
+            snippet,
+        }
     }
 
     pub fn advance_snippet_placeholder(&mut self, cx: &mut Context<Self>) -> bool {
@@ -3287,7 +3607,7 @@ impl TextEditor {
             .editor_core_snapshot()
             .word_target_at_offset(offset)
             .and_then(|target| {
-                let provider = SqlCompletionProvider::new();
+                let provider = SqlCompletionProvider::for_capabilities(&self.syntax_capabilities);
                 provider
                     .get_hover_documentation(&target.text)
                     .map(|documentation| HoverState {
@@ -3647,13 +3967,7 @@ impl TextEditor {
 
     /// Get references at cursor.
     pub fn get_references(&self, _cx: &App) -> Vec<lsp_types::Location> {
-        let Some(ranges) = self.lsp.reference_ranges(
-            &self.document.rope(),
-            self.current_cursor_offset(),
-            &self.document.context(),
-        ) else {
-            return Vec::new();
-        };
+        let ranges = self.reference_ranges_at_offset(self.current_cursor_offset());
         let uri = self.document.identity().uri().clone();
         ranges
             .into_iter()
@@ -3684,10 +3998,18 @@ impl TextEditor {
         }
 
         let offset = self.current_cursor_offset();
-        let Some(code_actions) =
-            self.lsp
-                .code_actions_at(&self.document.rope(), offset, &self.document.context())
-        else {
+        let diagnostics = if self.lsp_diagnostics_revision == Some(self.document.buffer_revision())
+        {
+            self.lsp_diagnostics()
+        } else {
+            &[]
+        };
+        let Some(code_actions) = self.lsp.code_actions_at(
+            &self.document.rope(),
+            offset,
+            &self.document.context(),
+            diagnostics,
+        ) else {
             self.document.clear_code_actions();
             cx.notify();
             return;
@@ -3709,7 +4031,15 @@ impl TextEditor {
     #[allow(clippy::mutable_key_type)]
     pub fn rename(&self, new_name: &str, _cx: &App) -> Option<lsp_types::WorkspaceEdit> {
         let cursor_offset = self.current_cursor_offset();
-        let plan = self.editor_core_snapshot().rename_query_plan(new_name)?;
+        if !Self::is_valid_local_rename_replacement(new_name) {
+            return None;
+        }
+        let WordTarget {
+            text: current_name, ..
+        } = self.editor_core_snapshot().rename_target_at_cursor()?;
+        if current_name == new_name {
+            return None;
+        }
         let ranges = if let Some(ranges) = self.lsp.reference_ranges(
             &self.document.rope(),
             cursor_offset,
@@ -3717,7 +4047,7 @@ impl TextEditor {
         ) {
             ranges
         } else {
-            plan.ranges
+            self.local_reference_ranges_at_offset(cursor_offset)
         };
 
         if ranges.is_empty() {
@@ -3746,6 +4076,37 @@ impl TextEditor {
             document_changes: None,
             change_annotations: None,
         })
+    }
+
+    fn is_valid_local_rename_replacement(name: &str) -> bool {
+        let name = name.trim();
+        if name.is_empty() || name.contains(['\n', '\r']) {
+            return false;
+        }
+
+        let mut characters = name.chars();
+        let Some(first) = characters.next() else {
+            return false;
+        };
+        if first.is_ascii_alphabetic() || first == '_' {
+            return characters
+                .all(|character| character.is_ascii_alphanumeric() || character == '_');
+        }
+
+        let matching_quote = match first {
+            '"' => Some('"'),
+            '`' => Some('`'),
+            '[' => Some(']'),
+            _ => None,
+        };
+        let Some(matching_quote) = matching_quote else {
+            return false;
+        };
+        if !name.ends_with(matching_quote) {
+            return false;
+        }
+        let inner = &name[first.len_utf8()..name.len() - matching_quote.len_utf8()];
+        !inner.is_empty()
     }
 
     fn apply_workspace_edit_impl(
@@ -3883,6 +4244,17 @@ impl TextEditor {
         new_text: String,
         resolved_edits: &mut Vec<(usize, usize, String)>,
     ) -> anyhow::Result<()> {
+        let range = Self::lsp_range_to_byte_range(&self.document, range)?;
+        let start = range.start;
+        let end = range.end;
+        resolved_edits.push((start.min(end), start.max(end), new_text));
+        Ok(())
+    }
+
+    fn lsp_range_to_byte_range(
+        document: &TextDocument,
+        range: &lsp_types::Range,
+    ) -> anyhow::Result<std::ops::Range<usize>> {
         let start_line = usize::try_from(range.start.line)
             .map_err(|error| anyhow::anyhow!("invalid edit start line: {error}"))?;
         let end_line = usize::try_from(range.end.line)
@@ -3892,37 +4264,38 @@ impl TextEditor {
         let end_character = usize::try_from(range.end.character)
             .map_err(|error| anyhow::anyhow!("invalid edit end character: {error}"))?;
 
-        let start_line_text = self
-            .document
-            .line(start_line)
-            .ok_or_else(|| anyhow::anyhow!("invalid edit start line: {start_line}"))?;
-        let end_line_text = self
-            .document
-            .line(end_line)
-            .ok_or_else(|| anyhow::anyhow!("invalid edit end line: {end_line}"))?;
-
-        let start_column = start_line_text
-            .char_indices()
-            .nth(start_character)
-            .map(|(byte_offset, _)| byte_offset)
-            .unwrap_or(start_line_text.len());
-        let end_column = end_line_text
-            .char_indices()
-            .nth(end_character)
-            .map(|(byte_offset, _)| byte_offset)
-            .unwrap_or(end_line_text.len());
-
-        let start = self
-            .document
+        let start_column =
+            Self::lsp_utf16_character_to_byte_column(document, start_line, start_character)?;
+        let end_column =
+            Self::lsp_utf16_character_to_byte_column(document, end_line, end_character)?;
+        let start = document
             .position_to_offset(Position::new(start_line, start_column))
             .map_err(|error| anyhow::anyhow!("invalid edit start position: {error}"))?;
-        let end = self
-            .document
+        let end = document
             .position_to_offset(Position::new(end_line, end_column))
             .map_err(|error| anyhow::anyhow!("invalid edit end position: {error}"))?;
 
-        resolved_edits.push((start.min(end), start.max(end), new_text));
-        Ok(())
+        Ok(start..end)
+    }
+
+    fn lsp_utf16_character_to_byte_column(
+        document: &TextDocument,
+        line: usize,
+        utf16_character: usize,
+    ) -> anyhow::Result<usize> {
+        let line_text = document
+            .line(line)
+            .ok_or_else(|| anyhow::anyhow!("invalid edit line: {line}"))?;
+
+        let mut utf16_offset = 0usize;
+        for (byte_offset, character) in line_text.char_indices() {
+            if utf16_offset >= utf16_character {
+                return Ok(byte_offset);
+            }
+            utf16_offset += character.len_utf16();
+        }
+
+        Ok(line_text.len())
     }
 
     /// Apply a workspace edit to the current buffer.
@@ -4344,6 +4717,10 @@ impl TextEditor {
         }
     }
 
+    fn indent_after_keywords(&self) -> &[&'static str] {
+        &self.syntax_capabilities.indent_after_keywords
+    }
+
     // ============================================================================
     // Focus
     // ============================================================================
@@ -4357,6 +4734,41 @@ impl TextEditor {
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.focus_handle.focus(window, cx);
     }
+}
+
+fn expand_visible_syntax_refresh_range(
+    buffer_snapshot: &BufferSnapshot,
+    range: std::ops::Range<usize>,
+    context_lines: usize,
+) -> std::ops::Range<usize> {
+    if buffer_snapshot.is_empty() || range.is_empty() {
+        return range;
+    }
+
+    let len = buffer_snapshot.len();
+    let start_offset = range.start.min(len);
+    let end_offset = range.end.saturating_sub(1).min(len);
+    let Some(start_line) = buffer_snapshot.byte_to_line(start_offset) else {
+        return range;
+    };
+    let Some(end_line) = buffer_snapshot.byte_to_line(end_offset) else {
+        return range;
+    };
+
+    let expanded_start_line = start_line.saturating_sub(context_lines);
+    let expanded_end_line = (end_line + context_lines + 1).min(buffer_snapshot.line_count());
+    let expanded_start = buffer_snapshot
+        .line_to_byte(expanded_start_line)
+        .unwrap_or(start_offset);
+    let expanded_end = if expanded_end_line >= buffer_snapshot.line_count() {
+        len
+    } else {
+        buffer_snapshot
+            .line_to_byte(expanded_end_line)
+            .unwrap_or(range.end.min(len))
+    };
+
+    expanded_start..expanded_end
 }
 
 impl Render for TextEditor {
@@ -4437,6 +4849,7 @@ impl Render for TextEditor {
             .on_action(cx.listener(Self::handle_indent_line))
             .on_action(cx.listener(Self::handle_dedent_line))
             .on_action(cx.listener(Self::handle_toggle_line_comment))
+            .on_action(cx.listener(Self::handle_toggle_block_comment))
             // Selection features (feat-016/017/018)
             .on_action(cx.listener(Self::handle_select_line))
             .on_action(cx.listener(Self::handle_select_next_occurrence))
@@ -5376,6 +5789,15 @@ impl TextEditor {
         cx.notify();
     }
 
+    fn handle_toggle_block_comment(
+        &mut self,
+        _: &actions::ToggleBlockComment,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.toggle_block_comment(cx);
+    }
+
     // ============================================================================
     // Action handlers — selection features (feat-016/017/018)
     // ============================================================================
@@ -5680,10 +6102,14 @@ impl TextEditor {
         }
 
         let indent_unit = self.indent_unit();
-        let Some(plan) = self
-            .editor_core_snapshot()
-            .multi_cursor_newline_plan(self.behavior.auto_indent_enabled(), &indent_unit)
-        else {
+        let comment_prefix = self.line_comment_prefix();
+        let indent_after_keywords = self.indent_after_keywords();
+        let Some(plan) = self.editor_core_snapshot().multi_cursor_newline_plan(
+            self.behavior.auto_indent_enabled(),
+            &indent_unit,
+            comment_prefix,
+            indent_after_keywords,
+        ) else {
             return false;
         };
 
@@ -6523,7 +6949,7 @@ impl TextEditor {
     // Copy as Markdown (feat-050)
     // ============================================================================
 
-    /// Copy the selected text (or entire buffer) wrapped in a SQL fenced code
+    /// Copy the selected text (or entire buffer) wrapped in a syntax-aware fenced code
     /// block so it can be pasted into Markdown documents.
     fn copy_as_markdown(&mut self, cx: &mut Context<Self>) {
         let content = if self.selection().has_selection() {
@@ -6541,8 +6967,17 @@ impl TextEditor {
             self.document.text()
         };
 
-        let markdown = format!("```sql\n{}\n```", content);
+        let markdown = Self::markdown_code_block(&content, &self.syntax_capabilities);
         cx.write_to_clipboard(ClipboardItem::new_string(markdown));
+    }
+
+    fn markdown_code_block(content: &str, capabilities: &SyntaxDriverCapabilities) -> String {
+        let language = markdown_fence_language_for_capabilities(capabilities);
+        if language.is_empty() {
+            format!("```\n{}\n```", content)
+        } else {
+            format!("```{}\n{}\n```", language, content)
+        }
     }
 
     // ============================================================================
@@ -6867,13 +7302,15 @@ impl TextEditor {
                 return;
             };
             text
-        } else {
+        } else if self.built_in_sql_formatter_enabled() {
             let formatter = SqlFormatter::with_defaults();
             match formatter.format(&original) {
                 Ok(text) => text,
                 // Leave buffer unchanged if the SQL cannot be formatted
                 Err(_) => return,
             }
+        } else {
+            return;
         };
 
         if formatted == original {
@@ -6943,15 +7380,98 @@ impl TextEditor {
         cx: &mut Context<Self>,
     ) {
         let offset = self.cursor_byte_offset();
-        let rope = self.document.rope();
-        let Some(ranges) = self
-            .lsp
-            .reference_ranges(&rope, offset, &self.document.context())
-        else {
-            return;
-        };
+        let ranges = self.reference_ranges_at_offset(offset);
         self.document.set_reference_ranges(ranges);
         cx.notify();
+    }
+
+    fn reference_ranges_at_offset(&self, offset: usize) -> Vec<std::ops::Range<usize>> {
+        let rope = self.document.rope();
+        if let Some(ranges) = self
+            .lsp
+            .reference_ranges(&rope, offset, &self.document.context())
+        {
+            return ranges;
+        }
+
+        self.local_reference_ranges_at_offset(offset)
+    }
+
+    fn local_reference_ranges_at_offset(&self, offset: usize) -> Vec<std::ops::Range<usize>> {
+        Self::local_reference_ranges_for_document(&self.document, self.large_file_policy(), offset)
+    }
+
+    fn local_reference_ranges_for_document(
+        document: &TextDocument,
+        large_file_policy: ResolvedLargeFilePolicy,
+        offset: usize,
+    ) -> Vec<std::ops::Range<usize>> {
+        if !large_file_policy.reference_highlights_enabled {
+            return Vec::new();
+        }
+
+        let buffer = document.buffer();
+        let cursor = buffer
+            .offset_to_position(offset.min(buffer.len()))
+            .map(Cursor::at)
+            .unwrap_or_else(|_| Cursor::new());
+        let selections_collection = SelectionsCollection::single(cursor, Selection::new());
+        let Some(word_range) =
+            EditorCoreSnapshot::new(buffer, selections_collection, false, Vec::new())
+                .find_word_range_at_offset(offset)
+        else {
+            return Vec::new();
+        };
+        let Ok(needle) = document.text_for_range(word_range.clone()) else {
+            return Vec::new();
+        };
+        if needle.trim().is_empty() {
+            return Vec::new();
+        }
+        if !Self::local_reference_range_allowed(document, &word_range) {
+            return Vec::new();
+        }
+
+        let whole_word = needle
+            .chars()
+            .all(|character| character.is_alphanumeric() || character == '_');
+        SearchEngine::new(
+            &needle,
+            &TextFindOptions {
+                case_sensitive: true,
+                whole_word,
+                regex: false,
+            },
+        )
+        .map(|engine| {
+            engine
+                .find_all_in_rope(&document.rope())
+                .into_iter()
+                .map(|matched| matched.range())
+                .filter(|range| Self::local_reference_range_allowed(document, range))
+                .collect()
+        })
+        .unwrap_or_default()
+    }
+
+    fn local_reference_range_allowed(
+        document: &TextDocument,
+        range: &std::ops::Range<usize>,
+    ) -> bool {
+        let syntax_highlights = document.syntax_highlights();
+        if syntax_highlights.is_empty() {
+            return true;
+        }
+
+        let Some(kind) = range
+            .start
+            .checked_add(range.end.saturating_sub(range.start) / 2)
+            .map(|offset| document.highlight_kind_at(offset))
+        else {
+            return false;
+        };
+
+        !matches!(kind, HighlightKind::String | HighlightKind::Comment)
     }
 
     // ============================================================================
@@ -7040,12 +7560,17 @@ impl TextEditor {
             return;
         };
 
-        let Some(workspace_edit) = self.lsp.rename_at(
-            &self.document.rope(),
-            word_range.start,
-            &new_name,
-            &self.document.context(),
-        ) else {
+        let workspace_edit = self
+            .lsp
+            .rename_at(
+                &self.document.rope(),
+                word_range.start,
+                &new_name,
+                &self.document.context(),
+            )
+            .or_else(|| self.rename(&new_name, cx));
+
+        let Some(workspace_edit) = workspace_edit else {
             self.restore_rename_cursor(&state);
             cx.notify();
             return;
@@ -7069,12 +7594,16 @@ impl TextEditor {
     }
 
     fn can_rename_at_offset(&self, offset: usize) -> bool {
-        self.lsp.can_rename_at(
+        if self.lsp.can_rename_at(
             &self.document.rope(),
             offset,
             RENAME_PROBE_IDENTIFIER,
             &self.document.context(),
-        )
+        ) {
+            return true;
+        }
+
+        !self.local_reference_ranges_at_offset(offset).is_empty()
     }
 
     /// Cancel the rename dialog without modifying the buffer.
@@ -7244,6 +7773,11 @@ impl TextEditor {
                 false,
             ),
             ContextMenuItem::action(
+                "Toggle Block Comment",
+                ContextMenuAction::ToggleBlockComment,
+                self.block_comment_delimiters().is_none(),
+            ),
+            ContextMenuItem::action(
                 "Sort Lines Ascending",
                 ContextMenuAction::SortLinesAscending,
                 false,
@@ -7260,7 +7794,11 @@ impl TextEditor {
             ContextMenuItem::action("Insert UUID v4", ContextMenuAction::InsertUuidV4, false),
             ContextMenuItem::action("Insert UUID v7", ContextMenuAction::InsertUuidV7, false),
             ContextMenuItem::separator(),
-            ContextMenuItem::action("Format SQL", ContextMenuAction::FormatSql, false),
+            ContextMenuItem::action(
+                "Format",
+                ContextMenuAction::FormatSql,
+                !self.can_format_current_document(),
+            ),
         ]
     }
 
@@ -7397,6 +7935,9 @@ impl TextEditor {
             Some(ContextMenuAction::ToggleLineComment) => {
                 window.dispatch_action(actions::ToggleLineComment.boxed_clone(), cx)
             }
+            Some(ContextMenuAction::ToggleBlockComment) => {
+                window.dispatch_action(actions::ToggleBlockComment.boxed_clone(), cx)
+            }
             Some(ContextMenuAction::SortLinesAscending) => {
                 window.dispatch_action(actions::SortLinesAscending.boxed_clone(), cx)
             }
@@ -7532,7 +8073,11 @@ impl EntityInputHandler for TextEditor {
             let Some(ch) = new_text.chars().next() else {
                 return;
             };
-            let closer = Self::bracket_closer(ch);
+            let auto_close_pairs = self.syntax_auto_close_pairs();
+            let closer = Self::bracket_closer_for_pairs(auto_close_pairs, ch);
+            let is_closer = auto_close_pairs
+                .iter()
+                .any(|(_opener, closer)| *closer == ch);
             let has_selection = self.has_selection();
 
             // feat-028: if a selection is active and user types an opener, surround it.
@@ -7544,7 +8089,6 @@ impl EntityInputHandler for TextEditor {
             }
 
             // feat-029: if cursor is immediately before the same closing bracket, skip over it.
-            let is_closer = matches!(ch, ')' | ']' | '}' | '\'' | '"');
             if is_closer && !has_selection && self.skip_over_closing_bracket(ch, cx) {
                 return;
             }
@@ -7650,6 +8194,7 @@ mod tests {
     use super::{
         CachedEditorLayout, DocumentSnapshot, EditorAppearance, EditorSnapshot,
         LargeFilePolicyConfig, LargeFilePolicyTier, ResolvedLargeFilePolicy,
+        expand_visible_syntax_refresh_range,
     };
     use crate::history_state::TransactionRecord;
     use crate::language_pipeline::{
@@ -7661,12 +8206,16 @@ mod tests {
         ContextMenuSnapshot, ContextMenuState, Cursor, CursorShapeStyle, DisplayMap, DisplayRowId,
         DisplayTextChunk, DocumentIdentity, EditPrediction, EditorInlayHint, EditorSnippetState,
         FindSnapshot, FoldDisplayState, FoldKind, FoldRegion, GoToLineSnapshot, Highlight,
-        InlineSuggestion, LanguagePipelineState, Position, Selection, SelectionState,
-        SelectionsCollection, Snippet, StructuralRange, SyntaxRefreshStrategy, SyntaxSnapshot,
-        TextDocument, TextEditor, TransactionId, VisibleWrapLayout,
+        HighlightKind, InlineSuggestion, LanguagePipelineState, Position, Selection,
+        SelectionState, SelectionsCollection, Snippet, StructuralRange, SyntaxRefreshStrategy,
+        SyntaxSnapshot, TextDocument, TextEditor, TransactionId, VisibleWrapLayout,
     };
     use gpui::{point, px, size};
     use std::{collections::HashSet, sync::Arc};
+    use zqlz_core::{
+        SyntaxBracketPair, SyntaxBracketScanMode, get_syntax_driver_capabilities,
+        syntax_bracket_pairs_for_profile, syntax_bracket_scan_mode_for_profile,
+    };
 
     fn test_editor_snapshot(
         buffer_snapshot: BufferSnapshot,
@@ -8394,6 +8943,28 @@ mod tests {
     }
 
     #[test]
+    fn test_document_syntax_configuration_applies_driver_capability_highlights() {
+        let text = "GET user:1 # cached";
+        let mut document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+
+        document.set_syntax_language_profile("sql");
+        document.set_syntax_capabilities_override(get_syntax_driver_capabilities("redis"));
+        document.refresh_buffer_state(true, true, false);
+
+        assert_eq!(
+            document.highlight_kind_at(text.find("GET").expect("command")),
+            HighlightKind::Keyword
+        );
+        assert_eq!(
+            document.highlight_kind_at(text.find("# cached").expect("comment")),
+            HighlightKind::Comment
+        );
+    }
+
+    #[test]
     fn test_soft_wrap_bounds_and_hit_testing_share_cached_layout_model() {
         let harness = EditorTestHarness::new("abcdefghij").with_soft_wrap(4, vec![3]);
         let snapshot = harness.snapshot();
@@ -8764,6 +9335,48 @@ mod tests {
     }
 
     #[test]
+    fn test_markdown_code_block_uses_driver_fence_language() {
+        assert_eq!(
+            TextEditor::markdown_code_block(
+                "SELECT 1;",
+                &get_syntax_driver_capabilities("postgres")
+            ),
+            "```sql\nSELECT 1;\n```"
+        );
+        assert_eq!(
+            TextEditor::markdown_code_block("GET user:1", &get_syntax_driver_capabilities("redis")),
+            "```redis\nGET user:1\n```"
+        );
+        assert_eq!(
+            TextEditor::markdown_code_block(
+                "db.users.find()",
+                &get_syntax_driver_capabilities("mongodb")
+            ),
+            "```javascript\ndb.users.find()\n```"
+        );
+    }
+
+    #[test]
+    fn built_in_formatter_is_sql_capability_only() {
+        assert!(TextEditor::built_in_sql_formatter_enabled_for_capabilities(
+            &get_syntax_driver_capabilities("postgres")
+        ));
+        assert!(TextEditor::built_in_sql_formatter_enabled_for_capabilities(
+            &get_syntax_driver_capabilities("sqlite")
+        ));
+        assert!(
+            !TextEditor::built_in_sql_formatter_enabled_for_capabilities(
+                &get_syntax_driver_capabilities("redis")
+            )
+        );
+        assert!(
+            !TextEditor::built_in_sql_formatter_enabled_for_capabilities(
+                &get_syntax_driver_capabilities("mongodb")
+            )
+        );
+    }
+
+    #[test]
     fn test_snippet_parse_orders_placeholders_by_tab_stop() {
         let snippet = Snippet::parse("${2:table} ${1:column}");
 
@@ -8782,6 +9395,193 @@ mod tests {
         assert_eq!(active.current_range(&buffer), Some((7, 13)));
         assert_eq!(active.advance(&buffer), Some((19, 24)));
         assert_eq!(active.advance(&buffer), None);
+    }
+
+    #[test]
+    fn test_local_reference_ranges_match_whole_symbol_without_provider() {
+        let text = "SELECT user_id, user_id2 FROM users WHERE user_id = :user_id";
+        let document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+        let offset = text.find("user_id,").expect("user_id");
+
+        let ranges = TextEditor::local_reference_ranges_for_document(
+            &document,
+            ResolvedLargeFilePolicy::full(),
+            offset,
+        );
+
+        let expected = vec![
+            text.find("user_id,").expect("first user_id")
+                ..text.find("user_id,").expect("first user_id") + "user_id".len(),
+            text.find("user_id =").expect("where user_id")
+                ..text.find("user_id =").expect("where user_id") + "user_id".len(),
+            text.find(":user_id").expect("parameter user_id") + 1
+                ..text.find(":user_id").expect("parameter user_id") + 1 + "user_id".len(),
+        ];
+        assert_eq!(ranges, expected);
+    }
+
+    #[test]
+    fn test_local_reference_ranges_ignore_strings_and_comments_with_syntax() {
+        let text = "SELECT user_id FROM users WHERE user_id = 1 -- user_id ignored\nAND note = 'user_id ignored'";
+        let mut document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+        document.refresh_buffer_state(true, true, false);
+        let offset = text.find("user_id FROM").expect("first user_id");
+
+        let ranges = TextEditor::local_reference_ranges_for_document(
+            &document,
+            ResolvedLargeFilePolicy::full(),
+            offset,
+        );
+
+        let expected = vec![
+            text.find("user_id FROM").expect("select user_id")
+                ..text.find("user_id FROM").expect("select user_id") + "user_id".len(),
+            text.find("user_id =").expect("where user_id")
+                ..text.find("user_id =").expect("where user_id") + "user_id".len(),
+        ];
+        assert_eq!(ranges, expected);
+    }
+
+    #[test]
+    fn test_local_reference_ranges_return_empty_when_origin_is_string_or_comment() {
+        let text = "SELECT user_id FROM users -- user_id ignored\nWHERE note = 'user_id ignored'";
+        let mut document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+        document.refresh_buffer_state(true, true, false);
+
+        for offset in [
+            text.find("-- user_id").expect("comment user_id") + "-- ".len(),
+            text.find("'user_id").expect("string user_id") + 1,
+        ] {
+            let ranges = TextEditor::local_reference_ranges_for_document(
+                &document,
+                ResolvedLargeFilePolicy::full(),
+                offset,
+            );
+            assert!(ranges.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_local_reference_ranges_match_mssql_bracket_identifier() {
+        let text = "SELECT [User Name] FROM [dbo].[Events] WHERE [User Name] IS NOT NULL";
+        let mut document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+        document.set_syntax_language_profile("mssql");
+        document.refresh_buffer_state(true, true, false);
+        let offset = text.find("User Name").expect("first bracket identifier");
+
+        let ranges = TextEditor::local_reference_ranges_for_document(
+            &document,
+            ResolvedLargeFilePolicy::full(),
+            offset,
+        );
+
+        let expected = vec![
+            text.find("[User Name]").expect("first user name")
+                ..text.find("[User Name]").expect("first user name") + "[User Name]".len(),
+            text.rfind("[User Name]").expect("where user name")
+                ..text.rfind("[User Name]").expect("where user name") + "[User Name]".len(),
+        ];
+        assert_eq!(ranges, expected);
+    }
+
+    #[test]
+    fn test_local_rename_replacement_accepts_plain_and_quoted_identifiers() {
+        for name in [
+            "user_id",
+            "_user2",
+            "\"User Name\"",
+            "`user-name`",
+            "[User Name]",
+        ] {
+            assert!(TextEditor::is_valid_local_rename_replacement(name));
+        }
+
+        for name in ["", "2user", "user-name", "\"\"", "[User\nName]", "[missing"] {
+            assert!(!TextEditor::is_valid_local_rename_replacement(name));
+        }
+    }
+
+    #[test]
+    fn test_local_reference_ranges_disabled_by_large_file_policy() {
+        let document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            "SELECT value FROM table WHERE value = 1",
+        );
+        let mut policy = ResolvedLargeFilePolicy::full();
+        policy.reference_highlights_enabled = false;
+
+        let ranges = TextEditor::local_reference_ranges_for_document(&document, policy, 7);
+
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn test_completion_acceptance_uses_lsp_text_edit_replace_range() {
+        let document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            "select",
+        );
+        let item = lsp_types::CompletionItem {
+            label: "select".to_string(),
+            text_edit: Some(lsp_types::CompletionTextEdit::Edit(lsp_types::TextEdit {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 0,
+                        character: 6,
+                    },
+                },
+                new_text: "select".to_string(),
+            })),
+            ..Default::default()
+        };
+
+        let acceptance = TextEditor::completion_acceptance_for_item(&document, &item, 0, 3);
+
+        assert_eq!(acceptance.replacement_range, 0..6);
+        assert_eq!(acceptance.inserted_text, "select");
+    }
+
+    #[test]
+    fn test_lsp_range_to_byte_range_uses_utf16_characters() {
+        let text = "SELECT '😀' AS mood";
+        let document = TextDocument::with_text(
+            DocumentIdentity::internal().expect("internal document uri"),
+            text,
+        );
+        let prefix = "SELECT '";
+        let start_character = prefix.chars().map(char::len_utf16).sum::<usize>();
+        let range = lsp_types::Range {
+            start: lsp_types::Position {
+                line: 0,
+                character: start_character as u32,
+            },
+            end: lsp_types::Position {
+                line: 0,
+                character: (start_character + 2) as u32,
+            },
+        };
+
+        let byte_range =
+            TextEditor::lsp_range_to_byte_range(&document, &range).expect("utf16 lsp range");
+
+        let emoji_start = text.find('😀').expect("emoji");
+        assert_eq!(byte_range, emoji_start..emoji_start + "😀".len());
     }
 
     #[test]
@@ -8847,6 +9647,29 @@ mod tests {
             InlineSuggestion::new(" FROM users".to_string(), Anchor::new(6, 1, Bias::Right));
 
         assert_eq!(suggestion.anchor.offset(), 6);
+    }
+
+    #[test]
+    fn auto_close_pairs_are_capability_owned() {
+        let sql_pairs = get_syntax_driver_capabilities("postgres").auto_close_pairs;
+        assert_eq!(
+            TextEditor::bracket_closer_for_pairs(&sql_pairs, '('),
+            Some(')')
+        );
+        assert_eq!(
+            TextEditor::bracket_closer_for_pairs(&sql_pairs, '\''),
+            Some('\'')
+        );
+
+        let redis_pairs = get_syntax_driver_capabilities("redis").auto_close_pairs;
+        assert_eq!(
+            TextEditor::bracket_closer_for_pairs(&redis_pairs, '"'),
+            Some('"')
+        );
+        assert_eq!(
+            TextEditor::bracket_closer_for_pairs(&redis_pairs, '('),
+            None
+        );
     }
 
     #[test]
@@ -8936,6 +9759,167 @@ mod tests {
         }];
 
         assert!(ranges.iter().any(|range| range.open == '\''));
+    }
+
+    #[test]
+    fn test_bracket_highlight_pairs_ignore_sql_strings_comments_and_quoted_identifiers() {
+        let text = "SELECT '(' AS literal, \"weird)name\" FROM users -- ) ignored\nWHERE id IN (SELECT id FROM groups /* ) ignored */ WHERE active = true)";
+        let cursor_offset = text.find("active").expect("active");
+        let pairs = syntax_bracket_pairs_for_profile("postgresql", text, 0, cursor_offset);
+
+        let expected_open = text.find("(SELECT").expect("subquery");
+        let expected_close = text.rfind(')').expect("closing subquery");
+
+        assert_eq!(
+            pairs,
+            vec![SyntaxBracketPair {
+                open: expected_open,
+                close: expected_close,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_bracket_highlight_pairs_handle_escaped_sql_quotes() {
+        let text = "SELECT '('' still string )', (SELECT 1)";
+        let cursor_offset = text.find('1').expect("nested select");
+        let pairs = syntax_bracket_pairs_for_profile("postgresql", text, 0, cursor_offset);
+
+        let expected_open = text.find("(SELECT").expect("subquery");
+        let expected_close = text.rfind(')').expect("closing subquery");
+
+        assert_eq!(
+            pairs,
+            vec![SyntaxBracketPair {
+                open: expected_open,
+                close: expected_close,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_bracket_highlight_pairs_ignore_postgres_dollar_quoted_bodies() {
+        let text = "CREATE FUNCTION demo() RETURNS void AS $body$\nBEGIN\n  PERFORM fake_call(1, 2);\nEND;\n$body$ LANGUAGE plpgsql;\nSELECT (1);";
+        let cursor_offset = text.rfind('1').expect("outer select");
+        let pairs = syntax_bracket_pairs_for_profile("postgresql", text, 0, cursor_offset);
+
+        let expected_open = text.rfind('(').expect("select opener");
+        let expected_close = text.rfind(')').expect("select closer");
+
+        assert_eq!(
+            pairs,
+            vec![SyntaxBracketPair {
+                open: expected_open,
+                close: expected_close,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_standard_bracket_scan_does_not_apply_sql_protected_ranges() {
+        let text = "JSON.SET key $.path [1, 2]";
+        let cursor_offset = text.find('1').expect("array value");
+        let pairs = syntax_bracket_pairs_for_profile("redis", text, 0, cursor_offset);
+
+        let expected_open = text.find('[').expect("array opener");
+        let expected_close = text.find(']').expect("array closer");
+        assert_eq!(
+            pairs,
+            vec![SyntaxBracketPair {
+                open: expected_open,
+                close: expected_close,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_mongodb_bracket_highlight_ignores_document_strings_and_comments() {
+        let text = r#"db.orders.find({ label: "ignore ) ] }", qty: { $gte: 3 } }) // ) ignored"#;
+        let cursor_offset = text.find("$gte").expect("operator");
+        let pairs = syntax_bracket_pairs_for_profile("mongodb", text, 0, cursor_offset);
+
+        assert_eq!(
+            pairs,
+            vec![
+                SyntaxBracketPair {
+                    open: text.find("find(").expect("find call") + "find".len(),
+                    close: text.find(") //").expect("find call close"),
+                },
+                SyntaxBracketPair {
+                    open: text.find("({").expect("find argument") + 1,
+                    close: text.find("}) //").expect("find argument close"),
+                },
+                SyntaxBracketPair {
+                    open: text.find("{ $gte").expect("operator object"),
+                    close: text.find(" } })").expect("operator object close") + 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn test_redis_bracket_highlight_ignores_quoted_arguments_and_comments() {
+        let text =
+            "JSON.SET key $ \"{\\\"ignored\\\": [1]}\"\n# ] ignored\nJSON.GET key $.items[0]";
+        let cursor_offset = text.rfind('0').expect("array index");
+        let pairs = syntax_bracket_pairs_for_profile("redis", text, 0, cursor_offset);
+
+        assert_eq!(
+            pairs,
+            vec![SyntaxBracketPair {
+                open: text.rfind('[').expect("array opener"),
+                close: text.rfind(']').expect("array closer"),
+            }]
+        );
+    }
+
+    #[test]
+    fn test_bracket_scan_mode_comes_from_syntax_profile() {
+        assert_eq!(
+            syntax_bracket_scan_mode_for_profile("postgresql"),
+            SyntaxBracketScanMode::Sql
+        );
+        assert_eq!(
+            syntax_bracket_scan_mode_for_profile("mssql"),
+            SyntaxBracketScanMode::Sql
+        );
+        assert_eq!(
+            syntax_bracket_scan_mode_for_profile("mongodb"),
+            SyntaxBracketScanMode::DriverSyntax
+        );
+        assert_eq!(
+            syntax_bracket_scan_mode_for_profile("redis"),
+            SyntaxBracketScanMode::DriverSyntax
+        );
+    }
+
+    #[test]
+    fn test_bracket_highlight_scan_range_caps_large_documents_around_cursor() {
+        assert_eq!(
+            TextEditor::bracket_highlight_scan_range(100, 50, 256),
+            0..100
+        );
+        assert_eq!(
+            TextEditor::bracket_highlight_scan_range(1_000, 500, 200),
+            400..600
+        );
+        assert_eq!(
+            TextEditor::bracket_highlight_scan_range(1_000, 950, 200),
+            800..1000
+        );
+    }
+
+    #[test]
+    fn test_bracket_highlight_scan_range_clamps_utf8_boundaries() {
+        let rope = ropey::Rope::from_str("SELECT 'é' FROM t");
+        let start = "SELECT '".len() + 1;
+        let end = start + 1;
+        let range = TextEditor::clamp_rope_byte_range(&rope, start..end);
+
+        assert!(rope.try_byte_to_char(range.start).is_ok());
+        assert!(rope.try_byte_to_char(range.end).is_ok());
+        assert!(range.start <= start);
+        assert!(range.end >= end);
     }
 
     #[test]
@@ -9702,6 +10686,35 @@ mod tests {
         assert!(policy.completions_enabled);
         assert!(policy.hover_enabled);
         assert!(!policy.allow_async_provider_requests());
+    }
+
+    #[test]
+    fn test_visible_syntax_refresh_range_adds_bounded_context_lines() {
+        let text = (0..20)
+            .map(|line| format!("line {line}\n"))
+            .collect::<String>();
+        let snapshot = crate::buffer::TextBuffer::new(&text).snapshot();
+        let visible_start = snapshot.line_to_byte(10).expect("visible start line");
+        let visible_end = snapshot.line_to_byte(12).expect("visible end line");
+        let expanded =
+            expand_visible_syntax_refresh_range(&snapshot, visible_start..visible_end, 3);
+
+        assert_eq!(
+            expanded,
+            snapshot.line_to_byte(7).expect("expanded start line")
+                ..snapshot.line_to_byte(15).expect("expanded end line")
+        );
+    }
+
+    #[test]
+    fn test_visible_syntax_refresh_range_context_clamps_to_buffer_edges() {
+        let snapshot = crate::buffer::TextBuffer::new("zero\none\ntwo").snapshot();
+        let visible_start = snapshot.line_to_byte(0).expect("visible start line");
+        let visible_end = snapshot.line_to_byte(1).expect("visible end line");
+        let expanded =
+            expand_visible_syntax_refresh_range(&snapshot, visible_start..visible_end, 8);
+
+        assert_eq!(expanded, 0..snapshot.len());
     }
 
     #[test]

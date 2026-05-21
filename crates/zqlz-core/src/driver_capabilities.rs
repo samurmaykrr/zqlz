@@ -101,12 +101,53 @@ pub fn resolve_schema_qualifier_for_connection(
     resolve_schema_qualifier_for_dialect(connection.dialect_id(), database_name)
 }
 
+/// Resolve the metadata/introspection namespace used for schema-scoped objects.
+///
+/// Some dialects expose sequence and object metadata under the selected
+/// database/catalog, while others expose it under the selected schema. Keep that
+/// mapping in core driver capabilities so editor/LSP layers do not branch on
+/// concrete driver names.
+pub fn resolve_metadata_scope_for_dialect(
+    dialect_id: Option<&str>,
+    active_database: Option<&str>,
+    active_schema: Option<&str>,
+    default_database: Option<&str>,
+    default_schema: Option<&str>,
+) -> Option<String> {
+    if matches!(
+        dialect_id,
+        Some("mysql") | Some("mariadb") | Some("clickhouse") | Some("mssql") | Some("sqlserver")
+    ) {
+        active_database.or(default_database).map(ToOwned::to_owned)
+    } else {
+        active_schema.or(default_schema).map(ToOwned::to_owned)
+    }
+}
+
+/// Resolve the metadata/introspection namespace from a concrete connection.
+pub fn resolve_metadata_scope_for_connection(
+    connection: &dyn Connection,
+    active_database: Option<&str>,
+    active_schema: Option<&str>,
+    default_database: Option<&str>,
+    default_schema: Option<&str>,
+) -> Option<String> {
+    resolve_metadata_scope_for_dialect(
+        connection.dialect_id(),
+        active_database,
+        active_schema,
+        default_database,
+        default_schema,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         default_database_label_for_driver, dialect_is_mysql_compatible, dialect_is_postgres,
         dialect_supports_create_or_replace_view, driver_category_from_driver_name,
-        extension_supports_database_file_open, resolve_schema_qualifier_for_dialect,
+        extension_supports_database_file_open, resolve_metadata_scope_for_dialect,
+        resolve_schema_qualifier_for_dialect,
     };
     use crate::DriverCategory;
 
@@ -198,6 +239,40 @@ mod tests {
         assert_eq!(
             resolve_schema_qualifier_for_dialect(Some("sqlite"), Some("main")),
             None
+        );
+    }
+
+    #[test]
+    fn metadata_scope_resolution_uses_dialect_semantics() {
+        assert_eq!(
+            resolve_metadata_scope_for_dialect(
+                Some("mysql"),
+                Some("app"),
+                Some("public"),
+                Some("fallback_db"),
+                Some("fallback_schema")
+            ),
+            Some("app".to_string())
+        );
+        assert_eq!(
+            resolve_metadata_scope_for_dialect(
+                Some("postgres"),
+                Some("app"),
+                Some("public"),
+                Some("fallback_db"),
+                Some("fallback_schema")
+            ),
+            Some("public".to_string())
+        );
+        assert_eq!(
+            resolve_metadata_scope_for_dialect(
+                Some("mssql"),
+                None,
+                Some("dbo"),
+                Some("fallback_db"),
+                Some("fallback_schema")
+            ),
+            Some("fallback_db".to_string())
         );
     }
 }

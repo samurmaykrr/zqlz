@@ -11668,7 +11668,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-admin"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "serde",
@@ -11680,7 +11680,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-analyzer"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "pretty_assertions",
@@ -11693,7 +11693,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-app"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11746,7 +11746,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-cli"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -11765,7 +11765,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-command-palette"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "gpui",
  "uuid",
@@ -11776,7 +11776,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-connection"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11797,7 +11797,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-core"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11815,7 +11815,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-clickhouse"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11831,11 +11831,12 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-duckdb"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
  "duckdb",
+ "fallible-streaming-iterator",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -11847,7 +11848,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mongodb"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "bson",
@@ -11866,7 +11867,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mssql"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11883,7 +11884,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-mysql"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11903,7 +11904,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-postgres"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11926,7 +11927,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-redis"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -11945,7 +11946,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-sqlite"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11964,7 +11965,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-driver-turso"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -11979,7 +11980,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-drivers"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12003,7 +12004,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-explain-visual"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "gpui",
  "serde_json",
@@ -12013,11 +12014,11 @@ dependencies = [
 
 [[package]]
 name = "zqlz-fuzzy"
-version = "0.0.9"
+version = "0.0.10"
 
 [[package]]
 name = "zqlz-interchange"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12040,7 +12041,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-internal-storage"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "rusqlite",
@@ -12049,7 +12050,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-lsp"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12076,7 +12077,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-monitor"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12089,7 +12090,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-objects"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "serde",
@@ -12102,7 +12103,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-query"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12138,7 +12139,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-schema"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12158,7 +12159,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-schema-tools"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "async-trait",
  "serde",
@@ -12170,7 +12171,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-sequence-designer"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "gpui",
  "tracing",
@@ -12220,7 +12221,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-table-designer"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12239,7 +12240,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-table-workflows"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -12248,7 +12249,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-templates"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12261,7 +12262,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-text-editor"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "chrono",
@@ -12284,13 +12285,15 @@ dependencies = [
  "tree-sitter-sequel",
  "url",
  "uuid",
+ "zqlz-core",
+ "zqlz-drivers",
  "zqlz-internal-storage",
  "zqlz-ui",
 ]
 
 [[package]]
 name = "zqlz-trigger-designer"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -12309,7 +12312,7 @@ dependencies = [
 
 [[package]]
 name = "zqlz-ui"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "aho-corasick",
  "anyhow",
@@ -12351,12 +12354,11 @@ dependencies = [
  "uuid",
  "zed-sum-tree",
  "zqlz-core",
- "zqlz-drivers",
 ]
 
 [[package]]
 name = "zqlz-versioning"
-version = "0.0.9"
+version = "0.0.10"
 dependencies = [
  "anyhow",
  "async-trait",

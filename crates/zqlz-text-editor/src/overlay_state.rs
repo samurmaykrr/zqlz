@@ -160,6 +160,7 @@ pub(crate) enum ContextMenuAction {
     MoveLineUp,
     MoveLineDown,
     ToggleLineComment,
+    ToggleBlockComment,
     SortLinesAscending,
     UniqueLines,
     TransformUppercase,

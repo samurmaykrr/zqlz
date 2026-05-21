@@ -1193,27 +1193,39 @@ impl TableService {
             .get_primary_key(relation.schema_ref(), &relation.table_name)
             .await
         {
-            let pk_values: Vec<(String, Value)> = pk_info
-                .columns
-                .iter()
-                .filter_map(|pk_col| {
-                    let idx = cell_data
-                        .all_column_names
-                        .iter()
-                        .position(|col| col == pk_col)?;
+            let mut pk_values = Vec::with_capacity(pk_info.columns.len());
+            let mut has_complete_primary_key = true;
 
-                    let value = cell_data.all_row_values.get(idx)?.clone();
-                    let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
-                    let value = match value {
-                        Value::String(text) => self.parse_value(&text, col_type).ok()?,
-                        other => other,
-                    };
+            for pk_col in &pk_info.columns {
+                let Some(idx) = cell_data
+                    .all_column_names
+                    .iter()
+                    .position(|col| col == pk_col)
+                else {
+                    has_complete_primary_key = false;
+                    break;
+                };
 
-                    Some((pk_col.clone(), value))
-                })
-                .collect();
+                let Some(value) = cell_data.all_row_values.get(idx).cloned() else {
+                    has_complete_primary_key = false;
+                    break;
+                };
 
-            if !pk_values.is_empty() {
+                let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
+                let value = match value {
+                    Value::String(text) => self.parse_value(&text, col_type)?,
+                    other => other,
+                };
+
+                if value.is_null() {
+                    has_complete_primary_key = false;
+                    break;
+                }
+
+                pk_values.push((pk_col.clone(), value));
+            }
+
+            if has_complete_primary_key && pk_values.len() == pk_info.columns.len() {
                 tracing::debug!("Using primary key for row identification");
                 return Ok(RowIdentifier::PrimaryKey(pk_values));
             }
@@ -1229,12 +1241,12 @@ impl TableService {
             .map(|(idx, (col, val))| {
                 let col_type = cell_data.all_column_types.get(idx).map(|s| s.as_str());
                 let value = match val {
-                    Value::String(text) => self.parse_value(text, col_type).unwrap_or(Value::Null),
-                    other => other.clone(),
+                    Value::String(text) => self.parse_value(text, col_type),
+                    other => Ok(other.clone()),
                 };
-                (col.clone(), value)
+                Ok((col.clone(), value?))
             })
-            .collect();
+            .collect::<ServiceResult<Vec<_>>>()?;
 
         Ok(RowIdentifier::FullRow(row_values))
     }

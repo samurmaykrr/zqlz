@@ -7,11 +7,17 @@ license.workspace = true
 [lib]
 path = "src/text_editor.rs"
 
+[features]
+syntax-probe-drivers = ["dep:zqlz-drivers"]
+syntax-probe-all-drivers = ["syntax-probe-drivers", "zqlz-drivers/all-drivers"]
+
 [dependencies]
 # GUI Framework
 gpui.workspace = true
 gpui_platform.workspace = true
 zqlz-ui.workspace = true
+zqlz-core.workspace = true
+zqlz-drivers = { workspace = true, optional = true }
 
 # Text buffer
 ropey = "1.6"

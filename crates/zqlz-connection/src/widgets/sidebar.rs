@@ -2547,7 +2547,7 @@ impl ConnectionSidebar {
 
     fn should_flatten_database_schema_group(
         driver_type: &str,
-        database_name: &str,
+        _database_name: &str,
         schema_data: &DatabaseSchemaData,
     ) -> bool {
         if !matches!(
@@ -2557,12 +2557,11 @@ impl ConnectionSidebar {
             return false;
         }
 
-        schema_data.schema_name.as_deref() == Some(database_name)
-            && schema_data.schema_names.len() == 1
-            && schema_data
+        schema_data.schema_name.as_deref() == Some("main")
+            || schema_data
                 .schema_names
-                .first()
-                .is_some_and(|schema_name| schema_name == database_name)
+                .iter()
+                .any(|schema_name| schema_name == "main")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -5420,6 +5419,51 @@ mod tests {
         assert!(ConnectionSidebar::should_flatten_database_schema_group(
             "sqlite",
             "main",
+            &schema_data
+        ));
+    }
+
+    #[test]
+    fn sqlite_named_database_does_not_render_duplicate_main_schema_group() {
+        let schema_data = DatabaseSchemaData {
+            schema_name: Some("main".to_string()),
+            schema_names: vec!["main".to_string()],
+            ..DatabaseSchemaData::default()
+        };
+
+        assert!(ConnectionSidebar::should_flatten_database_schema_group(
+            "sqlite",
+            "customer-data",
+            &schema_data
+        ));
+    }
+
+    #[test]
+    fn turso_named_database_does_not_render_duplicate_main_schema_group() {
+        let schema_data = DatabaseSchemaData {
+            schema_name: Some("main".to_string()),
+            schema_names: vec!["main".to_string()],
+            ..DatabaseSchemaData::default()
+        };
+
+        assert!(ConnectionSidebar::should_flatten_database_schema_group(
+            "turso",
+            "cobbold-and-ju...",
+            &schema_data
+        ));
+    }
+
+    #[test]
+    fn sqlite_main_schema_flattens_even_when_cached_schema_names_include_public() {
+        let schema_data = DatabaseSchemaData {
+            schema_name: Some("main".to_string()),
+            schema_names: vec!["main".to_string(), "public".to_string()],
+            ..DatabaseSchemaData::default()
+        };
+
+        assert!(ConnectionSidebar::should_flatten_database_schema_group(
+            "sqlite",
+            "seekunique-dev",
             &schema_data
         ));
     }

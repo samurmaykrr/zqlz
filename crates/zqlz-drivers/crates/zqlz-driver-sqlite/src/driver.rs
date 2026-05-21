@@ -2,13 +2,23 @@
 
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use zqlz_core::{
     Connection, ConnectionConfig, ConnectionField, ConnectionFieldSchema, DatabaseDriver,
-    DialectInfo, DriverCapabilities, Result, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, Result, ZqlzError,
+    dialect_bundle_from_legacy_info,
 };
 
 use crate::{SqliteConnection, SqliteOpenMode, SqliteOpenOptions};
+
+const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+fn get_dialect_bundle() -> &'static DialectBundle {
+    static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        dialect_bundle_from_legacy_info(CONFIG_TOML, &crate::sqlite_dialect(), "SQLite")
+    })
+}
 
 /// SQLite database driver
 pub struct SqliteDriver;
@@ -66,6 +76,10 @@ impl DatabaseDriver for SqliteDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         crate::sqlite_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        Some(get_dialect_bundle())
     }
 
     #[tracing::instrument(skip(self, config), fields(path = config.get_string("path").or_else(|| config.get_string("database")).as_deref()))]
@@ -234,7 +248,34 @@ fn parse_path_list(value: &str) -> Vec<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use zqlz_core::DatabaseDriver;
+    use zqlz_core::{
+        DatabaseDriver, HighlightQueryLanguage, ParameterPlaceholderCapability, TreeSitterGrammar,
+        syntax_driver_capabilities_from_bundle,
+    };
+
+    #[test]
+    fn sqlite_dialect_bundle_owns_editor_syntax_capabilities() {
+        let driver = SqliteDriver::new();
+        let bundle = driver
+            .dialect_bundle()
+            .expect("SQLite driver should expose dialect bundle");
+        let capabilities = syntax_driver_capabilities_from_bundle(bundle);
+
+        assert_eq!(capabilities.profile, "sqlite");
+        assert_eq!(capabilities.tree_sitter_grammar, TreeSitterGrammar::Sql);
+        assert_eq!(
+            capabilities.highlight_query_language,
+            HighlightQueryLanguage::Sqlite
+        );
+        assert_eq!(
+            capabilities.parameter_placeholders,
+            ParameterPlaceholderCapability::sql(true)
+        );
+        assert!(capabilities.sql_overlays);
+        assert!(!capabilities.dollar_quoted_strings);
+        assert!(!capabilities.command_syntax);
+        assert!(!capabilities.document_syntax);
+    }
 
     #[test]
     fn sqlite_schema_exposes_advanced_options() {

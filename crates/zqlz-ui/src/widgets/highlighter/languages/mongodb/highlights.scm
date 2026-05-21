@@ -74,7 +74,6 @@
 ; MongoDB database methods
 [
   "use"
-  "db"
   "show"
   "collections"
   "databases"

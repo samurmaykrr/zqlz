@@ -2,17 +2,31 @@
 
 use async_trait::async_trait;
 use std::borrow::Cow;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 use zqlz_core::{
     ColumnMeta, CommentStyles, Connection, ConnectionConfig, ConnectionField,
     ConnectionFieldSchema, ConnectionScope, DataTypeCategory, DataTypeInfo, DatabaseDriver,
-    DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions, DropViewOptions,
-    ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory, KeywordInfo, QueryResult,
-    ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName, StatementResult,
-    TableOptionDef, TableOptionType, Transaction, Value, ZqlzError,
+    DialectBundle, DialectInfo, DriverCapabilities, DropTableOptions, DropTriggerOptions,
+    DropViewOptions, ExplainConfig, ExplainParserKind, FunctionCategory, KeywordCategory,
+    KeywordInfo, QueryResult, ResolvedConnectionScope, Result, Row, SqlFunctionInfo, SqlObjectName,
+    StatementResult, TableOptionDef, TableOptionType, Transaction, Value, ZqlzError,
+    dialect_bundle_from_legacy_info,
 };
+
+const CONFIG_TOML: &str = include_str!("../dialect/config.toml");
+
+fn get_dialect_bundle() -> &'static DialectBundle {
+    static BUNDLE: OnceLock<DialectBundle> = OnceLock::new();
+    BUNDLE.get_or_init(|| {
+        dialect_bundle_from_legacy_info(CONFIG_TOML, &clickhouse_dialect(), "ClickHouse")
+    })
+}
+
+fn value_to_clickhouse_param(value: &Value) -> serde_json::Value {
+    value.to_json_value()
+}
 
 /// ClickHouse database driver
 ///
@@ -63,6 +77,10 @@ impl DatabaseDriver for ClickHouseDriver {
 
     fn dialect_info(&self) -> DialectInfo {
         clickhouse_dialect()
+    }
+
+    fn dialect_bundle(&self) -> Option<&'static DialectBundle> {
+        Some(get_dialect_bundle())
     }
 
     fn capabilities(&self) -> DriverCapabilities {
@@ -502,14 +520,16 @@ impl Connection for ClickHouseConnection {
         .to_string())
     }
 
-    async fn execute(&self, sql: &str, _params: &[Value]) -> Result<StatementResult> {
+    async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         self.ensure_not_closed()?;
         let start = std::time::Instant::now();
 
-        // ClickHouse doesn't return affected rows for most DDL/DML
-        // We just execute and check for errors
-        self.client
-            .query(sql)
+        let mut query = self.client.query(sql);
+        for param in params {
+            query = query.bind(value_to_clickhouse_param(param));
+        }
+
+        query
             .execute()
             .await
             .map_err(|e| ZqlzError::Driver(format!("Execute failed: {}", e)))?;
@@ -522,19 +542,22 @@ impl Connection for ClickHouseConnection {
         Ok(StatementResult {
             is_query: false,
             result: None,
-            affected_rows: 0, // ClickHouse doesn't reliably report this
+            affected_rows: 0,
             error: None,
         })
     }
 
-    async fn query(&self, sql: &str, _params: &[Value]) -> Result<QueryResult> {
+    async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.ensure_not_closed()?;
         let start = std::time::Instant::now();
 
+        let mut query = self.client.query(sql);
+        for param in params {
+            query = query.bind(value_to_clickhouse_param(param));
+        }
+
         // Fetch rows as JSONEachRow format for flexibility with dynamic queries
-        let mut cursor = self
-            .client
-            .query(sql)
+        let mut cursor = query
             .fetch_bytes("JSONEachRow")
             .map_err(|e| ZqlzError::Driver(format!("Query failed: {}", e)))?;
 

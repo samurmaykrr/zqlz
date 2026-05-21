@@ -401,45 +401,24 @@ impl SchemaMetadataProvider for SchemaMetadata {
     fn find_symbol_at_offset(&self, text: &str, offset: usize) -> Option<SchemaSymbolInfo> {
         let schema = self.schema.as_ref()?;
 
-        // Get the text up to the offset for context analysis
-        let text_before = &text[..offset.min(text.len())];
-        let text_after = &text[offset.min(text.len())..];
+        let token = extract_identifier_at_offset(text, offset)?;
 
-        // Check for "table.column" pattern first (more specific)
-        if let Some(dot_pos) = text_before.rfind(|c: char| !c.is_alphanumeric() && c != '_') {
-            let potential_table = &text_before[dot_pos + 1..];
-            if !potential_table.is_empty() && is_valid_identifier(potential_table) {
-                // Check if there's a dot
-                let rest = &text_before[..dot_pos + 1];
-                if rest.ends_with('.') {
-                    let table_name = potential_table;
-                    // Now get the column part from after the cursor
-                    let column_part: String = text_after
-                        .chars()
-                        .take_while(|c| c.is_alphanumeric() || *c == '_')
-                        .collect();
-
-                    if !column_part.is_empty() {
-                        // This is a table.column reference
-                        if let Some(column_info) = self.get_column_info(table_name, &column_part) {
-                            let is_pk = column_info.is_primary_key;
-                            return Some(SchemaSymbolInfo::column(
-                                column_part,
-                                table_name.to_string(),
-                                &column_info,
-                                is_pk,
-                            ));
-                        }
-                    }
-                }
-            }
+        if let Some((table_name, _table_range)) =
+            previous_qualified_identifier(text, token.range.start)
+            && let Some(column_info) = self.get_column_info(&table_name, &token.name)
+        {
+            let is_pk = column_info.is_primary_key;
+            return Some(SchemaSymbolInfo::column(
+                token.name,
+                table_name,
+                &column_info,
+                is_pk,
+            ));
         }
 
-        // Fall back to simple word finding
-        let word = extract_word_at_offset(text, offset)?;
-        let word = word.trim();
+        let word = token.name.trim();
 
-        if word.is_empty() || !is_valid_identifier(word) {
+        if word.is_empty() {
             return None;
         }
 
@@ -518,6 +497,7 @@ impl SchemaMetadataProvider for SchemaMetadata {
 }
 
 /// Check if a string is a valid SQL identifier
+#[cfg(test)]
 fn is_valid_identifier(s: &str) -> bool {
     let Some(first) = s.chars().next() else {
         return false;
@@ -528,30 +508,136 @@ fn is_valid_identifier(s: &str) -> bool {
     s.chars().all(|c| c.is_alphanumeric() || c == '_')
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct IdentifierToken {
+    name: String,
+    range: std::ops::Range<usize>,
+}
+
 /// Extract the word at the given offset
+#[cfg(test)]
 fn extract_word_at_offset(text: &str, offset: usize) -> Option<String> {
-    let chars: Vec<char> = text.chars().collect();
-    if offset >= chars.len() {
+    extract_identifier_at_offset(text, offset).map(|token| token.name)
+}
+
+fn extract_identifier_at_offset(text: &str, offset: usize) -> Option<IdentifierToken> {
+    if offset >= text.len() || !text.is_char_boundary(offset) {
         return None;
     }
 
-    // Find start of word
-    let mut start = offset;
-    while start > 0 && is_word_char(chars[start - 1]) {
-        start -= 1;
+    if let Some(quoted) = extract_quoted_identifier_at_offset(text, offset) {
+        return Some(quoted);
     }
 
-    // Find end of word
+    let mut start = offset;
+    while let Some((previous_start, character)) = previous_char(text, start) {
+        if is_word_char(character) {
+            start = previous_start;
+        } else {
+            break;
+        }
+    }
+
     let mut end = offset;
-    while end < chars.len() && is_word_char(chars[end]) {
-        end += 1;
+    while let Some((character_start, character_end, character)) = char_at(text, end) {
+        if is_word_char(character) {
+            end = character_end;
+        } else if character_start == offset && start == end {
+            return None;
+        } else {
+            break;
+        }
     }
 
     if start == end {
         return None;
     }
 
-    Some(chars[start..end].iter().collect())
+    Some(IdentifierToken {
+        name: text[start..end].to_string(),
+        range: start..end,
+    })
+}
+
+fn extract_quoted_identifier_at_offset(text: &str, offset: usize) -> Option<IdentifierToken> {
+    for (open, close) in [('"', '"'), ('`', '`'), ('[', ']')] {
+        let Some(open_start) = scan_backward_for_delimiter(text, offset, open) else {
+            continue;
+        };
+        let open_end = open_start + open.len_utf8();
+        let Some(close_start) = scan_forward_for_delimiter(text, open_end, close) else {
+            continue;
+        };
+        let close_end = close_start + close.len_utf8();
+        if open_start <= offset && offset < close_end {
+            return Some(IdentifierToken {
+                name: text[open_end..close_start].to_string(),
+                range: open_start..close_end,
+            });
+        }
+    }
+    None
+}
+
+fn previous_qualified_identifier(
+    text: &str,
+    identifier_start: usize,
+) -> Option<(String, std::ops::Range<usize>)> {
+    let (dot_start, dot) = previous_non_whitespace_char(text, identifier_start)?;
+    if dot != '.' {
+        return None;
+    }
+    let (previous_start, _previous) = previous_non_whitespace_char(text, dot_start)?;
+    extract_identifier_at_offset(text, previous_start).map(|token| (token.name, token.range))
+}
+
+fn scan_backward_for_delimiter(text: &str, offset: usize, delimiter: char) -> Option<usize> {
+    let mut cursor = offset.min(text.len());
+    while let Some((start, character)) = previous_char(text, cursor) {
+        if matches!(character, '\n' | '\r') {
+            return None;
+        }
+        if character == delimiter {
+            return Some(start);
+        }
+        cursor = start;
+    }
+    None
+}
+
+fn scan_forward_for_delimiter(text: &str, offset: usize, delimiter: char) -> Option<usize> {
+    let mut cursor = offset;
+    while let Some((start, end, character)) = char_at(text, cursor) {
+        if matches!(character, '\n' | '\r') {
+            return None;
+        }
+        if character == delimiter {
+            return Some(start);
+        }
+        cursor = end;
+    }
+    None
+}
+
+fn previous_non_whitespace_char(text: &str, offset: usize) -> Option<(usize, char)> {
+    let mut cursor = offset.min(text.len());
+    while let Some((start, character)) = previous_char(text, cursor) {
+        if !character.is_whitespace() {
+            return Some((start, character));
+        }
+        cursor = start;
+    }
+    None
+}
+
+fn previous_char(text: &str, offset: usize) -> Option<(usize, char)> {
+    text.get(..offset)?.char_indices().next_back()
+}
+
+fn char_at(text: &str, offset: usize) -> Option<(usize, usize, char)> {
+    let (relative_start, character) = text.get(offset..)?.char_indices().next()?;
+    let start = offset + relative_start;
+    Some((start, start + character.len_utf8(), character))
 }
 
 /// Check if a character can be part of a word
@@ -563,6 +649,60 @@ fn is_word_char(c: char) -> bool {
 mod tests {
     use super::*;
     use zqlz_core::IndexInfo;
+
+    fn test_column(name: &str) -> ServicesColumnInfo {
+        ServicesColumnInfo {
+            name: name.to_string(),
+            data_type: "TEXT".to_string(),
+            nullable: true,
+            is_primary_key: false,
+            default_value: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_auto_increment: false,
+            comment: None,
+            enum_values: None,
+        }
+    }
+
+    fn test_table(name: &str) -> zqlz_core::TableInfo {
+        zqlz_core::TableInfo {
+            schema: None,
+            name: name.to_string(),
+            table_type: zqlz_core::TableType::Table,
+            row_count: None,
+            owner: None,
+            size_bytes: None,
+            comment: None,
+            index_count: None,
+            trigger_count: None,
+            key_value_info: None,
+        }
+    }
+
+    fn test_schema(table_infos: Vec<zqlz_core::TableInfo>) -> DatabaseSchema {
+        DatabaseSchema {
+            tables: table_infos.iter().map(|table| table.name.clone()).collect(),
+            table_infos,
+            objects_panel_data: None,
+            objects_panel_manifest: None,
+            views: vec![],
+            materialized_views: vec![],
+            triggers: vec![],
+            functions: vec![],
+            procedures: vec![],
+            events: vec![],
+            sequences: vec![],
+            domains: vec![],
+            types: vec![],
+            extensions: vec![],
+            table_indexes: HashMap::new(),
+            database_name: None,
+            schema_name: None,
+            schema_names: vec![],
+        }
+    }
 
     #[test]
     fn test_schema_symbol_info_creation() {
@@ -753,6 +893,74 @@ mod tests {
         );
         assert_eq!(extract_word_at_offset("hello world", 11), None); // After end
         assert_eq!(extract_word_at_offset("hello", 100), None); // Way past end
+    }
+
+    #[test]
+    fn test_extract_word_at_offset_handles_quoted_identifiers() {
+        assert_eq!(
+            extract_word_at_offset("SELECT \"User Name\" FROM accounts", 10),
+            Some("User Name".to_string())
+        );
+        assert_eq!(
+            extract_word_at_offset("SELECT [User Name] FROM accounts", 10),
+            Some("User Name".to_string())
+        );
+        assert_eq!(
+            extract_word_at_offset("SELECT `User Name` FROM accounts", 10),
+            Some("User Name".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_symbol_quoted_table() {
+        let metadata = SchemaMetadata::new(test_schema(vec![test_table("User Name")]));
+        let text = "SELECT * FROM \"User Name\"";
+        let offset = text.find("User").expect("quoted table");
+
+        let symbol = metadata
+            .find_symbol_at_offset(text, offset)
+            .expect("quoted table symbol");
+
+        assert_eq!(symbol.name, "User Name");
+        assert_eq!(symbol.symbol_type, SchemaSymbolType::Table);
+    }
+
+    #[test]
+    fn test_find_symbol_qualified_column() {
+        let mut metadata = SchemaMetadata::new(test_schema(vec![test_table("users")]));
+        metadata.add_table_columns("users", vec![test_column("email")]);
+        let text = "SELECT users.email FROM users";
+        let offset = text.find("email").expect("column");
+
+        let symbol = metadata
+            .find_symbol_at_offset(text, offset)
+            .expect("qualified column symbol");
+
+        assert_eq!(symbol.name, "email");
+        assert_eq!(symbol.symbol_type, SchemaSymbolType::Column);
+        assert_eq!(
+            symbol.details.and_then(|details| details.table_name),
+            Some("users".to_string())
+        );
+    }
+
+    #[test]
+    fn test_find_symbol_qualified_quoted_column() {
+        let mut metadata = SchemaMetadata::new(test_schema(vec![test_table("User Table")]));
+        metadata.add_table_columns("User Table", vec![test_column("Email Address")]);
+        let text = "SELECT \"User Table\".\"Email Address\" FROM \"User Table\"";
+        let offset = text.find("Email").expect("quoted column");
+
+        let symbol = metadata
+            .find_symbol_at_offset(text, offset)
+            .expect("quoted qualified column symbol");
+
+        assert_eq!(symbol.name, "Email Address");
+        assert_eq!(symbol.symbol_type, SchemaSymbolType::Column);
+        assert_eq!(
+            symbol.details.and_then(|details| details.table_name),
+            Some("User Table".to_string())
+        );
     }
 
     #[test]

@@ -110,6 +110,36 @@ fn test_parameters_in_multiline_comment_ignored() {
 }
 
 #[test]
+fn test_parameters_in_postgres_dollar_body_ignored() {
+    let sql = r#"CREATE FUNCTION demo() RETURNS trigger AS $body$
+BEGIN
+  NEW.payload := jsonb_build_object('id', $1, 'name', :name);
+  RETURN NEW;
+END;
+$body$ LANGUAGE plpgsql;
+SELECT $1;"#;
+    let params = extract_parameters(sql);
+
+    assert_eq!(params, vec![Parameter::Positional(1)]);
+}
+
+#[test]
+fn test_cast_type_names_are_not_parameters() {
+    let sql = "SELECT payload::jsonb, created_at::timestamp FROM events WHERE id = :id";
+    let params = extract_parameters(sql);
+
+    assert_eq!(params, vec![Parameter::Named("id".into())]);
+}
+
+#[test]
+fn test_quoted_identifier_parameter_shapes_are_ignored() {
+    let sql = r#"SELECT ":quoted", `@tick`, [@bracket], payload FROM events WHERE id = :id"#;
+    let params = extract_parameters(sql);
+
+    assert_eq!(params, vec![Parameter::Named("id".into())]);
+}
+
+#[test]
 fn test_parameter_style_detection_colon() {
     let sql = "SELECT * FROM users WHERE id = :id";
     let result = extract_parameters_with_style(sql);
@@ -501,6 +531,62 @@ fn test_bind_named_ignores_params_in_comments() {
         "SELECT * FROM users WHERE id = $1 -- comment with :fake_param"
     );
     assert_eq!(result.values.len(), 1);
+}
+
+#[test]
+fn test_bind_named_ignores_params_in_postgres_dollar_body_and_casts() {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::Int64(42));
+
+    let sql = r#"CREATE FUNCTION demo() RETURNS trigger AS $body$
+BEGIN
+  NEW.payload := jsonb_build_object('id', $1, 'name', :name);
+  RETURN NEW;
+END;
+$body$ LANGUAGE plpgsql;
+SELECT payload::jsonb FROM events WHERE id = :id;"#;
+    let result = bind_named(sql, &params).unwrap();
+
+    assert!(result.sql.contains(":name"));
+    assert!(result.sql.contains("payload::jsonb"));
+    assert!(result.sql.ends_with("WHERE id = $1;"));
+    assert_eq!(result.values, vec![Value::Int64(42)]);
+}
+
+#[test]
+fn test_bind_named_ignores_params_in_quoted_identifiers() {
+    let mut params = HashMap::new();
+    params.insert("id".to_string(), Value::Int64(42));
+
+    let sql = r#"SELECT ":quoted", `@tick`, [@bracket] FROM events WHERE id = :id"#;
+    let result = bind_named(sql, &params).unwrap();
+
+    assert_eq!(
+        result.sql,
+        r#"SELECT ":quoted", `@tick`, [@bracket] FROM events WHERE id = $1"#
+    );
+    assert_eq!(result.values, vec![Value::Int64(42)]);
+}
+
+#[test]
+fn test_bind_positional_ignores_postgres_dollar_body_when_rewriting() {
+    let sql = r#"CREATE FUNCTION demo() RETURNS trigger AS $body$
+BEGIN
+  NEW.payload := jsonb_build_object('id', $1);
+  RETURN NEW;
+END;
+$body$ LANGUAGE plpgsql;
+SELECT * FROM events WHERE id = $1;"#;
+    let result = bind_positional_with_policy(
+        sql,
+        &[Value::Int64(42)],
+        BindPlaceholderPolicy::QuestionMark,
+    )
+    .unwrap();
+
+    assert!(result.sql.contains("jsonb_build_object('id', $1)"));
+    assert!(result.sql.ends_with("WHERE id = ?;"));
+    assert_eq!(result.values, vec![Value::Int64(42)]);
 }
 
 #[test]

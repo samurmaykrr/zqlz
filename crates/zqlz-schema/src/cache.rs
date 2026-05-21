@@ -230,7 +230,11 @@ impl SchemaCache {
         let mut cache = self.cache.write();
         if let Some(entry) = cache.get_mut(&connection_id) {
             entry.columns.retain(|key, _| {
-                key != table && key.rsplit_once('.').map(|(_, name)| name != table).unwrap_or(true)
+                key != table
+                    && key
+                        .rsplit_once('.')
+                        .map(|(_, name)| name != table)
+                        .unwrap_or(true)
             });
         }
     }

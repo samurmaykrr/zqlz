@@ -6,7 +6,7 @@
 mod common;
 
 use std::sync::Arc;
-use zqlz_core::{Connection, Value};
+use zqlz_core::{Connection, RowIdentifier, Value};
 use zqlz_services::{
     BrowseLastPageRequest, BrowseNearEndPageRequest, BrowseTableWithFiltersRequest, CellUpdateData,
     RowDeleteData, RowInsertData, TableService,
@@ -348,6 +348,90 @@ async fn update_cell_succeeds() {
         )
         .await
         .expect("update should succeed");
+}
+
+#[tokio::test]
+async fn update_cell_uses_complete_primary_key() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("postgresql"));
+    let service = TableService::new(100);
+
+    service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "users",
+            None,
+            CellUpdateData {
+                column_name: "email".to_string(),
+                new_value: Some(Value::String("new@example.com".to_string())),
+                all_column_names: vec!["id".to_string(), "name".to_string(), "email".to_string()],
+                all_row_values: vec![
+                    Value::Int32(1),
+                    Value::String("Alice".to_string()),
+                    Value::String("old@example.com".to_string()),
+                ],
+                all_column_types: vec!["int4".to_string(), "text".to_string(), "text".to_string()],
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+    let update = conn
+        .last_cell_update()
+        .expect("update request should be captured");
+    assert!(matches!(
+        update.row_identifier,
+        RowIdentifier::PrimaryKey(values)
+            if values == vec![("id".to_string(), Value::Int32(1))]
+    ));
+}
+
+#[tokio::test]
+async fn update_cell_does_not_use_partial_or_null_primary_key() {
+    let conn = Arc::new(MockConnection::new("test_db").with_driver("sqlite"));
+    let service = TableService::new(100);
+
+    service
+        .update_cell(
+            conn.clone() as Arc<dyn Connection>,
+            "composite_nullable",
+            None,
+            CellUpdateData {
+                column_name: "builder_document_json".to_string(),
+                new_value: Some(Value::String("{\"new\":true}".to_string())),
+                all_column_names: vec![
+                    "content_id".to_string(),
+                    "status_id".to_string(),
+                    "builder_document_json".to_string(),
+                ],
+                all_row_values: vec![
+                    Value::String("system.brand.logo.primary_logo".to_string()),
+                    Value::Null,
+                    Value::String("{\"old\":true}".to_string()),
+                ],
+                all_column_types: vec!["text".to_string(), "text".to_string(), "text".to_string()],
+            },
+        )
+        .await
+        .expect("update should succeed");
+
+    let update = conn
+        .last_cell_update()
+        .expect("update request should be captured");
+    assert!(matches!(
+        update.row_identifier,
+        RowIdentifier::FullRow(values)
+            if values == vec![
+                (
+                    "content_id".to_string(),
+                    Value::String("system.brand.logo.primary_logo".to_string())
+                ),
+                ("status_id".to_string(), Value::Null),
+                (
+                    "builder_document_json".to_string(),
+                    Value::String("{\"old\":true}".to_string())
+                ),
+            ]
+    ));
 }
 
 // ============ insert_row Tests ============

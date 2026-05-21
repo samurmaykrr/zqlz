@@ -4,14 +4,17 @@
 //! `DialectInfo` from `zqlz-core`. The `SqlDialect` enum is kept for API compatibility
 //! but internally uses the driver's metadata.
 
-use zqlz_core::{DialectConfig, DialectInfo, FunctionCategory};
+use zqlz_core::{
+    DialectConfig, DialectInfo, FunctionCategory, LanguageType, ParserCapability,
+    SqlDialect as CoreSqlDialect,
+};
 use zqlz_drivers::{get_dialect_bundle, get_dialect_info};
 
 /// SQL Dialect types
 ///
 /// This enum provides a simple interface for dialect selection while delegating
 /// to the comprehensive `DialectInfo` from drivers for actual metadata.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SqlDialect {
     /// SQLite dialect
     SQLite,
@@ -21,6 +24,10 @@ pub enum SqlDialect {
     PostgreSQL,
     /// Microsoft SQL Server dialect
     SQLServer,
+    /// ClickHouse dialect
+    ClickHouse,
+    /// DuckDB dialect
+    DuckDB,
     /// Redis commands dialect
     Redis,
     /// MongoDB query language
@@ -32,14 +39,24 @@ pub enum SqlDialect {
 impl SqlDialect {
     /// Get dialect from driver name
     pub fn from_driver(driver: &str) -> Self {
-        match driver.to_lowercase().as_str() {
-            "sqlite" => Self::SQLite,
-            "mysql" | "mariadb" => Self::MySQL,
-            "postgres" | "postgresql" => Self::PostgreSQL,
-            "sqlserver" | "mssql" => Self::SQLServer,
-            "redis" => Self::Redis,
-            "mongodb" | "mongo" => Self::MongoDB,
-            _ => Self::Generic,
+        let driver = driver.trim().to_ascii_lowercase();
+        let Some(profile) = zqlz_core::get_dialect_profile(&driver) else {
+            return Self::Generic;
+        };
+
+        match profile.parser {
+            ParserCapability::Sql(CoreSqlDialect::Sqlite) => Self::SQLite,
+            ParserCapability::Sql(CoreSqlDialect::MySql) => Self::MySQL,
+            ParserCapability::Sql(CoreSqlDialect::PostgreSql) => Self::PostgreSQL,
+            ParserCapability::Sql(CoreSqlDialect::MsSql) => Self::SQLServer,
+            ParserCapability::Sql(CoreSqlDialect::ClickHouse) => Self::ClickHouse,
+            ParserCapability::Sql(CoreSqlDialect::DuckDb) => Self::DuckDB,
+            ParserCapability::Sql(CoreSqlDialect::Ansi) => Self::Generic,
+            ParserCapability::Command => Self::Redis,
+            ParserCapability::Document if profile.language_type == LanguageType::Document => {
+                Self::MongoDB
+            }
+            ParserCapability::Document | ParserCapability::Custom => Self::Generic,
         }
     }
 
@@ -50,6 +67,8 @@ impl SqlDialect {
             Self::MySQL => "mysql",
             Self::PostgreSQL => "postgres",
             Self::SQLServer => "sqlserver",
+            Self::ClickHouse => "clickhouse",
+            Self::DuckDB => "duckdb",
             Self::Redis => "redis",
             Self::MongoDB => "mongodb",
             Self::Generic => "generic",
@@ -211,5 +230,32 @@ impl SqlDialect {
                 }
                 doc
             })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SqlDialect;
+
+    #[test]
+    fn from_driver_uses_core_registry_aliases() {
+        assert_eq!(
+            SqlDialect::from_driver(" postgres "),
+            SqlDialect::PostgreSQL
+        );
+        assert_eq!(
+            SqlDialect::from_driver("postgresql"),
+            SqlDialect::PostgreSQL
+        );
+        assert_eq!(SqlDialect::from_driver("mariadb"), SqlDialect::MySQL);
+        assert_eq!(SqlDialect::from_driver("turso"), SqlDialect::SQLite);
+        assert_eq!(SqlDialect::from_driver("mssql"), SqlDialect::SQLServer);
+        assert_eq!(
+            SqlDialect::from_driver("clickhouse"),
+            SqlDialect::ClickHouse
+        );
+        assert_eq!(SqlDialect::from_driver("duckdb"), SqlDialect::DuckDB);
+        assert_eq!(SqlDialect::from_driver("mongo"), SqlDialect::MongoDB);
+        assert_eq!(SqlDialect::from_driver("redis"), SqlDialect::Redis);
     }
 }

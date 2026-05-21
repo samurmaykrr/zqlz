@@ -7,9 +7,63 @@
 
 use super::test_helpers::*;
 use crate::SqlDialect;
+use sqlparser::parser::Parser;
 use zqlz_ui::widgets::Rope;
 
 // ===== SQLite-specific tests =====
+
+#[test]
+fn test_sqlparser_dialect_selection_uses_core_driver_registry_aliases() {
+    let mut turso_lsp = create_test_lsp_with_dialect(SqlDialect::SQLite);
+    turso_lsp.driver_type = "turso".to_string();
+    let turso_dialect = turso_lsp.get_dialect();
+    Parser::parse_sql(turso_dialect.as_ref(), "SELECT [name] FROM users")
+        .expect("turso alias should use SQLite sqlparser dialect");
+
+    let mut mssql_lsp = create_test_lsp_with_dialect(SqlDialect::SQLServer);
+    mssql_lsp.driver_type = "mssql".to_string();
+    let mssql_dialect = mssql_lsp.get_dialect();
+    Parser::parse_sql(mssql_dialect.as_ref(), "SELECT TOP 1 * FROM users")
+        .expect("mssql alias should use SQL Server sqlparser dialect");
+}
+
+#[test]
+fn test_mongodb_completions_use_document_driver_terms_not_sql_fallback() {
+    let mut lsp = create_test_lsp_with_dialect(SqlDialect::MongoDB);
+    let text = Rope::from("db.orders.aggregate([{ $gr");
+    let completions = lsp.get_completions(&text, text.len());
+    let labels = completions
+        .iter()
+        .map(|completion| completion.label.as_str())
+        .collect::<Vec<_>>();
+
+    assert!(
+        labels.contains(&"$group"),
+        "Mongo document completions should include driver operator terms. Got: {labels:?}"
+    );
+    assert!(
+        !labels.contains(&"SELECT"),
+        "Mongo document completions should not fall back to SQL keywords. Got: {labels:?}"
+    );
+}
+
+#[test]
+fn test_mongodb_type_completion_comes_from_driver_syntax_profile() {
+    let mut lsp = create_test_lsp_with_dialect(SqlDialect::MongoDB);
+    let text = Rope::from("Object");
+    let completions = lsp.get_completions(&text, text.len());
+
+    assert!(
+        completions
+            .iter()
+            .any(|completion| completion.label == "ObjectId"),
+        "Mongo document completions should include BSON types from driver syntax metadata. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.as_str())
+            .collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn test_sqlite_autoincrement_keyword() {
@@ -191,6 +245,20 @@ fn test_mysql_unsigned_keyword() {
         "Should suggest MySQL UNSIGNED keyword. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );
+    assert!(
+        completions.iter().any(|completion| {
+            completion.label.eq_ignore_ascii_case("UNSIGNED")
+                && completion
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("negative values"))
+        }),
+        "UNSIGNED completion should use driver metadata detail. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| (&completion.label, &completion.detail))
+            .collect::<Vec<_>>()
+    );
 }
 
 // ===== PostgreSQL-specific tests =====
@@ -265,6 +333,18 @@ fn test_postgresql_lateral_keyword() {
         "Should suggest PostgreSQL LATERAL keyword. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
     );
+    let lateral = completions
+        .iter()
+        .find(|completion| completion.label.eq_ignore_ascii_case("LATERAL"))
+        .expect("LATERAL completion");
+    assert!(
+        lateral
+            .detail
+            .as_deref()
+            .is_some_and(|detail| detail.contains("Lateral join")),
+        "LATERAL completion should use active dialect keyword metadata detail, got: {:?}",
+        lateral.detail
+    );
 }
 
 #[test]
@@ -336,6 +416,20 @@ fn test_sqlserver_top_keyword() {
         completions.iter().any(|c| c.label.to_uppercase() == "TOP"),
         "Should suggest SQL Server TOP keyword. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
+    );
+    assert!(
+        completions.iter().any(|completion| {
+            completion.label.eq_ignore_ascii_case("TOP")
+                && completion
+                    .detail
+                    .as_deref()
+                    .is_some_and(|detail| detail.contains("T-SQL"))
+        }),
+        "TOP completion should use driver-owned dialect metadata. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| (&completion.label, &completion.detail))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -474,6 +568,60 @@ fn test_dialect_specific_keyword_not_in_generic() {
                 .any(|c| c.label.to_uppercase().starts_with("PRAG")),
         "Should handle dialect-specific keywords. Got: {:?}",
         completions.iter().map(|c| &c.label).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_generic_completion_uses_core_sql_registry_profiles() {
+    let lsp = create_test_lsp_with_dialect(SqlDialect::Generic);
+    let dialects = lsp.completion_sql_dialects();
+
+    assert!(
+        dialects.contains(&SqlDialect::ClickHouse) && dialects.contains(&SqlDialect::DuckDB),
+        "generic SQL completion dialects should come from core SQL registry profiles. Got: {:?}",
+        dialects
+    );
+}
+
+#[test]
+fn test_signature_help_ignores_commas_inside_string_literals() {
+    let lsp = create_test_lsp_with_dialect(SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT CONCAT('last, first', ");
+    let offset = text.to_string().len();
+
+    let signature = lsp
+        .get_signature_help(&text, offset)
+        .expect("signature help for CONCAT");
+
+    assert_eq!(
+        signature.active_parameter,
+        Some(1),
+        "comma inside string literal should not advance active parameter"
+    );
+}
+
+#[test]
+fn test_signature_help_returns_outer_function_after_nested_call() {
+    let lsp = create_test_lsp_with_dialect(SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT CONCAT(LOWER(name), ");
+    let offset = text.to_string().len();
+
+    let signature = lsp
+        .get_signature_help(&text, offset)
+        .expect("signature help for outer CONCAT");
+
+    assert_eq!(
+        signature.active_parameter,
+        Some(1),
+        "closed nested function call should return to outer active parameter"
+    );
+    assert!(
+        signature
+            .signatures
+            .iter()
+            .any(|signature| signature.label.starts_with("CONCAT(")),
+        "signature help should describe outer CONCAT call: {:?}",
+        signature.signatures
     );
 }
 

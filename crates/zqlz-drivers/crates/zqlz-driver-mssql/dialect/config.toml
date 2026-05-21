@@ -1,0 +1,151 @@
+id = "mssql"
+display_name = "T-SQL"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "["
+string_quote = "'"
+case_sensitive = false
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "mssql"
+grammar = "sql"
+highlight_query = "sql"
+parameter_placeholders = "sql-no-question-mark"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = false
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["DENY", "FETCH", "GO", "IDENTITY", "MATCHED", "MERGE", "NEXT", "NOLOCK", "OFFSET", "ONLY", "OUTPUT", "PRINT", "ROWS", "TEMPORARY", "TOP", "USE"]
+functions = ["CHARINDEX", "CONVERT", "DATEADD", "DATEDIFF", "GETDATE", "IIF", "ISJSON", "ISNULL", "JSON_QUERY", "JSON_VALUE", "LEN", "NCHAR", "NEWID", "OPENJSON", "PATINDEX", "QUOTENAME", "SCOPE_IDENTITY", "STRING_AGG", "SYSUTCDATETIME", "TRY_CONVERT"]
+types = ["BIT", "DATETIME2", "DATETIMEOFFSET", "GEOGRAPHY", "GEOMETRY", "HIERARCHYID", "IMAGE", "MONEY", "NCHAR", "NTEXT", "NVARCHAR", "ROWVERSION", "SMALLDATETIME", "SMALLMONEY", "SQL_VARIANT", "SYSNAME", "UNIQUEIDENTIFIER", "VARBINARY", "XML"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+SELECT TOP 10 [User Name], JSON_VALUE(payload, '$.id') AS id
+FROM [dbo].[Events]
+WITH (NOLOCK)
+WHERE amount BETWEEN 1 AND 20
+ORDER BY created_at OFFSET 0 ROWS FETCH NEXT 10 ROWS ONLY;
+DECLARE @id UNIQUEIDENTIFIER = NEWID();
+PRINT CONVERT(NVARCHAR(36), @id);
+MERGE INTO [Users] AS target
+USING [StagingUsers] AS source
+ON target.id = source.id
+WHEN MATCHED THEN UPDATE SET target.name = source.name
+WHEN NOT MATCHED THEN INSERT (id, name) VALUES (source.id, source.name);
+"""
+
+expected_outline = [
+  "Query",
+  "DECLARE",
+  "PRINT",
+  "MERGE",
+]
+
+[[syntax_quality.expected]]
+token = "SELECT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "TOP"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "[User Name]"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "JSON_VALUE"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "[dbo]"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "[Events]"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "WITH"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "NOLOCK"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "BETWEEN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DECLARE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "OFFSET"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "FETCH"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ROWS"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "ONLY"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "UNIQUEIDENTIFIER"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "NEWID"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "PRINT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "CONVERT"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "NVARCHAR"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "MERGE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INTO"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "USING"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "WHEN"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "MATCHED"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "THEN"
+kind = "Keyword"
+
+[[syntax_quality.rejected]]
+token = "[Events]"
+kind = "Function"
+
+[[syntax_quality.rejected]]
+token = "'$.id'"
+kind = "Parameter"

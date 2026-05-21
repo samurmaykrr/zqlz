@@ -11,7 +11,7 @@ path = "src/zqlz_lsp.rs"
 [dependencies]
 # Core ZQLZ crates
 zqlz-core.workspace = true
-zqlz-drivers = { workspace = true, features = ["mssql"] }
+zqlz-drivers = { workspace = true, features = ["all-drivers"] }
 zqlz-services.workspace = true
 zqlz-ui.workspace = true
 zqlz-text-editor.workspace = true

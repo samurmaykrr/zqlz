@@ -329,10 +329,7 @@ fn parse_row_field_value(input: Option<String>, column_type: &str) -> Value {
 }
 
 fn row_field_display_value(value: &Value, is_new: bool, column: &ColumnMeta) -> String {
-    if value.is_null()
-        && (is_new || column.nullable)
-        && !matches!(value, Value::String(_))
-    {
+    if value.is_null() && (is_new || column.nullable) && !matches!(value, Value::String(_)) {
         String::new()
     } else {
         value.display_for_editor()

@@ -1,0 +1,158 @@
+id = "sqlite"
+display_name = "SQLite"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "\""
+string_quote = "'"
+case_sensitive = false
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "sqlite"
+grammar = "sql"
+highlight_query = "sqlite"
+parameter_placeholders = "sql-question-mark"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = false
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["ABORT", "ATTACH", "AUTOINCREMENT", "DETACH", "GLOB", "INDEXED", "MATCH", "PRAGMA", "RAISE", "REGEXP", "REPLACE", "ROWID", "VACUUM", "VIRTUAL", "WITHOUT"]
+functions = ["ABS", "CONCAT", "DATE", "DATETIME", "DENSE_RANK", "GROUP_CONCAT", "HEX", "IIF", "INSTR", "JSON", "JSON_ARRAY", "JSON_EXTRACT", "JSON_OBJECT", "JSON_TYPE", "JULIANDAY", "LAG", "LEAD", "LIKELIHOOD", "LIKELY", "NTH_VALUE", "PRINTF", "QUOTE", "RANDOM", "ROW_NUMBER", "STRFTIME", "TOTAL", "TYPEOF", "UNIXEPOCH", "UNLIKELY", "ZEROBLOB"]
+types = ["ANY", "BLOB", "INTEGER", "NUMERIC", "REAL", "TEXT"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+CREATE TABLE "categories" (
+  "category_id" text(255) NOT NULL,
+  "child_count" integer,
+  "sort_order" real(14, 3),
+  "metadata" text
+);
+ATTACH DATABASE 'analytics.db' AS analytics;
+CREATE VIRTUAL TABLE docs USING fts5(title, body);
+INSERT OR REPLACE INTO docs(rowid, title, body) VALUES (1, 'a', 'b');
+CREATE INDEX IF NOT EXISTS idx_categories_metadata ON "categories"(json_extract("metadata", '$.seo'));
+SELECT json_extract("metadata", '$.seo') FROM "categories" WHERE "category_id" = :category_id;
+SELECT rowid, rank FROM docs WHERE docs MATCH 'hello' ORDER BY rank LIMIT 5 OFFSET 1;
+"""
+
+expected_outline = [
+  "CREATE categories",
+  "ATTACH",
+  "CREATE VIRTUAL",
+  "INSERT docs",
+  "CREATE idx_categories_metadata",
+  "Query",
+]
+
+[[syntax_quality.expected]]
+token = "CREATE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "\"categories\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "\"category_id\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "\"child_count\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "\"sort_order\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "\"metadata\""
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "text"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "integer"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "real"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "ATTACH"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DATABASE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "INDEX"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "IF"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "EXISTS"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "VIRTUAL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "USING"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "fts5"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "REPLACE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "idx_categories_metadata"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "json_extract"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "'$.seo'"
+kind = "String"
+[[syntax_quality.expected]]
+token = ":category_id"
+kind = "Parameter"
+[[syntax_quality.expected]]
+token = "MATCH"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "OFFSET"
+kind = "Keyword"
+
+[[syntax_quality.rejected]]
+token = "\"category_id\""
+kind = "String"
+[[syntax_quality.rejected]]
+token = "\"child_count\""
+kind = "String"
+[[syntax_quality.rejected]]
+token = "text"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "integer"
+kind = "Identifier"
+[[syntax_quality.rejected]]
+token = "\"categories\""
+kind = "Function"

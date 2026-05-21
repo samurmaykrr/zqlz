@@ -1,0 +1,144 @@
+id = "duckdb"
+display_name = "DuckDB SQL"
+language_type = "sql"
+
+[grammar]
+type = "tree-sitter"
+name = "sql"
+
+[parser]
+skip_sql_validation = false
+skip_tree_sitter_errors = false
+custom_validator = false
+
+[syntax]
+identifier_quote = "\""
+string_quote = "'"
+case_sensitive = false
+statement_terminator = ";"
+supports_comments = true
+
+[syntax_highlighting]
+profile = "duckdb"
+grammar = "sql"
+highlight_query = "postgresql"
+parameter_placeholders = "sql-question-mark"
+brackets = "tree-sitter"
+command_syntax = false
+document_syntax = false
+sql_overlays = true
+dollar_quoted_strings = false
+completion_triggers = [".", " ", "(", ","]
+completion_word_chars = ["$"]
+indent_after_keywords = ["BEGIN", "THEN", "ELSE", "LOOP", "AS", "DECLARE"]
+auto_close_pairs = ["()", "[]", "{}", "''", "\"\""]
+
+[syntax_terms]
+keywords = ["ATTACH", "COPY", "DELIMITER", "DESCRIBE", "DETACH", "EXPORT", "HEADER", "IMPORT", "INSTALL", "LOAD", "PARTITION", "PERCENT", "PIVOT", "PRAGMA", "QUALIFY", "SAMPLE", "SUMMARIZE", "UNPIVOT"]
+functions = ["APPROX_COUNT_DISTINCT", "DATE_DIFF", "DATE_PART", "EPOCH_MS", "JSON_EXTRACT", "JSON_EXTRACT_STRING", "LIST", "LIST_AGG", "LIST_CONTAINS", "LIST_VALUE", "MEDIAN", "PIVOT", "READ_CSV", "READ_JSON", "READ_PARQUET", "ROW_NUMBER", "SPLIT_PART", "UNNEST"]
+types = ["BOOL", "HUGEINT", "LIST", "MAP", "STRUCT", "UBIGINT", "UINTEGER", "UNION", "USMALLINT", "UTINYINT", "UUID"]
+
+[comments]
+line_comment = "--"
+block_comment_start = "/*"
+block_comment_end = "*/"
+
+[syntax_quality]
+text = """
+INSTALL httpfs;
+LOAD httpfs;
+CREATE TEMP TABLE staging AS SELECT * FROM read_parquet('s3://bucket/events/*.parquet');
+COPY (
+  SELECT LIST_VALUE(user_id) AS ids, MEDIAN(total) AS p50
+  FROM read_parquet('orders.parquet')
+  QUALIFY row_number() OVER (PARTITION BY user_id ORDER BY created_at) = 1
+) TO 'orders.csv' (HEADER, DELIMITER ',');
+SELECT date_part('day', created_at) AS day FROM staging SAMPLE 10 PERCENT;
+CREATE TABLE analytics.events (payload STRUCT(id UUID, tags LIST(TEXT)));
+"""
+
+expected_outline = [
+  "INSTALL",
+  "LOAD",
+  "CREATE staging",
+  "COPY",
+  "Query",
+  "CREATE analytics.events",
+]
+
+[[syntax_quality.expected]]
+token = "INSTALL"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "LOAD"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "TEMP"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "COPY"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "LIST_VALUE"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "MEDIAN"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "read_parquet"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "QUALIFY"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "row_number"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "OVER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "PARTITION"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "HEADER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "DELIMITER"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "date_part"
+kind = "Function"
+[[syntax_quality.expected]]
+token = "SAMPLE"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "PERCENT"
+kind = "Keyword"
+[[syntax_quality.expected]]
+token = "day"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "analytics"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "events"
+kind = "Identifier"
+[[syntax_quality.expected]]
+token = "STRUCT"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "UUID"
+kind = "Type"
+[[syntax_quality.expected]]
+token = "TEXT"
+kind = "Type"
+
+[[syntax_quality.rejected]]
+token = "OVER"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "events"
+kind = "Function"
+[[syntax_quality.rejected]]
+token = "day"
+kind = "Keyword"

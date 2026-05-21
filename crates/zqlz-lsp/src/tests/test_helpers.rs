@@ -159,6 +159,8 @@ pub fn create_test_lsp_with_dialect(dialect: SqlDialect) -> SqlLsp {
         SqlDialect::MySQL => "mysql",
         SqlDialect::PostgreSQL => "postgres",
         SqlDialect::SQLServer => "sqlserver",
+        SqlDialect::ClickHouse => "clickhouse",
+        SqlDialect::DuckDB => "duckdb",
         SqlDialect::Redis => "redis",
         SqlDialect::MongoDB => "mongodb",
         SqlDialect::Generic => "generic",
