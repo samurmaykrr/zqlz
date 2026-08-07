@@ -369,12 +369,51 @@ fn parse_text_node(
             result.children.push(child);
             next = after_child;
         } else {
-            // It's an additional property line, skip for now
+            apply_text_property(&mut result, next_content);
             next += 1;
         }
     }
 
     Ok((result, next))
+}
+
+/// Applies an indented `Key: value` property line to the node it belongs to
+fn apply_text_property(node: &mut PlanNode, content: &str) {
+    let Some((key, value)) = content.split_once(':') else {
+        return;
+    };
+    let value = value.trim();
+    if value.is_empty() {
+        return;
+    }
+
+    match key.trim() {
+        "Filter" => node.filter = Some(value.to_string()),
+        "Rows Removed by Filter" => {
+            node.rows_removed_by_filter = value.replace(',', "").parse::<u64>().ok();
+        }
+        "Index Cond" => node.index_cond = Some(value.to_string()),
+        "Recheck Cond" if node.index_cond.is_none() => {
+            node.index_cond = Some(value.to_string());
+        }
+        "Hash Cond" | "Merge Cond" | "Join Filter" => {
+            node.join_cond = Some(value.to_string());
+        }
+        "Sort Key" => {
+            node.sort_keys = value
+                .split(", ")
+                .map(|key| key.trim().to_string())
+                .collect();
+        }
+        "Sort Method" => node.sort_method = Some(value.to_string()),
+        "Group Key" => {
+            node.group_keys = value
+                .split(", ")
+                .map(|key| key.trim().to_string())
+                .collect();
+        }
+        _ => {}
+    }
 }
 
 /// Parses a single text line into a PlanNode
@@ -408,6 +447,58 @@ fn parse_text_line(line: &str) -> Result<PlanNode> {
     Ok(node)
 }
 
+/// Node type prefixes recognised in text-format EXPLAIN output.
+const TEXT_NODE_TYPE_PREFIXES: &[(&str, NodeType)] = &[
+    ("Seq Scan", NodeType::SeqScan),
+    ("Index Scan", NodeType::IndexScan),
+    ("Index Only Scan", NodeType::IndexOnlyScan),
+    ("Bitmap Index Scan", NodeType::BitmapIndexScan),
+    ("Bitmap Heap Scan", NodeType::BitmapHeapScan),
+    ("Tid Scan", NodeType::TidScan),
+    ("Subquery Scan", NodeType::SubqueryScan),
+    ("Function Scan", NodeType::FunctionScan),
+    ("Values Scan", NodeType::ValuesScan),
+    ("CTE Scan", NodeType::CteScan),
+    ("WorkTable Scan", NodeType::WorkTableScan),
+    ("Foreign Scan", NodeType::ForeignScan),
+    ("Custom Scan", NodeType::CustomScan),
+    ("Nested Loop", NodeType::NestedLoop),
+    ("Hash Join", NodeType::HashJoin),
+    ("Merge Join", NodeType::MergeJoin),
+    ("Aggregate", NodeType::Aggregate),
+    ("HashAggregate", NodeType::HashAggregate),
+    ("Hash Aggregate", NodeType::HashAggregate),
+    ("GroupAggregate", NodeType::GroupAggregate),
+    ("Group Aggregate", NodeType::GroupAggregate),
+    ("WindowAgg", NodeType::WindowAgg),
+    ("Window Aggregate", NodeType::WindowAgg),
+    ("Sort", NodeType::Sort),
+    ("Incremental Sort", NodeType::IncrementalSort),
+    ("SetOp", NodeType::SetOp),
+    ("HashSetOp", NodeType::SetOp),
+    ("Append", NodeType::Append),
+    ("Merge Append", NodeType::MergeAppend),
+    ("Recursive Union", NodeType::RecursiveUnion),
+    ("Limit", NodeType::Limit),
+    ("Materialize", NodeType::Materialize),
+    ("Memoize", NodeType::Memoize),
+    ("Hash", NodeType::Hash),
+    ("Unique", NodeType::Unique),
+    ("BitmapAnd", NodeType::BitmapAnd),
+    ("BitmapOr", NodeType::BitmapOr),
+    ("SubPlan", NodeType::SubPlan),
+    ("ModifyTable", NodeType::ModifyTable),
+    ("Insert", NodeType::Insert),
+    ("Update", NodeType::Update),
+    ("Delete", NodeType::Delete),
+    ("Result", NodeType::Result),
+    ("Gather", NodeType::Gather),
+    ("Gather Merge", NodeType::GatherMerge),
+    ("LockRows", NodeType::LockRows),
+    ("ProjectSet", NodeType::ProjectSet),
+    ("CTE", NodeType::Cte),
+];
+
 /// Parses node type and relation from the text portion
 fn parse_type_and_relation(text: &str) -> (NodeType, Option<String>, Option<String>) {
     // Common patterns:
@@ -418,89 +509,17 @@ fn parse_type_and_relation(text: &str) -> (NodeType, Option<String>, Option<Stri
 
     let parts: Vec<&str> = text.split_whitespace().collect();
 
-    // Try to identify the node type
-    let mut node_type = NodeType::Unknown;
     let mut relation = None;
     let mut index_name = None;
-    let mut type_end_idx = 0;
 
-    // Check for common node types
-    if text.starts_with("Seq Scan") {
-        node_type = NodeType::SeqScan;
-        type_end_idx = 2;
-    } else if text.starts_with("Index Scan") {
-        node_type = NodeType::IndexScan;
-        type_end_idx = 2;
-    } else if text.starts_with("Index Only Scan") {
-        node_type = NodeType::IndexOnlyScan;
-        type_end_idx = 3;
-    } else if text.starts_with("Bitmap Index Scan") {
-        node_type = NodeType::BitmapIndexScan;
-        type_end_idx = 3;
-    } else if text.starts_with("Bitmap Heap Scan") {
-        node_type = NodeType::BitmapHeapScan;
-        type_end_idx = 3;
-    } else if text.starts_with("Nested Loop") {
-        node_type = NodeType::NestedLoop;
-        type_end_idx = 2;
-    } else if text.starts_with("Hash Join") {
-        node_type = NodeType::HashJoin;
-        type_end_idx = 2;
-    } else if text.starts_with("Merge Join") {
-        node_type = NodeType::MergeJoin;
-        type_end_idx = 2;
-    } else if text.starts_with("Hash") && !text.starts_with("Hash Join") {
-        node_type = NodeType::Hash;
-        type_end_idx = 1;
-    } else if text.starts_with("Sort") {
-        node_type = NodeType::Sort;
-        type_end_idx = 1;
-    } else if text.starts_with("Aggregate") {
-        node_type = NodeType::Aggregate;
-        type_end_idx = 1;
-    } else if text.starts_with("HashAggregate") || text.starts_with("Hash Aggregate") {
-        node_type = NodeType::HashAggregate;
-        type_end_idx = if text.starts_with("Hash Aggregate") {
-            2
-        } else {
-            1
-        };
-    } else if text.starts_with("GroupAggregate") || text.starts_with("Group Aggregate") {
-        node_type = NodeType::GroupAggregate;
-        type_end_idx = if text.starts_with("Group Aggregate") {
-            2
-        } else {
-            1
-        };
-    } else if text.starts_with("Limit") {
-        node_type = NodeType::Limit;
-        type_end_idx = 1;
-    } else if text.starts_with("Append") {
-        node_type = NodeType::Append;
-        type_end_idx = 1;
-    } else if text.starts_with("Materialize") {
-        node_type = NodeType::Materialize;
-        type_end_idx = 1;
-    } else if text.starts_with("Result") {
-        node_type = NodeType::Result;
-        type_end_idx = 1;
-    } else if text.starts_with("Gather") {
-        node_type = NodeType::Gather;
-        type_end_idx = 1;
-    } else if text.starts_with("CTE Scan") {
-        node_type = NodeType::CteScan;
-        type_end_idx = 2;
-    } else if text.starts_with("Unique") {
-        node_type = NodeType::Unique;
-        type_end_idx = 1;
-    } else if text.starts_with("WindowAgg") || text.starts_with("Window Aggregate") {
-        node_type = NodeType::WindowAgg;
-        type_end_idx = if text.starts_with("Window Aggregate") {
-            2
-        } else {
-            1
-        };
-    }
+    // Prefixes are matched longest-first so that e.g. "HashAggregate" is not
+    // swallowed by "Hash" and "Gather Merge" is not swallowed by "Gather".
+    let (node_type, type_end_idx) = TEXT_NODE_TYPE_PREFIXES
+        .iter()
+        .filter(|(prefix, _)| text.starts_with(prefix))
+        .max_by_key(|(prefix, _)| prefix.len())
+        .map(|(prefix, node_type)| (*node_type, prefix.split_whitespace().count()))
+        .unwrap_or((NodeType::Unknown, 0));
 
     // Look for "on relation" or "using index on relation"
     let remaining: Vec<&str> = parts.iter().skip(type_end_idx).cloned().collect();

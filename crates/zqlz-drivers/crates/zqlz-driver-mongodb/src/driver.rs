@@ -393,6 +393,9 @@ impl DatabaseDriver for MongoDbDriver {
 }
 
 /// MongoDB connection wrapper implementing the Connection trait
+/// Liveness command issued by connection heartbeats.
+const MONGODB_PING_COMMAND: &str = r#"{"ping": 1}"#;
+
 pub struct MongoDbConnection {
     client: Client,
     database: String,
@@ -1975,6 +1978,10 @@ impl Connection for MongoDbConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    fn ping_query_sql(&self) -> &'static str {
+        MONGODB_PING_COMMAND
+    }
+
     fn as_document_store(&self) -> Option<&dyn DocumentStore> {
         Some(self)
     }
@@ -3441,6 +3448,18 @@ fn dtype(
         max_length: None,
         description: Some(Cow::Borrowed(description)),
         example: None,
+    }
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+
+    #[test]
+    fn ping_statement_parses_as_a_runnable_command_document() {
+        let command: Document = serde_json::from_str(MONGODB_PING_COMMAND)
+            .expect("heartbeat ping must be a document the driver can run");
+        assert!(command.contains_key("ping"));
     }
 }
 

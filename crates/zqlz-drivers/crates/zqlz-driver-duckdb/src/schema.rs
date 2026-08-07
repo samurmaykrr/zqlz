@@ -1,125 +1,127 @@
-//! DuckDB schema introspection implementation
+//! DuckDB schema introspection.
+//!
+//! Structured introspection (tables, columns, indexes, foreign keys, ...) is
+//! delegated to the shared `zqlz-schema-engine` via [`DuckDbCatalog`]. The
+//! DuckDB-specific objects panel, object forms, and DDL synthesis stay here.
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use zqlz_core::{
-    ColumnInfo, Connection, ConstraintInfo, ConstraintType, DatabaseInfo, DatabaseObject,
-    Dependency, ForeignKeyAction, ForeignKeyInfo, FunctionInfo, IndexInfo, ObjectFormDdlRequest,
-    ObjectFormField, ObjectFormFieldKind, ObjectFormMode, ObjectFormSection, ObjectFormSpec,
-    ObjectFormSpecRequest, ObjectFormValue, ObjectType, ObjectsPanelAction, ObjectsPanelColumn,
+    CatalogCapabilities, CatalogSource, ColumnInfo, ConstraintInfo, DatabaseObject, Dependency,
+    ForeignKeyInfo, FunctionInfo, IndexInfo, NamespaceModel, ObjectFormDdlRequest, ObjectFormField,
+    ObjectFormFieldKind, ObjectFormMode, ObjectFormSection, ObjectFormSpec, ObjectFormSpecRequest,
+    ObjectFormValue, ObjectKindSupport, ObjectType, ObjectsPanelAction, ObjectsPanelColumn,
     ObjectsPanelData, ObjectsPanelManifest, ObjectsPanelObjectKind, ObjectsPanelObjectRef,
-    ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, Result, SchemaInfo, SchemaIntrospection,
-    SequenceInfo, TableDetails, TableInfo, TableType, TriggerInfo, TypeInfo, TypeKind, Value,
-    ViewInfo, ZqlzError,
+    ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryResult, RawColumnRow, RawConstraintRow,
+    RawDatabaseRow, RawForeignKeyRow, RawIndexRow, RawRelationRow, RawSchemaRow, RawSequenceRow,
+    RawTypeRow, RelationRef, Result, SchemaInfo, SchemaIntrospection, SequenceInfo, TableDetails,
+    TableInfo, TableType, TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
 };
 
+use super::driver::run_duckdb_query;
 use super::DuckDbConnection;
 
 #[async_trait]
 impl SchemaIntrospection for DuckDbConnection {
-    async fn list_databases(&self) -> Result<Vec<DatabaseInfo>> {
-        let result = self
-            .query("SELECT database_name, path FROM duckdb_databases()", &[])
-            .await?;
+    // ---- structured introspection: delegated to the shared engine ----
 
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| DatabaseInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                owner: None,
-                encoding: None,
-                size_bytes: None,
-                comment: row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
-            })
-            .collect())
+    async fn list_databases(&self) -> Result<Vec<zqlz_core::DatabaseInfo>> {
+        self.schema_engine.list_databases().await
     }
 
     async fn list_schemas(&self) -> Result<Vec<SchemaInfo>> {
-        let result = self
-            .query(
-                "SELECT schema_name FROM information_schema.schemata 
-                 WHERE catalog_name = current_database() ORDER BY schema_name",
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| SchemaInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                owner: None,
-                comment: None,
-            })
-            .collect())
+        self.schema_engine.list_schemas().await
     }
 
     async fn list_tables(&self, schema: Option<&str>) -> Result<Vec<TableInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT table_name, estimated_size, column_count 
-                     FROM duckdb_tables() WHERE schema_name = ?",
-                &[Value::String(schema.to_string())],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| TableInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                schema: Some(schema.to_string()),
-                table_type: TableType::Table,
-                owner: None,
-                row_count: row.get(1).and_then(|v| v.as_i64()),
-                size_bytes: None,
-                comment: None,
-                index_count: None,
-                trigger_count: None,
-                key_value_info: None,
-            })
-            .collect())
+        self.schema_engine.list_tables(schema).await
     }
 
     async fn list_views(&self, schema: Option<&str>) -> Result<Vec<ViewInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT view_name, sql FROM duckdb_views() WHERE schema_name = ?",
-                &[Value::String(schema.to_string())],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| ViewInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                schema: Some(schema.to_string()),
-                is_materialized: false,
-                definition: row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                owner: None,
-                comment: None,
-            })
-            .collect())
+        self.schema_engine.list_views(schema).await
     }
+
+    async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
+        self.schema_engine.get_table(schema, name).await
+    }
+
+    async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+        self.schema_engine.get_columns(schema, table).await
+    }
+
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
+
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
+    }
+
+    async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
+        self.schema_engine.get_indexes(schema, table).await
+    }
+
+    async fn get_foreign_keys(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ForeignKeyInfo>> {
+        self.schema_engine.get_foreign_keys(schema, table).await
+    }
+
+    async fn get_primary_key(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Option<PrimaryKeyInfo>> {
+        self.schema_engine.get_primary_key(schema, table).await
+    }
+
+    async fn get_constraints(
+        &self,
+        schema: Option<&str>,
+        table: &str,
+    ) -> Result<Vec<ConstraintInfo>> {
+        self.schema_engine.get_constraints(schema, table).await
+    }
+
+    async fn list_functions(&self, schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
+        self.schema_engine.list_functions(schema).await
+    }
+
+    async fn list_procedures(&self, schema: Option<&str>) -> Result<Vec<ProcedureInfo>> {
+        self.schema_engine.list_procedures(schema).await
+    }
+
+    async fn list_triggers(
+        &self,
+        schema: Option<&str>,
+        table: Option<&str>,
+    ) -> Result<Vec<TriggerInfo>> {
+        self.schema_engine.list_triggers(schema, table).await
+    }
+
+    async fn list_sequences(&self, schema: Option<&str>) -> Result<Vec<SequenceInfo>> {
+        self.schema_engine.list_sequences(schema).await
+    }
+
+    async fn list_types(&self, schema: Option<&str>) -> Result<Vec<TypeInfo>> {
+        self.schema_engine.list_types(schema).await
+    }
+
+    async fn get_dependencies(&self, object: &DatabaseObject) -> Result<Vec<Dependency>> {
+        self.schema_engine.get_dependencies(object).await
+    }
+
+    // ---- DuckDB-specific presentation: kept in the driver ----
 
     async fn list_objects_panel_data_for_kind(
         &self,
@@ -157,344 +159,6 @@ impl SchemaIntrospection for DuckDbConnection {
         duckdb_object_form_ddl(request)
     }
 
-    async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let schema = schema.unwrap_or("main");
-        let tables = self.list_tables(Some(schema)).await?;
-        let info = tables
-            .into_iter()
-            .find(|t| t.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-
-        Ok(TableDetails {
-            info,
-            columns: self.get_columns(Some(schema), name).await?,
-            primary_key: self.get_primary_key(Some(schema), name).await?,
-            foreign_keys: self.get_foreign_keys(Some(schema), name).await?,
-            indexes: self.get_indexes(Some(schema), name).await?,
-            constraints: self.get_constraints(Some(schema), name).await?,
-            triggers: Vec::new(), // DuckDB has no triggers
-        })
-    }
-
-    async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT column_name, column_index, data_type, is_nullable, column_default
-                     FROM duckdb_columns() 
-                     WHERE schema_name = ? AND table_name = ?
-                     ORDER BY column_index",
-                &[
-                    Value::String(schema.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| ColumnInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0) as usize,
-                data_type: row
-                    .get(2)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                nullable: row.get(3).and_then(|v| v.as_bool()).unwrap_or(true),
-                default_value: row.get(4).and_then(|v| v.as_str()).map(|s| s.to_string()),
-                max_length: None,
-                precision: None,
-                scale: None,
-                is_primary_key: false, // Set via constraints
-                is_auto_increment: false,
-                is_unique: false,
-                foreign_key: None,
-                comment: None,
-                ..Default::default()
-            })
-            .collect())
-    }
-
-    async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT index_name, is_unique, is_primary, sql
-                     FROM duckdb_indexes() 
-                     WHERE schema_name = ? AND table_name = ?",
-                &[
-                    Value::String(schema.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| IndexInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                columns: Vec::new(), // DuckDB doesn't expose index columns easily
-                is_unique: row.get(1).and_then(|v| v.as_bool()).unwrap_or(false),
-                is_primary: row.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
-                index_type: "ART".to_string(), // DuckDB uses ART indexes
-                comment: None,
-                ..Default::default()
-            })
-            .collect())
-    }
-
-    async fn get_foreign_keys(
-        &self,
-        schema: Option<&str>,
-        table: &str,
-    ) -> Result<Vec<ForeignKeyInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT 
-                        tc.constraint_name,
-                        kcu.column_name,
-                        ccu.table_name AS ref_table,
-                        ccu.table_schema AS ref_schema,
-                        ccu.column_name AS ref_column
-                     FROM information_schema.table_constraints tc
-                     JOIN information_schema.key_column_usage kcu 
-                        ON tc.constraint_name = kcu.constraint_name
-                     JOIN information_schema.constraint_column_usage ccu
-                        ON tc.constraint_name = ccu.constraint_name
-                     WHERE tc.constraint_type = 'FOREIGN KEY' 
-                        AND tc.table_schema = ? AND tc.table_name = ?",
-                &[
-                    Value::String(schema.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        let mut fk_map: std::collections::HashMap<String, ForeignKeyInfo> =
-            std::collections::HashMap::new();
-
-        for row in result.rows.iter() {
-            let name = row
-                .get(0)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let column = row
-                .get(1)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_table = row
-                .get(2)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ref_schema = row.get(3).and_then(|v| v.as_str()).map(|s| s.to_string());
-            let ref_column = row
-                .get(4)
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-
-            fk_map
-                .entry(name.clone())
-                .and_modify(|fk| {
-                    fk.columns.push(column.clone());
-                    fk.referenced_columns.push(ref_column.clone());
-                })
-                .or_insert(ForeignKeyInfo {
-                    name,
-                    columns: vec![column],
-                    referenced_table: ref_table,
-                    referenced_schema: ref_schema,
-                    referenced_columns: vec![ref_column],
-                    on_update: ForeignKeyAction::NoAction,
-                    on_delete: ForeignKeyAction::NoAction,
-                    is_deferrable: false,
-                    initially_deferred: false,
-                });
-        }
-
-        Ok(fk_map.into_values().collect())
-    }
-
-    async fn get_primary_key(
-        &self,
-        schema: Option<&str>,
-        table: &str,
-    ) -> Result<Option<PrimaryKeyInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT constraint_name, column_name
-                     FROM information_schema.key_column_usage kcu
-                     JOIN information_schema.table_constraints tc 
-                        ON kcu.constraint_name = tc.constraint_name
-                     WHERE tc.constraint_type = 'PRIMARY KEY' 
-                        AND tc.table_schema = ? AND tc.table_name = ?
-                     ORDER BY kcu.ordinal_position",
-                &[
-                    Value::String(schema.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        if result.rows.is_empty() {
-            return Ok(None);
-        }
-
-        let name = result
-            .rows
-            .first()
-            .and_then(|row| row.get(0))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-        let columns: Vec<String> = result
-            .rows
-            .iter()
-            .filter_map(|row| row.get(1).and_then(|v| v.as_str()).map(|s| s.to_string()))
-            .collect();
-
-        Ok(Some(PrimaryKeyInfo { name, columns }))
-    }
-
-    async fn get_constraints(
-        &self,
-        schema: Option<&str>,
-        table: &str,
-    ) -> Result<Vec<ConstraintInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT constraint_name, constraint_type
-                     FROM information_schema.table_constraints
-                     WHERE table_schema = ? AND table_name = ?",
-                &[
-                    Value::String(schema.to_string()),
-                    Value::String(table.to_string()),
-                ],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| {
-                let name = row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string();
-                let constraint_type = match row.get(1).and_then(|v| v.as_str()).unwrap_or("") {
-                    "PRIMARY KEY" => ConstraintType::PrimaryKey,
-                    "FOREIGN KEY" => ConstraintType::ForeignKey,
-                    "UNIQUE" => ConstraintType::Unique,
-                    "CHECK" => ConstraintType::Check,
-                    _ => ConstraintType::Check,
-                };
-                ConstraintInfo {
-                    name,
-                    constraint_type,
-                    columns: Vec::new(),
-                    definition: None,
-                }
-            })
-            .collect())
-    }
-
-    async fn list_functions(&self, _schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
-        // DuckDB has built-in functions but no user-defined functions in the traditional sense
-        Ok(Vec::new())
-    }
-
-    async fn list_procedures(&self, _schema: Option<&str>) -> Result<Vec<ProcedureInfo>> {
-        // DuckDB does not support stored procedures
-        Ok(Vec::new())
-    }
-
-    async fn list_triggers(
-        &self,
-        _schema: Option<&str>,
-        _table: Option<&str>,
-    ) -> Result<Vec<TriggerInfo>> {
-        // DuckDB does not support triggers
-        Ok(Vec::new())
-    }
-
-    async fn list_sequences(&self, schema: Option<&str>) -> Result<Vec<SequenceInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT sequence_name, start_value, min_value, max_value, increment_by
-                     FROM duckdb_sequences() WHERE schema_name = ?",
-                &[Value::String(schema.to_string())],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| SequenceInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                schema: Some(schema.to_string()),
-                data_type: "BIGINT".to_string(),
-                start_value: row.get(1).and_then(|v| v.as_i64()).unwrap_or(1),
-                min_value: row.get(2).and_then(|v| v.as_i64()).unwrap_or(1),
-                max_value: row.get(3).and_then(|v| v.as_i64()).unwrap_or(i64::MAX),
-                increment_by: row.get(4).and_then(|v| v.as_i64()).unwrap_or(1),
-                current_value: None,
-                owner: None,
-                comment: None,
-            })
-            .collect())
-    }
-
-    async fn list_types(&self, schema: Option<&str>) -> Result<Vec<TypeInfo>> {
-        let schema = schema.unwrap_or("main");
-        let result = self
-            .query(
-                "SELECT type_name, type_category FROM duckdb_types() 
-                     WHERE schema_name = ? AND type_category = 'ENUM'",
-                &[Value::String(schema.to_string())],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| TypeInfo {
-                name: row
-                    .get(0)
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_string(),
-                schema: Some(schema.to_string()),
-                type_kind: TypeKind::Enum,
-                values: None,
-                definition: None,
-                owner: None,
-                comment: None,
-            })
-            .collect())
-    }
-
     async fn generate_ddl(&self, object: &DatabaseObject) -> Result<String> {
         match object.object_type {
             ObjectType::Table => {
@@ -524,10 +188,456 @@ impl SchemaIntrospection for DuckDbConnection {
             ))),
         }
     }
+}
 
-    async fn get_dependencies(&self, _object: &DatabaseObject) -> Result<Vec<Dependency>> {
-        // DuckDB doesn't expose dependency information easily
-        Ok(Vec::new())
+/// DuckDB implementation of the raw-catalog port.
+pub struct DuckDbCatalog {
+    connection: Arc<Mutex<duckdb::Connection>>,
+    capabilities: CatalogCapabilities,
+}
+
+impl DuckDbCatalog {
+    pub fn new(connection: Arc<Mutex<duckdb::Connection>>) -> Self {
+        let capabilities = CatalogCapabilities {
+            driver_id: "duckdb".to_string(),
+            server_version: None,
+            namespaces: NamespaceModel::DatabasesAndSchemas {
+                default_schema: "main".to_string(),
+            },
+            objects: ObjectKindSupport {
+                tables: true,
+                views: true,
+                sequences: true,
+                types: true,
+                ..ObjectKindSupport::NONE
+            },
+            auto_increment: Default::default(),
+            stored_source: Vec::new(),
+            deferrable_constraints: false,
+            panel_extras: Vec::new(),
+        };
+        Self {
+            connection,
+            capabilities,
+        }
+    }
+
+    fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
+        run_duckdb_query(&self.connection, sql, params)
+    }
+}
+
+#[async_trait]
+impl CatalogSource for DuckDbCatalog {
+    fn capabilities(&self) -> &CatalogCapabilities {
+        &self.capabilities
+    }
+
+    async fn fetch_relations(&self, schema: Option<&str>) -> Result<Vec<RawRelationRow>> {
+        let schema = schema.unwrap_or("main").to_string();
+
+        let tables = self.query(
+            "SELECT table_name, estimated_size, column_count FROM duckdb_tables() WHERE schema_name = ?",
+            &[Value::String(schema.clone())],
+        )?;
+        let mut relations: Vec<RawRelationRow> = tables
+            .rows
+            .iter()
+            .map(|row| {
+                let mut relation = RawRelationRow::new(
+                    row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    TableType::Table,
+                );
+                relation.schema = Some(schema.clone());
+                relation.row_estimate = row.get(1).and_then(|v| v.as_i64());
+                relation
+            })
+            .collect();
+
+        let views = self.query(
+            "SELECT view_name, sql FROM duckdb_views() WHERE schema_name = ?",
+            &[Value::String(schema.clone())],
+        )?;
+        relations.extend(views.rows.iter().map(|row| {
+            let mut relation = RawRelationRow::new(
+                row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                TableType::View,
+            );
+            relation.schema = Some(schema.clone());
+            relation.view_definition = row.get(1).and_then(|v| v.as_str()).map(ToString::to_string);
+            relation
+        }));
+
+        Ok(relations)
+    }
+
+    async fn fetch_columns(&self, relation: &RelationRef) -> Result<Vec<RawColumnRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("main");
+        let result = self.query(
+            "SELECT column_name, column_index, data_type, is_nullable, column_default
+             FROM duckdb_columns()
+             WHERE schema_name = ? AND table_name = ?
+             ORDER BY column_index",
+            &[
+                Value::String(schema.to_string()),
+                Value::String(relation.name.clone()),
+            ],
+        )?;
+
+        // DuckDB reports primary-key membership through a separate constraint
+        // catalog; fetch it so the engine can flag PK columns.
+        let pk = self.query(
+            "SELECT kcu.column_name, kcu.ordinal_position
+             FROM information_schema.key_column_usage kcu
+             JOIN information_schema.table_constraints tc
+                ON kcu.constraint_name = tc.constraint_name
+             WHERE tc.constraint_type = 'PRIMARY KEY'
+                AND tc.table_schema = ? AND tc.table_name = ?",
+            &[
+                Value::String(schema.to_string()),
+                Value::String(relation.name.clone()),
+            ],
+        )?;
+        let pk_ordinals: HashMap<String, i64> = pk
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    row.get(0)?.as_str()?.to_string(),
+                    row.get(1).and_then(|v| v.as_i64()).unwrap_or(1),
+                ))
+            })
+            .collect();
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| {
+                let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                RawColumnRow {
+                    ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+                    data_type: row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    is_nullable: row.get(3).and_then(|v| v.as_bool()).unwrap_or(true),
+                    default_value: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+                    primary_key_ordinal: pk_ordinals.get(&name).copied(),
+                    name,
+                    ..Default::default()
+                }
+            })
+            .collect())
+    }
+
+    async fn fetch_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<RawColumnRow>>>> {
+        let schema = schema.unwrap_or("main");
+        let result = self.query(
+            "SELECT column_name, column_index, data_type, is_nullable, column_default, table_name
+             FROM duckdb_columns()
+             WHERE schema_name = ?
+             ORDER BY table_name, column_index",
+            &[Value::String(schema.to_string())],
+        )?;
+
+        // Constraint names are auto-generated for unnamed constraints and are not
+        // reliably unique across tables, so the join must carry table_name too.
+        let pk = self.query(
+            "SELECT kcu.column_name, kcu.ordinal_position, tc.table_name
+             FROM information_schema.key_column_usage kcu
+             JOIN information_schema.table_constraints tc
+                ON kcu.constraint_name = tc.constraint_name
+                AND kcu.table_schema = tc.table_schema
+                AND kcu.table_name = tc.table_name
+             WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_schema = ?",
+            &[Value::String(schema.to_string())],
+        )?;
+        let pk_ordinals: HashMap<(String, String), i64> = pk
+            .rows
+            .iter()
+            .filter_map(|row| {
+                Some((
+                    (
+                        row.get(2)?.as_str()?.to_string(),
+                        row.get(0)?.as_str()?.to_string(),
+                    ),
+                    row.get(1).and_then(|v| v.as_i64()).unwrap_or(1),
+                ))
+            })
+            .collect();
+
+        let mut columns_by_relation: HashMap<String, Vec<RawColumnRow>> = HashMap::new();
+        for row in &result.rows {
+            let Some(table) = row.get(5).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let primary_key_ordinal = pk_ordinals
+                .get(&(table.to_string(), name.clone()))
+                .copied();
+
+            columns_by_relation
+                .entry(table.to_string())
+                .or_default()
+                .push(RawColumnRow {
+                    ordinal: row.get(1).and_then(|v| v.as_i64()).unwrap_or(0),
+                    data_type: row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    is_nullable: row.get(3).and_then(|v| v.as_bool()).unwrap_or(true),
+                    default_value: row.get(4).and_then(|v| v.as_str()).map(ToString::to_string),
+                    primary_key_ordinal,
+                    name,
+                    ..Default::default()
+                });
+        }
+
+        Ok(Some(columns_by_relation))
+    }
+
+    async fn fetch_indexes(&self, relation: &RelationRef) -> Result<Vec<RawIndexRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("main");
+        let result = self.query(
+            "SELECT index_name, is_unique, is_primary, sql
+             FROM duckdb_indexes()
+             WHERE schema_name = ? AND table_name = ?",
+            &[
+                Value::String(schema.to_string()),
+                Value::String(relation.name.clone()),
+            ],
+        )?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawIndexRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                columns: Vec::new(),
+                is_unique: row.get(1).and_then(|v| v.as_bool()).unwrap_or(false),
+                is_primary: row.get(2).and_then(|v| v.as_bool()).unwrap_or(false),
+                method: Some("ART".to_string()),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    async fn fetch_foreign_keys(&self, relation: &RelationRef) -> Result<Vec<RawForeignKeyRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("main");
+        let result = self.query(
+            "SELECT tc.constraint_name, kcu.column_name, ccu.table_name AS ref_table,
+                    ccu.table_schema AS ref_schema, ccu.column_name AS ref_column
+             FROM information_schema.table_constraints tc
+             JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+             JOIN information_schema.constraint_column_usage ccu
+                ON tc.constraint_name = ccu.constraint_name
+             WHERE tc.constraint_type = 'FOREIGN KEY'
+                AND tc.table_schema = ? AND tc.table_name = ?",
+            &[
+                Value::String(schema.to_string()),
+                Value::String(relation.name.clone()),
+            ],
+        )?;
+
+        // Group one row per (constraint, column) into one record per constraint.
+        let mut by_name: indexmap_order::OrderedFkMap = Default::default();
+        for row in result.rows.iter() {
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let column = row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_table = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_schema = row.get(3).and_then(|v| v.as_str()).map(ToString::to_string);
+            let ref_column = row.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            by_name.push(name, column, ref_table, ref_schema, ref_column);
+        }
+        Ok(by_name.into_rows())
+    }
+
+    async fn fetch_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<RawForeignKeyRow>>>> {
+        let schema = schema.unwrap_or("main");
+        let result = self.query(
+            "SELECT tc.constraint_name, kcu.column_name, ccu.table_name AS ref_table,
+                    ccu.table_schema AS ref_schema, ccu.column_name AS ref_column,
+                    tc.table_name
+             FROM information_schema.table_constraints tc
+             JOIN information_schema.key_column_usage kcu
+                ON tc.constraint_name = kcu.constraint_name
+                AND tc.table_schema = kcu.table_schema
+                AND tc.table_name = kcu.table_name
+             JOIN information_schema.constraint_column_usage ccu
+                ON tc.constraint_name = ccu.constraint_name
+                AND tc.table_schema = ccu.table_schema
+             WHERE tc.constraint_type = 'FOREIGN KEY' AND tc.table_schema = ?
+             ORDER BY tc.table_name, tc.constraint_name",
+            &[Value::String(schema.to_string())],
+        )?;
+
+        // Grouped per table first: constraint names are not unique across tables.
+        let mut rows_by_relation: HashMap<String, indexmap_order::OrderedFkMap> = HashMap::new();
+        for row in result.rows.iter() {
+            let Some(table) = row.get(5).and_then(|value| value.as_str()) else {
+                continue;
+            };
+            let name = row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let column = row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_table = row.get(2).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let ref_schema = row.get(3).and_then(|v| v.as_str()).map(ToString::to_string);
+            let ref_column = row.get(4).and_then(|v| v.as_str()).unwrap_or("").to_string();
+            rows_by_relation
+                .entry(table.to_string())
+                .or_default()
+                .push(name, column, ref_table, ref_schema, ref_column);
+        }
+
+        Ok(Some(
+            rows_by_relation
+                .into_iter()
+                .map(|(relation, by_name)| (relation, by_name.into_rows()))
+                .collect(),
+        ))
+    }
+
+    async fn fetch_constraints(&self, relation: &RelationRef) -> Result<Vec<RawConstraintRow>> {
+        let schema = relation.schema.as_deref().unwrap_or("main");
+        let result = self.query(
+            "SELECT constraint_name, constraint_type
+             FROM information_schema.table_constraints
+             WHERE table_schema = ? AND table_name = ?",
+            &[
+                Value::String(schema.to_string()),
+                Value::String(relation.name.clone()),
+            ],
+        )?;
+
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawConstraintRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                kind: row.get(1).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                columns: Vec::new(),
+                definition: None,
+            })
+            .collect())
+    }
+
+    async fn fetch_databases(&self) -> Result<Vec<RawDatabaseRow>> {
+        let result = self.query("SELECT database_name, path FROM duckdb_databases()", &[])?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawDatabaseRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                comment: row.get(1).and_then(|v| v.as_str()).map(ToString::to_string),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    async fn fetch_schemas(&self) -> Result<Vec<RawSchemaRow>> {
+        let result = self.query(
+            "SELECT schema_name FROM information_schema.schemata
+             WHERE catalog_name = current_database() ORDER BY schema_name",
+            &[],
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawSchemaRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                ..Default::default()
+            })
+            .collect())
+    }
+
+    async fn fetch_sequences(&self, schema: Option<&str>) -> Result<Vec<RawSequenceRow>> {
+        let schema = schema.unwrap_or("main");
+        let result = self.query(
+            "SELECT sequence_name, start_value, min_value, max_value, increment_by
+             FROM duckdb_sequences() WHERE schema_name = ?",
+            &[Value::String(schema.to_string())],
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawSequenceRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                schema: Some(schema.to_string()),
+                data_type: "BIGINT".to_string(),
+                start_value: row.get(1).and_then(|v| v.as_i64()).unwrap_or(1),
+                min_value: row.get(2).and_then(|v| v.as_i64()).unwrap_or(1),
+                max_value: row.get(3).and_then(|v| v.as_i64()).unwrap_or(i64::MAX),
+                increment_by: row.get(4).and_then(|v| v.as_i64()).unwrap_or(1),
+                current_value: None,
+                owner: None,
+                comment: None,
+            })
+            .collect())
+    }
+
+    async fn fetch_types(&self, schema: Option<&str>) -> Result<Vec<RawTypeRow>> {
+        let schema = schema.unwrap_or("main");
+        let result = self.query(
+            "SELECT type_name, type_category FROM duckdb_types()
+             WHERE schema_name = ? AND type_category = 'ENUM'",
+            &[Value::String(schema.to_string())],
+        )?;
+        Ok(result
+            .rows
+            .iter()
+            .map(|row| RawTypeRow {
+                name: row.get(0).and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                schema: Some(schema.to_string()),
+                kind: "ENUM".to_string(),
+                ..Default::default()
+            })
+            .collect())
+    }
+}
+
+/// Insertion-ordered grouping of foreign-key rows by constraint name, so a
+/// composite key collapses to one record with all its columns in order.
+mod indexmap_order {
+    use zqlz_core::RawForeignKeyRow;
+
+    #[derive(Default)]
+    pub struct OrderedFkMap {
+        order: Vec<String>,
+        rows: std::collections::HashMap<String, RawForeignKeyRow>,
+    }
+
+    impl OrderedFkMap {
+        pub fn push(
+            &mut self,
+            name: String,
+            column: String,
+            ref_table: String,
+            ref_schema: Option<String>,
+            ref_column: String,
+        ) {
+            if !self.rows.contains_key(&name) {
+                self.order.push(name.clone());
+                self.rows.insert(
+                    name.clone(),
+                    RawForeignKeyRow {
+                        name: name.clone(),
+                        referenced_table: ref_table,
+                        referenced_schema: ref_schema,
+                        ..Default::default()
+                    },
+                );
+            }
+            let entry = self.rows.get_mut(&name).expect("entry just inserted");
+            entry.columns.push(column);
+            entry.referenced_columns.push(ref_column);
+        }
+
+        pub fn into_rows(mut self) -> Vec<RawForeignKeyRow> {
+            self.order
+                .iter()
+                .filter_map(|name| self.rows.remove(name))
+                .collect()
+        }
     }
 }
 

@@ -1,14 +1,88 @@
 //! Connection manager for handling active connections
 
+use gpui::BackgroundExecutor;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use uuid::Uuid;
 use zqlz_core::{Connection, ConnectionScope, Result, ZqlzError};
 use zqlz_drivers::DriverRegistry;
 
 use crate::SavedConnection;
+use crate::health::{PingError, PingResult, ping_database_with_timeout};
+
+/// How often active connections should be pinged to keep them alive and to
+/// notice a server-side or network-side disconnect before the user runs a query.
+pub const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How long a single heartbeat ping may take before the connection is treated as
+/// wedged. Connections are pinged in sequence, so this bounds how long one dead
+/// socket can delay the rest.
+pub const DEFAULT_HEARTBEAT_PING_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Result of pinging a single connection during a heartbeat pass.
+#[derive(Debug, Clone)]
+pub enum HeartbeatOutcome {
+    /// The connection answered the ping.
+    Healthy {
+        connection_id: Uuid,
+        database: Option<String>,
+        latency: Duration,
+    },
+    /// The connection was dead and a replacement was established.
+    Reconnected {
+        connection_id: Uuid,
+        database: Option<String>,
+    },
+    /// A query was already occupying the connection, so it was left alone. An
+    /// in-flight query is its own proof of liveness.
+    Busy {
+        connection_id: Uuid,
+        database: Option<String>,
+    },
+    /// The connection was dead and could not be replaced.
+    Lost {
+        connection_id: Uuid,
+        database: Option<String>,
+        error: String,
+    },
+}
+
+/// Whether a failed ping means the connection itself is gone, as opposed to the
+/// server rejecting the ping statement.
+///
+/// A closed transport and a wedged one are both unrecoverable. A query error is
+/// not: only rebuild for messages that clearly describe a broken transport, so a
+/// transient server complaint never discards a working session.
+fn indicates_connection_loss(error: &PingError) -> bool {
+    match error {
+        PingError::ConnectionClosed | PingError::Timeout => true,
+        PingError::QueryFailed(message) => message_indicates_connection_loss(message),
+    }
+}
+
+fn message_indicates_connection_loss(message: &str) -> bool {
+    const TRANSPORT_FAILURES: [&str; 11] = [
+        "connection closed",
+        "connection reset",
+        "connection refused",
+        "connection aborted",
+        "connection is closed",
+        "broken pipe",
+        "not connected",
+        "server closed the connection",
+        "terminating connection",
+        "no connection to the server",
+        "unexpected end of file",
+    ];
+
+    let normalized = message.to_ascii_lowercase();
+    TRANSPORT_FAILURES
+        .iter()
+        .any(|failure| normalized.contains(failure))
+}
 
 /// Manages database connections
 pub struct ConnectionManager {
@@ -357,6 +431,194 @@ impl ConnectionManager {
         tracing::debug!(count = ?names.len(), "databases retrieved");
         Ok(names)
     }
+
+    /// Ping every live connection once, replacing any that have died.
+    ///
+    /// This is what keeps sessions alive through idle periods: managed
+    /// PostgreSQL services, connection poolers and NAT gateways all drop idle
+    /// TCP sessions, and without traffic the first sign of that would be a
+    /// failed user query. Call this on a timer (see
+    /// [`DEFAULT_HEARTBEAT_INTERVAL`]) from a background task so it runs
+    /// whether or not the window is focused.
+    #[tracing::instrument(skip(self, executor))]
+    pub async fn heartbeat(&self, executor: &BackgroundExecutor) -> Vec<HeartbeatOutcome> {
+        let main_connections: Vec<(Uuid, Arc<dyn Connection>)> = self
+            .active
+            .read()
+            .iter()
+            .filter(|(_, conn)| conn.requires_heartbeat())
+            .map(|(id, conn)| (*id, Arc::clone(conn)))
+            .collect();
+
+        let scoped_connections: Vec<((Uuid, String), Arc<dyn Connection>)> = self
+            .database_connections
+            .read()
+            .iter()
+            .filter(|(_, conn)| conn.requires_heartbeat())
+            .map(|(key, conn)| (key.clone(), Arc::clone(conn)))
+            .collect();
+
+        let mut outcomes =
+            Vec::with_capacity(main_connections.len() + scoped_connections.len());
+
+        for (connection_id, conn) in main_connections {
+            if conn.is_busy() {
+                outcomes.push(HeartbeatOutcome::Busy {
+                    connection_id,
+                    database: None,
+                });
+                continue;
+            }
+
+            match self.ping(conn.as_ref(), executor).await {
+                Ok(latency) => outcomes.push(HeartbeatOutcome::Healthy {
+                    connection_id,
+                    database: None,
+                    latency,
+                }),
+                Err(error) => {
+                    let message = error.to_string();
+                    if !indicates_connection_loss(&error) {
+                        tracing::warn!(
+                            %connection_id,
+                            error = %message,
+                            "heartbeat ping failed but transport looks alive; keeping connection"
+                        );
+                        outcomes.push(HeartbeatOutcome::Lost {
+                            connection_id,
+                            database: None,
+                            error: message,
+                        });
+                        continue;
+                    }
+
+                    tracing::warn!(
+                        %connection_id,
+                        error = %message,
+                        "heartbeat detected a dead connection; reconnecting"
+                    );
+                    match self.reconnect(connection_id).await {
+                        Ok(()) => outcomes.push(HeartbeatOutcome::Reconnected {
+                            connection_id,
+                            database: None,
+                        }),
+                        Err(reconnect_error) => {
+                            tracing::error!(
+                                %connection_id,
+                                error = %reconnect_error,
+                                "failed to reconnect after heartbeat failure"
+                            );
+                            outcomes.push(HeartbeatOutcome::Lost {
+                                connection_id,
+                                database: None,
+                                error: reconnect_error.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+
+        for ((connection_id, database), conn) in scoped_connections {
+            if conn.is_busy() {
+                outcomes.push(HeartbeatOutcome::Busy {
+                    connection_id,
+                    database: Some(database),
+                });
+                continue;
+            }
+
+            match self.ping(conn.as_ref(), executor).await {
+                Ok(latency) => outcomes.push(HeartbeatOutcome::Healthy {
+                    connection_id,
+                    database: Some(database),
+                    latency,
+                }),
+                Err(error) => {
+                    let message = error.to_string();
+                    if !indicates_connection_loss(&error) {
+                        outcomes.push(HeartbeatOutcome::Lost {
+                            connection_id,
+                            database: Some(database),
+                            error: message,
+                        });
+                        continue;
+                    }
+
+                    // Database-scoped connections are created on demand, so
+                    // evicting the dead one is enough - the next lookup rebuilds it.
+                    tracing::warn!(
+                        %connection_id,
+                        %database,
+                        error = %message,
+                        "evicting dead database-scoped connection"
+                    );
+                    self.database_connections
+                        .write()
+                        .remove(&(connection_id, database.clone()));
+                    outcomes.push(HeartbeatOutcome::Lost {
+                        connection_id,
+                        database: Some(database),
+                        error: message,
+                    });
+                }
+            }
+        }
+
+        outcomes
+    }
+
+    async fn ping(
+        &self,
+        conn: &dyn Connection,
+        executor: &BackgroundExecutor,
+    ) -> PingResult {
+        ping_database_with_timeout(conn, executor, DEFAULT_HEARTBEAT_PING_TIMEOUT).await
+    }
+
+    /// Replace an active connection with a freshly established one.
+    ///
+    /// The saved configuration is reused, and every database-scoped connection
+    /// derived from this connection is dropped because they were bound to the
+    /// old server session.
+    #[tracing::instrument(skip(self), fields(connection_id = %id))]
+    pub async fn reconnect(&self, id: Uuid) -> Result<()> {
+        let saved = self
+            .get_saved(id)
+            .ok_or_else(|| ZqlzError::NotFound("Saved connection config not found".into()))?;
+
+        let driver = self
+            .drivers
+            .get(&saved.driver)
+            .ok_or_else(|| ZqlzError::Driver(format!("Unknown driver: {}", saved.driver)))?;
+
+        let conn = driver.connect(&saved.to_connection_config()).await?;
+
+        let previous = self.active.write().insert(id, conn);
+
+        let stale_scoped: Vec<Arc<dyn Connection>> = {
+            let mut guard = self.database_connections.write();
+            let keys: Vec<(Uuid, String)> = guard
+                .keys()
+                .filter(|(connection_id, _)| *connection_id == id)
+                .cloned()
+                .collect();
+            keys.into_iter()
+                .filter_map(|key| guard.remove(&key))
+                .collect()
+        };
+
+        // Deliberately not calling `close()` on the connections being replaced.
+        // Another task may still be awaiting a query on one of them, and for
+        // pool-backed drivers `close()` disconnects the pool, which would abort
+        // that query. Dropping our handle lets each connection shut down once
+        // its last user is finished.
+        drop(previous);
+        drop(stale_scoped);
+
+        tracing::info!("connection re-established");
+        Ok(())
+    }
 }
 
 impl Default for ConnectionManager {
@@ -379,6 +641,9 @@ mod tests {
         driver_name: &'static str,
         requires_scoped_connection: bool,
         closed: AtomicBool,
+        requires_heartbeat: bool,
+        busy: bool,
+        pinged: AtomicBool,
     }
 
     impl MockConnection {
@@ -387,7 +652,30 @@ mod tests {
                 driver_name,
                 requires_scoped_connection,
                 closed: AtomicBool::new(false),
+                requires_heartbeat: true,
+                busy: false,
+                pinged: AtomicBool::new(false),
             }
+        }
+
+        fn busy(driver_name: &'static str) -> Self {
+            Self {
+                busy: true,
+                ..Self::new(driver_name, false)
+            }
+        }
+
+        fn embedded(driver_name: &'static str) -> Self {
+            Self {
+                requires_heartbeat: false,
+                ..Self::new(driver_name, false)
+            }
+        }
+
+        fn dead(driver_name: &'static str, requires_scoped_connection: bool) -> Self {
+            let connection = Self::new(driver_name, requires_scoped_connection);
+            connection.closed.store(true, Ordering::SeqCst);
+            connection
         }
     }
 
@@ -418,6 +706,7 @@ mod tests {
         }
 
         async fn query(&self, _sql: &str, _params: &[Value]) -> Result<QueryResult> {
+            self.pinged.store(true, Ordering::SeqCst);
             Ok(QueryResult::empty())
         }
 
@@ -562,6 +851,14 @@ mod tests {
         fn is_closed(&self) -> bool {
             self.closed.load(Ordering::SeqCst)
         }
+
+        fn requires_heartbeat(&self) -> bool {
+            self.requires_heartbeat
+        }
+
+        fn is_busy(&self) -> bool {
+            self.busy
+        }
     }
 
     #[test]
@@ -594,6 +891,121 @@ mod tests {
                 .get_for_database_cached(connection_id, Some("analytics"))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn transport_failures_are_distinguished_from_server_errors() {
+        assert!(indicates_connection_loss(&PingError::QueryFailed(
+            "Query error: Failed to prepare query: connection closed".into()
+        )));
+        assert!(indicates_connection_loss(&PingError::QueryFailed(
+            "Broken pipe (os error 32)".into()
+        )));
+        assert!(indicates_connection_loss(&PingError::ConnectionClosed));
+        assert!(indicates_connection_loss(&PingError::Timeout));
+        assert!(!indicates_connection_loss(&PingError::QueryFailed(
+            "permission denied for table users".into()
+        )));
+        assert!(!indicates_connection_loss(&PingError::QueryFailed(
+            "syntax error at or near \"SELCT\"".into()
+        )));
+    }
+
+    #[gpui::test]
+    async fn heartbeat_reports_live_connections_as_healthy(cx: &mut gpui::TestAppContext) {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        manager
+            .active
+            .write()
+            .insert(connection_id, Arc::new(MockConnection::new("mysql", false)));
+
+        let outcomes = manager.heartbeat(&cx.background_executor).await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0],
+            HeartbeatOutcome::Healthy {
+                connection_id: id,
+                database: None,
+                ..
+            } if id == connection_id
+        ));
+    }
+
+    #[gpui::test]
+    async fn heartbeat_skips_drivers_with_no_transport_to_keep_warm(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let manager = ConnectionManager::new();
+        manager
+            .active
+            .write()
+            .insert(Uuid::new_v4(), Arc::new(MockConnection::embedded("sqlite")));
+
+        assert!(manager.heartbeat(&cx.background_executor).await.is_empty());
+    }
+
+    #[gpui::test]
+    async fn heartbeat_leaves_busy_connections_unpinged(cx: &mut gpui::TestAppContext) {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        let connection = Arc::new(MockConnection::busy("postgresql"));
+        manager
+            .active
+            .write()
+            .insert(connection_id, connection.clone());
+
+        let outcomes = manager.heartbeat(&cx.background_executor).await;
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [HeartbeatOutcome::Busy { database: None, .. }]
+        ));
+        assert!(
+            !connection.pinged.load(Ordering::SeqCst),
+            "a busy connection must not be pinged"
+        );
+    }
+
+    #[gpui::test]
+    async fn heartbeat_evicts_dead_database_scoped_connections(cx: &mut gpui::TestAppContext) {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        manager.database_connections.write().insert(
+            (connection_id, "erp_lab".to_string()),
+            Arc::new(MockConnection::dead("postgresql", true)),
+        );
+
+        let outcomes = manager.heartbeat(&cx.background_executor).await;
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [HeartbeatOutcome::Lost {
+                database: Some(_),
+                ..
+            }]
+        ));
+        assert!(manager.database_connections.read().is_empty());
+    }
+
+    #[gpui::test]
+    async fn heartbeat_reports_loss_when_dead_connection_cannot_be_rebuilt(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let manager = ConnectionManager::new();
+        let connection_id = Uuid::new_v4();
+        manager
+            .active
+            .write()
+            .insert(connection_id, Arc::new(MockConnection::dead("mysql", false)));
+
+        let outcomes = manager.heartbeat(&cx.background_executor).await;
+
+        assert!(matches!(
+            outcomes.as_slice(),
+            [HeartbeatOutcome::Lost { database: None, .. }]
+        ));
     }
 
     #[test]

@@ -469,9 +469,9 @@ impl ExplainConfig {
     pub fn postgresql() -> Self {
         Self {
             explain_format: Cow::Borrowed("EXPLAIN {sql}"),
-            query_plan_format: Some(Cow::Borrowed("EXPLAIN (FORMAT TEXT) {sql}")),
+            query_plan_format: Some(Cow::Borrowed("EXPLAIN (FORMAT JSON) {sql}")),
             analyze_format: Some(Cow::Borrowed(
-                "EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT) {sql}",
+                "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) {sql}",
             )),
             explain_description: Cow::Borrowed("Shows query execution plan"),
             query_plan_description: Some(Cow::Borrowed("Shows detailed execution plan with costs")),

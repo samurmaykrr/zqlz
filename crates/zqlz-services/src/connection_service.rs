@@ -2,6 +2,7 @@
 //!
 //! Orchestrates connection establishment, schema loading, and disconnection.
 
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use uuid::Uuid;
 use zqlz_connection::{
@@ -15,7 +16,7 @@ use zqlz_core::{
 use crate::error::{ServiceError, ServiceResult};
 use crate::key_value_service::KeyValueService;
 use crate::schema_service::SchemaService;
-use crate::view_models::DatabaseSchema;
+use crate::view_models::{DatabaseSchema, TableColumnSummary};
 
 /// Service for connection lifecycle management
 ///
@@ -28,6 +29,9 @@ pub struct ConnectionService {
     manager: Arc<ConnectionManager>,
     schema_service: Arc<SchemaService>,
     key_value_service: Arc<KeyValueService>,
+    /// Connections with an in-flight palette schema refresh, so repeatedly
+    /// opening the palette does not stack duplicate introspection queries.
+    palette_schema_refreshes_in_flight: Arc<parking_lot::Mutex<HashSet<Uuid>>>,
 }
 
 /// Resolved connection target for workflows that may address a specific logical
@@ -126,6 +130,10 @@ pub struct PaletteSchemaCommandsData {
     pub object_capabilities: SidebarObjectCapabilities,
     pub tables: Vec<String>,
     pub views: Vec<String>,
+    /// True when the schema cache was stale or empty and a background refresh
+    /// was started. Callers can await `refresh_palette_schema_commands_data`
+    /// (off the UI thread) to render the fresh list when it arrives.
+    pub is_refreshing: bool,
 }
 
 /// Outcome for a sidebar section load attempt.
@@ -189,6 +197,7 @@ impl ConnectionService {
             manager,
             schema_service,
             key_value_service,
+            palette_schema_refreshes_in_flight: Arc::new(parking_lot::Mutex::new(HashSet::new())),
         }
     }
 
@@ -878,44 +887,122 @@ impl ConnectionService {
         let connection_name = self
             .get_saved_connection_name(connection_id)
             .unwrap_or_else(|| "Unknown".to_string());
+        // Serve whatever is known immediately, even past the cache TTL, so an
+        // idle app never opens the palette with a silently empty table list.
         let tables: Vec<String> = schema_service
-            .get_cached_tables(connection_id)
+            .get_cached_tables_allow_stale(connection_id)
             .unwrap_or_default()
             .into_iter()
             .map(|table| table.name)
             .collect();
         let views: Vec<String> = schema_service
-            .get_cached_view_names(connection_id)
+            .get_cached_view_names_allow_stale(connection_id)
             .unwrap_or_default();
+
+        let needs_refresh = tables.is_empty() || schema_service.is_schema_cache_stale(connection_id);
+        let is_refreshing = needs_refresh && self.spawn_palette_schema_refresh(connection_id);
 
         Some(PaletteSchemaCommandsData {
             connection_name,
             object_capabilities,
             tables,
             views,
+            is_refreshing,
         })
     }
 
-    /// Pre-warm table detail metadata for a connection's current table set.
-    pub async fn prefetch_table_details_for_connection(
+    /// Start a background refresh of the palette's table/view lists.
+    ///
+    /// Returns whether a refresh is now in flight. The work runs on the shared
+    /// background executor, never the UI thread, and only refreshes the schema
+    /// cache; callers that want the fresh list in the current palette session
+    /// should await `refresh_palette_schema_commands_data` instead.
+    fn spawn_palette_schema_refresh(&self, connection_id: Uuid) -> bool {
+        let Some(connection) = self.get_connection(connection_id) else {
+            return false;
+        };
+
+        {
+            let mut in_flight = self.palette_schema_refreshes_in_flight.lock();
+            if !in_flight.insert(connection_id) {
+                return true;
+            }
+        }
+
+        let schema_service = Arc::clone(&self.schema_service);
+        let in_flight = Arc::clone(&self.palette_schema_refreshes_in_flight);
+        smol::spawn(async move {
+            if let Err(error) = schema_service
+                .refresh_palette_schema(connection, connection_id)
+                .await
+            {
+                tracing::error!(
+                    connection_id = %connection_id,
+                    "failed to refresh command palette schema: {}",
+                    error
+                );
+            }
+            in_flight.lock().remove(&connection_id);
+        })
+        .detach();
+
+        true
+    }
+
+    /// Reload the palette's table/view lists from the database and return the
+    /// refreshed payload.
+    ///
+    /// Callers must await this off the UI thread (for example inside
+    /// `cx.background_spawn`) and then apply the result to the palette entity
+    /// on the foreground.
+    pub async fn refresh_palette_schema_commands_data(
+        &self,
+        connection_id: Uuid,
+    ) -> ServiceResult<PaletteSchemaCommandsData> {
+        let connection = self.get_connection_or_error(connection_id)?;
+        let object_capabilities = SidebarObjectCapabilities::for_connection(connection.as_ref());
+        let connection_name = self
+            .get_saved_connection_name(connection_id)
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let (tables, views) = self
+            .schema_service
+            .refresh_palette_schema(connection, connection_id)
+            .await?;
+
+        Ok(PaletteSchemaCommandsData {
+            connection_name,
+            object_capabilities,
+            tables: tables.into_iter().map(|table| table.name).collect(),
+            views,
+            is_refreshing: false,
+        })
+    }
+
+    /// Pre-warm the column metadata SQL completions need for a connection.
+    ///
+    /// Returns the warmed summaries so callers can hand them straight to the LSP,
+    /// rather than paying for a whole-schema reload to read back data the service
+    /// already holds.
+    pub async fn warm_table_columns_for_connection(
         &self,
         connection_id: Uuid,
         table_names: Vec<String>,
-    ) -> ServiceResult<()> {
+    ) -> ServiceResult<HashMap<String, TableColumnSummary>> {
         let connection = self.get_connection_or_error(connection_id)?;
         let introspection_schema = self
             .schema_service
             .get_introspection_schema_cached(&connection, connection_id)
             .await;
-        self.schema_service
-            .prefetch_all_table_details(
+        Ok(self
+            .schema_service
+            .warm_schema_columns(
                 connection,
                 connection_id,
                 table_names,
                 introspection_schema,
             )
-            .await;
-        Ok(())
+            .await)
     }
 
     /// Disconnect from a database and cleanup

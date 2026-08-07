@@ -18,11 +18,18 @@ use zqlz_ui::widgets::{
 
 use super::{
     DiagnosticInfo, EditorObjectType, QueryEditor, QueryEditorEvent, QueryExecutionParams,
+    SchemaObjectRef,
 };
 
 /// Events emitted by the query tabs panel
 #[derive(Clone, Debug)]
 pub enum QueryTabsPanelEvent {
+    /// Go-to-definition resolved to a database object the app should open.
+    OpenSchemaObject {
+        connection_id: Uuid,
+        database_name: Option<String>,
+        object: SchemaObjectRef,
+    },
     /// User requested to execute a query (entire content)
     ExecuteQuery {
         sql: String,
@@ -45,6 +52,8 @@ pub enum QueryTabsPanelEvent {
         connection_id: Option<Uuid>,
         database_name: Option<String>,
         editor_index: usize,
+        /// `true` when the user asked for EXPLAIN ANALYZE, which really runs the SQL.
+        analyze: bool,
     },
     /// User requested to explain selection or current statement
     ExplainSelection {
@@ -52,6 +61,8 @@ pub enum QueryTabsPanelEvent {
         connection_id: Option<Uuid>,
         database_name: Option<String>,
         editor_index: usize,
+        /// `true` when the user asked for EXPLAIN ANALYZE, which really runs the SQL.
+        analyze: bool,
     },
     /// User requested to cancel the currently executing query
     CancelQuery { editor_index: usize },
@@ -164,28 +175,43 @@ impl QueryTabsPanel {
                         sql,
                         connection_id,
                         database_name,
+                        analyze,
                     } => {
                         cx.emit(QueryTabsPanelEvent::ExplainQuery {
                             sql: sql.clone(),
                             connection_id: *connection_id,
                             database_name: database_name.clone(),
                             editor_index,
+                            analyze: *analyze,
                         });
                     }
                     QueryEditorEvent::ExplainSelection {
                         sql,
                         connection_id,
                         database_name,
+                        analyze,
                     } => {
                         cx.emit(QueryTabsPanelEvent::ExplainSelection {
                             sql: sql.clone(),
                             connection_id: *connection_id,
                             database_name: database_name.clone(),
                             editor_index,
+                            analyze: *analyze,
                         });
                     }
                     QueryEditorEvent::CancelQuery => {
                         cx.emit(QueryTabsPanelEvent::CancelQuery { editor_index });
+                    }
+                    QueryEditorEvent::OpenSchemaObject {
+                        connection_id,
+                        database_name,
+                        object,
+                    } => {
+                        cx.emit(QueryTabsPanelEvent::OpenSchemaObject {
+                            connection_id: *connection_id,
+                            database_name: database_name.clone(),
+                            object: object.clone(),
+                        });
                     }
                     QueryEditorEvent::SaveObject {
                         connection_id,
@@ -442,6 +468,24 @@ impl QueryTabsPanel {
         if let Some(editor) = self.active_editor() {
             editor.update(cx, |editor, cx| {
                 editor.emit_explain_selection(cx);
+            });
+        }
+    }
+
+    /// Run EXPLAIN ANALYZE on the entire query in the active editor.
+    pub fn explain_analyze_query(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_analyze_query(cx);
+            });
+        }
+    }
+
+    /// Run EXPLAIN ANALYZE on the selection or current statement in the active editor.
+    pub fn explain_analyze_selection(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(editor) = self.active_editor() {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_analyze_selection(cx);
             });
         }
     }

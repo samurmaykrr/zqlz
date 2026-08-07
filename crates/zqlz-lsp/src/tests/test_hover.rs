@@ -477,3 +477,36 @@ fn test_hover_on_number_literal() {
         "Should not provide hover for number literal"
     );
 }
+
+#[test]
+fn test_hover_postgres_json_operator() {
+    let mut lsp = create_test_lsp_with_dialect(SqlDialect::PostgreSQL);
+    let sql = "SELECT data->>'email' FROM users";
+    let text = Rope::from(sql);
+    let offset = sql.find("->>").expect("operator present") + 1;
+
+    let hover = lsp.get_hover(&text, offset).expect("hover for ->> operator");
+    let hover_text = hover_to_text(hover);
+    assert!(hover_text.contains("->>"), "hover names the operator: {hover_text}");
+    assert!(
+        hover_text.to_lowercase().contains("text"),
+        "hover explains text extraction: {hover_text}"
+    );
+}
+
+#[test]
+fn test_hover_json_operator_absent_for_sqlite() {
+    let mut lsp = create_test_lsp_with_dialect(SqlDialect::SQLite);
+    let sql = "SELECT data->>'email' FROM users";
+    let text = Rope::from(sql);
+    let offset = sql.find("->>").expect("operator present") + 1;
+
+    let hover = lsp.get_hover(&text, offset);
+    if let Some(hover) = hover {
+        let hover_text = hover_to_text(hover);
+        assert!(
+            !hover_text.contains("Get JSON field"),
+            "sqlite should not get postgres JSON operator docs: {hover_text}"
+        );
+    }
+}

@@ -1,5 +1,6 @@
 //! Turso remote connection implementation.
 
+use std::collections::HashMap;
 use async_trait::async_trait;
 use std::future::Future;
 use std::sync::Arc;
@@ -9,13 +10,33 @@ use zqlz_core::{
     BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnInfo, ColumnMeta,
     Connection, ConnectionScope, ConstraintInfo, DatabaseInfo, DatabaseObject, Dependency,
     DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig, ExplainParserKind,
-    ForeignKeyAction, ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
+    ForeignKeyChecksSql, ForeignKeyInfo, FunctionInfo, ImportIndexCapabilities,
     IndexInfo, ObjectType, ObjectsPanelColumn, ObjectsPanelData, ObjectsPanelObjectRef,
     ObjectsPanelRow, PrimaryKeyInfo, ProcedureInfo, QueryCancelHandle, QueryResult,
     ResolvedConnectionScope, Result, Row, RowIdentifier, SchemaInfo, SchemaIntrospection,
-    SequenceInfo, SqlObjectName, StatementResult, TableDetails, TableInfo, TableType, Transaction,
+    SequenceInfo, SingleRowDmlScope, SqlObjectName, StatementResult, TableDetails, TableInfo,
+    TableType, Transaction,
     TriggerInfo, TypeInfo, Value, ViewInfo, ZqlzError,
 };
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::TursoCatalog;
+
+/// Execute a query against a Turso connection on the Turso runtime. Shared by
+/// `TursoConnection` and the schema-introspection adapter.
+pub(crate) async fn run_turso_query(
+    connection: &libsql::Connection,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let connection = connection.clone();
+    let sql = sql.to_string();
+    let params = params.to_vec();
+    run_on_turso_runtime(async move {
+        TursoConnection::query_with_connection(&connection, &sql, &params).await
+    })
+    .await
+}
 
 fn get_turso_runtime() -> &'static tokio::runtime::Runtime {
     static RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
@@ -58,6 +79,7 @@ pub struct TursoConnection {
     database: libsql::Database,
     connection: libsql::Connection,
     closed: AtomicBool,
+    pub(crate) schema_engine: SchemaEngine,
 }
 
 impl TursoConnection {
@@ -75,10 +97,15 @@ impl TursoConnection {
             ZqlzError::Connection(format!("Failed to connect to Turso database: {}", error))
         })?;
 
+        let schema_engine = SchemaEngine::new(
+            Arc::new(TursoCatalog::new(connection.clone())),
+            Arc::new(DefaultDialect),
+        );
         Ok(Self {
             database,
             connection,
             closed: AtomicBool::new(false),
+            schema_engine,
         })
     }
 
@@ -132,7 +159,7 @@ impl TursoConnection {
         }
     }
 
-    async fn query_with_connection(
+    pub(crate) async fn query_with_connection(
         connection: &libsql::Connection,
         sql: &str,
         params: &[Value],
@@ -664,24 +691,39 @@ impl Connection for TursoConnection {
 
         let table_name = self.quote_identifier(&request.table_name);
         let column_name = self.quote_identifier(&request.column_name);
+        let scope = match &request.row_identifier {
+            RowIdentifier::FullRow(_) => self.single_row_dml_scope(&table_name, &where_clause),
+            _ => SingleRowDmlScope::Unsupported,
+        };
+        let (where_clause, statement_suffix) = scope.apply(&where_clause);
         let sql = if let Some(new_value) = &request.new_value {
             params.insert(0, new_value.clone());
             format!(
-                "UPDATE {} SET {} = {} WHERE {}",
+                "UPDATE {} SET {} = {} WHERE {}{}",
                 table_name,
                 column_name,
                 self.format_bind_placeholder(0),
-                where_clause
+                where_clause,
+                statement_suffix
             )
         } else {
             format!(
-                "UPDATE {} SET {} = NULL WHERE {}",
-                table_name, column_name, where_clause
+                "UPDATE {} SET {} = NULL WHERE {}{}",
+                table_name, column_name, where_clause, statement_suffix
             )
         };
 
         let result = self.execute(&sql, &params).await?;
         Ok(result.affected_rows)
+    }
+
+    /// Turso speaks SQLite, where every keyless table still has a `rowid`.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::by_row_identity("rowid", qualified_table, where_clause)
     }
 
     async fn estimated_row_count(&self, table_name: &SqlObjectName) -> Result<Option<u64>> {
@@ -845,198 +887,54 @@ impl SchemaIntrospection for TursoConnection {
             .collect())
     }
 
-    async fn get_table(&self, _schema: Option<&str>, name: &str) -> Result<TableDetails> {
-        let name = self.resolve_catalog_table_name(name).await?;
-        let tables = self.list_tables(None).await?;
-        let info = tables
-            .into_iter()
-            .find(|table| table.name == name)
-            .ok_or_else(|| ZqlzError::NotFound(format!("Table '{}' not found", name)))?;
-        let columns = self.get_columns(None, &name).await?;
-        let indexes = self.get_indexes(None, &name).await?;
-        let foreign_keys = self.get_foreign_keys(None, &name).await?;
-        let primary_key = self.get_primary_key(None, &name).await?;
-
-        Ok(TableDetails {
-            info,
-            columns,
-            primary_key,
-            foreign_keys,
-            indexes,
-            constraints: Vec::new(),
-            triggers: Vec::new(),
-        })
+    async fn get_table(&self, schema: Option<&str>, name: &str) -> Result<TableDetails> {
+        self.schema_engine.get_table(schema, name).await
     }
 
-    async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA table_info('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| {
-                let ordinal = row.get(0).and_then(Value::as_i64).unwrap_or(0) as usize;
-                let name = row.get(1).and_then(Value::as_str).unwrap_or("").to_string();
-                let data_type = row
-                    .get(2)
-                    .and_then(Value::as_str)
-                    .unwrap_or("TEXT")
-                    .to_string();
-                let nullable = row.get(3).and_then(Value::as_i64).unwrap_or(0) == 0;
-                let default_value = row.get(4).and_then(|value| {
-                    if value.is_null() {
-                        None
-                    } else {
-                        Some(value.to_string())
-                    }
-                });
-                let is_primary_key = row.get(5).and_then(Value::as_i64).unwrap_or(0) > 0;
-
-                ColumnInfo {
-                    name,
-                    ordinal,
-                    data_type: data_type.clone(),
-                    nullable,
-                    default_value,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key,
-                    is_auto_increment: is_primary_key && data_type.to_uppercase() == "INTEGER",
-                    is_unique: false,
-                    foreign_key: None,
-                    comment: None,
-                    ..Default::default()
-                }
-            })
-            .collect())
+    async fn get_columns(&self, schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
+        self.schema_engine.get_columns(schema, table).await
     }
 
-    async fn get_indexes(&self, _schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA index_list('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-        let mut indexes = Vec::new();
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ColumnInfo>>>> {
+        self.schema_engine.list_all_columns(schema).await
+    }
 
-        for row in &result.rows {
-            let Some(name) = row.get(1).and_then(Value::as_str).map(str::to_string) else {
-                continue;
-            };
-            let is_unique = row.get(2).and_then(Value::as_i64).unwrap_or(0) == 1;
-            let cols_result = self
-                .query(
-                    &format!(
-                        "PRAGMA index_info('{}')",
-                        Self::sqlite_string_literal(&name)
-                    ),
-                    &[],
-                )
-                .await?;
-            let columns = cols_result
-                .rows
-                .iter()
-                .filter_map(|row| row.get(2).and_then(Value::as_str).map(str::to_string))
-                .collect();
+    async fn list_all_foreign_keys(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<HashMap<String, Vec<ForeignKeyInfo>>>> {
+        self.schema_engine.list_all_foreign_keys(schema).await
+    }
 
-            indexes.push(IndexInfo {
-                name,
-                columns,
-                is_unique,
-                is_primary: false,
-                index_type: "btree".to_string(),
-                comment: None,
-                ..Default::default()
-            });
-        }
-
-        Ok(indexes)
+    async fn get_indexes(&self, schema: Option<&str>, table: &str) -> Result<Vec<IndexInfo>> {
+        self.schema_engine.get_indexes(schema, table).await
     }
 
     async fn get_foreign_keys(
         &self,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Vec<ForeignKeyInfo>> {
-        let table = self.resolve_catalog_table_name(table).await?;
-        let result = self
-            .query(
-                &format!(
-                    "PRAGMA foreign_key_list('{}')",
-                    Self::sqlite_string_literal(&table)
-                ),
-                &[],
-            )
-            .await?;
-
-        Ok(result
-            .rows
-            .iter()
-            .map(|row| {
-                let ref_table = row.get(2).and_then(Value::as_str).unwrap_or("").to_string();
-                let from_col = row.get(3).and_then(Value::as_str).unwrap_or("").to_string();
-                let to_col = row.get(4).and_then(Value::as_str).unwrap_or("").to_string();
-                let on_update = row.get(5).and_then(Value::as_str).unwrap_or("NO ACTION");
-                let on_delete = row.get(6).and_then(Value::as_str).unwrap_or("NO ACTION");
-
-                ForeignKeyInfo {
-                    name: format!("fk_{}_{}", table, ref_table),
-                    columns: vec![from_col],
-                    referenced_table: ref_table,
-                    referenced_schema: Some("main".to_string()),
-                    referenced_columns: vec![to_col],
-                    on_update: parse_fk_action(on_update),
-                    on_delete: parse_fk_action(on_delete),
-                    is_deferrable: false,
-                    initially_deferred: false,
-                }
-            })
-            .collect())
+        self.schema_engine.get_foreign_keys(schema, table).await
     }
 
     async fn get_primary_key(
         &self,
-        _schema: Option<&str>,
+        schema: Option<&str>,
         table: &str,
     ) -> Result<Option<PrimaryKeyInfo>> {
-        let columns = self.get_columns(None, table).await?;
-        let pk_columns = columns
-            .iter()
-            .filter(|column| column.is_primary_key)
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
-
-        if pk_columns.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(PrimaryKeyInfo {
-                name: None,
-                columns: pk_columns,
-            }))
-        }
+        self.schema_engine.get_primary_key(schema, table).await
     }
 
     async fn get_constraints(
         &self,
-        _schema: Option<&str>,
-        _table: &str,
+        schema: Option<&str>,
+        table: &str,
     ) -> Result<Vec<ConstraintInfo>> {
-        Ok(Vec::new())
+        self.schema_engine.get_constraints(schema, table).await
     }
 
     async fn list_functions(&self, _schema: Option<&str>) -> Result<Vec<FunctionInfo>> {
@@ -1251,15 +1149,6 @@ impl Transaction for TursoTransaction {
     }
 }
 
-fn parse_fk_action(action: &str) -> ForeignKeyAction {
-    match action.to_uppercase().as_str() {
-        "CASCADE" => ForeignKeyAction::Cascade,
-        "SET NULL" => ForeignKeyAction::SetNull,
-        "SET DEFAULT" => ForeignKeyAction::SetDefault,
-        "RESTRICT" => ForeignKeyAction::Restrict,
-        _ => ForeignKeyAction::NoAction,
-    }
-}
 
 fn object_type_to_sqlite(object_type: &zqlz_core::ObjectType) -> Result<&'static str> {
     match object_type {

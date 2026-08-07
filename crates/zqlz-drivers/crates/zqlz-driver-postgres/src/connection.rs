@@ -7,20 +7,25 @@ use postgres_native_tls::MakeTlsConnector;
 use std::fs;
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tokio::sync::Mutex;
 use tokio_postgres::{
-    CancelToken, Client, NoTls, Row as PgRow,
+    CancelToken, Client, NoTls, Row as PgRow, SimpleQueryMessage,
     types::{FromSql, ToSql},
 };
 
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::PostgresCatalog;
 use crate::PostgresSshTunnel;
 use zqlz_core::{
     BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnMeta, Connection,
     ConnectionScope, DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig,
     ExplainParserKind, ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault,
     QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row, RowIdentifier,
-    SchemaIntrospection, SqlObjectName, StatementResult, TableType, Transaction, Value, ZqlzError,
+    SchemaIntrospection, SingleRowDmlScope, SqlObjectName, StatementResult, TableType, Transaction,
+    Value, ZqlzError, sql_protected_range_at, sql_protected_ranges,
 };
 
 /// Global Tokio runtime for PostgreSQL operations.
@@ -114,6 +119,209 @@ fn format_postgres_error(error: &tokio_postgres::Error) -> String {
     }
 }
 
+/// Collect the leading bare (non string/comment/quoted-identifier) words of a
+/// statement, uppercased. Bounded so that scanning a large script stays cheap.
+fn leading_sql_words(sql: &str, limit: usize) -> Vec<String> {
+    let ranges = sql_protected_ranges(sql);
+    let mut range_index = 0usize;
+    let bytes = sql.as_bytes();
+    let mut words = Vec::new();
+    let mut index = 0usize;
+
+    while index < bytes.len() && words.len() < limit {
+        if let Some(range) = sql_protected_range_at(index, &ranges, &mut range_index) {
+            index = range.end;
+            continue;
+        }
+
+        if bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_' {
+            let start = index;
+            while index < bytes.len()
+                && (bytes[index].is_ascii_alphanumeric() || bytes[index] == b'_')
+                && sql_protected_range_at(index, &ranges, &mut range_index).is_none()
+            {
+                index += 1;
+            }
+            words.push(sql[start..index].to_ascii_uppercase());
+        } else {
+            index += 1;
+        }
+    }
+
+    words
+}
+
+/// First bare keyword of a statement, uppercased, ignoring leading whitespace
+/// and comments.
+fn leading_sql_keyword(sql: &str) -> Option<String> {
+    leading_sql_words(sql, 1).into_iter().next()
+}
+
+/// PostgreSQL statements that cannot be executed through the extended query
+/// protocol inside a transaction block, and are therefore run through the
+/// simple query protocol as standalone statements.
+fn requires_simple_query_protocol(sql: &str) -> bool {
+    let words = leading_sql_words(sql, 8);
+    let Some(first) = words.first().map(String::as_str) else {
+        return false;
+    };
+
+    match first {
+        "VACUUM" | "REINDEX" | "CLUSTER" | "DISCARD" => return true,
+        "CREATE" | "DROP" | "ALTER" => {}
+        _ => return false,
+    }
+
+    let mut index = 1usize;
+    while let Some(word) = words.get(index) {
+        match word.as_str() {
+            "OR" | "REPLACE" | "IF" | "NOT" | "EXISTS" | "TEMP" | "TEMPORARY" | "UNLOGGED"
+            | "GLOBAL" | "LOCAL" | "UNIQUE" => index += 1,
+            _ => break,
+        }
+    }
+
+    let object = words.get(index).map(String::as_str);
+
+    if matches!(
+        object,
+        Some("DATABASE") | Some("TABLESPACE") | Some("SUBSCRIPTION")
+    ) {
+        return true;
+    }
+
+    if first == "ALTER" && object == Some("SYSTEM") {
+        return true;
+    }
+
+    words
+        .get(index..(index + 3).min(words.len()))
+        .is_some_and(|window| window.iter().any(|word| word == "CONCURRENTLY"))
+}
+
+/// Run a statement through the simple query protocol, returning the number of
+/// affected rows reported by the server.
+async fn run_postgres_simple_statement(client: &Client, sql: &str) -> Result<u64> {
+    let messages = client.simple_query(sql).await.map_err(|e| {
+        let message = format_postgres_error(&e);
+        ZqlzError::Query(format!("Failed to execute statement: {}", message))
+    })?;
+
+    let mut affected_rows = 0u64;
+    for message in messages {
+        if let SimpleQueryMessage::CommandComplete(rows) = message {
+            affected_rows = affected_rows.saturating_add(rows);
+        }
+    }
+
+    Ok(affected_rows)
+}
+
+fn simple_query_parameters_error(sql: &str) -> ZqlzError {
+    let keyword = leading_sql_keyword(sql).unwrap_or_else(|| "This".to_string());
+    ZqlzError::Query(format!(
+        "{} statements do not accept bound parameters; inline the values into the SQL text",
+        keyword
+    ))
+}
+
+/// Execute a query against a shared PostgreSQL client and collect the result.
+/// Shared by `PostgresConnection` and the schema-introspection adapter.
+pub(crate) async fn run_postgres_query(
+    client: &Arc<Mutex<Client>>,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start_time = std::time::Instant::now();
+    let client = client.lock().await;
+
+    if requires_simple_query_protocol(sql) {
+        if !params.is_empty() {
+            return Err(simple_query_parameters_error(sql));
+        }
+
+        let affected_rows = run_postgres_simple_statement(&client, sql).await?;
+        return Ok(QueryResult {
+            id: uuid::Uuid::new_v4(),
+            columns: Vec::new(),
+            rows: Vec::new(),
+            total_rows: Some(0),
+            is_estimated_total: false,
+            affected_rows,
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
+            warnings: Vec::new(),
+        });
+    }
+
+    let statement = client.prepare(sql).await.map_err(|e| {
+        let message = format_postgres_error(&e);
+        ZqlzError::Query(format!("Failed to prepare query: {}", message))
+    })?;
+
+    let param_types = statement.params();
+    let pg_params: Vec<PgValue> = params
+        .iter()
+        .enumerate()
+        .map(|(i, value)| {
+            if let Some(target_type) = param_types.get(i) {
+                PgValue::from_value_for_type(value, target_type)
+            } else {
+                PgValue::from_value(value)
+            }
+        })
+        .collect();
+    let param_refs: Vec<&(dyn ToSql + Sync)> =
+        pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
+
+    let pg_rows = client.query(&statement, &param_refs).await.map_err(|e| {
+        let message = format_postgres_error(&e);
+        ZqlzError::Query(format!("Failed to execute query: {}", message))
+    })?;
+
+    let mut columns = Vec::new();
+    let mut column_names = Vec::new();
+    for (idx, col) in statement.columns().iter().enumerate() {
+        let name = col.name().to_string();
+        column_names.push(name.clone());
+        columns.push(ColumnMeta {
+            name,
+            data_type: col.type_().name().to_string(),
+            nullable: true,
+            ordinal: idx,
+            max_length: None,
+            precision: None,
+            scale: None,
+            auto_increment: false,
+            default_value: None,
+            comment: None,
+            enum_values: None,
+        });
+    }
+
+    let mut rows = Vec::new();
+    for pg_row in &pg_rows {
+        let mut values = Vec::new();
+        for idx in 0..columns.len() {
+            values.push(postgres_to_value(pg_row, idx)?);
+        }
+        rows.push(Row::new(column_names.clone(), values));
+    }
+
+    let execution_time_ms = start_time.elapsed().as_millis() as u64;
+    let total_rows = rows.len();
+
+    Ok(QueryResult {
+        id: uuid::Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: Some(total_rows as u64),
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
+}
+
 fn format_postgres_cell_update_error(
     error: &tokio_postgres::Error,
     request: &CellUpdateRequest,
@@ -163,7 +371,11 @@ fn format_postgres_foreign_key_cell_update_error(
 pub struct PostgresConnection {
     client: Arc<Mutex<Client>>,
     cancel_token: CancelToken,
+    /// Set once the tokio-postgres connection task terminates, which is the only
+    /// authoritative signal that the client can no longer reach the server.
+    closed: Arc<AtomicBool>,
     _ssh_tunnel: Option<PostgresSshTunnel>,
+    pub(crate) schema_engine: SchemaEngine,
 }
 
 #[derive(Debug)]
@@ -236,6 +448,8 @@ impl PostgresConnection {
 
         // Determine whether to use TLS or NoTls based on ssl_mode
         let use_tls = !options.ssl_mode.eq_ignore_ascii_case("disable");
+
+        let closed = Arc::new(AtomicBool::new(false));
 
         let (client, cancel_token) = if use_tls {
             // Build TLS connector
@@ -311,10 +525,16 @@ impl PostgresConnection {
 
             let cancel_token = client.cancel_token();
 
-            // Spawn connection task
-            runtime.spawn(async move {
-                if let Err(e) = connection.await {
-                    tracing::error!(error = %e, "PostgreSQL connection error");
+            // Spawn connection task. Once it finishes the client is permanently
+            // unusable, so record that for `is_closed` and the heartbeat.
+            runtime.spawn({
+                let closed = Arc::clone(&closed);
+                async move {
+                    match connection.await {
+                        Ok(()) => tracing::info!("PostgreSQL connection task ended"),
+                        Err(e) => tracing::error!(error = %e, "PostgreSQL connection error"),
+                    }
+                    closed.store(true, Ordering::SeqCst);
                 }
             });
 
@@ -336,10 +556,16 @@ impl PostgresConnection {
 
             let cancel_token = client.cancel_token();
 
-            // Spawn connection task
-            runtime.spawn(async move {
-                if let Err(e) = connection.await {
-                    tracing::error!(error = %e, "PostgreSQL connection error");
+            // Spawn connection task. Once it finishes the client is permanently
+            // unusable, so record that for `is_closed` and the heartbeat.
+            runtime.spawn({
+                let closed = Arc::clone(&closed);
+                async move {
+                    match connection.await {
+                        Ok(()) => tracing::info!("PostgreSQL connection task ended"),
+                        Err(e) => tracing::error!(error = %e, "PostgreSQL connection error"),
+                    }
+                    closed.store(true, Ordering::SeqCst);
                 }
             });
 
@@ -353,10 +579,17 @@ impl PostgresConnection {
             ssl_mode = %options.ssl_mode,
             "PostgreSQL connection established"
         );
+        let client = Arc::new(Mutex::new(client));
+        let schema_engine = SchemaEngine::new(
+            Arc::new(PostgresCatalog::new(client.clone())),
+            Arc::new(DefaultDialect),
+        );
         Ok(Self {
-            client: Arc::new(Mutex::new(client)),
+            client,
             cancel_token,
+            closed,
             _ssh_tunnel: options.ssh_tunnel,
+            schema_engine,
         })
     }
 }
@@ -384,7 +617,15 @@ fn value_to_pg_literal(value: &Value) -> String {
         Value::Date(v) => format!("'{}'", v),
         Value::Time(v) => format!("'{}'", v),
         Value::DateTime(v) => format!("'{}'", v),
-        Value::Decimal(v) => v.to_string(),
+        // Emitted unquoted to preserve precision. A non-numeric payload would be
+        // injected as SQL, so quote it instead and let Postgres reject the type.
+        Value::Decimal(v) => {
+            if Value::is_sql_numeric_literal(v) {
+                v.to_string()
+            } else {
+                format!("'{}'", v.replace('\'', "''"))
+            }
+        }
         Value::Array(arr) => {
             // Format as PostgreSQL array literal: ARRAY[val1, val2, ...]
             let values: Vec<String> = arr.iter().map(value_to_pg_literal).collect();
@@ -546,6 +787,9 @@ enum PgValue {
     Date(chrono::NaiveDate),
     Time(chrono::NaiveTime),
     DateTime(chrono::NaiveDateTime),
+    Array(Vec<PgValue>),
+    /// Digits held as text so precision wider than f64 survives.
+    Decimal(String),
 }
 
 #[derive(Debug)]
@@ -562,6 +806,88 @@ struct PgTstzRangeString(String);
 struct PgBinaryDisplayString(String);
 #[derive(Debug)]
 struct PgArrayDisplay(Vec<String>);
+
+/// Encode a decimal string into PostgreSQL's binary NUMERIC wire format.
+///
+/// This is the inverse of [`PgNumericString::parse`]. It exists because
+/// `Value::Decimal` carries its digits as text to preserve precision, and no
+/// `ToSql` impl accepts a string for a `numeric` column — without this, decimal
+/// parameters fail on the bound query path.
+///
+/// The format is: `ndigits`, `weight`, `sign`, `dscale`, then `ndigits`
+/// base-10000 groups, all big-endian i16.
+fn encode_pg_numeric(
+    text: &str,
+    out: &mut BytesMut,
+) -> std::result::Result<(), Box<dyn std::error::Error + Sync + Send>> {
+    let trimmed = text.trim();
+    let (negative, unsigned) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+
+    let (integer_text, fraction_text) = match unsigned.find('.') {
+        Some(index) => (&unsigned[..index], &unsigned[index + 1..]),
+        None => (unsigned, ""),
+    };
+
+    if (integer_text.is_empty() && fraction_text.is_empty())
+        || !integer_text.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction_text.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return Err(format!("invalid NUMERIC literal: {}", text).into());
+    }
+
+    let dscale = fraction_text.len();
+
+    // Group into base-10000 digits: the integer part aligns from the right, the
+    // fraction from the left, so both pad to a multiple of four.
+    let mut integer_padded = "0".repeat((4 - integer_text.len() % 4) % 4);
+    integer_padded.push_str(integer_text);
+
+    let mut fraction_padded = String::from(fraction_text);
+    fraction_padded.push_str(&"0".repeat((4 - fraction_text.len() % 4) % 4));
+
+    let mut groups: Vec<u16> = Vec::new();
+    for chunk in integer_padded.as_bytes().chunks(4) {
+        groups.push(std::str::from_utf8(chunk)?.parse::<u16>()?);
+    }
+    let mut weight = groups.len() as i32 - 1;
+    for chunk in fraction_padded.as_bytes().chunks(4) {
+        groups.push(std::str::from_utf8(chunk)?.parse::<u16>()?);
+    }
+
+    // Leading zero groups shift the weight; trailing ones are simply dropped.
+    let leading_zeros = groups.iter().take_while(|group| **group == 0).count();
+    if leading_zeros == groups.len() {
+        groups.clear();
+        weight = 0;
+    } else {
+        groups.drain(..leading_zeros);
+        weight -= leading_zeros as i32;
+        while groups.last() == Some(&0) {
+            groups.pop();
+        }
+    }
+
+    let ndigits = i16::try_from(groups.len())
+        .map_err(|_| format!("NUMERIC value has too many digits: {}", text))?;
+    let weight = i16::try_from(weight)
+        .map_err(|_| format!("NUMERIC value is out of range: {}", text))?;
+    let dscale = i16::try_from(dscale)
+        .map_err(|_| format!("NUMERIC value has too many decimal places: {}", text))?;
+
+    out.extend_from_slice(&ndigits.to_be_bytes());
+    out.extend_from_slice(&weight.to_be_bytes());
+    out.extend_from_slice(&(if negative { 0x4000u16 } else { 0x0000u16 }).to_be_bytes());
+    out.extend_from_slice(&dscale.to_be_bytes());
+    for group in groups {
+        out.extend_from_slice(&group.to_be_bytes());
+    }
+
+    Ok(())
+}
 
 impl PgNumericString {
     fn parse(raw: &[u8]) -> std::result::Result<String, Box<dyn std::error::Error + Sync + Send>> {
@@ -801,7 +1127,7 @@ impl PgValue {
                 _ => PgValue::Float64(*v),
             },
 
-            Value::Decimal(v) => PgValue::String(v.clone()),
+            Value::Decimal(v) => PgValue::Decimal(v.clone()),
             Value::String(v) => Self::coerce_string(v, target_type),
             Value::Bytes(v) => PgValue::Bytes(v.clone()),
             Value::Uuid(v) => PgValue::Uuid(*v),
@@ -810,7 +1136,7 @@ impl PgValue {
             Value::Date(v) => PgValue::Date(*v),
             Value::Time(v) => PgValue::Time(*v),
             Value::DateTime(v) => PgValue::DateTime(*v),
-            Value::Array(_) => PgValue::String(value.to_string()),
+            Value::Array(items) => PgValue::Array(items.iter().map(PgValue::from_value).collect()),
         }
     }
 
@@ -909,7 +1235,7 @@ impl PgValue {
             Value::Int64(v) => PgValue::Int64(*v),
             Value::Float32(v) => PgValue::Float32(*v),
             Value::Float64(v) => PgValue::Float64(*v),
-            Value::Decimal(v) => PgValue::String(v.clone()),
+            Value::Decimal(v) => PgValue::Decimal(v.clone()),
             Value::String(v) => PgValue::String(v.clone()),
             Value::Bytes(v) => PgValue::Bytes(v.clone()),
             Value::Uuid(v) => PgValue::Uuid(*v),
@@ -918,7 +1244,7 @@ impl PgValue {
             Value::Date(v) => PgValue::Date(*v),
             Value::Time(v) => PgValue::Time(*v),
             Value::DateTime(v) => PgValue::DateTime(*v),
-            Value::Array(_) => PgValue::String(value.to_string()),
+            Value::Array(items) => PgValue::Array(items.iter().map(PgValue::from_value).collect()),
         }
     }
 }
@@ -945,6 +1271,30 @@ impl ToSql for PgValue {
             PgValue::Date(v) => v.to_sql(ty, out),
             PgValue::Time(v) => v.to_sql(ty, out),
             PgValue::DateTime(v) => v.to_sql(ty, out),
+            // A numeric column needs the binary NUMERIC encoding; anywhere else
+            // (text, varchar) the digits travel as a plain string.
+            PgValue::Decimal(v) => {
+                if *ty == tokio_postgres::types::Type::NUMERIC {
+                    encode_pg_numeric(v, out)?;
+                    Ok(postgres_types::IsNull::No)
+                } else {
+                    v.to_sql(ty, out)
+                }
+            }
+            // Encode against the array's element type so each member is written
+            // with the right binary format rather than stringified.
+            PgValue::Array(values) => match ty.kind() {
+                postgres_types::Kind::Array(element_type) => {
+                    values.as_slice().to_sql(ty, out).or_else(|_| {
+                        Err(format!(
+                            "failed to encode array of {} for {}",
+                            element_type, ty
+                        )
+                        .into())
+                    })
+                }
+                _ => Err(format!("cannot send an array value to non-array type {}", ty).into()),
+            },
         }
     }
 
@@ -1761,6 +2111,14 @@ impl Transaction for PostgresTransaction {
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing query in transaction");
 
+        if requires_simple_query_protocol(sql) {
+            let keyword = leading_sql_keyword(sql).unwrap_or_else(|| "This".to_string());
+            return Err(ZqlzError::Query(format!(
+                "{} cannot run inside a transaction block; run it as a standalone statement",
+                keyword
+            )));
+        }
+
         let start_time = std::time::Instant::now();
         let client = self.client.lock().await;
 
@@ -1798,7 +2156,7 @@ impl Transaction for PostgresTransaction {
             column_names.push(name.clone());
             columns.push(ColumnMeta {
                 name,
-                data_type: format!("{:?}", col.type_()),
+                data_type: col.type_().name().to_string(),
                 nullable: true,
                 ordinal: idx,
                 max_length: None,
@@ -1839,6 +2197,14 @@ impl Transaction for PostgresTransaction {
 
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         tracing::debug!(sql_preview = %sql.chars().take(100).collect::<String>(), "executing statement in transaction");
+
+        if requires_simple_query_protocol(sql) {
+            let keyword = leading_sql_keyword(sql).unwrap_or_else(|| "This".to_string());
+            return Err(ZqlzError::Query(format!(
+                "{} cannot run inside a transaction block; run it as a standalone statement",
+                keyword
+            )));
+        }
 
         let client = self.client.lock().await;
 
@@ -2403,6 +2769,20 @@ impl Connection for PostgresConnection {
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         let client = self.client.lock().await;
 
+        if requires_simple_query_protocol(sql) {
+            if !params.is_empty() {
+                return Err(simple_query_parameters_error(sql));
+            }
+
+            let affected_rows = run_postgres_simple_statement(&client, sql).await?;
+            return Ok(StatementResult {
+                is_query: false,
+                result: None,
+                affected_rows,
+                error: None,
+            });
+        }
+
         // Prepare first so we know the target column types for each parameter
         let statement = client.prepare(sql).await.map_err(|e| {
             let message = format_postgres_error(&e);
@@ -2440,87 +2820,7 @@ impl Connection for PostgresConnection {
 
     #[tracing::instrument(skip(self, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
-        let start_time = std::time::Instant::now();
-
-        let client = self.client.lock().await;
-
-        // Prepare first so we know the target column types for each parameter
-        let statement = client.prepare(sql).await.map_err(|e| {
-            let message = format_postgres_error(&e);
-            ZqlzError::Query(format!("Failed to prepare query: {}", message))
-        })?;
-
-        let param_types = statement.params();
-        let pg_params: Vec<PgValue> = params
-            .iter()
-            .enumerate()
-            .map(|(i, value)| {
-                if let Some(target_type) = param_types.get(i) {
-                    PgValue::from_value_for_type(value, target_type)
-                } else {
-                    PgValue::from_value(value)
-                }
-            })
-            .collect();
-        let param_refs: Vec<&(dyn ToSql + Sync)> =
-            pg_params.iter().map(|p| p as &(dyn ToSql + Sync)).collect();
-
-        let pg_rows = client.query(&statement, &param_refs).await.map_err(|e| {
-            let message = format_postgres_error(&e);
-            ZqlzError::Query(format!("Failed to execute query: {}", message))
-        })?;
-
-        // Get column metadata from prepared statement so empty result sets still include columns.
-        let mut columns = Vec::new();
-        let mut column_names = Vec::new();
-        for (idx, col) in statement.columns().iter().enumerate() {
-            let name = col.name().to_string();
-            column_names.push(name.clone());
-            columns.push(ColumnMeta {
-                name,
-                data_type: format!("{:?}", col.type_()),
-                nullable: true, // PostgreSQL doesn't provide this info easily
-                ordinal: idx,
-                max_length: None,
-                precision: None,
-                scale: None,
-                auto_increment: false,
-                default_value: None,
-                comment: None,
-                enum_values: None,
-            });
-        }
-
-        // Convert rows
-        let mut rows = Vec::new();
-        for pg_row in &pg_rows {
-            let mut values = Vec::new();
-            for idx in 0..columns.len() {
-                let value = postgres_to_value(pg_row, idx)?;
-                values.push(value);
-            }
-            rows.push(Row::new(column_names.clone(), values));
-        }
-
-        let execution_time_ms = start_time.elapsed().as_millis() as u64;
-        let total_rows = rows.len();
-
-        tracing::debug!(
-            row_count = total_rows,
-            execution_time_ms = execution_time_ms,
-            "query executed successfully"
-        );
-
-        Ok(QueryResult {
-            id: uuid::Uuid::new_v4(),
-            columns,
-            rows,
-            total_rows: Some(total_rows as u64),
-            is_estimated_total: false,
-            affected_rows: 0,
-            execution_time_ms,
-            warnings: Vec::new(),
-        })
+        run_postgres_query(&self.client, sql, params).await
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
@@ -2545,11 +2845,16 @@ impl Connection for PostgresConnection {
 
     async fn close(&self) -> Result<()> {
         tracing::info!("closing PostgreSQL connection");
+        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn is_closed(&self) -> bool {
-        false
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn is_busy(&self) -> bool {
+        self.client.try_lock().is_err()
     }
 
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
@@ -2621,12 +2926,21 @@ impl Connection for PostgresConnection {
             None => "NULL".to_string(),
         };
 
+        let scope = match &request.row_identifier {
+            RowIdentifier::FullRow(_) => {
+                self.single_row_dml_scope(&table_identifier, &where_clause)
+            }
+            _ => SingleRowDmlScope::Unsupported,
+        };
+        let (where_clause, statement_suffix) = scope.apply(&where_clause);
+
         let sql = format!(
-            "UPDATE {} SET {} = {} WHERE {}",
+            "UPDATE {} SET {} = {} WHERE {}{}",
             table_identifier,
             escape_identifier_pg(&request.column_name),
             set_value,
-            where_clause
+            where_clause,
+            statement_suffix
         );
 
         tracing::debug!("PostgreSQL update SQL: {}", sql);
@@ -2650,6 +2964,16 @@ impl Connection for PostgresConnection {
 
         tracing::debug!(affected_rows = rows_affected, "cell update completed");
         Ok(rows_affected)
+    }
+
+    /// `ctid` is the physical location of a row, which identifies it even in a
+    /// table with no key and duplicate rows.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::by_row_identity("ctid", qualified_table, where_clause)
     }
 }
 
@@ -2939,13 +3263,60 @@ fn escape_table_name_pg(table_name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_postgres_array_values, format_postgres_binary_display_value,
-        format_postgres_foreign_key_cell_update_error, format_postgres_network_value,
-        format_postgres_tstzrange_value, format_postgres_tsvector_value,
-        is_postgres_foreign_table_browse_error, is_postgres_missing_user_mapping_error,
-        value_to_pg_literal_for_type,
+        leading_sql_keyword, requires_simple_query_protocol,
+        PgNumericString, encode_pg_numeric, format_postgres_array_values,
+        format_postgres_binary_display_value, format_postgres_foreign_key_cell_update_error,
+        format_postgres_network_value, format_postgres_tstzrange_value,
+        format_postgres_tsvector_value, is_postgres_foreign_table_browse_error,
+        is_postgres_missing_user_mapping_error, value_to_pg_literal_for_type,
     };
+    use bytes::BytesMut;
     use zqlz_core::{CellUpdateRequest, RowIdentifier, Value};
+
+    /// The encoder must be the inverse of the decoder the driver already uses to
+    /// read NUMERIC columns.
+    ///
+    /// Compared numerically because the decoder trims trailing fraction zeros,
+    /// so `-6.0000` legitimately comes back as `-6`.
+    #[track_caller]
+    fn assert_numeric_round_trips(text: &str) {
+        let mut buffer = BytesMut::new();
+        encode_pg_numeric(text, &mut buffer).expect("numeric encodes");
+        let decoded = PgNumericString::parse(&buffer).expect("numeric decodes");
+        assert!(
+            Value::Decimal(decoded.clone()).is_equivalent_to(&Value::Decimal(text.to_string())),
+            "round trip changed the value: {} became {}",
+            text,
+            decoded
+        );
+    }
+
+    #[test]
+    fn pg_numeric_encoding_round_trips() {
+        assert_numeric_round_trips("0");
+        assert_numeric_round_trips("1");
+        assert_numeric_round_trips("-1");
+        assert_numeric_round_trips("12345.6789");
+        assert_numeric_round_trips("-6.0000");
+        assert_numeric_round_trips("0.5");
+        assert_numeric_round_trips("1000000");
+        assert_numeric_round_trips("0.0001");
+    }
+
+    /// The whole reason decimals travel as text: these do not fit in an f64.
+    #[test]
+    fn pg_numeric_encoding_preserves_wide_values() {
+        assert_numeric_round_trips("20000000000000000001.5");
+        assert_numeric_round_trips("123456789012345678901234567890.123456789");
+    }
+
+    #[test]
+    fn pg_numeric_encoding_rejects_non_numeric_text() {
+        let mut buffer = BytesMut::new();
+        assert!(encode_pg_numeric("0 WHERE 1=1 -- ", &mut buffer).is_err());
+        assert!(encode_pg_numeric("abc", &mut buffer).is_err());
+        assert!(encode_pg_numeric("", &mut buffer).is_err());
+    }
 
     #[test]
     fn postgres_array_literals_include_cast_when_type_known() {
@@ -3197,5 +3568,149 @@ mod tests {
         assert!(message.contains("customers_tenant_id_fkey"));
         assert!(message.contains("ON UPDATE CASCADE"));
         assert!(message.contains("Key (tenant_id)="));
+    }
+
+    #[test]
+    fn leading_sql_keyword_skips_whitespace_and_comments() {
+        assert_eq!(leading_sql_keyword("VACUUM t").as_deref(), Some("VACUUM"));
+        assert_eq!(leading_sql_keyword("  \n\t vacuum t").as_deref(), Some("VACUUM"));
+        assert_eq!(
+            leading_sql_keyword("-- warm up\nVACUUM t").as_deref(),
+            Some("VACUUM")
+        );
+        assert_eq!(
+            leading_sql_keyword("/* warm up */ VACUUM t").as_deref(),
+            Some("VACUUM")
+        );
+        assert_eq!(leading_sql_keyword("   ").as_deref(), None);
+        assert_eq!(leading_sql_keyword("-- only a comment").as_deref(), None);
+    }
+
+    #[test]
+    fn requires_simple_query_protocol_detects_non_transactable_statements() {
+        assert!(requires_simple_query_protocol("VACUUM users;"));
+        assert!(requires_simple_query_protocol("vacuum (analyze) users"));
+        assert!(requires_simple_query_protocol("-- x\nVACUUM t"));
+        assert!(requires_simple_query_protocol("/* x */ VACUUM t"));
+        assert!(requires_simple_query_protocol("\n\n   REINDEX TABLE users"));
+        assert!(requires_simple_query_protocol("CLUSTER users USING idx"));
+        assert!(requires_simple_query_protocol("DISCARD ALL"));
+        assert!(requires_simple_query_protocol("CREATE DATABASE demo"));
+        assert!(requires_simple_query_protocol("DROP DATABASE IF EXISTS demo"));
+        assert!(requires_simple_query_protocol("ALTER SYSTEM SET work_mem = '64MB'"));
+        assert!(requires_simple_query_protocol("CREATE TABLESPACE ts LOCATION '/x'"));
+        assert!(requires_simple_query_protocol(
+            "CREATE INDEX CONCURRENTLY idx ON users (id)"
+        ));
+        assert!(requires_simple_query_protocol(
+            "CREATE UNIQUE INDEX CONCURRENTLY idx ON users (id)"
+        ));
+        assert!(requires_simple_query_protocol("DROP INDEX CONCURRENTLY idx"));
+    }
+
+    #[test]
+    fn requires_simple_query_protocol_ignores_ordinary_statements() {
+        assert!(!requires_simple_query_protocol("SELECT 1"));
+        assert!(!requires_simple_query_protocol("INSERT INTO t VALUES (1)"));
+        assert!(!requires_simple_query_protocol("UPDATE t SET a = 1"));
+        assert!(!requires_simple_query_protocol("CREATE INDEX idx ON users (id)"));
+        assert!(!requires_simple_query_protocol("CREATE TABLE t (id int)"));
+        assert!(!requires_simple_query_protocol(
+            "SELECT 'VACUUM users' AS note"
+        ));
+        assert!(!requires_simple_query_protocol(
+            "INSERT INTO logs (message) VALUES ('VACUUM users')"
+        ));
+        assert!(!requires_simple_query_protocol("SELECT \"VACUUM\" FROM t"));
+        assert!(!requires_simple_query_protocol("-- VACUUM users\nSELECT 1"));
+        assert!(!requires_simple_query_protocol(""));
+    }
+
+    /// Opt-in end-to-end check against a real PostgreSQL server. Set
+    /// `ZQLZ_POSTGRES_TEST_URL`-style parts via env and run with `--ignored`.
+    #[tokio::test]
+    #[ignore = "requires a live PostgreSQL server"]
+    async fn vacuum_runs_outside_transaction_and_is_refused_inside_one() {
+        use super::{PostgresConnectOptions, PostgresConnection};
+        use zqlz_core::Connection as _;
+
+        let port: u16 = std::env::var("ZQLZ_PG_TEST_PORT")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(5432);
+
+        let options = PostgresConnectOptions {
+            host: std::env::var("ZQLZ_PG_TEST_HOST").unwrap_or_else(|_| "localhost".to_string()),
+            port,
+            database: std::env::var("ZQLZ_PG_TEST_DB").unwrap_or_else(|_| "postgres".to_string()),
+            user: Some(std::env::var("ZQLZ_PG_TEST_USER").unwrap_or_else(|_| "postgres".to_string())),
+            password: Some(
+                std::env::var("ZQLZ_PG_TEST_PASSWORD").unwrap_or_else(|_| "postgres".to_string()),
+            ),
+            ssl_mode: "disable".to_string(),
+            ssl_ca_cert: None,
+            ssl_client_cert: None,
+            ssl_client_key: None,
+            connect_timeout_seconds: Some(10),
+            application_name: Some("zqlz-vacuum-test".to_string()),
+            search_path: None,
+            keepalive: true,
+            ssh_tunnel: None,
+        };
+
+        let connection = PostgresConnection::connect(options)
+            .await
+            .expect("connect to test PostgreSQL server");
+
+        connection
+            .execute("DROP TABLE IF EXISTS zqlz_vacuum_demo", &[])
+            .await
+            .expect("drop demo table");
+        connection
+            .execute("CREATE TABLE zqlz_vacuum_demo (id int primary key)", &[])
+            .await
+            .expect("create demo table");
+        connection
+            .execute("INSERT INTO zqlz_vacuum_demo VALUES (1), (2), (3)", &[])
+            .await
+            .expect("seed demo table");
+
+        connection
+            .execute("VACUUM zqlz_vacuum_demo", &[])
+            .await
+            .expect("VACUUM must succeed outside a transaction");
+        connection
+            .execute("-- warm up\nVACUUM (ANALYZE) zqlz_vacuum_demo", &[])
+            .await
+            .expect("commented VACUUM (ANALYZE) must succeed");
+        connection
+            .query("VACUUM zqlz_vacuum_demo", &[])
+            .await
+            .expect("VACUUM through query() must succeed");
+
+        let transaction = connection
+            .begin_transaction()
+            .await
+            .expect("begin transaction");
+        let error = transaction
+            .execute("VACUUM zqlz_vacuum_demo", &[])
+            .await
+            .expect_err("VACUUM inside a transaction must be refused");
+        assert!(
+            error
+                .to_string()
+                .contains("cannot run inside a transaction block"),
+            "unexpected error: {error}"
+        );
+        transaction.rollback().await.expect("rollback");
+
+        connection
+            .execute("SELECT 1", &[])
+            .await
+            .expect("connection still usable after refusal");
+        connection
+            .execute("DROP TABLE zqlz_vacuum_demo", &[])
+            .await
+            .expect("cleanup demo table");
     }
 }

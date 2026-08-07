@@ -134,7 +134,9 @@ fn warn_and_clear_sidebar_section_loading_state(
 async fn run_relational_bootstrap_follow_up(
     connection_service: Arc<zqlz_services::ConnectionService>,
     sidebar: &WeakEntity<ConnectionSidebar>,
+    main_view: &WeakEntity<MainView>,
     connection_id: Uuid,
+    table_names: Vec<String>,
     cx: &mut AsyncWindowContext,
 ) {
     match connection_service
@@ -182,6 +184,53 @@ async fn run_relational_bootstrap_follow_up(
         connection_id = %connection_id,
         "Sequential schema load complete"
     );
+
+    // Without this, `alias.` completions stay empty for every table the user hasn't
+    // clicked. Detached because drivers with no bulk form fall back to a paced
+    // per-table walk that deliberately stays off the connection pool's critical path.
+    let main_view = main_view.clone();
+    cx.spawn(async move |cx| {
+        let summaries = match connection_service
+            .warm_table_columns_for_connection(connection_id, table_names)
+            .await
+        {
+            Ok(summaries) => summaries,
+            Err(error) => {
+                tracing::warn!(
+                    %error,
+                    connection_id = %connection_id,
+                    "Failed to warm table columns for completions"
+                );
+                return;
+            }
+        };
+
+        if summaries.is_empty() {
+            tracing::warn!(
+                connection_id = %connection_id,
+                "Column warm-up produced nothing; completions will stay column-less"
+            );
+            return;
+        }
+
+        // Merged in memory rather than via `trigger_lsp_schema_refresh`: a targeted
+        // reload can never be cache-served, so it would re-introspect the whole
+        // schema to deliver data we already have.
+        if let Err(error) = main_view.update(cx, |main_view, cx| {
+            main_view.for_each_live_query_editor(cx, |editor, cx| {
+                editor.update(cx, |editor, cx| {
+                    editor.notify_table_columns_batch_loaded(&summaries, cx);
+                });
+            });
+        }) {
+            tracing::warn!(
+                %error,
+                connection_id = %connection_id,
+                "Failed to apply warmed columns to the LSP"
+            );
+        }
+    })
+    .detach();
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -247,6 +296,9 @@ async fn run_connection_sidebar_bootstrap(
                         objects_panel_data,
                         objects_panel_manifest.clone(),
                         object_capabilities,
+                        // The feature set is derived by the refresh that follows connect;
+                        // until then no action is gated.
+                        None,
                         cx,
                     );
                 }) {
@@ -406,21 +458,37 @@ async fn run_connection_sidebar_bootstrap(
             {
                 let connection_service = connection_service.clone();
                 let objects_panel = objects_panel.clone();
-                let active_database_name_from_config = active_database_name_from_config.clone();
-                if let Err(error) = objects_panel.update(cx, |panel, cx| {
-                    panel.set_loading(true, cx);
-                }) {
-                    tracing::warn!(
-                        %error,
-                        connection_id = %connection_id,
-                        "Failed to set initial rich table objects panel loading state"
-                    );
-                }
+                // Match the database the lazy kind loads use (event_handlers.rs
+                // `ActiveKindChanged`) so both paths hit the same kind cache key.
+                let target_database = main_view
+                    .read_with(cx, |main_view, cx| {
+                        main_view
+                            .workspace_state
+                            .read(cx)
+                            .active_database()
+                            .map(ToString::to_string)
+                    })
+                    .ok()
+                    .flatten()
+                    .or_else(|| active_database_name_from_config.clone());
+                let ticket = objects_panel
+                    .update(cx, |panel, cx| {
+                        panel.set_loading(true, cx);
+                        panel.begin_kind_request("table")
+                    })
+                    .inspect_err(|error| {
+                        tracing::warn!(
+                            %error,
+                            connection_id = %connection_id,
+                            "Failed to set initial rich table objects panel loading state"
+                        );
+                    })
+                    .unwrap_or(0);
                 cx.spawn(async move |cx| {
                     match connection_service
                         .load_objects_panel_kind_data(
                             connection_id,
-                            active_database_name_from_config,
+                            target_database,
                             "table",
                             None,
                         )
@@ -429,7 +497,7 @@ async fn run_connection_sidebar_bootstrap(
                         Ok(data) => {
                             if let Err(error) = objects_panel.update(cx, |panel, cx| {
                                 panel.set_loading(false, cx);
-                                panel.replace_kind_objects("table", data, cx);
+                                panel.replace_kind_objects_if_current(ticket, "table", data, cx);
                             }) {
                                 tracing::warn!(
                                     %error,
@@ -486,8 +554,16 @@ async fn run_connection_sidebar_bootstrap(
         }
     };
 
-    if table_names.is_some() {
-        run_relational_bootstrap_follow_up(connection_service, sidebar, connection_id, cx).await;
+    if let Some(table_names) = table_names {
+        run_relational_bootstrap_follow_up(
+            connection_service,
+            sidebar,
+            main_view,
+            connection_id,
+            table_names,
+            cx,
+        )
+        .await;
     }
 }
 
@@ -546,6 +622,9 @@ fn apply_relational_sidebar_bootstrap_payload(
             bootstrap.objects_panel_data.clone(),
             bootstrap.objects_panel_manifest.clone(),
             bootstrap.object_capabilities,
+            // The feature set is derived by the refresh that follows connect;
+            // until then no action is gated.
+            None,
             cx,
         );
     }) {
@@ -1333,7 +1412,7 @@ impl MainView {
             table_name: table_name.clone(),
         };
 
-        cx.spawn_in(window, async move |_this, cx| {
+        cx.spawn_in(window, async move |main_view, cx| {
             let connection = database_name
                 .as_deref()
                 .and_then(|database_name| {
@@ -1358,6 +1437,23 @@ impl MainView {
 
             match details_result {
                 Ok(details) => {
+                    // Hand the columns to every open editor's LSP before the details are
+                    // decomposed into sidebar strings, so `alias.` completions for this
+                    // table work without waiting for the next whole-schema refresh.
+                    if let Err(error) = main_view.update(cx, |main_view, cx| {
+                        main_view.for_each_live_query_editor(cx, |editor, cx| {
+                            editor.update(cx, |editor, cx| {
+                                editor.notify_table_details_loaded(
+                                    table_name.as_str(),
+                                    &details,
+                                    cx,
+                                );
+                            });
+                        });
+                    }) {
+                        tracing::warn!(%error, "Failed to seed LSP cache with table details");
+                    }
+
                     let mut detail_data = SidebarTableDetailsData {
                         fields: details
                             .columns

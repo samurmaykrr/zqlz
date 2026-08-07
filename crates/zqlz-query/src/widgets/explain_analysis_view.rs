@@ -630,6 +630,7 @@ mod tests {
         ExplainResult {
             sql: "SELECT 1".to_string(),
             duration_ms: 0,
+            duration_micros: 0,
             raw_output: None,
             query_plan: None,
             analyzed_plan: None,

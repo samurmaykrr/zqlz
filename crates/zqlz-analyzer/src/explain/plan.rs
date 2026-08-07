@@ -459,6 +459,58 @@ impl NodeType {
         }
     }
 
+    /// Returns the canonical short name of this node type, matching the
+    /// spelling PostgreSQL uses in its own EXPLAIN output.
+    pub fn short_name(&self) -> &'static str {
+        match self {
+            Self::SeqScan => "Seq Scan",
+            Self::IndexScan => "Index Scan",
+            Self::IndexOnlyScan => "Index Only Scan",
+            Self::BitmapIndexScan => "Bitmap Index Scan",
+            Self::BitmapHeapScan => "Bitmap Heap Scan",
+            Self::TidScan => "Tid Scan",
+            Self::SubqueryScan => "Subquery Scan",
+            Self::FunctionScan => "Function Scan",
+            Self::ValuesScan => "Values Scan",
+            Self::CteScan => "CTE Scan",
+            Self::WorkTableScan => "WorkTable Scan",
+            Self::ForeignScan => "Foreign Scan",
+            Self::CustomScan => "Custom Scan",
+            Self::NestedLoop => "Nested Loop",
+            Self::HashJoin => "Hash Join",
+            Self::MergeJoin => "Merge Join",
+            Self::Aggregate => "Aggregate",
+            Self::GroupAggregate => "GroupAggregate",
+            Self::HashAggregate => "HashAggregate",
+            Self::WindowAgg => "WindowAgg",
+            Self::Sort => "Sort",
+            Self::IncrementalSort => "Incremental Sort",
+            Self::SetOp => "SetOp",
+            Self::Append => "Append",
+            Self::MergeAppend => "Merge Append",
+            Self::RecursiveUnion => "Recursive Union",
+            Self::Limit => "Limit",
+            Self::Materialize => "Materialize",
+            Self::Memoize => "Memoize",
+            Self::Hash => "Hash",
+            Self::Unique => "Unique",
+            Self::BitmapAnd => "BitmapAnd",
+            Self::BitmapOr => "BitmapOr",
+            Self::SubPlan => "SubPlan",
+            Self::ModifyTable => "ModifyTable",
+            Self::Insert => "Insert",
+            Self::Update => "Update",
+            Self::Delete => "Delete",
+            Self::Result => "Result",
+            Self::Gather => "Gather",
+            Self::GatherMerge => "Gather Merge",
+            Self::LockRows => "LockRows",
+            Self::ProjectSet => "ProjectSet",
+            Self::Cte => "CTE",
+            Self::Unknown => "Unknown",
+        }
+    }
+
     /// Returns a human-readable description of this node type
     pub fn description(&self) -> &'static str {
         match self {

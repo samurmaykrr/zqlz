@@ -7,5 +7,5 @@
 
 pub(super) mod conversion;
 pub(super) mod redis;
-pub(super) mod sql;
+pub(crate) mod sql;
 pub(super) mod validation;

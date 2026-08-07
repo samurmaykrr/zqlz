@@ -1,4 +1,4 @@
-use crate::widgets::{ActiveTheme, Disableable, StyledExt, h_flex};
+use crate::widgets::{ActiveTheme, Disableable, StyledExt, h_flex, tooltip::Tooltip};
 use gpui::{
     AnyElement, App, ClickEvent, ElementId, InteractiveElement, IntoElement, MouseButton,
     ParentElement, RenderOnce, SharedString, StatefulInteractiveElement as _, StyleRefinement,
@@ -16,6 +16,7 @@ pub(crate) struct MenuItemElement {
     style: StyleRefinement,
     disabled: bool,
     selected: bool,
+    tooltip: Option<SharedString>,
     on_click: Option<MenuItemClickHandler>,
     on_hover: Option<MenuItemHoverHandler>,
     children: SmallVec<[AnyElement; 2]>,
@@ -31,6 +32,7 @@ impl MenuItemElement {
             style: StyleRefinement::default(),
             disabled: false,
             selected: false,
+            tooltip: None,
             on_click: None,
             on_hover: None,
             children: SmallVec::new(),
@@ -46,6 +48,12 @@ impl MenuItemElement {
     /// Set the disabled state of the MenuItem.
     pub(crate) fn disabled(mut self, disabled: bool) -> Self {
         self.disabled = disabled;
+        self
+    }
+
+    /// Set the hover tooltip of the MenuItem, shown even when disabled.
+    pub(crate) fn tooltip_text(mut self, tooltip: Option<SharedString>) -> Self {
+        self.tooltip = tooltip;
         self
     }
 
@@ -121,6 +129,9 @@ impl RenderOnce for MenuItemElement {
             })
             .when(self.disabled, |this| {
                 this.text_color(cx.theme().muted_foreground)
+            })
+            .when_some(self.tooltip, |this, tooltip| {
+                this.tooltip(move |window, cx| Tooltip::new(tooltip.clone()).build(window, cx))
             })
             .children(self.children)
     }

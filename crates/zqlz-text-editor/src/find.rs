@@ -22,6 +22,8 @@ pub struct FindOptions {
     pub whole_word: bool,
     /// Treat the query string as a regular expression
     pub use_regex: bool,
+    /// Adapt replacement text to the case pattern of each match
+    pub preserve_case: bool,
 }
 
 /// A contiguous byte range in the buffer that matches the search query.
@@ -115,6 +117,7 @@ impl FindState {
             case_sensitive: self.options.case_sensitive,
             whole_word: self.options.whole_word,
             regex: self.options.use_regex,
+            preserve_case: self.options.preserve_case,
         };
 
         match SearchEngine::new(&self.query, &options) {
@@ -145,6 +148,7 @@ impl FindState {
             case_sensitive: self.options.case_sensitive,
             whole_word: self.options.whole_word,
             regex: self.options.use_regex,
+            preserve_case: self.options.preserve_case,
         };
         match SearchEngine::new(&self.query, &options) {
             Ok(engine) => {

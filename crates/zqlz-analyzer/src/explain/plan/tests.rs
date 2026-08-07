@@ -246,3 +246,66 @@ fn test_query_plan_serialization() {
     assert_eq!(plan.root.node_type, deserialized.root.node_type);
     assert_eq!(plan.root.relation, deserialized.root.relation);
 }
+
+#[test]
+fn test_short_name_round_trips_through_postgres_parser() {
+    let all = [
+        NodeType::SeqScan,
+        NodeType::IndexScan,
+        NodeType::IndexOnlyScan,
+        NodeType::BitmapIndexScan,
+        NodeType::BitmapHeapScan,
+        NodeType::TidScan,
+        NodeType::SubqueryScan,
+        NodeType::FunctionScan,
+        NodeType::ValuesScan,
+        NodeType::CteScan,
+        NodeType::WorkTableScan,
+        NodeType::ForeignScan,
+        NodeType::CustomScan,
+        NodeType::NestedLoop,
+        NodeType::HashJoin,
+        NodeType::MergeJoin,
+        NodeType::Aggregate,
+        NodeType::GroupAggregate,
+        NodeType::HashAggregate,
+        NodeType::WindowAgg,
+        NodeType::Sort,
+        NodeType::IncrementalSort,
+        NodeType::SetOp,
+        NodeType::Append,
+        NodeType::MergeAppend,
+        NodeType::RecursiveUnion,
+        NodeType::Limit,
+        NodeType::Materialize,
+        NodeType::Memoize,
+        NodeType::Hash,
+        NodeType::Unique,
+        NodeType::BitmapAnd,
+        NodeType::BitmapOr,
+        NodeType::SubPlan,
+        NodeType::ModifyTable,
+        NodeType::Insert,
+        NodeType::Update,
+        NodeType::Delete,
+        NodeType::Result,
+        NodeType::Gather,
+        NodeType::GatherMerge,
+        NodeType::LockRows,
+        NodeType::ProjectSet,
+        NodeType::Cte,
+    ];
+
+    for node_type in all {
+        let short_name = node_type.short_name();
+        assert!(!short_name.is_empty());
+        assert_eq!(
+            NodeType::from_postgres_str(short_name),
+            node_type,
+            "short_name {short_name:?} did not round-trip"
+        );
+    }
+
+    assert_eq!(NodeType::SeqScan.short_name(), "Seq Scan");
+    assert_eq!(NodeType::IndexOnlyScan.short_name(), "Index Only Scan");
+}

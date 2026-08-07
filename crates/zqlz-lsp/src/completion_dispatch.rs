@@ -2,7 +2,50 @@ use lsp_types::{CompletionItem, CompletionItemKind};
 use zqlz_core::SyntaxCompletionContextKind;
 use zqlz_ui::widgets::Rope;
 
-use crate::{AstSqlContext, SqlLsp, completion_context, operator_completions};
+use crate::{AstSqlContext, SqlLsp, completion_context, operator_completions, schema_lookup};
+
+/// Why the schema can offer nothing at all, if that is the situation.
+///
+/// `None` means the schema is loaded and populated, so the caller should explain the
+/// narrower reason its own lookup came back empty.
+fn schema_unavailable_reason(lsp: &SqlLsp) -> Option<(String, &'static str)> {
+    if lsp.schema_loading {
+        return Some((
+            "Loading schema…".to_string(),
+            "Fetching tables from the database",
+        ));
+    }
+
+    if lsp.schema_cache.tables.is_empty() && lsp.schema_cache.views.is_empty() {
+        return Some((
+            "No schema loaded — connect and refresh the schema".to_string(),
+            "schema",
+        ));
+    }
+
+    None
+}
+
+fn relation_is_known(lsp: &SqlLsp, name: &str) -> bool {
+    schema_lookup::table_info(lsp, name).is_some()
+        || lsp
+            .schema_cache
+            .views
+            .keys()
+            .any(|view_name| view_name.eq_ignore_ascii_case(name))
+}
+
+/// A non-inserting menu entry that explains an otherwise silent empty result.
+fn schema_hint_item(message: String, detail: &str) -> CompletionItem {
+    CompletionItem {
+        label: message,
+        kind: Some(CompletionItemKind::TEXT),
+        detail: Some(detail.to_string()),
+        insert_text: Some(String::new()),
+        preselect: Some(false),
+        ..Default::default()
+    }
+}
 
 pub(crate) fn add_completions_for_context(
     lsp: &SqlLsp,
@@ -17,16 +60,34 @@ pub(crate) fn add_completions_for_context(
         AstSqlContext::SelectList { available_tables } => {
             tracing::debug!("In SELECT list, available tables: {:?}", available_tables);
 
+            let before_columns = completions.len();
             if available_tables.is_empty() {
                 lsp.add_filtered_columns(completions);
             } else {
                 lsp.add_columns_from_tables(available_tables, completions);
             }
 
+            // Functions and keywords follow, so the menu is never empty — without an
+            // explicit hint a schema that hasn't loaded its columns yet is
+            // indistinguishable from one that simply has nothing to offer.
+            if completions.len() == before_columns {
+                let (message, detail) = schema_unavailable_reason(lsp)
+                    .unwrap_or_else(|| ("Loading columns…".to_string(), "schema"));
+                completions.push(schema_hint_item(message, detail));
+            }
+
             lsp.add_filtered_functions(current_word_lower, completions);
             lsp.add_context_keywords(
                 SyntaxCompletionContextKind::SelectList,
                 current_word_lower,
+                completions,
+            );
+
+            operator_completions::add_operator_completions(
+                SyntaxCompletionContextKind::SelectList,
+                current_word_lower,
+                lines_before_cursor,
+                &lsp.driver_type,
                 completions,
             );
         }
@@ -107,6 +168,8 @@ pub(crate) fn add_completions_for_context(
             operator_completions::add_operator_completions(
                 SyntaxCompletionContextKind::ConditionClause,
                 current_word_lower,
+                lines_before_cursor,
+                &lsp.driver_type,
                 completions,
             );
         }
@@ -134,6 +197,27 @@ pub(crate) fn add_completions_for_context(
                 after_dot_filter(current_word_lower),
                 completions,
             );
+
+            // An empty result here is invisible to the user (the menu simply
+            // never opens), so explain WHY there are no columns instead of
+            // failing silently.
+            if completions.is_empty() && current_word_lower.is_empty() {
+                let (message, detail) = match schema_unavailable_reason(lsp) {
+                    Some(reason) => reason,
+                    // A relation the schema knows about but has no cached columns for is
+                    // a pending column fetch, not an unresolved name — reporting it as
+                    // "unknown" sends the user hunting for a typo that isn't there.
+                    None if relation_is_known(lsp, &table_name) => {
+                        (format!("Loading columns for {table_name}…"), "schema")
+                    }
+                    None if !table_name.eq_ignore_ascii_case(table_or_alias) => {
+                        (format!("No columns cached for {table_name}"), "schema")
+                    }
+                    None => (format!("Unknown table or alias: {table_name}"), "schema"),
+                };
+
+                completions.push(schema_hint_item(message, detail));
+            }
         }
         AstSqlContext::CommonTableExpression { .. } => {
             tracing::debug!("In CTE context");

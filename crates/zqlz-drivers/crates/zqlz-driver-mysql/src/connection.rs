@@ -8,14 +8,19 @@ use mysql_async::{
 };
 use std::sync::Arc;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use zqlz_core::{
     BindPlaceholderPolicy, CellUpdateRequest, CheckConstraintEnforcement, ColumnMeta, Connection,
     ConnectionScope, DropTableOptions, DropTriggerOptions, DropViewOptions, ExplainConfig,
     ExplainParserKind, ForeignKeyChecksSql, ImportIndexCapabilities, ImportSemanticDefault,
     QueryCancelHandle, QueryResult, ResolvedConnectionScope, Result, Row, RowIdentifier,
-    SchemaIntrospection, SqlObjectName, StatementResult, Transaction, Value, ZqlzError,
+    SchemaIntrospection, SingleRowDmlScope, SqlObjectName, SqlParameterPlaceholderKind,
+    StatementResult, Transaction, Value, ZqlzError,
 };
 
+use zqlz_schema_engine::{DefaultDialect, SchemaEngine};
+
+use crate::schema::MySqlCatalog;
 use crate::MysqlSshTunnel;
 
 fn strip_pg_casts(expr: &str) -> String {
@@ -150,6 +155,36 @@ impl QueryCancelHandle for MySqlCancelHandle {
     }
 }
 
+/// Counts operations currently holding the pooled MySQL connection.
+///
+/// The pool is capped at a single connection, so a heartbeat ping would queue
+/// behind any in-flight query and then be misread as a dead transport when it
+/// hits the ping deadline. mysql_async offers no non-blocking pool checkout, so
+/// occupancy is tracked here instead and reported through `Connection::is_busy`.
+#[derive(Clone, Default)]
+pub(crate) struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    /// Mark the connection occupied until the returned guard is dropped.
+    fn enter(&self) -> InFlightGuard {
+        self.0.fetch_add(1, Ordering::SeqCst);
+        InFlightGuard(Arc::clone(&self.0))
+    }
+
+    fn is_busy(&self) -> bool {
+        self.0.load(Ordering::SeqCst) > 0
+    }
+}
+
+/// Releases one unit of occupancy when dropped, including on early return.
+pub(crate) struct InFlightGuard(Arc<AtomicUsize>);
+
+impl Drop for InFlightGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 /// MySQL connection wrapper
 pub struct MySqlConnection {
     pool: Pool,
@@ -159,6 +194,9 @@ pub struct MySqlConnection {
     database_name: Option<String>,
     cancelled: Arc<std::sync::atomic::AtomicBool>,
     _ssh_tunnel: Option<MysqlSshTunnel>,
+    pub(crate) schema_engine: SchemaEngine,
+    closed: AtomicBool,
+    in_flight: InFlight,
 }
 
 #[derive(Debug)]
@@ -177,9 +215,13 @@ impl MySqlConnection {
     pub async fn connect(options: MySqlConnectOptions) -> Result<Self> {
         tracing::info!(host = %options.host, port = %options.port, database = ?options.database, "connecting to MySQL database");
 
+        // Without CLIENT_FOUND_ROWS, MySQL reports rows *changed* rather than rows
+        // *matched*, so an UPDATE that sets a column to the value it already holds
+        // returns 0 and is indistinguishable from a row that no longer exists.
         let mut opts_builder = OptsBuilder::from_opts(Opts::default())
             .ip_or_hostname(options.host.as_str())
-            .tcp_port(options.port);
+            .tcp_port(options.port)
+            .client_found_rows(true);
 
         if let Some(db) = options.database.as_deref() {
             opts_builder = opts_builder.db_name(Some(db));
@@ -248,22 +290,46 @@ impl MySqlConnection {
         };
 
         tracing::info!(host = %options.host, port = %options.port, database = ?database_name, "MySQL connection established");
+        let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let in_flight = InFlight::default();
+        let schema_engine = SchemaEngine::new(
+            Arc::new(MySqlCatalog::new(
+                pool.clone(),
+                database_name.clone(),
+                cancelled.clone(),
+                in_flight.clone(),
+            )),
+            Arc::new(DefaultDialect),
+        );
         Ok(Self {
             pool,
             database_name,
-            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancelled,
             _ssh_tunnel: options.ssh_tunnel,
+            schema_engine,
+            closed: AtomicBool::new(false),
+            in_flight,
         })
     }
 
-    /// Get a connection from the pool, dispatched on the MySQL Tokio runtime
-    async fn get_conn(&self) -> Result<Conn> {
+    /// Get a connection from the pool, dispatched on the MySQL Tokio runtime.
+    ///
+    /// The returned guard marks the connection occupied and must be held for as
+    /// long as the `Conn` is in use, so `is_busy` stays accurate. Returning them
+    /// together makes it impossible to check out a connection without counting
+    /// it. Occupancy starts before the checkout so a caller waiting on the pool
+    /// also reads as busy.
+    async fn get_conn(&self) -> Result<(Conn, InFlightGuard)> {
+        let in_flight = self.in_flight.enter();
         let pool = self.pool.clone();
-        get_mysql_runtime()
+        let conn = get_mysql_runtime()
             .spawn(async move { pool.get_conn().await })
             .await
             .map_err(|e| ZqlzError::Connection(format!("MySQL get_conn task failed: {}", e)))?
-            .map_err(|e| ZqlzError::Connection(format!("Failed to get MySQL connection: {}", e)))
+            .map_err(|e| {
+                ZqlzError::Connection(format!("Failed to get MySQL connection: {}", e))
+            })?;
+        Ok((conn, in_flight))
     }
 
     /// Reset the cancellation flag
@@ -309,41 +375,146 @@ fn value_to_mysql_literal(value: &Value) -> Result<String> {
         Value::Date(v) => format!("'{}'", v),
         Value::Time(v) => format!("'{}'", v),
         Value::DateTime(v) => format!("'{}'", v.format("%Y-%m-%d %H:%M:%S")),
-        Value::Decimal(v) => v.to_string(),
+        // Emitted unquoted to preserve precision, so it must be a real number.
+        Value::Decimal(v) => {
+            if !Value::is_sql_numeric_literal(v) {
+                return Err(ZqlzError::Query(format!(
+                    "Invalid decimal literal: {}",
+                    v
+                )));
+            }
+            v.to_string()
+        }
         Value::Array(arr) => {
             // MySQL doesn't have native array support, convert to JSON
             let json = serde_json::to_string(&serde_json::Value::Array(
                 arr.iter().map(Value::to_json_value).collect(),
             ))
             .map_err(|error| ZqlzError::Query(format!("Failed to serialize array: {}", error)))?;
-            format!("'{}'", json.replace("'", "''"))
+            format!("'{}'", json.replace("'", "''").replace("\\", "\\\\"))
         }
     })
 }
 
+/// Execute a query against a MySQL pool and collect the result. Shared by
+/// `MySqlConnection` and the schema-introspection adapter.
+pub(crate) async fn run_mysql_query(
+    pool: Pool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+    in_flight: InFlight,
+    sql: &str,
+    params: &[Value],
+) -> Result<QueryResult> {
+    let start_time = std::time::Instant::now();
+    let _in_flight = in_flight.enter();
+
+    let mut conn = {
+        let pool = pool.clone();
+        get_mysql_runtime()
+            .spawn(async move { pool.get_conn().await })
+            .await
+            .map_err(|e| ZqlzError::Connection(format!("MySQL get_conn task failed: {}", e)))?
+            .map_err(|e| ZqlzError::Connection(format!("Failed to get MySQL connection: {}", e)))?
+    };
+
+    let final_sql = render_mysql_sql_with_params(sql, params)?;
+
+    let (columns, _column_names, rows) = get_mysql_runtime()
+        .spawn(async move {
+            let result = conn
+                .query_iter(&final_sql)
+                .await
+                .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
+
+            let (columns, column_names, column_types, column_flags) =
+                mysql_column_metadata(result.columns_ref());
+            let mysql_rows: Vec<MySqlRow> = result
+                .collect_and_drop()
+                .await
+                .map_err(|e| ZqlzError::Query(format!("Failed to collect query rows: {}", e)))?;
+
+            let mut rows = Vec::new();
+            for mysql_row in mysql_rows {
+                if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
+                    break;
+                }
+                let mut values = Vec::new();
+                for idx in 0..columns.len() {
+                    let mysql_val: mysql_async::Value =
+                        mysql_row.get(idx).unwrap_or(mysql_async::Value::NULL);
+                    let col_type = column_types
+                        .get(idx)
+                        .copied()
+                        .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
+                    let value =
+                        mysql_value_to_value(mysql_val, col_type, column_flags.get(idx).copied());
+                    values.push(value);
+                }
+                rows.push(Row::new(column_names.clone(), values));
+            }
+
+            Ok::<(Vec<ColumnMeta>, Vec<String>, Vec<Row>), ZqlzError>((columns, column_names, rows))
+        })
+        .await
+        .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
+
+    let execution_time_ms = start_time.elapsed().as_millis() as u64;
+    let total_rows = rows.len();
+
+    Ok(QueryResult {
+        id: uuid::Uuid::new_v4(),
+        columns,
+        rows,
+        total_rows: Some(total_rows as u64),
+        is_estimated_total: false,
+        affected_rows: 0,
+        execution_time_ms,
+        warnings: Vec::new(),
+    })
+}
+
+/// Substitute parameter values into MySQL SQL text.
+///
+/// Placeholders are located with the SQL lexer rather than by string search, so
+/// a `?` or `$1` appearing inside a string literal, a comment or a quoted
+/// identifier is left alone. A plain `replacen` would rewrite the contents of
+/// `WHERE note = '?'` and silently corrupt the statement.
 fn render_mysql_sql_with_params(sql: &str, params: &[Value]) -> Result<String> {
     if params.is_empty() {
         return Ok(sql.to_string());
     }
 
-    let uses_numbered_params = params
-        .iter()
-        .enumerate()
-        .any(|(index, _)| sql.contains(&format!("${}", index + 1)));
-
-    let mut result = sql.to_string();
-    if uses_numbered_params {
-        for (index, param) in params.iter().enumerate() {
-            let placeholder = format!("${}", index + 1);
-            let value_str = value_to_mysql_literal(param)?;
-            result = result.replacen(&placeholder, &value_str, 1);
-        }
-    } else {
-        for param in params {
-            let value_str = value_to_mysql_literal(param)?;
-            result = result.replacen("?", &value_str, 1);
-        }
+    let placeholders = zqlz_core::sql_parameter_placeholders(sql);
+    if placeholders.is_empty() {
+        return Ok(sql.to_string());
     }
+
+    let mut result = String::with_capacity(sql.len());
+    let mut last_end = 0usize;
+    let mut next_positional = 0usize;
+
+    for placeholder in &placeholders {
+        let param_index = match &placeholder.kind {
+            SqlParameterPlaceholderKind::DollarPositional(position) => position.saturating_sub(1),
+            SqlParameterPlaceholderKind::QuestionMark => {
+                let index = next_positional;
+                next_positional += 1;
+                index
+            }
+            // Named placeholders are not bound positionally; leave them intact.
+            SqlParameterPlaceholderKind::Named(_) => continue,
+        };
+
+        let Some(param) = params.get(param_index) else {
+            continue;
+        };
+
+        result.push_str(&sql[last_end..placeholder.start]);
+        result.push_str(&value_to_mysql_literal(param)?);
+        last_end = placeholder.end;
+    }
+
+    result.push_str(&sql[last_end..]);
 
     Ok(result)
 }
@@ -1146,7 +1317,7 @@ impl Connection for MySqlConnection {
     async fn execute(&self, sql: &str, params: &[Value]) -> Result<StatementResult> {
         self.reset_cancellation();
 
-        let mut conn = self.get_conn().await?;
+        let (mut conn, _in_flight) = self.get_conn().await?;
 
         let final_sql = render_mysql_sql_with_params(sql, params)?;
 
@@ -1172,86 +1343,21 @@ impl Connection for MySqlConnection {
     #[tracing::instrument(skip(self, sql, params), fields(sql_preview = %sql.chars().take(100).collect::<String>()))]
     async fn query(&self, sql: &str, params: &[Value]) -> Result<QueryResult> {
         self.reset_cancellation();
-        let start_time = std::time::Instant::now();
-
-        let mut conn = self.get_conn().await?;
-
-        let final_sql = render_mysql_sql_with_params(sql, params)?;
-
-        let cancelled = self.cancelled.clone();
-        let (columns, _column_names, rows) = get_mysql_runtime()
-            .spawn(async move {
-                let result = conn
-                    .query_iter(&final_sql)
-                    .await
-                    .map_err(|e| ZqlzError::Query(format!("Failed to execute query: {}", e)))?;
-
-                let (columns, column_names, column_types, column_flags) =
-                    mysql_column_metadata(result.columns_ref());
-                let mysql_rows: Vec<MySqlRow> = result.collect_and_drop().await.map_err(|e| {
-                    ZqlzError::Query(format!("Failed to collect query rows: {}", e))
-                })?;
-
-                let mut rows = Vec::new();
-                for mysql_row in mysql_rows {
-                    if cancelled.load(std::sync::atomic::Ordering::SeqCst) {
-                        tracing::debug!("Query cancelled by user");
-                        break;
-                    }
-
-                    let mut values = Vec::new();
-                    for idx in 0..columns.len() {
-                        let mysql_val: mysql_async::Value =
-                            mysql_row.get(idx).unwrap_or(mysql_async::Value::NULL);
-                        let col_type = column_types
-                            .get(idx)
-                            .copied()
-                            .unwrap_or(ColumnType::MYSQL_TYPE_STRING);
-                        let value = mysql_value_to_value(
-                            mysql_val,
-                            col_type,
-                            column_flags.get(idx).copied(),
-                        );
-                        values.push(value);
-                    }
-                    rows.push(Row::new(column_names.clone(), values));
-                }
-
-                Ok::<(Vec<ColumnMeta>, Vec<String>, Vec<Row>), ZqlzError>((
-                    columns,
-                    column_names,
-                    rows,
-                ))
-            })
-            .await
-            .map_err(|e| ZqlzError::Query(format!("MySQL query task failed: {}", e)))??;
-
-        let execution_time_ms = start_time.elapsed().as_millis() as u64;
-        let total_rows = rows.len();
-
-        tracing::debug!(
-            row_count = total_rows,
-            execution_time_ms = execution_time_ms,
-            "query executed successfully"
-        );
-
-        Ok(QueryResult {
-            id: uuid::Uuid::new_v4(),
-            columns,
-            rows,
-            total_rows: Some(total_rows as u64),
-            is_estimated_total: false,
-            affected_rows: 0,
-            execution_time_ms,
-            warnings: Vec::new(),
-        })
+        run_mysql_query(
+            self.pool.clone(),
+            self.cancelled.clone(),
+            self.in_flight.clone(),
+            sql,
+            params,
+        )
+        .await
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
         tracing::debug!("beginning MySQL transaction");
 
         // Get a connection from the pool for the duration of the transaction
-        let mut conn = self.get_conn().await?;
+        let (mut conn, in_flight) = self.get_conn().await?;
 
         // Begin the transaction
         let conn = get_mysql_runtime()
@@ -1271,6 +1377,7 @@ impl Connection for MySqlConnection {
             conn: Arc::new(tokio::sync::Mutex::new(Some(conn))),
             committed: false,
             rolled_back: false,
+            in_flight: Some(in_flight),
         }))
     }
 
@@ -1284,16 +1391,23 @@ impl Connection for MySqlConnection {
             .map_err(|e| {
                 ZqlzError::Connection(format!("Failed to close MySQL connection: {}", e))
             })?;
+        self.closed.store(true, Ordering::SeqCst);
         Ok(())
     }
 
     fn is_closed(&self) -> bool {
-        false
+        self.closed.load(Ordering::SeqCst)
+    }
+
+    fn is_busy(&self) -> bool {
+        self.in_flight.is_busy()
     }
 
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
         Some(self)
     }
+
+    // schema_engine drives delegated introspection; see src/schema.rs.
 
     fn cancel_handle(&self) -> Option<Arc<dyn QueryCancelHandle>> {
         Some(Arc::new(MySqlCancelHandle {
@@ -1353,17 +1467,26 @@ impl Connection for MySqlConnection {
             None => "NULL".to_string(),
         };
 
+        let scope = match &request.row_identifier {
+            RowIdentifier::FullRow(_) => {
+                self.single_row_dml_scope(&table_identifier, &where_clause)
+            }
+            _ => SingleRowDmlScope::Unsupported,
+        };
+        let (where_clause, statement_suffix) = scope.apply(&where_clause);
+
         let sql = format!(
-            "UPDATE {} SET {} = {} WHERE {}",
+            "UPDATE {} SET {} = {} WHERE {}{}",
             table_identifier,
             escape_identifier_mysql(&request.column_name),
             set_value,
-            where_clause
+            where_clause,
+            statement_suffix
         );
 
         tracing::debug!("MySQL update SQL: {}", sql);
 
-        let mut conn = self.get_conn().await?;
+        let (mut conn, _in_flight) = self.get_conn().await?;
         let rows_affected = get_mysql_runtime()
             .spawn(async move {
                 conn.query_drop(&sql)
@@ -1376,6 +1499,16 @@ impl Connection for MySqlConnection {
 
         tracing::debug!(affected_rows = rows_affected, "cell update completed");
         Ok(rows_affected)
+    }
+
+    /// InnoDB's internal row id is not selectable, but MySQL accepts a row
+    /// limit directly on UPDATE and DELETE.
+    fn single_row_dml_scope(
+        &self,
+        _qualified_table: &str,
+        _where_clause: &str,
+    ) -> SingleRowDmlScope {
+        SingleRowDmlScope::StatementSuffix(" LIMIT 1")
     }
 }
 
@@ -1412,6 +1545,9 @@ pub struct MySqlTransaction {
     conn: Arc<tokio::sync::Mutex<Option<Conn>>>,
     committed: bool,
     rolled_back: bool,
+    /// Held for the transaction's lifetime; moved into the auto-rollback thread
+    /// on drop so the connection reads as busy until the rollback finishes.
+    in_flight: Option<InFlightGuard>,
 }
 
 #[async_trait]
@@ -1621,8 +1757,10 @@ impl Drop for MySqlTransaction {
                 "MySQL transaction dropped without commit or rollback - will auto-rollback"
             );
             let conn_mutex = self.conn.clone();
+            let in_flight = self.in_flight.take();
             std::thread::spawn(move || {
                 get_mysql_runtime().block_on(async move {
+                    let _in_flight = in_flight;
                     let mut guard = conn_mutex.lock().await;
                     if let Some(ref mut conn) = *guard
                         && let Err(e) = conn.query_drop("ROLLBACK").await
@@ -1638,6 +1776,25 @@ impl Drop for MySqlTransaction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn in_flight_tracks_nested_occupancy() {
+        let in_flight = InFlight::default();
+        assert!(!in_flight.is_busy());
+
+        let first = in_flight.enter();
+        assert!(in_flight.is_busy());
+
+        let second = in_flight.enter();
+        drop(first);
+        assert!(
+            in_flight.is_busy(),
+            "connection is still occupied while a second guard is held"
+        );
+
+        drop(second);
+        assert!(!in_flight.is_busy());
+    }
 
     #[test]
     fn mysql_column_type_display_uses_sql_type_names() {
@@ -1801,6 +1958,24 @@ mod tests {
     }
 
     #[test]
+    fn mysql_decimal_literal_rejects_sql_payload() {
+        let result = value_to_mysql_literal(&Value::Decimal("0 WHERE 1=1 -- ".to_string()));
+
+        assert!(
+            result.is_err(),
+            "a non-numeric decimal must not be emitted unquoted"
+        );
+    }
+
+    #[test]
+    fn mysql_decimal_literal_preserves_precision() {
+        let literal = value_to_mysql_literal(&Value::Decimal("-6.0000".to_string()))
+            .expect("numeric decimal serializes");
+
+        assert_eq!(literal, "-6.0000");
+    }
+
+    #[test]
     fn mysql_params_render_question_mark_placeholders() {
         let sql = render_mysql_sql_with_params(
             "SELECT ? AS name, ? AS active",
@@ -1820,6 +1995,42 @@ mod tests {
         .expect("params render");
 
         assert_eq!(sql, "SELECT 20 AS second, 10 AS first");
+    }
+
+    /// Substitution used to be a plain `replacen`, which rewrote any `?` it
+    /// found — including ones inside string literals, where they are data.
+    #[test]
+    fn mysql_params_ignore_placeholders_inside_string_literals() {
+        let sql = render_mysql_sql_with_params(
+            "SELECT * FROM t WHERE note = '?' AND id = ?",
+            &[Value::Int32(7)],
+        )
+        .expect("params render");
+
+        assert_eq!(sql, "SELECT * FROM t WHERE note = '?' AND id = 7");
+    }
+
+    #[test]
+    fn mysql_params_ignore_placeholders_inside_comments() {
+        let sql = render_mysql_sql_with_params(
+            "SELECT id -- what about ?\nFROM t WHERE id = ?",
+            &[Value::Int32(3)],
+        )
+        .expect("params render");
+
+        assert_eq!(sql, "SELECT id -- what about ?\nFROM t WHERE id = 3");
+    }
+
+    /// A literal dollar amount is not a positional placeholder.
+    #[test]
+    fn mysql_params_ignore_dollar_text_inside_literals() {
+        let sql = render_mysql_sql_with_params(
+            "SELECT * FROM t WHERE price = '$1' AND id = ?",
+            &[Value::Int32(5)],
+        )
+        .expect("params render");
+
+        assert_eq!(sql, "SELECT * FROM t WHERE price = '$1' AND id = 5");
     }
 
     #[test]

@@ -4,12 +4,52 @@ use std::sync::Arc;
 use anyhow::Result;
 use uuid::Uuid;
 use zqlz_core::Connection;
-use zqlz_services::SchemaService;
+use zqlz_services::{SchemaService, TableDetails};
 
 use crate::{
     ColumnInfo, DatabaseObject, FunctionInfo, IndexInfo, ParameterDirection, ParameterInfo,
     ProcedureInfo, SchemaCache, TableInfo, TriggerInfo, ViewInfo,
 };
+
+/// Projects a service-level `TableDetails` onto the LSP's flatter `ColumnInfo`.
+///
+/// Shared by the full schema fetch and by `SqlLsp::merge_table_columns` so an
+/// incrementally merged table looks identical to a fully fetched one.
+pub(crate) fn columns_from_table_details(
+    table_name: &str,
+    details: &TableDetails,
+) -> Vec<ColumnInfo> {
+    columns_from_parts(table_name, &details.columns, &details.foreign_keys)
+}
+
+/// The projection itself, shared by every entry point.
+///
+/// `is_foreign_key` is derived from the foreign-key list rather than read off the
+/// column, so the two must always be passed together.
+pub(crate) fn columns_from_parts(
+    table_name: &str,
+    columns: &[zqlz_services::ColumnInfo],
+    foreign_keys: &[zqlz_core::ForeignKeyInfo],
+) -> Vec<ColumnInfo> {
+    let foreign_key_columns: HashSet<&str> = foreign_keys
+        .iter()
+        .flat_map(|foreign_key| foreign_key.columns.iter().map(String::as_str))
+        .collect();
+
+    columns
+        .iter()
+        .map(|column| ColumnInfo {
+            table_name: table_name.to_string(),
+            name: column.name.clone(),
+            data_type: column.data_type.clone(),
+            nullable: column.nullable,
+            default_value: column.default_value.clone(),
+            is_primary_key: column.is_primary_key,
+            is_foreign_key: foreign_key_columns.contains(column.name.as_str()),
+            comment: column.comment.clone(),
+        })
+        .collect()
+}
 
 pub(crate) async fn fetch_schema_cache(
     connection: Arc<dyn Connection>,
@@ -76,26 +116,7 @@ pub(crate) async fn fetch_schema_cache(
 
     if let Some(cached_details) = schema_service.get_all_cached_table_details(connection_id) {
         for (table_name, details) in cached_details {
-            let foreign_key_columns: HashSet<String> = details
-                .foreign_keys
-                .iter()
-                .flat_map(|foreign_key| foreign_key.columns.iter().cloned())
-                .collect();
-
-            let column_infos: Vec<ColumnInfo> = details
-                .columns
-                .iter()
-                .map(|column| ColumnInfo {
-                    table_name: table_name.clone(),
-                    name: column.name.clone(),
-                    data_type: column.data_type.clone(),
-                    nullable: column.nullable,
-                    default_value: column.default_value.clone(),
-                    is_primary_key: column.is_primary_key,
-                    is_foreign_key: foreign_key_columns.contains(&column.name),
-                    comment: None,
-                })
-                .collect();
+            let column_infos = columns_from_table_details(&table_name, &details);
 
             for column in &column_infos {
                 cache.objects.push(DatabaseObject::Column(column.clone()));
@@ -117,6 +138,88 @@ pub(crate) async fn fetch_schema_cache(
                     .or_default()
                     .push((table_name.clone(), foreign_key.clone()));
             }
+        }
+    }
+
+    // The `TableDetails` cache above is only warm for tables something has already
+    // opened. Ask the driver for the whole schema's columns in one query — cheaper
+    // than the per-table caches it would otherwise have to hope are populated, and
+    // immune to the snapshot invalidation a scoped reload performs.
+    if let Some(summaries) = schema_service
+        .try_bulk_schema_columns(&connection, connection_id, active_schema.as_deref())
+        .await
+    {
+        for (table_name, summary) in summaries {
+            if cache
+                .columns_by_table
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(&table_name))
+            {
+                continue;
+            }
+
+            let column_infos =
+                columns_from_parts(&table_name, &summary.columns, &summary.foreign_keys);
+            for column in &column_infos {
+                cache.objects.push(DatabaseObject::Column(column.clone()));
+            }
+            cache
+                .columns_by_table
+                .insert(table_name.clone(), column_infos);
+
+            for foreign_key in &summary.foreign_keys {
+                cache
+                    .foreign_keys_by_table
+                    .entry(table_name.clone())
+                    .or_default()
+                    .push(foreign_key.clone());
+                cache
+                    .reverse_foreign_keys
+                    .entry(foreign_key.referenced_table.clone())
+                    .or_default()
+                    .push((table_name.clone(), foreign_key.clone()));
+            }
+        }
+    }
+
+    // Last resort for drivers with no bulk form: whatever the per-table column
+    // cache happens to hold, filled by the table viewer, designer or the paced
+    // warm-up.
+    if let Some(cached_columns) = schema_service.get_all_cached_columns(connection_id) {
+        for (cache_key, columns) in cached_columns {
+            let table_name = cache_key
+                .rsplit_once('.')
+                .map(|(_, name)| name)
+                .unwrap_or(&cache_key);
+
+            if cache
+                .columns_by_table
+                .keys()
+                .any(|name| name.eq_ignore_ascii_case(table_name))
+            {
+                continue;
+            }
+
+            let column_infos: Vec<ColumnInfo> = columns
+                .iter()
+                .map(|column| ColumnInfo {
+                    table_name: table_name.to_string(),
+                    name: column.name.clone(),
+                    data_type: column.data_type.clone(),
+                    nullable: column.nullable,
+                    default_value: column.default_value.clone(),
+                    is_primary_key: column.is_primary_key,
+                    is_foreign_key: column.foreign_key.is_some(),
+                    comment: column.comment.clone(),
+                })
+                .collect();
+
+            for column in &column_infos {
+                cache.objects.push(DatabaseObject::Column(column.clone()));
+            }
+            cache
+                .columns_by_table
+                .insert(table_name.to_string(), column_infos);
         }
     }
 

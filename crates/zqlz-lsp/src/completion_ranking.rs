@@ -25,6 +25,12 @@ pub(crate) fn rank_and_dedup_completions(
     let filter_lower = filter.to_lowercase();
     let mut best_by_key: HashMap<String, ScoredCompletionItem> = HashMap::new();
 
+    // Explanatory hints exist precisely to be seen when nothing else can be offered,
+    // so they must not be fuzzy-filtered against the typed word or ranked into the
+    // tail that `truncate` discards.
+    let (hints, completions): (Vec<_>, Vec<_>) =
+        completions.into_iter().partition(is_explanatory_hint);
+
     for (original_index, item) in completions.into_iter().enumerate() {
         let match_target = item
             .filter_text
@@ -70,7 +76,17 @@ pub(crate) fn rank_and_dedup_completions(
 
     let mut scored: Vec<_> = best_by_key.into_values().collect();
     scored.sort_by(|left, right| compare_scored_completions(right, left));
-    scored.into_iter().map(|entry| entry.item).collect()
+    hints
+        .into_iter()
+        .chain(scored.into_iter().map(|entry| entry.item))
+        .collect()
+}
+
+/// A non-inserting `TEXT` entry whose only job is to explain an empty result.
+fn is_explanatory_hint(item: &CompletionItem) -> bool {
+    item.kind == Some(CompletionItemKind::TEXT)
+        && item.insert_text.as_deref() == Some("")
+        && item.preselect == Some(false)
 }
 
 fn compare_scored_completions(

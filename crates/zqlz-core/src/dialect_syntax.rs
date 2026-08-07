@@ -1034,6 +1034,110 @@ pub fn condition_operator_completion_terms() -> &'static [SyntaxOperatorCompleti
     ]
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PostgresJsonOperator {
+    pub symbol: &'static str,
+    pub name: &'static str,
+    pub description: &'static str,
+    pub example: &'static str,
+    pub sort_text: &'static str,
+}
+
+pub fn postgres_json_operators() -> &'static [PostgresJsonOperator] {
+    &[
+        PostgresJsonOperator {
+            symbol: "->",
+            name: "Get JSON field (as json)",
+            description: "Extracts a JSON object field by key or array element by index, returning json/jsonb. Chain further operators on the result.",
+            example: "data->'address'->'city'",
+            sort_text: "9_operator_json_arrow",
+        },
+        PostgresJsonOperator {
+            symbol: "->>",
+            name: "Get JSON field (as text)",
+            description: "Extracts a JSON object field by key or array element by index, returning text. Comparisons on the result are string comparisons — cast for numeric ordering, e.g. (data->>'age')::int.",
+            example: "data->>'email'",
+            sort_text: "9_operator_json_arrow_text",
+        },
+        PostgresJsonOperator {
+            symbol: "#>",
+            name: "Get JSON at path (as json)",
+            description: "Extracts JSON at the given path (a text array), returning json/jsonb.",
+            example: "data#>'{address,city}'",
+            sort_text: "9_operator_json_path",
+        },
+        PostgresJsonOperator {
+            symbol: "#>>",
+            name: "Get JSON at path (as text)",
+            description: "Extracts JSON at the given path (a text array), returning text.",
+            example: "data#>>'{address,city}'",
+            sort_text: "9_operator_json_path_text",
+        },
+        PostgresJsonOperator {
+            symbol: "@>",
+            name: "Contains",
+            description: "True if the left jsonb value contains the right jsonb value. Can use a GIN index on the column.",
+            example: "data @> '{\"active\": true}'",
+            sort_text: "9_operator_json_contains",
+        },
+        PostgresJsonOperator {
+            symbol: "<@",
+            name: "Contained by",
+            description: "True if the left jsonb value is contained within the right jsonb value.",
+            example: "'{\"active\": true}' <@ data",
+            sort_text: "9_operator_json_contained",
+        },
+        PostgresJsonOperator {
+            symbol: "?",
+            name: "Key exists",
+            description: "True if the text string exists as a top-level key or array element in the jsonb value. Can use a GIN index.",
+            example: "data ? 'email'",
+            sort_text: "9_operator_json_exists",
+        },
+        PostgresJsonOperator {
+            symbol: "?|",
+            name: "Any key exists",
+            description: "True if any of the strings in the text array exist as top-level keys or array elements.",
+            example: "data ?| array['email', 'phone']",
+            sort_text: "9_operator_json_exists_any",
+        },
+        PostgresJsonOperator {
+            symbol: "?&",
+            name: "All keys exist",
+            description: "True if all of the strings in the text array exist as top-level keys or array elements.",
+            example: "data ?& array['email', 'phone']",
+            sort_text: "9_operator_json_exists_all",
+        },
+        PostgresJsonOperator {
+            symbol: "@?",
+            name: "JSON path exists",
+            description: "True if the jsonpath returns any item for the jsonb value. Can use a GIN index.",
+            example: "data @? '$.items[*] ? (@.qty > 2)'",
+            sort_text: "9_operator_json_path_exists",
+        },
+        PostgresJsonOperator {
+            symbol: "@@",
+            name: "JSON path predicate",
+            description: "Returns the result of a jsonpath predicate check for the jsonb value.",
+            example: "data @@ '$.qty > 2'",
+            sort_text: "9_operator_json_path_match",
+        },
+        PostgresJsonOperator {
+            symbol: "#-",
+            name: "Delete at path",
+            description: "Deletes the field or array element at the given path from a jsonb value.",
+            example: "data #- '{address,city}'",
+            sort_text: "9_operator_json_delete_path",
+        },
+    ]
+}
+
+pub fn postgres_json_operator(symbol: &str) -> Option<&'static PostgresJsonOperator> {
+    postgres_json_operators()
+        .iter()
+        .find(|operator| operator.symbol == symbol)
+}
+
 pub fn syntax_completion_dedup_key(
     item_kind: SyntaxCompletionItemKind,
     label: &str,
@@ -1097,9 +1201,14 @@ pub fn sql_completion_trigger_context(
 
     let is_after_dot = before_cursor.ends_with('.')
         || (current_word.is_empty() && before_cursor.trim_end().ends_with('.'));
+    let is_after_operator_char = before_cursor
+        .chars()
+        .next_back()
+        .is_some_and(|character| matches!(character, '-' | '>' | '#' | '@' | '?' | '|' | '&'));
     let is_after_trigger_char = before_cursor.ends_with(' ')
         || before_cursor.ends_with('(')
         || before_cursor.ends_with(',')
+        || is_after_operator_char
         || is_after_dot;
     let should_show = if current_word.is_empty() {
         is_after_trigger_char || before_cursor.is_empty()

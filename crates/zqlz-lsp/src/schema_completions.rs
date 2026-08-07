@@ -109,27 +109,8 @@ pub(crate) fn add_views(schema_cache: &SchemaCache, completions: &mut Vec<Comple
 }
 
 pub(crate) fn add_all_columns(schema_cache: &SchemaCache, completions: &mut Vec<CompletionItem>) {
-    #[cfg(test)]
-    println!(
-        "DEBUG add_filtered_columns: cache has {} tables",
-        schema_cache.columns_by_table.len()
-    );
-
     for (table, columns) in &schema_cache.columns_by_table {
-        #[cfg(test)]
-        println!(
-            "DEBUG: Checking table '{}' with {} columns",
-            table,
-            columns.len()
-        );
-
         for column in columns {
-            #[cfg(test)]
-            println!(
-                "DEBUG: Adding column '{}' from table '{}'",
-                column.name, table
-            );
-
             completions.push(completion_items::column_completion(table, column, "2"));
         }
     }

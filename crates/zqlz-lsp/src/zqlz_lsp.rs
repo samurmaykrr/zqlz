@@ -319,6 +319,17 @@ impl SqlLsp {
     /// For non-SQL dialects (like Redis), validation is skipped and no errors
     /// are returned for valid dialect commands.
     pub fn validate_sql(&mut self, text: &Rope) -> Vec<Diagnostic> {
+        self.validate_sql_at_cursor(text, None)
+    }
+
+    /// Same as [`Self::validate_sql`], but tolerates a qualified reference that is
+    /// still being typed at `cursor_offset` (`select c.|  from t`) instead of
+    /// reporting it as a syntax error.
+    pub fn validate_sql_at_cursor(
+        &mut self,
+        text: &Rope,
+        cursor_offset: Option<usize>,
+    ) -> Vec<Diagnostic> {
         let dialect_name = self.get_dialect_name().to_string();
         validation::validate_sql(
             &mut self.sql_diagnostics,
@@ -327,6 +338,7 @@ impl SqlLsp {
             &self.driver_type,
             self.dialect,
             &dialect_name,
+            cursor_offset,
         )
     }
 

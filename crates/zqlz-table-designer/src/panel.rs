@@ -308,14 +308,21 @@ impl TableDesignerPanel {
             .into_any_element()
     }
 
-    /// Create a new table designer for a new table
+    /// Create a new table designer for a new table.
+    ///
+    /// `schema` seeds the schema/database the table will be created in. Leaving it
+    /// empty makes `CREATE TABLE` resolve against the session's current database,
+    /// which is not necessarily the one the user is browsing.
     pub fn new(
         connection_id: Uuid,
         dialect: DatabaseDialect,
+        schema: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let design = TableDesign::empty(dialect);
+        let schema = schema.filter(|schema| !schema.is_empty());
+        let mut design = TableDesign::empty(dialect);
+        design.schema = schema.clone();
         let data_types = get_data_types(&dialect);
 
         let table_name_input = cx.new(|cx| InputState::new(window, cx).placeholder("Table name"));
@@ -330,8 +337,13 @@ impl TableDesignerPanel {
             }),
         );
 
-        let schema_input =
-            cx.new(|cx| InputState::new(window, cx).placeholder("Schema (optional)"));
+        let schema_input = cx.new(|cx| {
+            let mut state = InputState::new(window, cx).placeholder("Schema (optional)");
+            if let Some(ref schema) = schema {
+                state.set_value(schema, window, cx);
+            }
+            state
+        });
         let table_comment_input =
             cx.new(|cx| InputState::new(window, cx).placeholder("Table comment"));
         let mysql_engine_input = cx.new(|cx| {

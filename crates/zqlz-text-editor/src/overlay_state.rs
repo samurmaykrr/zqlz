@@ -44,10 +44,12 @@ pub struct GoToLineSnapshot {
 
 #[derive(Clone, Debug)]
 pub struct ContextMenuSnapshot {
-    pub items: Vec<(String, bool, bool)>,
+    /// `(label, shortcut, is_separator, disabled)`
+    pub items: Vec<(String, Option<String>, bool, bool)>,
     pub origin_x: f32,
     pub origin_y: f32,
     pub highlighted: Option<usize>,
+    pub scroll_y: f32,
 }
 
 /// Result of hit-testing a pointer position against the context menu.
@@ -178,6 +180,9 @@ pub(crate) enum ContextMenuAction {
 #[derive(Clone)]
 pub(crate) struct ContextMenuItem {
     label: String,
+    /// Pre-formatted keybinding, resolved when the menu opens so a user keymap
+    /// change is reflected without restarting.
+    shortcut: Option<String>,
     disabled: bool,
     is_separator: bool,
     action: Option<ContextMenuAction>,
@@ -191,19 +196,30 @@ impl ContextMenuItem {
     ) -> Self {
         Self {
             label: label.into(),
+            shortcut: None,
             disabled,
             is_separator: false,
             action: Some(action),
         }
     }
 
+    pub(crate) fn with_shortcut(mut self, shortcut: Option<String>) -> Self {
+        self.shortcut = shortcut;
+        self
+    }
+
     pub(crate) fn separator() -> Self {
         Self {
             label: String::new(),
+            shortcut: None,
             disabled: false,
             is_separator: true,
             action: None,
         }
+    }
+
+    pub(crate) fn shortcut(&self) -> Option<&str> {
+        self.shortcut.as_deref()
     }
 
     pub(crate) fn label(&self) -> &str {
@@ -229,10 +245,13 @@ pub(crate) struct ContextMenuState {
     origin_x: f32,
     origin_y: f32,
     highlighted: Option<usize>,
+    /// Vertical scroll within the menu content, in pixels. Non-zero only when
+    /// the item list is taller than the viewport allows.
+    scroll_y: f32,
 }
 
 impl ContextMenuState {
-    pub(crate) const MENU_WIDTH: Pixels = px(260.0);
+    pub(crate) const MENU_WIDTH: Pixels = px(300.0);
     const MENU_PADDING_Y: Pixels = px(8.0);
     const MENU_MARGIN: Pixels = px(8.0);
 
@@ -247,6 +266,7 @@ impl ContextMenuState {
             origin_x,
             origin_y,
             highlighted,
+            scroll_y: 0.0,
         }
     }
 
@@ -274,9 +294,9 @@ impl ContextMenuState {
         bounds_size: gpui::Size<Pixels>,
         line_height: Pixels,
     ) -> gpui::Point<Pixels> {
+        let visible_height = self.visible_height(bounds_size, line_height);
         let max_x = (bounds_size.width - Self::MENU_WIDTH - Self::MENU_MARGIN).max(px(0.0));
-        let max_y =
-            (bounds_size.height - self.total_height(line_height) - Self::MENU_MARGIN).max(px(0.0));
+        let max_y = (bounds_size.height - visible_height - Self::MENU_MARGIN).max(px(0.0));
         let min_x = Self::MENU_MARGIN.min(max_x);
         let min_y = Self::MENU_MARGIN.min(max_y);
 
@@ -284,6 +304,91 @@ impl ContextMenuState {
             bounds_origin.x + px(self.origin_x).clamp(min_x, max_x),
             bounds_origin.y + px(self.origin_y).clamp(min_y, max_y),
         )
+    }
+
+    /// On-screen menu height: the natural content height clamped to the
+    /// viewport. When clamped, the content scrolls within it.
+    pub(crate) fn visible_height(
+        &self,
+        bounds_size: gpui::Size<Pixels>,
+        line_height: Pixels,
+    ) -> Pixels {
+        let available = (bounds_size.height - Self::MENU_MARGIN * 2.0)
+            .max(Self::item_height(line_height) + Self::MENU_PADDING_Y);
+        self.total_height(line_height).min(available)
+    }
+
+    pub(crate) fn max_scroll(
+        &self,
+        bounds_size: gpui::Size<Pixels>,
+        line_height: Pixels,
+    ) -> f32 {
+        f32::from(self.total_height(line_height) - self.visible_height(bounds_size, line_height))
+            .max(0.0)
+    }
+
+    pub(crate) fn scroll_y(&self) -> f32 {
+        self.scroll_y
+    }
+
+    /// Scroll the menu content by `delta` pixels (positive scrolls down).
+    /// Returns true when the offset changed.
+    pub(crate) fn scroll_by(
+        &mut self,
+        delta: f32,
+        bounds_size: gpui::Size<Pixels>,
+        line_height: Pixels,
+    ) -> bool {
+        let max_scroll = self.max_scroll(bounds_size, line_height);
+        let new_scroll = (self.scroll_y + delta).clamp(0.0, max_scroll);
+        if (new_scroll - self.scroll_y).abs() < f32::EPSILON {
+            return false;
+        }
+        self.scroll_y = new_scroll;
+        true
+    }
+
+    /// Top of item `index` within the menu content (before scrolling),
+    /// relative to the menu's top edge.
+    fn item_content_top(&self, index: usize, line_height: Pixels) -> Pixels {
+        let item_height = Self::item_height(line_height);
+        let mut top = px(4.0);
+        for item in self.items.iter().take(index) {
+            top += if item.is_separator {
+                px(8.0)
+            } else {
+                item_height
+            };
+        }
+        top
+    }
+
+    /// Adjust scroll so the highlighted row is fully visible.
+    pub(crate) fn ensure_highlight_visible(
+        &mut self,
+        bounds_size: gpui::Size<Pixels>,
+        line_height: Pixels,
+    ) -> bool {
+        let Some(highlighted) = self.highlighted else {
+            return false;
+        };
+        let item_height = Self::item_height(line_height);
+        let visible_height = self.visible_height(bounds_size, line_height);
+        let row_top = f32::from(self.item_content_top(highlighted, line_height));
+        let row_bottom = row_top + f32::from(item_height);
+
+        let mut new_scroll = self.scroll_y;
+        if row_top < new_scroll {
+            new_scroll = row_top;
+        } else if row_bottom > new_scroll + f32::from(visible_height) {
+            new_scroll = row_bottom - f32::from(visible_height);
+        }
+        new_scroll = new_scroll.clamp(0.0, self.max_scroll(bounds_size, line_height));
+        if (new_scroll - self.scroll_y).abs() < f32::EPSILON {
+            return false;
+        }
+        self.scroll_y = new_scroll;
+        true
     }
 
     pub(crate) fn origin_x(&self) -> f32 {
@@ -306,7 +411,10 @@ impl ContextMenuState {
     ) -> gpui::Bounds<Pixels> {
         gpui::Bounds::new(
             self.clamped_origin(bounds_origin, bounds_size, line_height),
-            gpui::size(Self::MENU_WIDTH, self.total_height(line_height)),
+            gpui::size(
+                Self::MENU_WIDTH,
+                self.visible_height(bounds_size, line_height),
+            ),
         )
     }
 }
@@ -496,6 +604,7 @@ impl EditorOverlayState {
                 .map(|item| {
                     (
                         item.label().to_string(),
+                        item.shortcut().map(ToString::to_string),
                         item.is_separator(),
                         item.disabled(),
                     )
@@ -504,6 +613,7 @@ impl EditorOverlayState {
             origin_x: state.origin_x(),
             origin_y: state.origin_y(),
             highlighted: state.highlighted(),
+            scroll_y: state.scroll_y(),
         })
     }
 
@@ -643,6 +753,27 @@ impl EditorOverlayState {
             .is_some_and(|item| !item.disabled)
     }
 
+    pub(crate) fn scroll_context_menu(
+        &mut self,
+        delta: f32,
+        layout: &CachedEditorLayout,
+        line_height: gpui::Pixels,
+    ) -> bool {
+        self.context_menu
+            .as_mut()
+            .is_some_and(|state| state.scroll_by(delta, layout.bounds_size(), line_height))
+    }
+
+    pub(crate) fn ensure_context_menu_highlight_visible(
+        &mut self,
+        layout: &CachedEditorLayout,
+        line_height: gpui::Pixels,
+    ) -> bool {
+        self.context_menu
+            .as_mut()
+            .is_some_and(|state| state.ensure_highlight_visible(layout.bounds_size(), line_height))
+    }
+
     pub(crate) fn set_context_menu_highlighted_enabled_item(
         &mut self,
         index: Option<usize>,
@@ -664,7 +795,7 @@ impl EditorOverlayState {
             return Some(ContextMenuHit::new(false, None, false));
         }
 
-        let mut row_y = menu_bounds.origin.y + gpui::px(4.0);
+        let mut row_y = menu_bounds.origin.y + gpui::px(4.0) - gpui::px(state.scroll_y());
         for (index, item) in state.items.iter().enumerate() {
             if item.is_separator {
                 row_y += gpui::px(8.0);
@@ -871,6 +1002,62 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn context_menu_clamps_height_and_scrolls_within_viewport() {
+        let items: Vec<ContextMenuItem> = (0..30)
+            .map(|index| {
+                ContextMenuItem::action(
+                    format!("Item {index}"),
+                    super::ContextMenuAction::Copy,
+                    false,
+                )
+            })
+            .collect();
+        let mut state = ContextMenuState::new(items, 10.0, 10.0, Some(0));
+        let line_height = px(20.0);
+        let viewport = size(px(800.0), px(400.0));
+
+        // 30 items at ~32.4px each far exceed 400px: height must clamp.
+        let visible = state.visible_height(viewport, line_height);
+        assert!(visible <= px(400.0) - px(16.0));
+        assert!(state.max_scroll(viewport, line_height) > 0.0);
+
+        // Scrolling moves and clamps at both ends.
+        assert!(state.scroll_by(50.0, viewport, line_height));
+        assert_eq!(state.scroll_y(), 50.0);
+        assert!(state.scroll_by(-500.0, viewport, line_height));
+        assert_eq!(state.scroll_y(), 0.0);
+        assert!(state.scroll_by(f32::MAX, viewport, line_height));
+        assert_eq!(state.scroll_y(), state.max_scroll(viewport, line_height));
+
+        // Bounds use the clamped height, so the menu always fits on screen.
+        let bounds = state.bounds(point(px(0.0), px(0.0)), viewport, line_height);
+        assert_eq!(bounds.size.height, visible);
+    }
+
+    #[test]
+    fn context_menu_keyboard_navigation_keeps_highlight_visible() {
+        let items: Vec<ContextMenuItem> = (0..30)
+            .map(|index| {
+                ContextMenuItem::action(
+                    format!("Item {index}"),
+                    super::ContextMenuAction::Copy,
+                    false,
+                )
+            })
+            .collect();
+        let mut state = ContextMenuState::new(items, 10.0, 10.0, Some(29));
+        let line_height = px(20.0);
+        let viewport = size(px(800.0), px(400.0));
+
+        // Highlighting the last item must scroll the menu to its end.
+        assert!(state.ensure_highlight_visible(viewport, line_height));
+        assert!(state.scroll_y() > 0.0);
+        // Within the menu's vertical padding of the maximum scroll.
+        let max_scroll = state.max_scroll(viewport, line_height);
+        assert!((state.scroll_y() - max_scroll).abs() <= 8.0);
+    }
+
+    #[test]
     fn default_overlay_state_uses_hover_delay_and_no_overlays() {
         let state = EditorOverlayState::default();
 
@@ -902,7 +1089,7 @@ mod tests {
         let menu = state
             .context_menu_snapshot()
             .expect("context menu snapshot");
-        assert_eq!(menu.items, vec![("Copy".to_string(), false, false)]);
+        assert_eq!(menu.items, vec![("Copy".to_string(), None, false, false)]);
         assert_eq!(menu.origin_x, 12.0);
         assert_eq!(menu.origin_y, 24.0);
         assert_eq!(menu.highlighted, Some(0));

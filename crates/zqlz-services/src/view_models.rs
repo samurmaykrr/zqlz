@@ -48,6 +48,44 @@ pub struct TableDetails {
     pub row_count: Option<usize>,
 }
 
+/// The subset of a table's metadata that SQL completions actually need.
+///
+/// Warming a whole schema for the editor fetches only this, because it is the only
+/// part [`TableDetails`] contributes to completions — indexes, constraints and
+/// triggers are read solely by user-initiated, per-table views.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TableColumnSummary {
+    pub columns: Vec<ColumnInfo>,
+    pub foreign_keys: Vec<ForeignKeyInfo>,
+}
+
+impl From<&TableDetails> for TableColumnSummary {
+    fn from(details: &TableDetails) -> Self {
+        Self {
+            columns: details.columns.clone(),
+            foreign_keys: details.foreign_keys.clone(),
+        }
+    }
+}
+
+impl From<&zqlz_core::ColumnInfo> for ColumnInfo {
+    fn from(column: &zqlz_core::ColumnInfo) -> Self {
+        Self {
+            name: column.name.clone(),
+            data_type: column.data_type.clone(),
+            nullable: column.nullable,
+            is_primary_key: column.is_primary_key,
+            default_value: column.default_value.clone(),
+            max_length: column.max_length,
+            precision: column.precision,
+            scale: column.scale,
+            is_auto_increment: column.is_auto_increment,
+            comment: column.comment.clone(),
+            enum_values: column.enum_values.clone(),
+        }
+    }
+}
+
 /// Column information for UI (simplified from ColumnMeta)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ColumnInfo {

@@ -363,6 +363,7 @@ impl EditorFindState {
                 case_sensitive: state.options.case_sensitive,
                 whole_word: state.options.whole_word,
                 regex: state.options.use_regex,
+                preserve_case: state.options.preserve_case,
             },
         }
     }
@@ -487,6 +488,7 @@ mod tests {
                 case_sensitive: true,
                 whole_word: false,
                 use_regex: false,
+                preserve_case: false,
             },
             &document,
         );

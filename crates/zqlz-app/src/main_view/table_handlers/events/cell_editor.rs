@@ -111,6 +111,10 @@ impl MainView {
                         key_value_service
                             .update_key_cell(connection, &table_name, None, cell_update_data)
                             .await
+                            .map(|_| zqlz_services::CellUpdateOutcome {
+                                affected_rows: 1,
+                                ..Default::default()
+                            })
                             .map_err(|e| anyhow::anyhow!("{}", e))
                     } else if is_document {
                         if column_name == "_id" {
@@ -135,6 +139,12 @@ impl MainView {
                                         },
                                     )
                                     .await
+                                    // MongoDB matches on _id and errors when nothing
+                                    // matched, so reaching here means the write landed.
+                                    .map(|_| zqlz_services::CellUpdateOutcome {
+                                        affected_rows: 1,
+                                        ..Default::default()
+                                    })
                                     .map_err(|e| anyhow::anyhow!("{}", e)),
                                 (Err(error), _) | (_, Err(error)) => Err(error),
                             }
@@ -147,22 +157,35 @@ impl MainView {
                     };
 
                     match update_result {
-                        Ok(()) => {
+                        Ok(outcome) => {
                             tracing::info!("Cell updated successfully");
+
+                            if let Some(reason) = outcome.unconfirmed_reason {
+                                _ = cx.update(|window, cx| {
+                                    window.push_notification(Notification::warning(reason), cx);
+                                });
+                            }
+
+                            // Prefer what the database stored: it may have rounded
+                            // or truncated the submitted value.
+                            let displayed_value = outcome
+                                .stored_value
+                                .clone()
+                                .unwrap_or_else(|| typed_value.clone());
 
                             if let Some(viewer) = source_viewer {
                                 _ = viewer.update(cx, |viewer, cx| {
                                     viewer.update_cell_value(
                                         row_index,
                                         col_index,
-                                        typed_value.clone(),
+                                        displayed_value.clone(),
                                         cx,
                                     );
                                 });
                             }
 
                             _ = cell_editor_panel.update(cx, |editor, cx| {
-                                editor.mark_current_cell_saved(typed_value.clone(), cx);
+                                editor.mark_current_cell_saved(displayed_value.clone(), cx);
                             });
 
                             _ = cx.update(|window, cx| {

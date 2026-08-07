@@ -50,6 +50,8 @@ struct CompletionItemData {
     kind_badge: Option<String>,
     /// Shortened detail string (parenthetical dialect info stripped)
     detail: Option<String>,
+    /// Full documentation for the side panel (selected item only).
+    documentation: Option<String>,
 }
 
 /// Inline (ghost-text) suggestion render data
@@ -63,6 +65,13 @@ struct InlineSuggestionRenderData {
 }
 
 struct EditPredictionRenderData {
+    shaped: Arc<ShapedLine>,
+    origin: Point<Pixels>,
+    line_height: Pixels,
+}
+
+/// Error-lens style inline diagnostic message painted after the line end.
+struct ErrorLensRenderData {
     shaped: Arc<ShapedLine>,
     origin: Point<Pixels>,
     line_height: Pixels,
@@ -1159,6 +1168,8 @@ pub struct PrepaintState {
     completion_menu: Option<CompletionMenuRenderData>,
     /// Error diagnostic ranges for rendering squiggles
     diagnostics: Vec<(crate::syntax::Highlight, Bounds<Pixels>)>,
+    /// Inline diagnostic messages painted after line ends (error lens).
+    error_lens: Vec<ErrorLensRenderData>,
     /// Hover tooltip data (if hovering over a word)
     hover_tooltip: Option<HoverTooltipData>,
     /// Signature-help tooltip data (if explicitly requested)
@@ -1223,6 +1234,9 @@ pub struct PrepaintState {
 struct HoverTooltipData {
     documentation: String,
     anchor_bounds: Bounds<Pixels>,
+    /// Top of the editor's content area. The tooltip flips below the anchor when it would not
+    /// fit above this line, so it never paints over the toolbar sitting above the editor.
+    content_top: Pixels,
 }
 
 /// Signature-help overlay data for rendering near the invocation site.
@@ -1267,6 +1281,8 @@ struct ScrollbarData {
     track: Bounds<Pixels>,
     /// The draggable thumb rectangle
     thumb: Bounds<Pixels>,
+    /// Pre-positioned annotation marks (find matches, diagnostics).
+    marks: Vec<(Bounds<Pixels>, gpui::Hsla)>,
 }
 
 struct StickyHeaderRenderData {
@@ -1338,13 +1354,17 @@ struct ReferenceHighlightData {
 /// Data for rendering the right-click context menu (feat-045).
 struct ContextMenuRenderData {
     /// Ordered items to display (separators have `is_separator = true`)
-    items: Vec<(String, bool, bool)>, // (label, is_separator, is_disabled)
+    items: Vec<(String, Option<String>, bool, bool)>, // (label, shortcut, is_separator, is_disabled)
     /// Pixel bounds after clamping into the editor viewport.
     bounds: Bounds<Pixels>,
     /// Index of the highlighted item, if any
     highlighted: Option<usize>,
     /// Line height for menu item sizing
     line_height: Pixels,
+    /// Vertical content scroll in pixels (non-zero when clamped to viewport).
+    scroll_y: Pixels,
+    /// Natural (unclamped) content height; > bounds height means scrollable.
+    total_height: Pixels,
 }
 
 impl Element for EditorElement {
@@ -1446,6 +1466,11 @@ impl Element for EditorElement {
             .find_info
             .as_ref()
             .map(|snapshot| (snapshot.matches.clone(), snapshot.current_match));
+        let find_match_offsets: Vec<usize> = editor_snapshot
+            .find_info
+            .as_ref()
+            .map(|snapshot| snapshot.matches.iter().map(|found| found.start).collect())
+            .unwrap_or_default();
         let goto_line_info = editor_snapshot.goto_line_info.as_ref().map(|snapshot| {
             (
                 snapshot.query.clone(),
@@ -1486,6 +1511,7 @@ impl Element for EditorElement {
                 snapshot.origin_x,
                 snapshot.origin_y,
                 snapshot.highlighted,
+                snapshot.scroll_y,
             )
         });
 
@@ -1925,6 +1951,14 @@ impl Element for EditorElement {
                                 }
                             }),
                             label: sanitize_completion_text(&item.label, 120),
+                            documentation: item.documentation.as_ref().map(
+                                |documentation| match documentation {
+                                    lsp_types::Documentation::String(text) => text.clone(),
+                                    lsp_types::Documentation::MarkupContent(markup) => {
+                                        markup.value.clone()
+                                    }
+                                },
+                            ),
                         })
                         .collect(),
                     cursor_bounds: menu_cursor_bounds,
@@ -1991,6 +2025,102 @@ impl Element for EditorElement {
             }
         }
 
+        // Error-lens: one inline message per buffer line with diagnostics,
+        // painted after the end of the line's last visible display row.
+        let mut error_lens: Vec<ErrorLensRenderData> = Vec::new();
+        if self.editor.read(cx).show_inline_diagnostics() {
+            let lsp_diagnostics = self.editor.read(cx).lsp_diagnostics().to_vec();
+            if !lsp_diagnostics.is_empty() {
+                let mut last_chunk_per_line: std::collections::HashMap<usize, &crate::DisplayTextChunk> =
+                    std::collections::HashMap::new();
+                for chunk in visible_chunks.iter() {
+                    let entry = last_chunk_per_line.entry(chunk.buffer_line).or_insert(chunk);
+                    if chunk.display_row >= entry.display_row {
+                        *entry = chunk;
+                    }
+                }
+
+                let mut lines: Vec<usize> = last_chunk_per_line.keys().copied().collect();
+                lines.sort_unstable();
+                for buffer_line in lines {
+                    let chunk = last_chunk_per_line[&buffer_line];
+                    let diagnostic = lsp_diagnostics
+                        .iter()
+                        .filter(|diagnostic| diagnostic.range.start.line as usize == buffer_line)
+                        .min_by_key(|diagnostic| {
+                            match diagnostic.severity {
+                                Some(lsp_types::DiagnosticSeverity::ERROR) => 1u8,
+                                Some(lsp_types::DiagnosticSeverity::WARNING) => 2,
+                                Some(lsp_types::DiagnosticSeverity::INFORMATION) => 3,
+                                Some(lsp_types::DiagnosticSeverity::HINT) => 4,
+                                _ => 5,
+                            }
+                        });
+                    let Some(diagnostic) = diagnostic else {
+                        continue;
+                    };
+
+                    let message: String = diagnostic
+                        .message
+                        .lines()
+                        .next()
+                        .unwrap_or("")
+                        .chars()
+                        .take(160)
+                        .collect();
+                    if message.is_empty() {
+                        continue;
+                    }
+
+                    let Ok(line_start_byte) =
+                        buffer.position_to_offset(Position::new(buffer_line, 0))
+                    else {
+                        continue;
+                    };
+                    let chunk_end_column =
+                        chunk.start_offset + chunk.text.trim_end_matches(['\n', '\r']).len()
+                            - line_start_byte;
+                    let mut origin = Self::wrapped_position_origin(
+                        &wrapped_position_context,
+                        Position::new(buffer_line, chunk_end_column),
+                        chunk.display_row,
+                    );
+                    origin.x += char_width * 3.0;
+                    if origin.x >= bounds.origin.x + bounds.size.width {
+                        continue;
+                    }
+
+                    let color = match diagnostic.severity {
+                        Some(lsp_types::DiagnosticSeverity::ERROR) | None => {
+                            cx.theme().colors.danger.opacity(0.75)
+                        }
+                        Some(lsp_types::DiagnosticSeverity::WARNING) => {
+                            cx.theme().colors.warning.opacity(0.8)
+                        }
+                        _ => cx.theme().colors.muted_foreground.opacity(0.8),
+                    };
+                    let shaped = self.shape_line_cached(
+                        &message,
+                        line_height * 0.85,
+                        &[TextRun {
+                            len: message.len(),
+                            font: Font::default(),
+                            color,
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        }],
+                        window,
+                    );
+                    error_lens.push(ErrorLensRenderData {
+                        shaped,
+                        origin,
+                        line_height,
+                    });
+                }
+            }
+        }
+
         let hover_tooltip = if let Some(ref hover) = hover_state {
             if let (Ok(start_pos), Ok(end_pos)) = (
                 buffer.offset_to_position(hover.range.start),
@@ -2020,6 +2150,7 @@ impl Element for EditorElement {
                     Some(HoverTooltipData {
                         documentation: hover.documentation.clone(),
                         anchor_bounds,
+                        content_top: bounds.origin.y,
                     })
                 } else {
                     None
@@ -2339,7 +2470,62 @@ impl Element for EditorElement {
                 point(track_x, bounds.origin.y + thumb_y),
                 size(scrollbar_width, thumb_height),
             );
-            Some(ScrollbarData { track, thumb })
+
+            // Annotation marks: find matches on the left half of the track,
+            // diagnostics on the right half. Positions are proportional to the
+            // buffer line, which is close enough for an overview gauge.
+            const MAX_SCROLLBAR_MARKS: usize = 200;
+            let buffer_line_count = buffer.line_count().max(1);
+            let mark_height = px(2.0);
+            let half_width = scrollbar_width * 0.5;
+            let mark_y = |line: usize| {
+                bounds.origin.y
+                    + (bounds.size.height - mark_height)
+                        * (line.min(buffer_line_count) as f32 / buffer_line_count as f32)
+            };
+
+            let mut marks = Vec::new();
+            for offset in find_match_offsets.iter().take(MAX_SCROLLBAR_MARKS) {
+                let Ok(position) = buffer.offset_to_position(*offset) else {
+                    continue;
+                };
+                marks.push((
+                    Bounds::new(
+                        point(track_x, mark_y(position.line)),
+                        size(half_width, mark_height),
+                    ),
+                    cx.theme().colors.info.opacity(0.9),
+                ));
+            }
+            for diagnostic in self
+                .editor
+                .read(cx)
+                .lsp_diagnostics()
+                .iter()
+                .take(MAX_SCROLLBAR_MARKS)
+            {
+                let color = match diagnostic.severity {
+                    Some(lsp_types::DiagnosticSeverity::WARNING) => cx.theme().colors.warning,
+                    Some(lsp_types::DiagnosticSeverity::ERROR) | None => cx.theme().colors.danger,
+                    _ => cx.theme().colors.muted_foreground,
+                };
+                marks.push((
+                    Bounds::new(
+                        point(
+                            track_x + half_width,
+                            mark_y(diagnostic.range.start.line as usize),
+                        ),
+                        size(half_width, mark_height),
+                    ),
+                    color,
+                ));
+            }
+
+            Some(ScrollbarData {
+                track,
+                thumb,
+                marks,
+            })
         } else {
             None
         };
@@ -2493,29 +2679,37 @@ impl Element for EditorElement {
             .collect();
 
         // ── Context menu (feat-045) ────────────────────────────────────────────
-        let context_menu = context_menu_snapshot.map(|(items, origin_x, origin_y, highlighted)| {
-            let item_height = line_height.clamp(px(18.0), px(24.0)) * 1.35;
-            let total_height: Pixels = items.iter().fold(px(8.0), |height, (_, is_sep, _)| {
-                height + if *is_sep { px(8.0) } else { item_height }
-            });
-            let menu_width = px(260.0);
-            let margin = px(8.0);
-            let max_x = (bounds.size.width - menu_width - margin).max(px(0.0));
-            let max_y = (bounds.size.height - total_height - margin).max(px(0.0));
-            let min_x = margin.min(max_x);
-            let min_y = margin.min(max_y);
-            let clamped_origin = point(
-                bounds.origin.x + px(origin_x).clamp(min_x, max_x),
-                bounds.origin.y + px(origin_y).clamp(min_y, max_y),
-            );
+        let context_menu =
+            context_menu_snapshot.map(|(items, origin_x, origin_y, highlighted, scroll_y)| {
+                let item_height = line_height.clamp(px(18.0), px(24.0)) * 1.35;
+                let total_height: Pixels =
+                    items.iter().fold(px(8.0), |height, (_, _, is_sep, _)| {
+                        height + if *is_sep { px(8.0) } else { item_height }
+                    });
+                let menu_width = crate::ContextMenuState::MENU_WIDTH;
+                let margin = px(8.0);
+                // Must mirror ContextMenuState::visible_height/clamped_origin so
+                // hit-testing and painting agree.
+                let visible_height = total_height
+                    .min((bounds.size.height - margin * 2.0).max(item_height + px(8.0)));
+                let max_x = (bounds.size.width - menu_width - margin).max(px(0.0));
+                let max_y = (bounds.size.height - visible_height - margin).max(px(0.0));
+                let min_x = margin.min(max_x);
+                let min_y = margin.min(max_y);
+                let clamped_origin = point(
+                    bounds.origin.x + px(origin_x).clamp(min_x, max_x),
+                    bounds.origin.y + px(origin_y).clamp(min_y, max_y),
+                );
 
-            ContextMenuRenderData {
-                items,
-                bounds: Bounds::new(clamped_origin, size(menu_width, total_height)),
-                highlighted,
-                line_height,
-            }
-        });
+                ContextMenuRenderData {
+                    items,
+                    bounds: Bounds::new(clamped_origin, size(menu_width, visible_height)),
+                    highlighted,
+                    line_height,
+                    scroll_y: px(scroll_y),
+                    total_height,
+                }
+            });
 
         // Push scrollbar geometry into the editor so that mouse handlers can
         // hit-test and drive scrollbar interaction without element-layer access.
@@ -2539,6 +2733,7 @@ impl Element for EditorElement {
             bracket_highlight_rects,
             completion_menu,
             diagnostics: diag_bounds,
+            error_lens,
             hover_tooltip,
             signature_help_tooltip,
             find_panel,
@@ -3031,6 +3226,18 @@ impl Element for EditorElement {
             }
         }
 
+        // Paint error-lens inline diagnostic messages after line ends.
+        for lens in &prepaint.error_lens {
+            _ = lens.shaped.paint(
+                lens.origin,
+                lens.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            );
+        }
+
         // Paint completion menu if open
         if let Some(ref menu) = prepaint.completion_menu {
             self.paint_completion_menu(menu, window, cx);
@@ -3439,6 +3646,113 @@ impl EditorElement {
             ));
         }
 
+        // ── Documentation side panel for the selected item ──────────────────
+        if let Some(documentation) = menu
+            .items
+            .get(menu.selected_index)
+            .and_then(|item| item.documentation.as_deref())
+            .filter(|documentation| !documentation.trim().is_empty())
+        {
+            let pad_x = px(10.0);
+            let pad_y = px(8.0);
+            let doc_font_size = font_size * 0.95;
+            let doc_line_height = doc_font_size * 1.45;
+            let panel_width = px(300.0);
+            let wrap_columns = ((panel_width - pad_x * 2.0) / (doc_font_size * 0.55))
+                .floor()
+                .max(16.0) as usize;
+
+            let mut doc_lines: Vec<String> = Vec::new();
+            for raw_line in documentation.lines().take(24) {
+                let mut current = String::new();
+                for word in raw_line.split_whitespace() {
+                    if !current.is_empty() && current.len() + word.len() + 1 > wrap_columns {
+                        doc_lines.push(std::mem::take(&mut current));
+                    }
+                    if !current.is_empty() {
+                        current.push(' ');
+                    }
+                    current.push_str(word);
+                }
+                doc_lines.push(current);
+                if doc_lines.len() >= 18 {
+                    break;
+                }
+            }
+            while doc_lines.last().is_some_and(|line| line.is_empty()) {
+                doc_lines.pop();
+            }
+
+            if !doc_lines.is_empty() {
+                let panel_height = doc_line_height * doc_lines.len() as f32 + pad_y * 2.0;
+                let panel_x = menu_x + menu_width + px(6.0);
+                let panel_bounds =
+                    Bounds::new(point(panel_x, menu_y), size(panel_width, panel_height));
+
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(panel_x + px(2.0), menu_y + px(3.0)),
+                        size(panel_width, panel_height),
+                    ),
+                    hsla(0.0, 0.0, 0.0, 0.25),
+                ));
+                window.paint_quad(fill(panel_bounds, bg));
+                window.paint_quad(fill(
+                    Bounds::new(point(panel_x, menu_y), size(panel_width, bw)),
+                    border,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(panel_x, menu_y + panel_height - bw),
+                        size(panel_width, bw),
+                    ),
+                    border,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(point(panel_x, menu_y), size(bw, panel_height)),
+                    border,
+                ));
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(panel_x + panel_width - bw, menu_y),
+                        size(bw, panel_height),
+                    ),
+                    border,
+                ));
+
+                for (line_index, doc_line) in doc_lines.iter().enumerate() {
+                    if doc_line.is_empty() {
+                        continue;
+                    }
+                    let run = TextRun {
+                        len: doc_line.len(),
+                        font: Font::default(),
+                        color: detail_color,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(
+                        doc_line.clone().into(),
+                        doc_font_size,
+                        &[run],
+                        None,
+                    );
+                    _ = shaped.paint(
+                        point(
+                            panel_x + pad_x,
+                            menu_y + pad_y + doc_line_height * line_index as f32,
+                        ),
+                        doc_line_height,
+                        TextAlign::Left,
+                        None,
+                        window,
+                        cx,
+                    );
+                }
+            }
+        }
+
         // Push the menu's layout snapshot to the editor so `handle_mouse_down`
         // can hit-test clicks in window space without accessing element data.
         self.editor.update(cx, |editor, _cx| {
@@ -3637,7 +3951,11 @@ impl EditorElement {
         let gap = px(6.0);
         let above_y = hover.anchor_bounds.origin.y - tooltip_height - gap;
         let below_y = hover.anchor_bounds.origin.y + hover.anchor_bounds.size.height + gap;
-        let origin_y = if above_y > px(0.0) { above_y } else { below_y };
+        let origin_y = if above_y > hover.content_top {
+            above_y
+        } else {
+            below_y
+        };
         let tooltip_origin = point(hover.anchor_bounds.origin.x, origin_y);
         let tooltip_bounds = Bounds::new(tooltip_origin, size(tooltip_width, tooltip_height));
 
@@ -3695,6 +4013,31 @@ impl EditorElement {
         _ = shaped.paint(origin, font_size * 1.4, TextAlign::Left, None, window, cx);
     }
 
+    /// Helper: measure a single-line string with the same shaping as
+    /// [`Self::paint_panel_text`], so callers can right-align it.
+    fn panel_text_width(
+        text: &str,
+        font_size: Pixels,
+        window: &mut Window,
+        _cx: &mut App,
+    ) -> Pixels {
+        if text.is_empty() {
+            return px(0.0);
+        }
+        let text_run = TextRun {
+            len: text.len(),
+            font: Font::default(),
+            color: gpui::black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window
+            .text_system()
+            .shape_line(text.to_string().into(), font_size, &[text_run], None)
+            .width
+    }
+
     /// Paint vertical indent-guide lines over the text area (feat-038).
     ///
     /// Each guide is a 1-px wide line spanning the vertical run of lines that
@@ -3724,6 +4067,10 @@ impl EditorElement {
     fn paint_scrollbar(&self, scrollbar: &ScrollbarData, window: &mut Window, cx: &App) {
         // Track: very faint background
         window.paint_quad(fill(scrollbar.track, cx.theme().colors.scrollbar));
+        // Annotation marks under the thumb so the thumb stays visible.
+        for (mark_bounds, color) in &scrollbar.marks {
+            window.paint_quad(fill(*mark_bounds, *color));
+        }
         // Thumb
         window.paint_quad(fill(scrollbar.thumb, cx.theme().colors.scrollbar_thumb));
     }
@@ -3844,52 +4191,109 @@ impl EditorElement {
             BorderStyle::default(),
         ));
 
-        // Items
-        let mut y = menu_bounds.origin.y + px(4.0);
-        for (index, (label, is_separator, is_disabled)) in menu.items.iter().enumerate() {
-            if *is_separator {
-                let sep_y = y + px(4.0);
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(menu_bounds.origin.x + px(6.0), sep_y),
-                        size(menu_width - px(12.0), px(1.0)),
-                    ),
-                    cx.theme().colors.border,
-                ));
-                y += px(8.0);
-                continue;
-            }
+        // Items — offset by the scroll position and clipped to the menu bounds
+        // so partially-visible rows don't bleed past the rounded corners.
+        let menu_top = menu_bounds.origin.y;
+        let menu_bottom = menu_bounds.origin.y + menu_bounds.size.height;
+        window.with_content_mask(
+            Some(gpui::ContentMask {
+                bounds: menu_bounds,
+            }),
+            |window| {
+                let mut y = menu_bounds.origin.y + px(4.0) - menu.scroll_y;
+                for (index, (label, shortcut, is_separator, is_disabled)) in
+                    menu.items.iter().enumerate()
+                {
+                    if *is_separator {
+                        if y + px(8.0) >= menu_top && y <= menu_bottom {
+                            let sep_y = y + px(4.0);
+                            window.paint_quad(fill(
+                                Bounds::new(
+                                    point(menu_bounds.origin.x + px(6.0), sep_y),
+                                    size(menu_width - px(12.0), px(1.0)),
+                                ),
+                                cx.theme().colors.border,
+                            ));
+                        }
+                        y += px(8.0);
+                        continue;
+                    }
 
-            // Highlight the hovered/keyboard-selected item
-            if menu.highlighted == Some(index) {
-                window.paint_quad(fill(
-                    Bounds::new(
-                        point(menu_bounds.origin.x, y),
-                        size(menu_width, item_height),
-                    ),
-                    cx.theme().colors.list_hover,
-                ));
-            }
+                    if y + item_height < menu_top || y > menu_bottom {
+                        y += item_height;
+                        continue;
+                    }
 
-            let text_color: Hsla = if *is_disabled {
-                cx.theme().colors.muted_foreground
+                    // Highlight the hovered/keyboard-selected item
+                    if menu.highlighted == Some(index) {
+                        window.paint_quad(fill(
+                            Bounds::new(
+                                point(menu_bounds.origin.x, y),
+                                size(menu_width, item_height),
+                            ),
+                            cx.theme().colors.list_hover,
+                        ));
+                    }
+
+                    let text_color: Hsla = if *is_disabled {
+                        cx.theme().colors.muted_foreground
+                    } else {
+                        cx.theme().colors.popover_foreground
+                    };
+
+                    let text_y = y + (item_height - font_size) / 2.0;
+                    Self::paint_panel_text(
+                        label,
+                        point(menu_bounds.origin.x + padding_x, text_y),
+                        font_size,
+                        text_color,
+                        window,
+                        cx,
+                    );
+
+                    // Right-aligned, dimmer than the label so it reads as an
+                    // annotation rather than a second choice.
+                    if let Some(shortcut) = shortcut {
+                        let shortcut_width =
+                            Self::panel_text_width(shortcut, font_size, window, cx);
+                        Self::paint_panel_text(
+                            shortcut,
+                            point(
+                                menu_bounds.origin.x + menu_width - padding_x - shortcut_width,
+                                text_y,
+                            ),
+                            font_size,
+                            cx.theme().colors.muted_foreground,
+                            window,
+                            cx,
+                        );
+                    }
+
+                    y += item_height;
+                }
+            },
+        );
+
+        // Scrollbar thumb when the content overflows the on-screen menu.
+        if menu.total_height > menu_bounds.size.height {
+            let track_width = px(4.0);
+            let track_x = menu_bounds.origin.x + menu_width - track_width - px(2.0);
+            let visible_fraction =
+                f32::from(menu_bounds.size.height) / f32::from(menu.total_height);
+            let thumb_height = (menu_bounds.size.height * visible_fraction).max(px(16.0));
+            let max_scroll =
+                f32::from(menu.total_height) - f32::from(menu_bounds.size.height);
+            let scroll_fraction = if max_scroll > 0.0 {
+                f32::from(menu.scroll_y) / max_scroll
             } else {
-                cx.theme().colors.popover_foreground
+                0.0
             };
-
-            Self::paint_panel_text(
-                label,
-                point(
-                    menu_bounds.origin.x + padding_x,
-                    y + (item_height - font_size) / 2.0,
-                ),
-                font_size,
-                text_color,
-                window,
-                cx,
-            );
-
-            y += item_height;
+            let thumb_y = menu_bounds.origin.y
+                + (menu_bounds.size.height - thumb_height) * scroll_fraction.clamp(0.0, 1.0);
+            window.paint_quad(fill(
+                Bounds::new(point(track_x, thumb_y), size(track_width, thumb_height)),
+                cx.theme().colors.scrollbar_thumb,
+            ));
         }
     }
 }

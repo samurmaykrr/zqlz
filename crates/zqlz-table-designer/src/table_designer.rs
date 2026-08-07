@@ -16,7 +16,7 @@
 //! use zqlz_table_designer::{TableDesignerPanel, TableDesign, DatabaseDialect};
 //!
 //! // Create a new table designer for a new table
-//! let panel = cx.new(|cx| TableDesignerPanel::new(connection_id, DatabaseDialect::Sqlite, window, cx));
+//! let panel = cx.new(|cx| TableDesignerPanel::new(connection_id, DatabaseDialect::Sqlite, None, window, cx));
 //!
 //! // Or load an existing table for editing
 //! let design = TableDesign::from_table_details(table_details, dialect);

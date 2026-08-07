@@ -401,6 +401,50 @@ fn test_schema_qualified_table_lookup_uses_object_name_leaf() {
 }
 
 #[test]
+fn test_schema_qualified_cache_key_resolves_against_qualified_and_bare_queries() {
+    // Postgres populates the schema cache with schema-qualified keys (e.g.
+    // "public.users") when it was fetched across all schemas — no unqualified
+    // "users" key ever exists in that cache, unlike `create_test_schema`'s
+    // convention used elsewhere in this file.
+    let validator = SchemaValidator::new();
+    let mut schema = SchemaCache::default();
+    schema.tables.insert(
+        "public.users".to_string(),
+        crate::TableInfo {
+            name: "public.users".to_string(),
+            schema: Some("public".to_string()),
+            comment: None,
+            row_count: None,
+            table_type: zqlz_core::TableType::Table,
+        },
+    );
+    schema.columns_by_table.insert(
+        "public.users".to_string(),
+        vec![ColumnInfo {
+            table_name: "public.users".to_string(),
+            name: "id".to_string(),
+            data_type: "INTEGER".to_string(),
+            nullable: false,
+            default_value: None,
+            is_primary_key: true,
+            is_foreign_key: false,
+            comment: None,
+        }],
+    );
+
+    for sql in ["SELECT id FROM public.users", "SELECT id FROM users"] {
+        let issues = validator.validate(sql, &schema);
+        assert!(
+            issues
+                .iter()
+                .all(|issue| !issue.message.contains("does not exist")),
+            "schema-qualified cache key should resolve for `{sql}`: {:?}",
+            issues
+        );
+    }
+}
+
+#[test]
 fn test_quoted_table_lookup_uses_identifier_value() {
     let validator = SchemaValidator::new();
     let mut schema = create_test_schema();

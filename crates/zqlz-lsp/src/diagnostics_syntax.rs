@@ -14,7 +14,7 @@ pub(crate) fn check_sqlparser_syntax(
 ) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
-    if is_create_trigger_statement(sql) {
+    if is_compound_routine_statement(sql) {
         return diagnostics;
     }
 
@@ -62,33 +62,14 @@ pub(crate) fn check_sqlparser_syntax(
     diagnostics
 }
 
-pub(crate) fn is_create_trigger_statement(sql: &str) -> bool {
-    let sql = sql.trim_start_matches(|character: char| character.is_whitespace());
-
-    if sql.starts_with("--") {
-        let Some((_, after_comment)) = sql.split_once('\n') else {
-            return false;
-        };
-        return is_create_trigger_statement(after_comment);
-    }
-
-    if sql.starts_with("/*") {
-        let Some((_, after_comment)) = sql.split_once("*/") else {
-            return false;
-        };
-        return is_create_trigger_statement(after_comment);
-    }
-
-    starts_with_create_trigger(sql)
-}
-
-fn starts_with_create_trigger(sql: &str) -> bool {
-    let mut words = sql.split_whitespace();
-    matches!(
-        (words.next(), words.next()),
-        (Some(first), Some(second))
-            if first.eq_ignore_ascii_case("CREATE") && second.eq_ignore_ascii_case("TRIGGER")
-    )
+/// True for `CREATE ... FUNCTION|PROCEDURE|TRIGGER|EVENT`, whose `BEGIN ... END` bodies
+/// neither sqlparser nor tree-sitter-sequel can parse. Reporting their syntax would paint
+/// every line of a server-emitted routine definition red.
+///
+/// Shares [`zqlz_core::is_compound_routine_header`] with the statement splitter so that what
+/// is exempt from syntax checking and what is kept whole when splitting cannot drift apart.
+pub(crate) fn is_compound_routine_statement(sql: &str) -> bool {
+    zqlz_core::is_compound_routine_header(sql)
 }
 
 fn parser_error_range(token: &TokenWithLocation) -> Option<Range> {

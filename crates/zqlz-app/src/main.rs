@@ -2,6 +2,7 @@
 //!
 //! This is the main entry point for the ZQLZ application.
 
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 #![allow(unexpected_cfgs)]
 
 mod actions;
@@ -119,6 +120,10 @@ fn main() {
         tracing::info!("Setting global AppState...");
         cx.set_global(AppState::new());
         tracing::info!("AppState set");
+
+        // Keep active database connections alive across idle periods so they
+        // don't get dropped out from under the user by a server or NAT timeout.
+        app::spawn_connection_heartbeat(cx.global::<AppState>().connections.clone(), cx);
 
         let startup_targets = snapshot_launch_targets(&launch_targets);
 

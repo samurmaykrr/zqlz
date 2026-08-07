@@ -29,12 +29,18 @@ actions!(
         ExecuteCurrentStatement,
         ExplainQuery,
         ExplainSelection,
+        ExplainAnalyzeQuery,
+        ExplainAnalyzeSelection,
         StopQuery,
         // Layout actions
         ToggleLeftSidebar,
         ToggleRightSidebar,
         ToggleBottomPanel,
         ToggleAllDocks,
+        ShowSchemaInspector,
+        ShowCellEditorInspector,
+        ShowKeyEditorInspector,
+        ShowQueryHistoryInspector,
         // Focus actions
         FocusEditor,
         FocusResults,

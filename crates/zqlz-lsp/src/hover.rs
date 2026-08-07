@@ -11,8 +11,8 @@ use zqlz_ui::widgets::input::lsp::HoverProvider;
 use super::SqlLsp;
 use crate::hover_render::{
     create_column_hover, create_derived_table_hover, create_dialect_metadata_hover,
-    create_function_hover, create_index_hover, create_procedure_hover, create_sequence_hover,
-    create_table_hover, create_trigger_hover, create_view_hover,
+    create_function_hover, create_index_hover, create_json_operator_hover, create_procedure_hover,
+    create_sequence_hover, create_table_hover, create_trigger_hover, create_view_hover,
 };
 
 pub struct SqlHoverProvider {
@@ -54,8 +54,41 @@ impl HoverProvider for SqlHoverProvider {
     }
 }
 
+fn is_json_operator_char(character: char) -> bool {
+    matches!(character, '-' | '>' | '<' | '#' | '@' | '?' | '|' | '&')
+}
+
+/// The contiguous run of operator characters under the cursor, e.g. `->>` or `@>`.
+fn operator_at_offset(text: &Rope, offset: usize) -> Option<String> {
+    let sql = text.to_string();
+    let offset = crate::clamp_to_char_boundary(&sql, offset);
+
+    let start = sql[..offset]
+        .rfind(|character| !is_json_operator_char(character))
+        .map(|index| index + sql[index..].chars().next().map_or(1, char::len_utf8))
+        .unwrap_or(0);
+    let end = sql[offset..]
+        .find(|character| !is_json_operator_char(character))
+        .map(|index| offset + index)
+        .unwrap_or(sql.len());
+
+    if start < end {
+        Some(sql[start..end].to_string())
+    } else {
+        None
+    }
+}
+
 pub(crate) fn get_hover(lsp: &SqlLsp, text: &Rope, offset: usize) -> Option<Hover> {
     tracing::debug!("get_hover: offset={}", offset);
+
+    if crate::operator_completions::driver_supports_json_operators(&lsp.driver_type)
+        && let Some(operator_text) = operator_at_offset(text, offset)
+        && let Some(operator) = zqlz_core::postgres_json_operator(&operator_text)
+    {
+        return Some(create_json_operator_hover(operator));
+    }
+
     let word = match lsp.get_word_at_offset(text, offset) {
         Some(word) => {
             tracing::debug!("word extracted: '{}'", word);

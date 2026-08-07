@@ -17,7 +17,7 @@ use zqlz_core::{
 use zqlz_schema::SchemaCache;
 
 use crate::error::{ServiceError, ServiceResult};
-use crate::view_models::{ColumnInfo, DatabaseSchema, TableDetails};
+use crate::view_models::{ColumnInfo, DatabaseSchema, TableColumnSummary, TableDetails};
 
 #[derive(Clone, Debug)]
 pub enum SidebarSectionLoadData {
@@ -51,6 +51,12 @@ const PREFETCH_INITIAL_DELAY: std::time::Duration = std::time::Duration::from_se
 /// Pause between batches so prefetch never monopolises the connection pool.
 const PREFETCH_INTER_BATCH_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// Above this many tables, a single unfiltered `information_schema` scan starts to
+/// cost real memory and lock-hold time, so the paced per-table path is used instead.
+/// Truncating the bulk query is not an option — a partial column list for the last
+/// table would be worse than being slow.
+const BULK_COLUMN_TABLE_LIMIT: usize = 1500;
+
 /// Service for schema introspection operations
 ///
 /// This service wraps the `SchemaCache` and provides:
@@ -60,14 +66,16 @@ const PREFETCH_INTER_BATCH_DELAY: std::time::Duration = std::time::Duration::fro
 /// - UI-friendly schema models
 pub struct SchemaService {
     cache: Arc<SchemaCache>,
-    /// Per-connection, per-table, per-schema cache for full TableDetails. TTL is governed
-    /// by `self.cache.is_valid(connection_id)` — entries are considered stale
-    /// whenever the main schema cache expires or is invalidated, so they share
-    /// one consistent TTL domain rather than having independent timestamps.
+    /// Per-connection, per-table, per-schema cache for full TableDetails.
+    ///
+    /// Not TTL-governed: entries live until an explicit purge by
+    /// [`Self::invalidate_connection_cache`], [`Self::invalidate_table_details`], or
+    /// [`Self::load_tables_only`]. Tying them to the connection-wide snapshot's TTL
+    /// made them permanently unreadable for database-scoped connections, whose
+    /// snapshot is invalidated on every targeted load and never written back.
     table_details_cache: RwLock<TableDetailsCacheMap>,
     /// Per-connection, per-object, per-schema cache for generated DDL strings.
-    /// Shares the same TTL domain as
-    /// `table_details_cache` — cleared together on invalidation.
+    /// Still gated on the snapshot's TTL, unlike `table_details_cache`.
     ddl_cache: RwLock<DdlCacheMap>,
     objects_panel_kind_cache: RwLock<ObjectsPanelKindCacheMap>,
 }
@@ -277,9 +285,16 @@ impl SchemaService {
             self.invalidate_schema_snapshot(connection_id);
         }
 
-        // Check cache validity
+        // Check cache validity. `set_connection_names` and friends can create an
+        // entry with a fresh timestamp but no tables, so an empty table list means
+        // "never loaded", not "this database has no tables" — serving it would hand
+        // back an empty schema and blank the sidebar.
         if !bypass_cache && self.cache.is_valid(connection_id) {
-            if let Some(cached_tables) = self.cache.get_tables(connection_id) {
+            if let Some(cached_tables) = self
+                .cache
+                .get_tables(connection_id)
+                .filter(|tables| !tables.is_empty())
+            {
                 tracing::debug!("Schema cache hit for connection {}", connection_id);
 
                 let has_driver_manifest = self
@@ -693,6 +708,44 @@ impl SchemaService {
         Ok(tables)
     }
 
+    /// Reload the table and view lists the command palette searches and refresh
+    /// their cache entries.
+    ///
+    /// This is the revalidation half of the palette's stale-while-revalidate
+    /// path: `get_cached_tables_allow_stale` serves whatever is known instantly
+    /// while this runs off the UI thread.
+    #[tracing::instrument(skip(self, connection), fields(connection_id = %connection_id))]
+    pub async fn refresh_palette_schema(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+    ) -> ServiceResult<(Vec<TableInfo>, Vec<String>)> {
+        let tables = self
+            .load_tables_only(Arc::clone(&connection), connection_id)
+            .await?;
+
+        let view_names = match self.load_views(connection, connection_id).await {
+            Ok(views) => {
+                let names = views.iter().map(|view| view.name.clone()).collect();
+                self.cache.set_views(connection_id, views);
+                names
+            }
+            Err(error) => {
+                // Views are optional for the palette; tables are the critical
+                // part, so a view failure must not discard the table refresh.
+                tracing::warn!(
+                    connection_id = %connection_id,
+                    "failed to refresh views for command palette: {}",
+                    error
+                );
+                self.get_cached_view_names_allow_stale(connection_id)
+                    .unwrap_or_default()
+            }
+        };
+
+        Ok((tables, view_names))
+    }
+
     /// Load views for a connection
     #[tracing::instrument(skip(self, connection), fields(connection_id = %connection_id))]
     pub async fn load_views(
@@ -1082,17 +1135,17 @@ impl SchemaService {
         table_name: &str,
         schema: Option<&str>,
     ) -> ServiceResult<TableDetails> {
-        // Check full TableDetails cache first.
-        // Validity is governed by the main schema cache — if that has expired or
-        // been invalidated, table details are treated as stale too, ensuring both
-        // caches share a single consistent TTL domain.
+        // Check full TableDetails cache first. Entries live until an explicit
+        // purge — gating them on the connection-wide snapshot's TTL would make
+        // them unreadable for every database-scoped connection, whose snapshot
+        // is invalidated on each targeted load and never written back.
         let normalized_scope = Self::normalize_scope(schema);
         let cache_key = (
             connection_id,
             table_name.to_string(),
             normalized_scope.clone(),
         );
-        if self.cache.is_valid(connection_id) {
+        {
             let cache = self.table_details_cache.read();
             if let Some(cached) = cache.get(&cache_key) {
                 tracing::debug!("TableDetails cache hit for {}", table_name);
@@ -1289,9 +1342,10 @@ impl SchemaService {
 
     /// Invalidate only the connection-wide schema snapshot.
     ///
-    /// Targeted database loads need a fresh manifest and row set, but the
-    /// schema-scoped table-details and generated-DDL caches can survive that
-    /// switch because their keys already carry the object scope.
+    /// Targeted database loads need a fresh manifest and row set. Note this drops
+    /// the whole `CachedSchema` entry, including its per-table `columns` map; only
+    /// `table_details_cache` and `ddl_cache` survive, because they live outside
+    /// that entry and their keys already carry the object scope.
     fn invalidate_schema_snapshot(&self, connection_id: Uuid) {
         self.cache.invalidate(connection_id);
         self.objects_panel_kind_cache
@@ -1321,18 +1375,15 @@ impl SchemaService {
 
     /// Synchronous cache-only read of TableDetails — no database round-trip.
     ///
-    /// Returns `Some` only when the main schema cache is still valid AND the
-    /// details have already been fetched (e.g. by the prefetch task).  Callers
-    /// can use this to skip showing a loading spinner when data is already warm.
+    /// Returns `Some` once the details have been fetched (e.g. by the prefetch
+    /// task) and not since purged. Callers use this to skip showing a loading
+    /// spinner when data is already warm.
     pub fn peek_table_details_cache(
         &self,
         connection_id: Uuid,
         table_name: &str,
         schema: Option<&str>,
     ) -> Option<TableDetails> {
-        if !self.cache.is_valid(connection_id) {
-            return None;
-        }
         let normalized_scope = Self::normalize_scope(schema);
         self.table_details_cache
             .read()
@@ -1396,6 +1447,128 @@ impl SchemaService {
         }
     }
 
+    /// Warm the column cache for a whole schema, preferring a single bulk query.
+    ///
+    /// Completions only need columns and foreign keys, and every SQL driver can
+    /// answer both for an entire schema in one round-trip. The per-table path costs
+    /// roughly eight queries per table plus the pacing `prefetch_all_table_details`
+    /// imposes, so it is kept strictly as the fallback for drivers with no bulk form.
+    pub async fn warm_schema_columns(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        table_names: Vec<String>,
+        schema: Option<String>,
+    ) -> HashMap<String, TableColumnSummary> {
+        if table_names.len() <= BULK_COLUMN_TABLE_LIMIT {
+            if let Some(summaries) = self
+                .warm_schema_columns_in_bulk(&connection, connection_id, schema.as_deref())
+                .await
+            {
+                tracing::info!(
+                    connection_id = %connection_id,
+                    tables = summaries.len(),
+                    "Warmed schema columns with a bulk fetch"
+                );
+                return summaries;
+            }
+        }
+
+        if table_names.len() > BULK_COLUMN_TABLE_LIMIT {
+            tracing::info!(
+                connection_id = %connection_id,
+                tables = table_names.len(),
+                limit = BULK_COLUMN_TABLE_LIMIT,
+                "Schema too large for a single column fetch; using the paced per-table path"
+            );
+        }
+
+        self.prefetch_all_table_details(connection, connection_id, table_names, schema)
+            .await;
+
+        self.get_all_cached_table_details(connection_id)
+            .unwrap_or_default()
+            .iter()
+            .map(|(table_name, details)| (table_name.clone(), TableColumnSummary::from(details)))
+            .collect()
+    }
+
+    /// Bulk-fetch a schema's columns and foreign keys, or `None` if unsupported.
+    ///
+    /// Unlike [`Self::warm_schema_columns`] this never falls back to the paced
+    /// per-table path, so callers on a latency-sensitive path (the LSP's schema
+    /// refresh) can ask for the cheap answer and simply do without.
+    pub async fn try_bulk_schema_columns(
+        &self,
+        connection: &Arc<dyn Connection>,
+        connection_id: Uuid,
+        schema: Option<&str>,
+    ) -> Option<HashMap<String, TableColumnSummary>> {
+        self.warm_schema_columns_in_bulk(connection, connection_id, schema)
+            .await
+    }
+
+    /// Returns `None` when the driver has no bulk form and the caller must fall back.
+    async fn warm_schema_columns_in_bulk(
+        &self,
+        connection: &Arc<dyn Connection>,
+        connection_id: Uuid,
+        schema: Option<&str>,
+    ) -> Option<HashMap<String, TableColumnSummary>> {
+        let introspection = connection.as_schema_introspection()?;
+
+        let columns_by_table = match introspection.list_all_columns(schema).await {
+            Ok(Some(columns)) => columns,
+            Ok(None) => {
+                tracing::debug!(
+                    driver = connection.driver_name(),
+                    "Driver has no bulk column fetch; using the per-table path"
+                );
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "Bulk column fetch failed; using the per-table path");
+                return None;
+            }
+        };
+
+        // A driver can support bulk columns without supporting foreign keys at all,
+        // so an absent FK map must not drag the whole warm-up onto the slow path.
+        let foreign_keys_by_table = match introspection.list_all_foreign_keys(schema).await {
+            Ok(Some(foreign_keys)) => foreign_keys,
+            Ok(None) => HashMap::new(),
+            Err(error) => {
+                tracing::warn!(%error, "Bulk foreign key fetch failed; completions will lack join hints");
+                HashMap::new()
+            }
+        };
+
+        let mut summaries = HashMap::with_capacity(columns_by_table.len());
+        for (table_name, columns) in columns_by_table {
+            // Same key `load_relation_columns` writes, so a later `get_table_details`
+            // for this table is a cache hit rather than a fresh query.
+            self.cache.set_columns(
+                connection_id,
+                &Self::scoped_column_cache_key(&table_name, schema),
+                columns.clone(),
+            );
+
+            let foreign_keys = foreign_keys_by_table
+                .get(&table_name)
+                .cloned()
+                .unwrap_or_default();
+            summaries.insert(
+                table_name,
+                TableColumnSummary {
+                    columns: columns.iter().map(ColumnInfo::from).collect(),
+                    foreign_keys,
+                },
+            );
+        }
+
+        Some(summaries)
+    }
+
     /// Warm `table_details_cache` for every table in `table_names` by fetching
     /// details from the database in concurrent batches.
     ///
@@ -1456,16 +1629,12 @@ impl SchemaService {
 
     /// Return all currently-cached `TableDetails` for a connection in one map.
     ///
-    /// Returns `None` when the main schema cache is expired or not yet
-    /// populated, so callers can decide whether to wait or trigger a load.
+    /// Returns `None` when nothing has been fetched yet, so callers can decide
+    /// whether to wait or trigger a load.
     pub fn get_all_cached_table_details(
         &self,
         connection_id: Uuid,
     ) -> Option<HashMap<String, TableDetails>> {
-        if !self.cache.is_valid(connection_id) {
-            return None;
-        }
-
         let cache = self.table_details_cache.read();
         let details: HashMap<String, TableDetails> = cache
             .iter()
@@ -1478,6 +1647,22 @@ impl SchemaService {
         } else {
             Some(details)
         }
+    }
+
+    /// Return every cached column list for a connection, keyed exactly as stored
+    /// (`"schema.table"` when a scope was active, otherwise `"table"`).
+    ///
+    /// This is the cheap column cache filled by `load_relation_columns` (one query
+    /// per table), which is warmed by the table viewer and designer long before the
+    /// full `TableDetails` prefetch finishes. Callers that only need column names
+    /// and types should prefer it over `get_all_cached_table_details`.
+    pub fn get_all_cached_columns(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<HashMap<String, Vec<SchemaColumnInfo>>> {
+        self.cache
+            .get_all_columns(connection_id)
+            .filter(|columns| !columns.is_empty())
     }
 
     /// Get the underlying cache
@@ -1497,6 +1682,34 @@ impl SchemaService {
         } else {
             None
         }
+    }
+
+    /// Whether the schema cache for a connection is missing or past its TTL.
+    ///
+    /// Callers that can serve stale data while revalidating (the command
+    /// palette) use this to decide whether to kick off a background refetch.
+    pub fn is_schema_cache_stale(&self, connection_id: Uuid) -> bool {
+        !self.cache.is_valid(connection_id)
+    }
+
+    /// Get cached tables for a connection even when the cache entry is stale.
+    ///
+    /// Unlike `get_cached_tables`, this does not drop the entry once the TTL
+    /// expires. It exists so UI surfaces never silently render an empty table
+    /// list just because the app idled; the caller is expected to trigger a
+    /// refresh alongside using this data.
+    pub fn get_cached_tables_allow_stale(
+        &self,
+        connection_id: Uuid,
+    ) -> Option<Vec<zqlz_core::TableInfo>> {
+        self.cache.get_tables(connection_id)
+    }
+
+    /// Get cached view names for a connection even when the cache entry is stale.
+    pub fn get_cached_view_names_allow_stale(&self, connection_id: Uuid) -> Option<Vec<String>> {
+        self.cache
+            .get_views(connection_id)
+            .map(|views| views.into_iter().map(|view| view.name).collect())
     }
 
     /// Get cached view names for a connection if available

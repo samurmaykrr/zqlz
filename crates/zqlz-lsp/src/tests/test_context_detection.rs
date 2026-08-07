@@ -212,3 +212,145 @@ fn test_context_where_clause() {
 
     assert!(has_user_cols, "Should suggest user columns in WHERE clause");
 }
+
+#[test]
+fn test_select_list_ranks_columns_above_functions() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT lo");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+
+    let first_field = completions
+        .iter()
+        .position(|completion| completion.kind == Some(lsp_types::CompletionItemKind::FIELD))
+        .expect("select list should offer columns");
+    let first_function = completions
+        .iter()
+        .position(|completion| completion.kind == Some(lsp_types::CompletionItemKind::FUNCTION));
+
+    if let Some(first_function) = first_function {
+        assert!(
+            first_field < first_function,
+            "Columns should outrank functions in a select list. Got: {:?}",
+            completions
+                .iter()
+                .map(|completion| (completion.label.clone(), completion.kind))
+                .collect::<Vec<_>>()
+        );
+    }
+}
+
+#[test]
+fn test_select_list_without_cached_columns_explains_why() {
+    // Mirrors the real failure: tables are known but their columns have not been
+    // fetched, which previously left a menu of nothing but SQL functions.
+    let mut lsp = create_test_lsp();
+    lsp.schema_cache.columns_by_table.clear();
+
+    let text = Rope::from("SELECT c");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let hints: Vec<&str> = completions
+        .iter()
+        .filter(|completion| completion.kind == Some(lsp_types::CompletionItemKind::TEXT))
+        .map(|completion| completion.label.as_str())
+        .collect();
+
+    assert_eq!(
+        hints.len(),
+        1,
+        "Expected exactly one explanatory item. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        hints[0].contains("column"),
+        "Hint should name the missing columns. Got: {}",
+        hints[0]
+    );
+    assert!(
+        !completions
+            .iter()
+            .any(|completion| completion.kind == Some(lsp_types::CompletionItemKind::FIELD)),
+        "No columns are cached, so none should be offered"
+    );
+}
+
+#[test]
+fn test_select_list_does_not_suggest_table_names() {
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT us");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        !labels.contains(&"users".to_string()),
+        "Table names belong to FROM/JOIN, not the select list. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_select_list_is_scoped_to_the_from_clause() {
+    // The grammar keeps `from` as a sibling of `select`, and an empty projection
+    // makes it fold into the select item entirely — both used to leave the select
+    // list unscoped, so it offered every column in the schema.
+    let analyzer = crate::ContextAnalyzer::new().expect("analyzer");
+
+    let cases: [(&str, usize, Vec<(&str, Option<&str>)>); 6] = [
+        ("select  from audit_log", 7, vec![("audit_log", None)]),
+        ("select x from audit_log", 7, vec![("audit_log", None)]),
+        ("select  from audit_log where 1=1", 7, vec![("audit_log", None)]),
+        ("select a, from audit_log", 10, vec![("audit_log", None)]),
+        ("select  from users u", 7, vec![("users", Some("u"))]),
+        (
+            "select  from audit_log al join users u on 1=1",
+            7,
+            vec![("audit_log", Some("al")), ("users", Some("u"))],
+        ),
+    ];
+
+    for (sql, cursor, expected) in cases {
+        let context = analyzer.analyze(&Rope::from(sql), cursor);
+        let crate::AstSqlContext::SelectList { available_tables } = context else {
+            panic!("{sql:?} should analyse as a select list, got {context:?}");
+        };
+        let actual: Vec<(&str, Option<&str>)> = available_tables
+            .iter()
+            .map(|table| (table.table_name.as_str(), table.alias.as_deref()))
+            .collect();
+        assert_eq!(actual, expected, "wrong tables in scope for {sql:?}");
+    }
+}
+
+#[test]
+fn test_select_list_offers_only_the_scoped_tables_columns() {
+    let mut lsp = create_test_lsp();
+    let sql = "select  from audit_log";
+    let text = Rope::from(sql);
+
+    let completions = lsp.get_completions(&text, "select ".len());
+    let fields: Vec<String> = completions
+        .iter()
+        .filter(|item| item.kind == Some(lsp_types::CompletionItemKind::FIELD))
+        .map(|item| item.label.clone())
+        .collect();
+
+    assert!(
+        fields.iter().any(|name| name == "log_id"),
+        "expected audit_log columns, got: {fields:?}"
+    );
+    assert!(
+        !fields.iter().any(|name| name == "username"),
+        "columns from unrelated tables must not be offered: {fields:?}"
+    );
+}

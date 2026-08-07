@@ -86,8 +86,10 @@ pub use table_service::{
     OpenTablesDecisionRequest, OpenViewerInitialLoadOutcome, OpenViewerInitialLoadRequest,
     OpenViewerSchemaLoad, OpenViewerSchemaViewerMetadata, RenameTableRequest, TableWorkflowError,
 };
-pub use table_service::{CellUpdateData, RowDeleteData, RowInsertData, TableService};
-pub use view_models::{ColumnInfo, DatabaseSchema, TableDetails};
+pub use table_service::{
+    CellUpdateData, CellUpdateOutcome, RowDeleteData, RowInsertData, TableService,
+};
+pub use view_models::{ColumnInfo, DatabaseSchema, TableColumnSummary, TableDetails};
 pub use zqlz_core::ConnectionFeatureSet;
 pub use zqlz_core::ConnectionScope;
 

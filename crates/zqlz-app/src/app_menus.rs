@@ -130,6 +130,8 @@ fn update_menus(app_menu_bar: Entity<AppMenuBar>, cx: &mut App) {
                 MenuItem::separator(),
                 MenuItem::action("Explain Query", ExplainQuery),
                 MenuItem::action("Explain Selection", ExplainSelection),
+                MenuItem::action("Explain Analyze Query", ExplainAnalyzeQuery),
+                MenuItem::action("Explain Analyze Selection", ExplainAnalyzeSelection),
                 MenuItem::separator(),
                 MenuItem::action("Stop Execution", StopQuery),
             ],

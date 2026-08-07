@@ -207,7 +207,7 @@ async fn fetch_function_definition(
         signature,
     )
     .await
-    .map_err(|error| format!("Failed to fetch function definition: {}", error))
+    .map_err(|error| error.to_string())
 }
 
 /// Fetches the definition of a stored procedure from the database.
@@ -225,7 +225,7 @@ async fn fetch_procedure_definition(
         signature,
     )
     .await
-    .map_err(|error| format!("Failed to fetch procedure definition: {}", error))
+    .map_err(|error| error.to_string())
 }
 
 async fn fetch_sequence_definition(
@@ -247,7 +247,7 @@ async fn fetch_sequence_definition(
         None,
     )
     .await
-    .map_err(|error| format!("Failed to fetch sequence definition: {}", error))
+    .map_err(|error| error.to_string())
 }
 
 fn build_drop_extension_statement(

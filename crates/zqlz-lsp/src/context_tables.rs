@@ -30,10 +30,21 @@ impl TableRef {
 
 /// Extract table references with aliases from a SELECT statement.
 pub(crate) fn extract_table_refs(select_node: tree_sitter::Node, source: &str) -> Vec<TableRef> {
-    let mut tables = Vec::new();
-    let mut cursor = select_node.walk();
+    // The grammar nests the projection under `select` but keeps `from` as its
+    // *sibling* under `statement`:
+    //   (statement (select ...) (from (relation (object_reference ...))))
+    // Scanning only the `select` node's children therefore never finds a table,
+    // which leaves select-list completions unscoped.
+    let scope = if select_node.kind() == "select" {
+        select_node.parent().unwrap_or(select_node)
+    } else {
+        select_node
+    };
 
-    for child in select_node.children(&mut cursor) {
+    let mut tables = Vec::new();
+    let mut cursor = scope.walk();
+
+    for child in scope.children(&mut cursor) {
         if child.kind() == "from_clause" || child.kind() == "from" {
             extract_table_refs_from_clause(child, source, &mut tables);
         }

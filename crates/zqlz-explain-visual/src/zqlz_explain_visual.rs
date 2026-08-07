@@ -10,18 +10,27 @@ use zqlz_analyzer::{
     explain::{JoinType, NodeType, PlanNode},
 };
 use zqlz_ui::widgets::{
-    ActiveTheme, Icon, IconName, h_flex,
+    ActiveTheme, Icon, IconName, Sizable as _, h_flex,
+    button::{Button, ButtonVariants as _},
     scroll::{ScrollableElement, Scrollbar},
     v_flex,
 };
 
-const NODE_WIDTH: f32 = 132.0;
-const NODE_HEIGHT: f32 = 90.0;
-const COLUMN_GAP: f32 = 178.0;
-const ROW_GAP: f32 = 92.0;
-const CANVAS_PADDING_X: f32 = 72.0;
-const CANVAS_PADDING_Y: f32 = 64.0;
-const COST_THRESHOLD: f64 = 0.5;
+const NODE_WIDTH: f32 = 208.0;
+const NODE_HEIGHT: f32 = 148.0;
+const COLUMN_GAP: f32 = 292.0;
+const ROW_GAP: f32 = 168.0;
+const CANVAS_PADDING_X: f32 = 80.0;
+const CANVAS_PADDING_Y: f32 = 72.0;
+
+/// Share of the plan's total cost that a node must incur *by itself* before it
+/// is flagged as the expensive node. Postgres total costs are cumulative, so
+/// comparing cumulative cost against the root would always flag the root.
+const COST_THRESHOLD: f64 = 0.2;
+
+const MIN_ZOOM: f32 = 0.5;
+const MAX_ZOOM: f32 = 2.0;
+const ZOOM_STEP: f32 = 0.2;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ExplainGraphNodeId(usize);
@@ -54,6 +63,7 @@ pub struct ExplainGraphState {
     duration_ms: u64,
     selected_node_id: Option<ExplainGraphNodeId>,
     scroll_handle: ScrollHandle,
+    zoom: f32,
 }
 
 impl ExplainGraphState {
@@ -67,7 +77,24 @@ impl ExplainGraphState {
             duration_ms: input.duration_ms,
             selected_node_id: None,
             scroll_handle: ScrollHandle::new(),
+            zoom: 1.0,
         }
+    }
+
+    pub fn zoom(&self) -> f32 {
+        self.zoom
+    }
+
+    pub fn zoom_in(&mut self) {
+        self.zoom = (self.zoom + ZOOM_STEP).min(MAX_ZOOM);
+    }
+
+    pub fn zoom_out(&mut self) {
+        self.zoom = (self.zoom - ZOOM_STEP).max(MIN_ZOOM);
+    }
+
+    pub fn reset_zoom(&mut self) {
+        self.zoom = 1.0;
     }
 
     pub fn graph(&self) -> &ExplainGraph {
@@ -106,11 +133,13 @@ impl ExplainGraphView {
             .selected_node_id
             .and_then(|id| graph.node(id).cloned());
         let scroll_handle = state.scroll_handle.clone();
+        let zoom = state.zoom;
         let header = GraphHeader {
             provider_label: state.provider_label.clone(),
             performance_score: state.performance_score,
             suggestion_count: state.suggestion_count,
             duration_ms: state.duration_ms,
+            zoom,
         };
         let graph_state = self.state.clone();
 
@@ -124,7 +153,7 @@ impl ExplainGraphView {
                     .flex_1()
                     .w_full()
                     .bg(background)
-                    .child(self.render_canvas(&graph, scroll_handle, cx))
+                    .child(self.render_canvas(&graph, scroll_handle, zoom, cx))
                     .when_some(selected_node, |this, node| {
                         this.child(self.render_detail_panel(node, graph_state, cx))
                     }),
@@ -134,6 +163,10 @@ impl ExplainGraphView {
 
     fn render_header(&self, header: GraphHeader, cx: &mut App) -> AnyElement {
         let theme = cx.theme();
+        let zoom_percent = (header.zoom * 100.0).round() as i32;
+        let zoom_out_state = self.state.clone();
+        let zoom_in_state = self.state.clone();
+        let reset_state = self.state.clone();
 
         h_flex()
             .h(px(36.0))
@@ -160,13 +193,54 @@ impl ExplainGraphView {
                 div()
                     .text_xs()
                     .text_color(theme.muted_foreground)
-                    .child("cost threshold 50%"),
+                    .child(format!(
+                        "highlight above {:.0}% self cost",
+                        COST_THRESHOLD * 100.0
+                    )),
             )
             .child(
-                div()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child("fit"),
+                h_flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("explain-graph-zoom-out")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Minus)
+                            .tooltip("Zoom out")
+                            .on_click(move |_, _, cx| {
+                                zoom_out_state.update(cx, |state, cx| {
+                                    state.zoom_out();
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("explain-graph-zoom-reset")
+                            .ghost()
+                            .xsmall()
+                            .label(format!("{zoom_percent}%"))
+                            .tooltip("Reset zoom to 100%")
+                            .on_click(move |_, _, cx| {
+                                reset_state.update(cx, |state, cx| {
+                                    state.reset_zoom();
+                                    cx.notify();
+                                });
+                            }),
+                    )
+                    .child(
+                        Button::new("explain-graph-zoom-in")
+                            .ghost()
+                            .xsmall()
+                            .icon(IconName::Plus)
+                            .tooltip("Zoom in")
+                            .on_click(move |_, _, cx| {
+                                zoom_in_state.update(cx, |state, cx| {
+                                    state.zoom_in();
+                                    cx.notify();
+                                });
+                            }),
+                    ),
             )
             .child(div().flex_1())
             .child(
@@ -186,10 +260,11 @@ impl ExplainGraphView {
         &self,
         graph: &ExplainGraph,
         scroll_handle: ScrollHandle,
+        zoom: f32,
         cx: &mut App,
     ) -> AnyElement {
-        let content_width = graph.bounds_width.max(1.0);
-        let content_height = (graph.bounds_height + 220.0).max(1.0);
+        let content_width = (graph.bounds_width * zoom).max(1.0);
+        let content_height = ((graph.bounds_height + 220.0) * zoom).max(1.0);
         let scrollbar_width = px(12.0);
         let state = self.state.clone();
 
@@ -216,10 +291,16 @@ impl ExplainGraphView {
                                 graph
                                     .edges
                                     .iter()
-                                    .map(|edge| self.render_edge(graph, edge, cx)),
+                                    .map(|edge| self.render_edge(graph, edge, zoom, cx)),
                             )
                             .children(graph.nodes.iter().map(|node| {
-                                self.render_node(node, graph.root_total_cost, state.clone(), cx)
+                                self.render_node(
+                                    node,
+                                    graph.root_total_cost,
+                                    zoom,
+                                    state.clone(),
+                                    cx,
+                                )
                             })),
                     ),
             )
@@ -244,7 +325,13 @@ impl ExplainGraphView {
             .into_any_element()
     }
 
-    fn render_edge(&self, graph: &ExplainGraph, edge: &GraphEdge, cx: &mut App) -> AnyElement {
+    fn render_edge(
+        &self,
+        graph: &ExplainGraph,
+        edge: &GraphEdge,
+        zoom: f32,
+        cx: &mut App,
+    ) -> AnyElement {
         let Some(parent) = graph.node(edge.parent_id) else {
             return div().into_any_element();
         };
@@ -252,11 +339,11 @@ impl ExplainGraphView {
             return div().into_any_element();
         };
         let theme = cx.theme();
-        let start_x = parent.x + NODE_WIDTH;
-        let start_y = parent.y + NODE_HEIGHT / 2.0;
-        let end_x = child.x;
-        let end_y = child.y + NODE_HEIGHT / 2.0;
-        let middle_x = start_x + ((end_x - start_x) / 2.0).max(34.0);
+        let start_x = (parent.x + NODE_WIDTH) * zoom;
+        let start_y = (parent.y + NODE_HEIGHT / 2.0) * zoom;
+        let end_x = child.x * zoom;
+        let end_y = (child.y + NODE_HEIGHT / 2.0) * zoom;
+        let middle_x = start_x + ((end_x - start_x) / 2.0).max(34.0 * zoom);
         let horizontal_width = (middle_x - start_x).max(1.0);
         let trailing_width = (end_x - middle_x).max(1.0);
         let vertical_top = start_y.min(end_y);
@@ -300,12 +387,12 @@ impl ExplainGraphView {
         &self,
         node: &GraphNode,
         root_total_cost: f64,
+        zoom: f32,
         state: Entity<ExplainGraphState>,
         cx: &mut App,
     ) -> AnyElement {
         let theme = cx.theme();
-        let cost_percent = node.cost_percent(root_total_cost);
-        let highlighted = node.total_cost.is_some() && cost_percent >= COST_THRESHOLD;
+        let highlighted = node.exceeds_threshold(root_total_cost);
         let color = if highlighted {
             theme.warning
         } else {
@@ -316,15 +403,21 @@ impl ExplainGraphView {
             }
         };
         let id = node.id;
+        let secondary_label = node.secondary_label();
+        let rows_label = node.rows_label();
+        let filtered_label = node
+            .rows_removed_by_filter
+            .map(|removed| format!("{} filtered out", format_count(removed)));
 
         v_flex()
             .absolute()
-            .left(px(node.x))
-            .top(px(node.y))
-            .w(px(NODE_WIDTH))
-            .h(px(NODE_HEIGHT))
+            .left(px(node.x * zoom))
+            .top(px(node.y * zoom))
+            .w(px(NODE_WIDTH * zoom))
+            .h(px(NODE_HEIGHT * zoom))
+            .px(px(6.0 * zoom))
             .items_center()
-            .gap_1()
+            .gap(px(3.0 * zoom))
             .cursor_pointer()
             .on_mouse_down(MouseButton::Left, move |_, _, cx| {
                 state.update(cx, |state, cx| {
@@ -334,7 +427,7 @@ impl ExplainGraphView {
             })
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(12.0 * zoom))
                     .font_family(theme.mono_font_family.clone())
                     .font_weight(FontWeight::SEMIBOLD)
                     .text_color(color)
@@ -343,14 +436,14 @@ impl ExplainGraphView {
                     .whitespace_nowrap()
                     .child(
                         node.total_cost
-                            .map(format_cost)
+                            .map(|total_cost| format!("cost {}", format_cost(total_cost)))
                             .unwrap_or_else(|| node.operation_label.clone()),
                     ),
             )
             .child(
                 h_flex()
-                    .w(px(52.0))
-                    .h(px(34.0))
+                    .w(px(56.0 * zoom))
+                    .h(px(36.0 * zoom))
                     .items_center()
                     .justify_center()
                     .border_1()
@@ -362,7 +455,7 @@ impl ExplainGraphView {
                     .bg(theme.muted.opacity(0.20))
                     .child(
                         Icon::new(node.icon_family.icon_name())
-                            .size_6()
+                            .size(px(24.0 * zoom))
                             .text_color(color),
                     ),
             )
@@ -370,25 +463,53 @@ impl ExplainGraphView {
                 div()
                     .w_full()
                     .text_center()
-                    .text_xs()
-                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_size(px(15.0 * zoom))
+                    .font_weight(FontWeight::BOLD)
                     .text_color(theme.foreground)
                     .overflow_hidden()
                     .text_ellipsis()
-                    .child(node.display_label.clone()),
+                    .whitespace_nowrap()
+                    .child(node.short_name.clone()),
             )
-            .when_some(node.rows, |this, rows| {
+            .when_some(secondary_label, |this, label| {
                 this.child(
                     div()
                         .w_full()
                         .text_center()
-                        .text_xs()
+                        .text_size(px(13.0 * zoom))
+                        .text_color(theme.foreground.opacity(0.8))
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(label),
+                )
+            })
+            .when_some(rows_label, |this, label| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .text_size(px(12.0 * zoom))
                         .font_family(theme.mono_font_family.clone())
                         .text_color(theme.muted_foreground)
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(format!("{} rows", format_count(rows))),
+                        .child(label),
+                )
+            })
+            .when_some(filtered_label, |this, label| {
+                this.child(
+                    div()
+                        .w_full()
+                        .text_center()
+                        .text_size(px(12.0 * zoom))
+                        .font_family(theme.mono_font_family.clone())
+                        .text_color(theme.warning)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(label),
                 )
             })
             .into_any_element()
@@ -436,32 +557,29 @@ impl ExplainGraphView {
                             .text_color(theme.foreground)
                             .line_height(relative(1.25))
                             .whitespace_normal()
-                            .child(node.node_type.clone()),
+                            .child(node.short_name.clone()),
                     )
                     .child(div().flex_none().w(px(1.0)).h(px(18.0)).bg(theme.border))
                     .child(
-                        div()
-                            .flex_none()
-                            .cursor_pointer()
-                            .text_sm()
-                            .text_color(theme.info)
-                            .line_height(relative(1.25))
-                            .child("Copy All")
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        Button::new("explain-graph-copy-all")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Copy)
+                            .label("Copy All")
+                            .tooltip("Copy every field of this node")
+                            .on_click(move |_, _, cx| {
                                 cx.write_to_clipboard(ClipboardItem::new_string(
                                     copy_payload.clone(),
                                 ));
                             }),
                     )
                     .child(
-                        div()
-                            .flex_none()
-                            .cursor_pointer()
-                            .text_lg()
-                            .text_color(theme.muted_foreground)
-                            .line_height(relative(1.0))
-                            .child("x")
-                            .on_mouse_down(MouseButton::Left, move |_, _, cx| {
+                        Button::new("explain-graph-close-detail")
+                            .ghost()
+                            .small()
+                            .icon(IconName::Close)
+                            .tooltip("Close")
+                            .on_click(move |_, _, cx| {
                                 close_state.update(cx, |state, cx| {
                                     state.clear_selection();
                                     cx.notify();
@@ -517,6 +635,7 @@ struct GraphHeader {
     performance_score: u8,
     suggestion_count: usize,
     duration_ms: u64,
+    zoom: f32,
 }
 
 #[derive(Clone, Debug)]
@@ -595,13 +714,16 @@ pub struct GraphNode {
     depth: usize,
     x: f32,
     y: f32,
-    node_type: String,
+    short_name: String,
+    node_type_description: String,
     display_label: String,
     icon_family: IconFamily,
     startup_cost: Option<f64>,
     total_cost: Option<f64>,
+    self_cost: Option<f64>,
     operation_label: String,
     rows: Option<u64>,
+    rows_removed_by_filter: Option<u64>,
     width: Option<u32>,
     relation: Option<String>,
     schema: Option<String>,
@@ -635,6 +757,40 @@ impl GraphNode {
         &self.display_label
     }
 
+    pub fn short_name(&self) -> &str {
+        &self.short_name
+    }
+
+    /// The label shown beneath the node type: the relation, index or other
+    /// subject the operation acts on. `None` when it would just repeat the
+    /// node type.
+    pub fn secondary_label(&self) -> Option<String> {
+        if self.display_label.is_empty() || self.display_label == self.short_name {
+            None
+        } else {
+            Some(self.display_label.clone())
+        }
+    }
+
+    /// The row line shown on the node: estimate alone before EXPLAIN ANALYZE,
+    /// estimate versus actual once real counts are available.
+    pub fn rows_label(&self) -> Option<String> {
+        match (self.rows, self.actual_rows) {
+            (Some(rows), Some(actual_rows)) => Some(format!(
+                "est {} / act {}",
+                format_count(rows),
+                format_count(actual_rows)
+            )),
+            (Some(rows), None) => Some(format!("{} rows", format_count(rows))),
+            (None, Some(actual_rows)) => {
+                Some(format!("{} rows actual", format_count(actual_rows)))
+            }
+            (None, None) => None,
+        }
+    }
+
+    /// Share of the plan's total cost that is cumulative through this node.
+    /// The root is always 1.0 because Postgres costs include all children.
     pub fn cost_percent(&self, root_total_cost: f64) -> f64 {
         let Some(total_cost) = self.total_cost else {
             return 0.0;
@@ -647,8 +803,22 @@ impl GraphNode {
         }
     }
 
+    /// Share of the plan's total cost incurred by this node alone, excluding
+    /// the cost its children already account for.
+    pub fn self_cost_percent(&self, root_total_cost: f64) -> f64 {
+        let Some(self_cost) = self.self_cost else {
+            return 0.0;
+        };
+
+        if root_total_cost <= 0.0 {
+            0.0
+        } else {
+            (self_cost / root_total_cost).clamp(0.0, 1.0)
+        }
+    }
+
     pub fn exceeds_threshold(&self, root_total_cost: f64) -> bool {
-        self.cost_percent(root_total_cost) >= COST_THRESHOLD
+        self.self_cost.is_some() && self.self_cost_percent(root_total_cost) >= COST_THRESHOLD
     }
 
     pub fn copy_payload(&self) -> String {
@@ -661,13 +831,20 @@ impl GraphNode {
 
     pub fn detail_rows(&self) -> Vec<(String, String)> {
         let mut rows = Vec::new();
-        rows.push(("Node Type".to_string(), self.node_type.clone()));
+        rows.push(("Node Type".to_string(), self.short_name.clone()));
+        rows.push((
+            "Description".to_string(),
+            self.node_type_description.clone(),
+        ));
         rows.push(("Operation".to_string(), self.operation_label.clone()));
         if let Some(startup_cost) = self.startup_cost {
             rows.push(("Startup Cost".to_string(), format_cost(startup_cost)));
         }
         if let Some(total_cost) = self.total_cost {
             rows.push(("Total Cost".to_string(), format_cost(total_cost)));
+        }
+        if let Some(self_cost) = self.self_cost {
+            rows.push(("Self Cost".to_string(), format_cost(self_cost)));
         }
         if let Some(plan_rows) = self.rows {
             rows.push(("Plan Rows".to_string(), format_count(plan_rows)));
@@ -685,6 +862,12 @@ impl GraphNode {
         }
         push_optional(&mut rows, "Join Cond", self.join_cond.as_deref());
         push_optional(&mut rows, "Filter", self.filter.as_deref());
+        if let Some(removed) = self.rows_removed_by_filter {
+            rows.push((
+                "Rows Removed by Filter".to_string(),
+                format_count(removed),
+            ));
+        }
         if !self.sort_keys.is_empty() {
             rows.push(("Sort Keys".to_string(), self.sort_keys.join(", ")));
         }
@@ -763,13 +946,16 @@ impl GraphBuilder {
             depth,
             x: 0.0,
             y: 0.0,
-            node_type: node.node_type.description().to_string(),
+            short_name: node.node_type.short_name().to_string(),
+            node_type_description: node.node_type.description().to_string(),
             display_label: node_display_label(node),
             icon_family: icon_family(node),
             startup_cost: node.cost.map(|cost| cost.startup),
             total_cost: node_total_cost(node),
+            self_cost: node_self_cost(node),
             operation_label: node_operation_label(node),
             rows: node.rows,
+            rows_removed_by_filter: node.rows_removed_by_filter,
             width: node.width,
             relation: node.relation.clone(),
             schema: node.schema.clone(),
@@ -870,7 +1056,7 @@ fn node_display_label(node: &PlanNode) -> String {
         .as_ref()
         .or(node.index_name.as_ref())
         .cloned()
-        .unwrap_or_else(|| node.node_type.description().to_string())
+        .unwrap_or_else(|| node.node_type.short_name().to_string())
 }
 
 fn node_operation_label(node: &PlanNode) -> String {
@@ -891,6 +1077,18 @@ fn node_operation_label(node: &PlanNode) -> String {
 
 fn node_total_cost(node: &PlanNode) -> Option<f64> {
     node.cost.as_ref().map(|cost| cost.total)
+}
+
+/// Postgres total costs are cumulative, so a node's own contribution is its
+/// total minus the totals of its children.
+fn node_self_cost(node: &PlanNode) -> Option<f64> {
+    let total = node_total_cost(node)?;
+    let children_total = node
+        .children
+        .iter()
+        .filter_map(node_total_cost)
+        .sum::<f64>();
+    Some((total - children_total).max(0.0))
 }
 
 fn push_optional(rows: &mut Vec<(String, String)>, label: &str, value: Option<&str>) {

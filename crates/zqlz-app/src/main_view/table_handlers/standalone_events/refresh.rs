@@ -7,6 +7,8 @@ use zqlz_core::DriverCategory;
 use zqlz_services::{
     BrowseTableWithFiltersRequest, KeyValueService, LoadKeyValueDatabaseRowsRequest, TableService,
 };
+use zqlz_ui::widgets::WindowExt;
+use zqlz_ui::widgets::notification::Notification;
 
 use crate::app::AppState;
 use crate::components::TableViewerEvent;
@@ -362,9 +364,13 @@ fn handle_refresh_sql_table(
                 Err(e) => {
                     tracing::error!("Failed to refresh table: {}", e);
 
-                    if let Err(error) = viewer_entity.update(cx, |viewer, cx| {
+                    if let Err(error) = viewer_entity.update_in(cx, |viewer, window, cx| {
                         if viewer.is_current_request(request_generation) {
                             viewer.set_loading(false, cx);
+                            window.push_notification(
+                                Notification::error(format!("Failed to refresh table: {}", e)),
+                                cx,
+                            );
                         }
                         Ok::<(), anyhow::Error>(())
                     }) {

@@ -16,16 +16,22 @@ pub(crate) fn analyze_best_practices(
     dialect: &dyn SqlParserDialect,
     rules: &SyntaxDiagnosticRules,
 ) -> Vec<Diagnostic> {
+    // Every check below needs the same parse. Doing it once keeps unparseable input (MySQL
+    // routine bodies, for one) from being re-tokenized three times only to be discarded.
+    let Ok(statements) = Parser::parse_sql(dialect, sql) else {
+        return Vec::new();
+    };
+
     let mut diagnostics = Vec::new();
     if rules.select_wildcard {
-        diagnostics.extend(check_select_wildcards(sql, text, dialect));
+        diagnostics.extend(check_select_wildcards(sql, text, dialect, &statements));
     }
 
     if rules.dml_without_where {
-        diagnostics.extend(check_dml_without_where(sql, text, dialect));
+        diagnostics.extend(check_dml_without_where(sql, text, dialect, &statements));
     }
     if rules.suspicious_drop_chain {
-        diagnostics.extend(check_suspicious_drop_chain(sql, text, dialect));
+        diagnostics.extend(check_suspicious_drop_chain(sql, text, dialect, &statements));
     }
 
     diagnostics
@@ -35,16 +41,14 @@ fn check_select_wildcards(
     sql: &str,
     text: &Rope,
     dialect: &dyn SqlParserDialect,
+    statements: &[Statement],
 ) -> Vec<Diagnostic> {
-    let Ok(statements) = Parser::parse_sql(dialect, sql) else {
-        return Vec::new();
-    };
     let mut diagnostics = Vec::new();
     let wildcard_ranges = select_wildcard_token_ranges(sql, dialect);
     let mut wildcard_range_index = 0usize;
 
     for statement in statements {
-        let wildcard_count = select_wildcard_count_in_statement(&statement);
+        let wildcard_count = select_wildcard_count_in_statement(statement);
         for _ in 0..wildcard_count {
             let Some(wildcard_range) = wildcard_ranges.get(wildcard_range_index) else {
                 continue;
@@ -75,10 +79,8 @@ fn check_suspicious_drop_chain(
     sql: &str,
     text: &Rope,
     dialect: &dyn SqlParserDialect,
+    statements: &[Statement],
 ) -> Vec<Diagnostic> {
-    let Ok(statements) = Parser::parse_sql(dialect, sql) else {
-        return Vec::new();
-    };
     if statements.len() <= 1 {
         return Vec::new();
     }
@@ -116,10 +118,8 @@ fn check_dml_without_where(
     sql: &str,
     text: &Rope,
     dialect: &dyn SqlParserDialect,
+    statements: &[Statement],
 ) -> Vec<Diagnostic> {
-    let Ok(statements) = Parser::parse_sql(dialect, sql) else {
-        return Vec::new();
-    };
     let mut diagnostics = Vec::new();
     let update_ranges = keyword_token_ranges(text, sql, dialect, "update");
     let delete_ranges = keyword_token_ranges(text, sql, dialect, "delete");

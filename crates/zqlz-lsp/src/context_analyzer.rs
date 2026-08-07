@@ -135,12 +135,65 @@ impl ContextAnalyzer {
                 tracing::trace!("No node found at cursor offset");
             }
 
+            // Tables in scope, resolved before clause detection so both the
+            // text-based rescue and the AST walk can use them.
+            let available_tables = cursor_node
+                .map(|node| {
+                    context_tables::extract_available_tables_at_position(
+                        tree.root_node(),
+                        node,
+                        &source,
+                    )
+                })
+                .unwrap_or_default();
+            let available_tables = if available_tables.is_empty() {
+                Self::tables_with_placeholder_select_item(parser, &source, offset)
+            } else {
+                available_tables
+            };
+
             // Analyze context based on the cursor position
-            let result = self.analyze_node_context(&tree, cursor_node, offset, &source);
+            let result =
+                self.analyze_node_context(&tree, cursor_node, offset, &source, available_tables);
             tracing::trace!(context = ?result, "Final context result");
             Ok(result)
         })
         .unwrap_or(SqlContext::General)
+    }
+
+    /// Re-parses with a placeholder in the select list to recover the FROM clause.
+    ///
+    /// An empty projection (`select |  from t`) makes the grammar fold `from t` into
+    /// the select item as a field plus alias, so no `from` node exists and the
+    /// completions fall back to every column in the schema. Filling the hole makes
+    /// the statement parse the way the user means it.
+    fn tables_with_placeholder_select_item(
+        parser: &mut tree_sitter::Parser,
+        source: &str,
+        offset: usize,
+    ) -> Vec<TableRef> {
+        // Trailing space so the placeholder cannot glue onto whatever follows the
+        // cursor (`select a,|from t` would otherwise become one identifier).
+        const PLACEHOLDER: &str = "zqlz_cursor ";
+
+        if offset > source.len() || !source.is_char_boundary(offset) {
+            return Vec::new();
+        }
+
+        let mut sanitized = String::with_capacity(source.len() + PLACEHOLDER.len());
+        sanitized.push_str(&source[..offset]);
+        sanitized.push_str(PLACEHOLDER);
+        sanitized.push_str(&source[offset..]);
+
+        let Some(tree) = parser.parse(&sanitized, None) else {
+            return Vec::new();
+        };
+        let root = tree.root_node();
+        let Some(node) = root.descendant_for_byte_range(offset, offset) else {
+            return Vec::new();
+        };
+
+        context_tables::extract_available_tables_at_position(root, node, &sanitized)
     }
 
     fn analyze_node_context(
@@ -149,6 +202,7 @@ impl ContextAnalyzer {
         cursor_node: Option<tree_sitter::Node>,
         offset: usize,
         source: &str,
+        available_tables: Vec<TableRef>,
     ) -> SqlContext {
         let Some(node) = cursor_node else {
             tracing::trace!("No node at cursor");
@@ -156,10 +210,6 @@ impl ContextAnalyzer {
         };
 
         tracing::trace!(kind = node.kind(), "Starting node context analysis");
-
-        // Extract available tables from the enclosing SELECT statement
-        let available_tables =
-            context_tables::extract_available_tables_at_position(tree.root_node(), node, source);
 
         // Text-based special cases checked before AST traversal, because incomplete SQL
         // causes tree-sitter to produce ERROR nodes that prevent accurate clause detection.
@@ -181,9 +231,17 @@ impl ContextAnalyzer {
 
             match node_type {
                 "select_statement" | "statement" | "select" => {
-                    // In SELECT context - show SelectList with available tables
-                    let available_tables = context_tables::extract_table_refs(current, source);
-                    return SqlContext::SelectList { available_tables };
+                    // Prefer the enclosing node's own tables, but keep the resolved
+                    // set when it has none — that is the placeholder-recovered list
+                    // for a statement the grammar could not parse as written.
+                    let scoped = context_tables::extract_table_refs(current, source);
+                    return SqlContext::SelectList {
+                        available_tables: if scoped.is_empty() {
+                            available_tables
+                        } else {
+                            scoped
+                        },
+                    };
                 }
                 "create_table_statement" | "create_table" => {
                     return SqlContext::CreateTable;

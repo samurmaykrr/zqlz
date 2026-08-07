@@ -45,6 +45,51 @@ pub(crate) fn resolve_alias_to_table(
     aliases.get(&alias_lower).cloned()
 }
 
+/// Rewrites `alias.<cursor>` into `alias.__zqlz_cursor` so half-typed qualified
+/// references parse.
+///
+/// Returns `None` unless the cursor sits immediately after a `.` that terminates an
+/// identifier — the caret position is the only reliable signal that the reference is
+/// still being typed, since `t.from` is itself a valid compound identifier.
+///
+/// The 13-character insertion shifts every offset after the cursor, so the result is
+/// only safe to parse, never to report positions from.
+pub(crate) fn sanitize_dangling_qualified_reference(
+    sql: &str,
+    cursor_offset: Option<usize>,
+) -> Option<String> {
+    let offset = cursor_offset?;
+    let offset = crate::clamp_to_char_boundary(sql, offset);
+    let before_cursor = sql.get(..offset)?;
+    let before_dot = before_cursor.strip_suffix('.')?;
+
+    if !ends_with_identifier(before_dot) {
+        return None;
+    }
+
+    let mut sanitized = String::with_capacity(sql.len() + "__zqlz_cursor".len());
+    sanitized.push_str(before_cursor);
+    sanitized.push_str("__zqlz_cursor");
+    sanitized.push_str(&sql[offset..]);
+    Some(sanitized)
+}
+
+/// True when `text` ends in something that can qualify a column reference.
+///
+/// A trailing run of digits is a number literal (`SELECT 1.`), not an identifier, so
+/// it must not be treated as a half-typed qualified reference.
+fn ends_with_identifier(text: &str) -> bool {
+    match text.chars().next_back() {
+        Some('"') | Some('`') | Some(']') => true,
+        Some(character) if character.is_alphanumeric() || character == '_' => text
+            .chars()
+            .rev()
+            .take_while(|character| character.is_alphanumeric() || *character == '_')
+            .any(|character| !character.is_numeric()),
+        _ => false,
+    }
+}
+
 fn parse_sql_allowing_dangling_qualified_reference(
     dialect: &dyn Dialect,
     sql: &str,
@@ -54,16 +99,7 @@ fn parse_sql_allowing_dangling_qualified_reference(
         return Some(statements);
     }
 
-    let offset = cursor_offset?;
-    let offset = crate::clamp_to_char_boundary(sql, offset);
-    if offset == 0 || !sql[..offset].ends_with('.') {
-        return None;
-    }
-
-    let mut sanitized = String::with_capacity(sql.len() + "__zqlz_cursor".len());
-    sanitized.push_str(&sql[..offset]);
-    sanitized.push_str("__zqlz_cursor");
-    sanitized.push_str(&sql[offset..]);
+    let sanitized = sanitize_dangling_qualified_reference(sql, cursor_offset)?;
     Parser::parse_sql(dialect, &sanitized).ok()
 }
 

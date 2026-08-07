@@ -179,6 +179,19 @@ impl TableViewerPanel {
         cx.notify();
     }
 
+    pub fn set_row_identity(&mut self, row_identity: RowIdentity, cx: &mut Context<Self>) {
+        self.row_identity = row_identity.clone();
+
+        if let Some(table_state) = &self.table_state {
+            table_state.update(cx, |table, cx| {
+                table.delegate_mut().set_row_identity(row_identity);
+                table.refresh(cx);
+            });
+        }
+
+        cx.notify();
+    }
+
     pub fn update_column_types_from_schema(
         &mut self,
         schema_columns: &[SchemaColumnInfo],

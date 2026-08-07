@@ -7,7 +7,7 @@ use zqlz_core::{Connection, default_database_label_for_driver};
 
 use crate::widgets::{ExplainResult, QueryExecution, StatementResult};
 use crate::{
-    DestructiveOperationWarning, QueryEngine, QueryExecutionParams, QueryService,
+    DestructiveOperationWarning, ExplainMode, QueryEngine, QueryExecutionParams, QueryService,
     QueryServiceError, QueryServiceResult, view_models,
 };
 
@@ -41,6 +41,10 @@ pub enum QueryWorkflowRequest {
     },
     Explain {
         sql: String,
+        /// `true` runs `EXPLAIN ANALYZE`, which really executes the statement.
+        analyze: bool,
+        /// Present when analyze mode would run a destructive statement for real.
+        destructive_warning: Option<DestructiveOperationWarning>,
     },
 }
 
@@ -113,8 +117,39 @@ impl QueryWorkflowDispatch {
             selected_database_name,
             start_log_message,
             no_connection_log_message: "No connection available for explain",
-            request: QueryWorkflowRequest::Explain { sql: sql.into() },
+            request: QueryWorkflowRequest::Explain {
+                sql: sql.into(),
+                analyze: false,
+                destructive_warning: None,
+            },
             refresh_history: false,
+        }
+    }
+
+    /// Dispatch an `EXPLAIN ANALYZE`, which genuinely executes the statement.
+    ///
+    /// Destructive statements are flagged so the app layer can require explicit
+    /// confirmation before anything reaches the server.
+    pub fn explain_analyze(
+        preferred_connection_id: Option<Uuid>,
+        selected_database_name: Option<String>,
+        sql: impl Into<String>,
+        start_log_message: &'static str,
+    ) -> Self {
+        let sql = sql.into();
+        let destructive_warning = analyze_destructive_warning(&sql);
+
+        Self {
+            preferred_connection_id,
+            selected_database_name,
+            start_log_message,
+            no_connection_log_message: "No connection available for explain analyze",
+            request: QueryWorkflowRequest::Explain {
+                sql,
+                analyze: true,
+                destructive_warning,
+            },
+            refresh_history: true,
         }
     }
 }
@@ -449,10 +484,25 @@ pub async fn execute_explain_request(
     connection: Arc<dyn Connection>,
     connection_id: Uuid,
     sql: &str,
+    analyze: bool,
 ) -> QueryServiceResult<view_models::ExplainResult> {
+    let mode = if analyze {
+        ExplainMode::Analyze
+    } else {
+        ExplainMode::Plan
+    };
+
     query_service
-        .explain_query(connection, connection_id, sql)
+        .explain_query_with_mode(connection, connection_id, sql, mode)
         .await
+}
+
+/// Detect whether an `EXPLAIN ANALYZE` would really perform a destructive write.
+///
+/// `EXPLAIN ANALYZE DELETE ...` deletes rows, so analyze requests are screened
+/// with the same rules as a plain execution regardless of user settings.
+pub fn analyze_destructive_warning(sql: &str) -> Option<DestructiveOperationWarning> {
+    QueryEngine::new().analyze_for_destructive_operations(sql)
 }
 
 /// Convert a query-service execution response into the UI payload used by results panel widgets.
@@ -468,6 +518,7 @@ pub fn build_query_execution_outcome(
             start_time: completed_at - Duration::milliseconds(execution.duration_ms as i64),
             end_time: completed_at,
             duration_ms: execution.duration_ms,
+            duration_micros: execution.duration_micros,
             connection_name: display_context.connection_name,
             database_name: display_context.database_name,
             statements: execution
@@ -476,6 +527,7 @@ pub fn build_query_execution_outcome(
                 .map(|statement| StatementResult {
                     sql: statement.sql,
                     duration_ms: statement.duration_ms,
+                    duration_micros: statement.duration_micros,
                     result: statement.result,
                     error: statement.error,
                     affected_rows: statement.affected_rows,
@@ -487,11 +539,13 @@ pub fn build_query_execution_outcome(
             start_time: completed_at,
             end_time: completed_at,
             duration_ms: 0,
+            duration_micros: 0,
             connection_name: display_context.connection_name,
             database_name: display_context.database_name,
             statements: vec![StatementResult {
                 sql: String::new(),
                 duration_ms: 0,
+                duration_micros: 0,
                 result: None,
                 error: Some(format!("Service error: {}", error)),
                 affected_rows: 0,
@@ -520,6 +574,7 @@ pub fn build_explain_execution_outcome(
         Ok(result) => ExplainResult {
             sql: result.sql,
             duration_ms: result.duration_ms,
+            duration_micros: result.duration_micros,
             raw_output: result.raw_output,
             query_plan: result.query_plan,
             analyzed_plan: result.analyzed_plan,
@@ -532,6 +587,7 @@ pub fn build_explain_execution_outcome(
         Err(error) => ExplainResult {
             sql: requested_sql,
             duration_ms: 0,
+            duration_micros: 0,
             raw_output: None,
             query_plan: None,
             analyzed_plan: None,
@@ -579,9 +635,10 @@ pub async fn run_query_workflow(
                 completed_at,
             )))
         }
-        QueryWorkflowRequest::Explain { sql } => {
+        QueryWorkflowRequest::Explain { sql, analyze, .. } => {
             let service_result =
-                execute_explain_request(query_service, connection, connection_id, &sql).await;
+                execute_explain_request(query_service, connection, connection_id, &sql, analyze)
+                    .await;
 
             QueryWorkflowOutcome::Explain(Box::new(build_explain_execution_outcome(
                 service_result,
@@ -624,8 +681,30 @@ pub async fn run_explain_query_workflow(
     display_context: QueryDisplayContext,
     completed_at: DateTime<Utc>,
 ) -> ExplainExecutionOutcome {
+    run_explain_query_workflow_with_mode(
+        query_service,
+        connection,
+        connection_id,
+        sql,
+        false,
+        display_context,
+        completed_at,
+    )
+    .await
+}
+
+/// Execute an "explain query" workflow, optionally as `EXPLAIN ANALYZE`.
+pub async fn run_explain_query_workflow_with_mode(
+    query_service: &QueryService,
+    connection: Arc<dyn Connection>,
+    connection_id: Uuid,
+    sql: String,
+    analyze: bool,
+    display_context: QueryDisplayContext,
+    completed_at: DateTime<Utc>,
+) -> ExplainExecutionOutcome {
     let service_result =
-        execute_explain_request(query_service, connection, connection_id, &sql).await;
+        execute_explain_request(query_service, connection, connection_id, &sql, analyze).await;
 
     build_explain_execution_outcome(service_result, sql, display_context, completed_at)
 }

@@ -11,6 +11,9 @@ use zqlz_core::QueryResult;
 pub struct StatementResult {
     pub sql: String,
     pub duration_ms: u64,
+    /// Wall-clock duration in microseconds. Sub-millisecond statements floor to
+    /// `0` in `duration_ms`, so display code should prefer this value.
+    pub duration_micros: u64,
     pub result: Option<QueryResult>,
     pub error: Option<String>,
     pub affected_rows: u64,
@@ -21,6 +24,8 @@ pub struct StatementResult {
 pub struct QueryExecution {
     pub sql: String,
     pub duration_ms: u64,
+    /// Wall-clock duration in microseconds across all statements.
+    pub duration_micros: u64,
     pub statements: Vec<StatementResult>,
 }
 
@@ -41,6 +46,11 @@ pub struct ExplainResult {
     pub sql: String,
     /// Execution time of the EXPLAIN itself
     pub duration_ms: u64,
+    /// Execution time of the EXPLAIN itself, in microseconds.
+    pub duration_micros: u64,
+    /// Whether this result came from `EXPLAIN ANALYZE` (real execution) rather
+    /// than a plan-only EXPLAIN (planner estimates).
+    pub analyzed: bool,
     /// The raw EXPLAIN output as a table (for Op tab)
     pub raw_output: Option<QueryResult>,
     /// The EXPLAIN QUERY PLAN output (for Plan tab - SQLite)

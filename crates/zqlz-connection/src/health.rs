@@ -26,5 +26,5 @@ mod status;
 mod tests;
 
 pub use checker::{HealthCheckConfig, HealthCheckResult, HealthChecker, create_shared_checker};
-pub use ping::{PingError, PingResult, ping_database};
+pub use ping::{PingError, PingResult, ping_database, ping_database_with_timeout};
 pub use status::{HealthStatus, HealthThresholds};

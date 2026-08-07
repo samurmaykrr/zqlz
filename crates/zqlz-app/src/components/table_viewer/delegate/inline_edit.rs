@@ -519,7 +519,10 @@ impl TableViewerDelegate {
             .unwrap_or("text");
         let new_value = Value::parse_from_string(new_value_str, data_type);
 
-        if is_null_no_op || new_value == original_value {
+        // Compared semantically: a DECIMAL column reads back as Value::Decimal
+        // but may parse from text as a float, and a variant mismatch would look
+        // like an edit and issue a pointless UPDATE.
+        if is_null_no_op || new_value.is_equivalent_to(&original_value) {
             return Ok(None);
         }
 

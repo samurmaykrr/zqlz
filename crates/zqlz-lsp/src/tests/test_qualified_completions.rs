@@ -305,11 +305,23 @@ fn test_qualified_completion_unknown_table() {
 
     let completions = lsp.get_completions(&text, offset);
 
-    // Should return empty or no completions for unknown table
-    assert!(
-        completions.is_empty(),
-        "Should not suggest columns for unknown table"
+    // Unknown tables produce a single non-inserting explanatory item instead
+    // of real column suggestions (or a silent empty menu).
+    assert_eq!(
+        completions.len(),
+        1,
+        "Should only show the explanatory item for unknown table. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.clone())
+            .collect::<Vec<_>>()
     );
+    assert!(
+        completions[0].label.contains("Unknown table or alias"),
+        "Got: {}",
+        completions[0].label
+    );
+    assert_eq!(completions[0].insert_text.as_deref(), Some(""));
 }
 
 #[test]
@@ -442,5 +454,227 @@ fn test_qualified_completion_in_group_by() {
     assert!(
         !completions.is_empty(),
         "Should suggest columns in GROUP BY clause"
+    );
+}
+
+#[test]
+fn test_qualified_completion_alias_used_before_from_with_dangling_dot() {
+    // Regression: `SELECT ws. FROM users as ws` — the qualifier appears before
+    // the FROM clause that defines the alias, and the dangling dot makes the
+    // statement unparseable. Columns of the aliased table must still complete.
+    let mut lsp = create_test_lsp();
+    let text = Rope::from("SELECT ws. FROM users as ws");
+    let offset = text.to_string().find("ws.").unwrap() + 3;
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        labels.contains(&"user_id".to_string()),
+        "Should resolve alias defined with AS after a dangling dot. Got: {:?}",
+        labels
+    );
+    assert!(
+        !labels.contains(&"SELECT".to_string()),
+        "Should not fall back to keywords after a qualified dot. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_alias_dangling_dot_postgres_dialect() {
+    // Same regression but under the PostgreSQL dialect, matching the live app.
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT ws. FROM users as ws");
+    let offset = text.to_string().find("ws.").unwrap() + 3;
+
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        labels.contains(&"user_id".to_string()),
+        "PostgreSQL dialect should resolve dangling-dot alias. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_manual_trigger_dangling_dot() {
+    // Right-click → Complete uses the manual (INVOKED) path.
+    let mut lsp = create_test_lsp_with_dialect(crate::SqlDialect::PostgreSQL);
+    let text = Rope::from("SELECT ws. FROM users as ws");
+    let offset = text.to_string().find("ws.").unwrap() + 3;
+
+    let completions = lsp.get_completions_with_trigger(&text, offset, true);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        labels.contains(&"user_id".to_string()),
+        "Manual trigger should resolve dangling-dot alias. Got: {:?}",
+        labels
+    );
+}
+
+#[test]
+fn test_qualified_completion_empty_schema_reports_reason() {
+    use std::sync::Arc;
+    use zqlz_services::SchemaService;
+
+    // No schema cache at all: instead of silently showing nothing, after-dot
+    // completion should explain why no columns are available.
+    let mut lsp = crate::SqlLsp::new(Arc::new(SchemaService::new()));
+    let text = Rope::from("SELECT ws. FROM users as ws");
+    let offset = text.to_string().find("ws.").unwrap() + 3;
+
+    let completions = lsp.get_completions(&text, offset);
+    assert_eq!(
+        completions.len(),
+        1,
+        "Expected a single explanatory item. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        completions[0].label.contains("No schema loaded"),
+        "Got: {}",
+        completions[0].label
+    );
+    assert_eq!(completions[0].insert_text.as_deref(), Some(""));
+}
+
+#[test]
+fn test_after_dot_known_table_without_columns_reports_pending_load() {
+    // A table the schema knows about but has no cached columns for is a pending
+    // column fetch, not a typo — the message must not send the user hunting.
+    let mut lsp = create_test_lsp();
+    lsp.schema_cache.columns_by_table.remove("locations");
+
+    let text = Rope::from("SELECT locations.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    assert_eq!(
+        completions.len(),
+        1,
+        "Expected a single explanatory item. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !completions[0].label.starts_with("Unknown table or alias"),
+        "A known table must not be reported as unknown. Got: {}",
+        completions[0].label
+    );
+    assert!(
+        completions[0].label.contains("locations"),
+        "Got: {}",
+        completions[0].label
+    );
+}
+
+#[test]
+fn test_after_dot_alias_to_known_table_without_columns_reports_pending_load() {
+    let mut lsp = create_test_lsp();
+    lsp.schema_cache.columns_by_table.remove("locations");
+
+    let text = Rope::from("select c.  from locations as c");
+    let offset = text.to_string().find("c.").unwrap() + "c.".len();
+
+    let completions = lsp.get_completions(&text, offset);
+    assert_eq!(
+        completions.len(),
+        1,
+        "Expected a single explanatory item. Got: {:?}",
+        completions
+            .iter()
+            .map(|completion| completion.label.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !completions[0].label.starts_with("Unknown table or alias"),
+        "Resolved alias must not be reported as unknown. Got: {}",
+        completions[0].label
+    );
+    assert!(
+        completions[0].label.contains("locations"),
+        "Got: {}",
+        completions[0].label
+    );
+}
+
+#[test]
+fn test_after_dot_schema_loading_reports_loading() {
+    let mut lsp = create_test_lsp();
+    lsp.schema_cache.columns_by_table.remove("locations");
+    lsp.schema_loading = true;
+
+    let text = Rope::from("SELECT locations.");
+    let offset = text.to_string().len();
+
+    let completions = lsp.get_completions(&text, offset);
+    assert_eq!(completions.len(), 1, "Got: {:?}", completions);
+    assert!(
+        completions[0].label.contains("Loading schema"),
+        "Got: {}",
+        completions[0].label
+    );
+}
+
+#[test]
+fn test_merge_table_columns_makes_after_dot_completions_available() {
+    use zqlz_services::TableDetails;
+
+    let mut lsp = create_test_lsp();
+    let details = TableDetails {
+        name: "invoices".to_string(),
+        table_type: zqlz_core::TableType::Table,
+        columns: vec![zqlz_services::ColumnInfo {
+            name: "invoice_total".to_string(),
+            data_type: "NUMERIC".to_string(),
+            nullable: false,
+            is_primary_key: false,
+            default_value: None,
+            max_length: None,
+            precision: None,
+            scale: None,
+            is_auto_increment: false,
+            comment: None,
+            enum_values: None,
+        }],
+        indexes: Vec::new(),
+        foreign_keys: Vec::new(),
+        constraints: Vec::new(),
+        triggers: Vec::new(),
+        primary_key_columns: Vec::new(),
+        row_count: None,
+    };
+
+    lsp.merge_table_columns("invoices", &details);
+
+    let text = Rope::from("SELECT invoices.");
+    let offset = text.to_string().len();
+    let completions = lsp.get_completions(&text, offset);
+    let labels: Vec<String> = completions
+        .iter()
+        .map(|completion| completion.label.clone())
+        .collect();
+
+    assert!(
+        labels.contains(&"invoice_total".to_string()),
+        "Merged columns should be completable. Got: {:?}",
+        labels
     );
 }

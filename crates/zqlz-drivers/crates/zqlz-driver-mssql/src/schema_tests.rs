@@ -73,36 +73,9 @@ fn test_column_info() -> ColumnInfo {
     }
 }
 
-// Tests for parse_fk_action
-#[test]
-fn test_parse_fk_action_cascade() {
-    assert_eq!(parse_fk_action("CASCADE"), ForeignKeyAction::Cascade);
-    assert_eq!(parse_fk_action("cascade"), ForeignKeyAction::Cascade);
-}
-
-#[test]
-fn test_parse_fk_action_set_null() {
-    assert_eq!(parse_fk_action("SET_NULL"), ForeignKeyAction::SetNull);
-    assert_eq!(parse_fk_action("SET NULL"), ForeignKeyAction::SetNull);
-}
-
-#[test]
-fn test_parse_fk_action_set_default() {
-    assert_eq!(parse_fk_action("SET_DEFAULT"), ForeignKeyAction::SetDefault);
-    assert_eq!(parse_fk_action("SET DEFAULT"), ForeignKeyAction::SetDefault);
-}
-
-#[test]
-fn test_parse_fk_action_no_action() {
-    assert_eq!(parse_fk_action("NO_ACTION"), ForeignKeyAction::NoAction);
-    assert_eq!(parse_fk_action("NO ACTION"), ForeignKeyAction::NoAction);
-}
-
-#[test]
-fn test_parse_fk_action_unknown() {
-    assert_eq!(parse_fk_action("RESTRICT"), ForeignKeyAction::NoAction);
-    assert_eq!(parse_fk_action("unknown"), ForeignKeyAction::NoAction);
-}
+// Foreign-key action parsing now lives in zqlz-schema-engine and is covered by
+// the shared contract suite; the driver-local tests were removed with the
+// driver-local `parse_fk_action`.
 
 // Tests for generate_table_ddl
 #[test]
@@ -586,21 +559,6 @@ fn test_get_indexes_uses_string_agg() {
     // Verify we use STRING_AGG for column aggregation (SQL Server 2017+)
     let agg_function = "STRING_AGG";
     assert_eq!(agg_function, "STRING_AGG");
-}
-
-#[test]
-fn test_foreign_key_action_mapping() {
-    // Test all FK action mappings
-    let actions = [
-        ("CASCADE", ForeignKeyAction::Cascade),
-        ("SET_NULL", ForeignKeyAction::SetNull),
-        ("SET_DEFAULT", ForeignKeyAction::SetDefault),
-        ("NO_ACTION", ForeignKeyAction::NoAction),
-    ];
-
-    for (sql_action, expected) in actions.iter() {
-        assert_eq!(parse_fk_action(sql_action), *expected);
-    }
 }
 
 #[test]

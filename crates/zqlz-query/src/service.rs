@@ -6,15 +6,45 @@
 use parking_lot::RwLock;
 use std::sync::Arc;
 use uuid::Uuid;
-use zqlz_core::{Connection, DriverCategory, ExplainConfig, Value};
+use zqlz_core::{Connection, DriverCategory, ExplainConfig, ExplainParserKind, Value};
 
 use crate::batch::split_statements;
 use crate::engine::QueryEngine;
 use crate::error::{QueryServiceError, QueryServiceResult};
-use crate::explain;
 use crate::history::{QueryHistory, QueryHistoryEntry};
 use crate::parameters::{BindError, bind_named_with_policy, bind_positional_with_policy};
 use crate::view_models::{QueryExecution, StatementExecution, StatementResult};
+
+/// Which flavour of EXPLAIN to run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExplainMode {
+    /// Planner estimates only. Never executes the statement.
+    Plan,
+    /// `EXPLAIN ANALYZE`: the server really runs the statement and reports
+    /// actual row counts and timings.
+    Analyze,
+}
+
+/// Whether an EXPLAIN result cell carries a JSON document rather than plain text.
+fn explain_result_looks_like_json(result: &zqlz_core::QueryResult) -> bool {
+    let Some(value) = result.rows.first().and_then(|row| row.values.first()) else {
+        return false;
+    };
+
+    match value {
+        Value::Json(_) => true,
+        Value::String(text) => {
+            let trimmed = text.trim_start();
+            trimmed.starts_with('[') || trimmed.starts_with('{')
+        }
+        Value::Null => false,
+        other => {
+            let rendered = other.to_string();
+            let trimmed = rendered.trim_start();
+            trimmed.starts_with('[') || trimmed.starts_with('{')
+        }
+    }
+}
 
 /// Service for executing queries and statements
 ///
@@ -88,20 +118,22 @@ impl QueryService {
             let statement_result = if is_query {
                 match self.engine.execute_query(&connection, statement_sql).await {
                     Ok(query_result) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: Some(query_result),
                             error: None,
                             affected_rows: 0,
                         }
                     }
                     Err(e) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: Some(e.to_string()),
                             affected_rows: 0,
@@ -115,20 +147,22 @@ impl QueryService {
                     .await
                 {
                     Ok(stmt_result) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: None,
                             affected_rows: stmt_result.affected_rows,
                         }
                     }
                     Err(e) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: Some(e.to_string()),
                             affected_rows: 0,
@@ -142,6 +176,7 @@ impl QueryService {
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
+        let duration_micros = duration.as_micros() as u64;
 
         // Track in history
         let success_count = statement_results
@@ -186,6 +221,7 @@ impl QueryService {
         Ok(QueryExecution {
             sql: sql.to_string(),
             duration_ms,
+            duration_micros,
             statements: statement_results,
         })
     }
@@ -259,20 +295,22 @@ impl QueryService {
                     .await
                 {
                     Ok(query_result) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: Some(query_result),
                             error: None,
                             affected_rows: 0,
                         }
                     }
                     Err(e) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: Some(e.to_string()),
                             affected_rows: 0,
@@ -286,20 +324,22 @@ impl QueryService {
                     .await
                 {
                     Ok(stmt_result) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: None,
                             affected_rows: stmt_result.affected_rows,
                         }
                     }
                     Err(e) => {
-                        let duration = statement_start.elapsed().as_millis() as u64;
+                        let elapsed = statement_start.elapsed();
                         StatementResult {
                             sql: statement_sql.to_string(),
-                            duration_ms: duration,
+                            duration_ms: elapsed.as_millis() as u64,
+                            duration_micros: elapsed.as_micros() as u64,
                             result: None,
                             error: Some(e.to_string()),
                             affected_rows: 0,
@@ -313,6 +353,7 @@ impl QueryService {
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
+        let duration_micros = duration.as_micros() as u64;
 
         // Track in history
         let success_count = statement_results
@@ -358,6 +399,7 @@ impl QueryService {
         Ok(QueryExecution {
             sql: sql.to_string(),
             duration_ms,
+            duration_micros,
             statements: statement_results,
         })
     }
@@ -501,14 +543,39 @@ impl QueryService {
     /// # Returns
     ///
     /// An `ExplainResult` containing the EXPLAIN output
-    #[tracing::instrument(skip(self, connection, sql), fields(connection_id = %connection_id, sql_preview = %sql.chars().take(50).collect::<String>()))]
     pub async fn explain_query(
         &self,
         connection: Arc<dyn Connection>,
         connection_id: Uuid,
         sql: &str,
     ) -> QueryServiceResult<crate::view_models::ExplainResult> {
-        tracing::debug!("Executing EXPLAIN via QueryService");
+        self.explain_query_with_mode(connection, connection_id, sql, ExplainMode::Plan)
+            .await
+    }
+
+    /// Execute `EXPLAIN ANALYZE` on a SQL query, producing real row counts and timings.
+    ///
+    /// This genuinely executes the statement on the server. Callers are responsible
+    /// for confirming intent before invoking this on a non-read-only statement.
+    pub async fn explain_analyze_query(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        sql: &str,
+    ) -> QueryServiceResult<crate::view_models::ExplainResult> {
+        self.explain_query_with_mode(connection, connection_id, sql, ExplainMode::Analyze)
+            .await
+    }
+
+    #[tracing::instrument(skip(self, connection, sql), fields(connection_id = %connection_id, mode = ?mode, sql_preview = %sql.chars().take(50).collect::<String>()))]
+    pub async fn explain_query_with_mode(
+        &self,
+        connection: Arc<dyn Connection>,
+        connection_id: Uuid,
+        sql: &str,
+        mode: ExplainMode,
+    ) -> QueryServiceResult<crate::view_models::ExplainResult> {
+        tracing::debug!(?mode, "Executing EXPLAIN via QueryService");
 
         let start = std::time::Instant::now();
 
@@ -520,6 +587,8 @@ impl QueryService {
             return Ok(crate::view_models::ExplainResult {
                 sql: sql.to_string(),
                 duration_ms: 0,
+                duration_micros: 0,
+                analyzed: false,
                 raw_output: None,
                 query_plan: None,
                 analyzed_plan: None,
@@ -533,15 +602,40 @@ impl QueryService {
         // Get ExplainConfig based on the connection's dialect
         let explain_config = self.get_explain_config_for_connection(&connection);
 
+        // The secondary statement carries the detail: planner costs in plan mode,
+        // real row counts and timings in analyze mode.
+        let plan_sql = match mode {
+            ExplainMode::Plan => explain_config.format_query_plan(first_statement),
+            ExplainMode::Analyze => explain_config.format_analyze(first_statement),
+        };
+
+        if mode == ExplainMode::Analyze && plan_sql.is_none() {
+            let dialect = connection
+                .dialect_id()
+                .map(ToString::to_string)
+                .unwrap_or_else(|| "this database".to_string());
+            return Ok(crate::view_models::ExplainResult {
+                sql: first_statement.to_string(),
+                duration_ms: 0,
+                duration_micros: 0,
+                analyzed: true,
+                raw_output: None,
+                query_plan: None,
+                analyzed_plan: None,
+                provider_id: connection.dialect_id().map(ToString::to_string),
+                error: Some(format!("EXPLAIN ANALYZE is not supported by {dialect}")),
+                connection_name: None,
+                database_name: None,
+            });
+        }
+
         // Run the primary EXPLAIN query
         let explain_sql = explain_config.format_explain(first_statement);
         tracing::debug!(explain_sql = %explain_sql, "Running primary EXPLAIN");
         let raw_result = self.engine.execute_query(&connection, &explain_sql).await;
 
-        // Run the query plan EXPLAIN if available for this dialect
-        let plan_result = if let Some(plan_sql) = explain_config.format_query_plan(first_statement)
-        {
-            tracing::debug!(plan_sql = %plan_sql, "Running query plan EXPLAIN");
+        let plan_result = if let Some(plan_sql) = plan_sql {
+            tracing::debug!(plan_sql = %plan_sql, ?mode, "Running secondary EXPLAIN");
             Some(self.engine.execute_query(&connection, &plan_sql).await)
         } else {
             None
@@ -549,6 +643,7 @@ impl QueryService {
 
         let duration = start.elapsed();
         let duration_ms = duration.as_millis() as u64;
+        let duration_micros = duration.as_micros() as u64;
 
         // Determine overall success/error
         let (raw_output, query_plan, error) = match (&raw_result, &plan_result) {
@@ -570,6 +665,8 @@ impl QueryService {
 
         tracing::info!(
             duration_ms = duration_ms,
+            duration_micros = duration_micros,
+            mode = ?mode,
             has_raw = raw_output.is_some(),
             has_plan = query_plan.is_some(),
             has_analysis = analyzed_plan.is_some(),
@@ -580,6 +677,8 @@ impl QueryService {
         Ok(crate::view_models::ExplainResult {
             sql: first_statement.to_string(),
             duration_ms,
+            duration_micros,
+            analyzed: mode == ExplainMode::Analyze,
             raw_output,
             query_plan,
             analyzed_plan,
@@ -597,13 +696,34 @@ impl QueryService {
         query_plan: Option<&zqlz_core::QueryResult>,
         duration_ms: u64,
     ) -> Option<zqlz_analyzer::QueryAnalysis> {
-        explain::parse_and_analyze_explain(
-            connection.explain_parser_kind(),
+        let parser_kind = connection.explain_parser_kind();
+
+        // The PostgreSQL parser tries `raw_output` first, and the plain-text EXPLAIN
+        // in `raw_output` always parses, so a JSON payload in `query_plan` would
+        // otherwise never be reached - losing actual rows, actual times and
+        // "Rows Removed by Filter". Present the JSON result first when there is one.
+        let (primary, secondary) = if parser_kind == ExplainParserKind::PostgreSql
+            && query_plan.is_some_and(explain_result_looks_like_json)
+        {
+            (query_plan, raw_output)
+        } else {
+            (raw_output, query_plan)
+        };
+
+        let mut plan = zqlz_drivers::explain::parse_explain_plan(
+            parser_kind,
             connection.dialect_id(),
-            raw_output,
-            query_plan,
-            duration_ms,
-        )
+            primary,
+            secondary,
+        )?;
+
+        // EXPLAIN ANALYZE reports the server-side execution time, which is far more
+        // meaningful than our round-trip wall clock. Only fall back when absent.
+        if plan.execution_time_ms.is_none() {
+            plan.execution_time_ms = Some(duration_ms as f64);
+        }
+
+        Some(zqlz_analyzer::QueryAnalyzer::new().analyze(plan))
     }
 
     /// Get the ExplainConfig for a connection based on its dialect

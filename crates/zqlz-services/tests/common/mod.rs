@@ -3,10 +3,11 @@
 use async_trait::async_trait;
 use std::sync::Arc;
 use zqlz_core::{
-    BindPlaceholderPolicy, CellUpdateRequest, ColumnInfo, ColumnMeta, Connection, ConnectionScope,
+    AffectedRowCountFidelity, BindPlaceholderPolicy, CellUpdateRequest, ColumnInfo, ColumnMeta,
+    Connection, ConnectionScope,
     DatabaseObject, ForeignKeyInfo, IndexInfo, PrimaryKeyInfo, QueryResult,
-    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SqlObjectName, StatementResult,
-    TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
+    ResolvedConnectionScope, Result, Row, SchemaIntrospection, SingleRowDmlScope, SqlObjectName,
+    StatementResult, TableInfo, TableType, Transaction, TriggerInfo, Value, ViewInfo, ZqlzError,
 };
 
 /// Mock connection for testing service-layer logic without a real database.
@@ -37,6 +38,16 @@ pub struct MockConnection {
     pub list_tables_schemas: Arc<parking_lot::Mutex<Vec<Option<String>>>>,
     /// Last cell update request, for service-layer update assertions.
     pub last_cell_update: Arc<parking_lot::Mutex<Option<CellUpdateRequest>>>,
+    /// Whether this mock answers the schema-wide column fetch. Off by default so
+    /// existing tests keep exercising the per-table fallback.
+    pub bulk_columns_supported: bool,
+    /// Counts schema-wide column fetches.
+    pub list_all_columns_count: Arc<parking_lot::Mutex<usize>>,
+    /// Rows reported by `update_cell`. Configurable so tests can exercise the
+    /// zero-row branch that a hardcoded `1` used to hide.
+    pub cell_update_affected_rows: u64,
+    /// Fidelity reported for affected-row counts.
+    pub affected_row_count_fidelity: AffectedRowCountFidelity,
 }
 
 impl MockConnection {
@@ -53,6 +64,71 @@ impl MockConnection {
             query_log: Arc::new(parking_lot::Mutex::new(Vec::new())),
             list_tables_schemas: Arc::new(parking_lot::Mutex::new(Vec::new())),
             last_cell_update: Arc::new(parking_lot::Mutex::new(None)),
+            bulk_columns_supported: false,
+            list_all_columns_count: Arc::new(parking_lot::Mutex::new(0)),
+            cell_update_affected_rows: 1,
+            affected_row_count_fidelity: AffectedRowCountFidelity::Exact,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn with_cell_update_affected_rows(mut self, rows: u64) -> Self {
+        self.cell_update_affected_rows = rows;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_affected_row_count_fidelity(
+        mut self,
+        fidelity: AffectedRowCountFidelity,
+    ) -> Self {
+        self.affected_row_count_fidelity = fidelity;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn with_bulk_columns(mut self) -> Self {
+        self.bulk_columns_supported = true;
+        self
+    }
+
+    #[allow(dead_code)]
+    pub fn list_all_columns_count(&self) -> usize {
+        *self.list_all_columns_count.lock()
+    }
+
+    /// The fixture column set, shared by the per-table and schema-wide fetches so
+    /// tests can assert the two agree.
+    #[allow(dead_code)]
+    fn mock_columns_for(&self, table: &str) -> Vec<ColumnInfo> {
+        match table {
+            "users" => vec![
+                ColumnInfo {
+                    name: "id".to_string(),
+                    ordinal: 0,
+                    data_type: "INTEGER".to_string(),
+                    nullable: false,
+                    is_primary_key: true,
+                    is_auto_increment: true,
+                    is_unique: true,
+                    ..Default::default()
+                },
+                ColumnInfo {
+                    name: "name".to_string(),
+                    ordinal: 1,
+                    data_type: "TEXT".to_string(),
+                    nullable: false,
+                    ..Default::default()
+                },
+                ColumnInfo {
+                    name: "email".to_string(),
+                    ordinal: 2,
+                    data_type: "TEXT".to_string(),
+                    nullable: true,
+                    ..Default::default()
+                },
+            ],
+            _ => Vec::new(),
         }
     }
 
@@ -256,6 +332,20 @@ impl Connection for MockConnection {
                 let escaped_identifier = identifier.replace('"', "\"\"");
                 format!("\"{}\"", escaped_identifier)
             }
+        }
+    }
+
+    /// Mirrors the SQLite/PostgreSQL shape so tests can assert that keyless
+    /// statements are narrowed to one row.
+    fn single_row_dml_scope(
+        &self,
+        qualified_table: &str,
+        where_clause: &str,
+    ) -> SingleRowDmlScope {
+        match self.driver.as_str() {
+            "mysql" => SingleRowDmlScope::StatementSuffix(" LIMIT 1"),
+            "mock" => SingleRowDmlScope::Unsupported,
+            _ => SingleRowDmlScope::by_row_identity("rowid", qualified_table, where_clause),
         }
     }
 
@@ -540,8 +630,12 @@ impl Connection for MockConnection {
             Err(ZqlzError::Query("Update failed".into()))
         } else {
             *self.last_cell_update.lock() = Some(request);
-            Ok(1)
+            Ok(self.cell_update_affected_rows)
         }
+    }
+
+    fn affected_row_count_fidelity(&self) -> AffectedRowCountFidelity {
+        self.affected_row_count_fidelity
     }
 
     async fn begin_transaction(&self) -> Result<Box<dyn Transaction>> {
@@ -641,6 +735,26 @@ impl SchemaIntrospection for MockConnection {
         ))
     }
 
+    async fn list_all_columns(
+        &self,
+        schema: Option<&str>,
+    ) -> Result<Option<std::collections::HashMap<String, Vec<ColumnInfo>>>> {
+        if !self.bulk_columns_supported {
+            return Ok(None);
+        }
+
+        *self.list_all_columns_count.lock() += 1;
+
+        let mut columns_by_table = std::collections::HashMap::new();
+        for table in ["users", "posts"] {
+            // Reuses the per-table shape so bulk and per-table agree, without
+            // going through the counted `get_columns` entry point.
+            columns_by_table.insert(table.to_string(), self.mock_columns_for(table));
+        }
+        let _ = schema;
+        Ok(Some(columns_by_table))
+    }
+
     async fn get_columns(&self, _schema: Option<&str>, table: &str) -> Result<Vec<ColumnInfo>> {
         if self.should_fail {
             return Err(ZqlzError::Schema("Failed to get columns".into()));
@@ -648,59 +762,7 @@ impl SchemaIntrospection for MockConnection {
 
         *self.get_columns_count.lock() += 1;
 
-        match table {
-            "users" => Ok(vec![
-                ColumnInfo {
-                    name: "id".to_string(),
-                    ordinal: 0,
-                    data_type: "INTEGER".to_string(),
-                    nullable: false,
-                    default_value: None,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key: true,
-                    is_auto_increment: true,
-                    is_unique: true,
-                    foreign_key: None,
-                    comment: None,
-                    ..Default::default()
-                },
-                ColumnInfo {
-                    name: "name".to_string(),
-                    ordinal: 1,
-                    data_type: "TEXT".to_string(),
-                    nullable: false,
-                    default_value: None,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key: false,
-                    is_auto_increment: false,
-                    is_unique: false,
-                    foreign_key: None,
-                    comment: None,
-                    ..Default::default()
-                },
-                ColumnInfo {
-                    name: "email".to_string(),
-                    ordinal: 2,
-                    data_type: "TEXT".to_string(),
-                    nullable: true,
-                    default_value: None,
-                    max_length: None,
-                    precision: None,
-                    scale: None,
-                    is_primary_key: false,
-                    is_auto_increment: false,
-                    is_unique: false,
-                    foreign_key: None,
-                    comment: None,
-                    ..Default::default()
-                },
-            ]),
-            _ => Ok(vec![]),
-        }
+        Ok(self.mock_columns_for(table))
     }
 
     async fn get_indexes(&self, _schema: Option<&str>, _table: &str) -> Result<Vec<IndexInfo>> {
@@ -876,6 +938,19 @@ pub fn mysql_connection(database_name: &str) -> Arc<MockConnection> {
         MockConnection::new(database_name)
             .with_driver("mysql")
             .with_query_response("DATABASE()", db_result),
+    )
+}
+
+/// Same as [`mysql_connection`], but the mock answers the schema-wide column fetch.
+#[allow(dead_code)]
+pub fn mysql_connection_with_bulk_columns(database_name: &str) -> Arc<MockConnection> {
+    let db_result =
+        mock_single_value_result("DATABASE()", Value::String(database_name.to_string()));
+    Arc::new(
+        MockConnection::new(database_name)
+            .with_driver("mysql")
+            .with_query_response("DATABASE()", db_result)
+            .with_bulk_columns(),
     )
 }
 

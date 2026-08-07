@@ -599,3 +599,86 @@ fn test_node_iterator_order() {
     assert_eq!(nodes[1].node_type, NodeType::SeqScan);
     assert_eq!(nodes[2].node_type, NodeType::IndexScan);
 }
+
+#[test]
+fn test_text_hash_aggregate_is_not_mistyped_as_hash() {
+    let text = "HashAggregate  (cost=10.00..12.00 rows=5 width=8)\n  ->  Seq Scan on users  (cost=0.00..8.00 rows=100 width=8)";
+    let plan = parse_text_explain(text).expect("parse failed");
+
+    assert_eq!(plan.root.node_type, NodeType::HashAggregate);
+    assert_eq!(plan.root.children[0].node_type, NodeType::SeqScan);
+}
+
+#[test]
+fn test_text_node_type_prefixes_use_longest_match() {
+    let cases = [
+        ("Hash  (cost=1.00..1.00 rows=1 width=8)", NodeType::Hash),
+        (
+            "Hash Join  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::HashJoin,
+        ),
+        (
+            "Hash Aggregate  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::HashAggregate,
+        ),
+        (
+            "GroupAggregate  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::GroupAggregate,
+        ),
+        ("Gather  (cost=1.00..2.00 rows=1 width=8)", NodeType::Gather),
+        (
+            "Gather Merge  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::GatherMerge,
+        ),
+        (
+            "Merge Append  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::MergeAppend,
+        ),
+        (
+            "Incremental Sort  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::IncrementalSort,
+        ),
+        (
+            "Index Only Scan using users_pkey on users  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::IndexOnlyScan,
+        ),
+        (
+            "CTE Scan on cte  (cost=1.00..2.00 rows=1 width=8)",
+            NodeType::CteScan,
+        ),
+    ];
+
+    for (text, expected) in cases {
+        let plan = parse_text_explain(text).expect("parse failed");
+        assert_eq!(plan.root.node_type, expected, "misparsed {text:?}");
+    }
+}
+
+#[test]
+fn test_text_parses_filter_and_rows_removed_by_filter() {
+    let text = "Seq Scan on events  (cost=0.00..100.00 rows=12 width=8) (actual time=0.10..820.00 rows=12 loops=1)\n  Filter: (status = 'open'::text)\n  Rows Removed by Filter: 2000000";
+    let plan = parse_text_explain(text).expect("parse failed");
+
+    assert_eq!(plan.root.node_type, NodeType::SeqScan);
+    assert_eq!(plan.root.relation.as_deref(), Some("events"));
+    assert_eq!(
+        plan.root.filter.as_deref(),
+        Some("(status = 'open'::text)")
+    );
+    assert_eq!(plan.root.rows_removed_by_filter, Some(2_000_000));
+    assert_eq!(plan.root.actual_rows, Some(12));
+    assert_eq!(plan.root.loops, Some(1));
+}
+
+#[test]
+fn test_text_parses_index_cond_and_sort_keys() {
+    let text = "Sort  (cost=1.00..2.00 rows=1 width=8)\n  Sort Key: users.created_at, users.id\n  Sort Method: quicksort\n  ->  Index Scan using users_pkey on users  (cost=0.10..1.00 rows=1 width=8)\n        Index Cond: (id = 42)";
+    let plan = parse_text_explain(text).expect("parse failed");
+
+    assert_eq!(plan.root.sort_keys, vec!["users.created_at", "users.id"]);
+    assert_eq!(plan.root.sort_method.as_deref(), Some("quicksort"));
+    let scan = &plan.root.children[0];
+    assert_eq!(scan.node_type, NodeType::IndexScan);
+    assert_eq!(scan.index_name.as_deref(), Some("users_pkey"));
+    assert_eq!(scan.index_cond.as_deref(), Some("(id = 42)"));
+}

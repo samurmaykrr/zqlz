@@ -592,6 +592,9 @@ fn parse_optional_u64(config: &ConnectionConfig, key: &str) -> Result<Option<u64
 }
 
 /// Redis connection wrapper implementing the Connection trait
+/// Liveness command issued by connection heartbeats.
+const REDIS_PING_COMMAND: &str = "PING";
+
 pub struct RedisConnection {
     connection: Mutex<redis::aio::MultiplexedConnection>,
     config: ConnectionConfig,
@@ -1592,6 +1595,15 @@ impl Connection for RedisConnection {
         self.closed.load(Ordering::SeqCst)
     }
 
+    fn ping_query_sql(&self) -> &'static str {
+        REDIS_PING_COMMAND
+    }
+
+    fn is_busy(&self) -> bool {
+        self.connection.try_lock().is_err()
+    }
+
+
     fn as_schema_introspection(&self) -> Option<&dyn SchemaIntrospection> {
         Some(self)
     }
@@ -2367,6 +2379,19 @@ fn redis_value_to_zqlz_value(value: &redis::Value) -> Value {
         redis::Value::VerbatimString { format: _, text } => Value::String(text.clone()),
         redis::Value::ServerError(err) => Value::String(format!("ERROR: {:?}", err)),
         _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod ping_tests {
+    use super::*;
+
+    #[test]
+    fn ping_statement_parses_as_a_single_redis_command() {
+        let (command, args) = parse_single_redis_command(REDIS_PING_COMMAND)
+            .expect("heartbeat ping must be a command the driver can run");
+        assert_eq!(command, "PING");
+        assert!(args.is_empty());
     }
 }
 

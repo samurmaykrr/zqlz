@@ -33,6 +33,7 @@ pub enum CompletionResolution {
     CachedFilter {
         items: Vec<CompletionItem>,
         trigger_offset: usize,
+        items_revision: usize,
     },
     Clear,
     Provider {
@@ -78,6 +79,13 @@ pub(crate) struct CompletionMenuState {
     pub(crate) selected_index: usize,
     pub(crate) scroll_offset: usize,
     pub(crate) scroll_accumulator: f32,
+    /// Buffer revision the items' `text_edit` ranges were computed against.
+    /// When the buffer has moved past this revision the ranges are stale and
+    /// acceptance must recompute the replacement range.
+    pub(crate) items_revision: usize,
+    /// True once the user has explicitly navigated the menu (arrow keys or
+    /// hovering a slot). Enter only accepts after navigation; Tab always accepts.
+    pub(crate) user_navigated: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -85,6 +93,7 @@ pub(crate) struct CompletionCache {
     pub(crate) all_items: Vec<CompletionItem>,
     pub(crate) trigger_prefix: String,
     pub(crate) trigger_offset: usize,
+    pub(crate) items_revision: usize,
 }
 
 #[derive(Default)]
@@ -103,6 +112,7 @@ impl LspUiState {
         let Some(menu) = self.completion_menu.as_mut() else {
             return false;
         };
+        menu.user_navigated = true;
         if menu.selected_index == 0 {
             return false;
         }
@@ -118,6 +128,7 @@ impl LspUiState {
         let Some(menu) = self.completion_menu.as_mut() else {
             return false;
         };
+        menu.user_navigated = true;
         if menu.selected_index >= menu.items.len().saturating_sub(1) {
             return false;
         }
@@ -140,6 +151,7 @@ impl LspUiState {
             return false;
         }
         menu.selected_index = selected_index;
+        menu.user_navigated = true;
         true
     }
 
@@ -182,6 +194,7 @@ impl LspUiState {
         &mut self,
         items: Vec<CompletionItem>,
         trigger_offset: usize,
+        items_revision: usize,
     ) {
         if items.is_empty() {
             self.completion_menu = None;
@@ -198,6 +211,8 @@ impl LspUiState {
             selected_index,
             scroll_offset: 0,
             scroll_accumulator: 0.0,
+            items_revision,
+            user_navigated: false,
         });
     }
 
@@ -227,6 +242,18 @@ impl LspUiState {
         self.completion_menu
             .as_ref()
             .is_some_and(|menu| !menu.items.is_empty())
+    }
+
+    pub(crate) fn completion_menu_user_navigated(&self) -> bool {
+        self.completion_menu
+            .as_ref()
+            .is_some_and(|menu| menu.user_navigated)
+    }
+
+    pub(crate) fn completion_menu_has_single_item(&self) -> bool {
+        self.completion_menu
+            .as_ref()
+            .is_some_and(|menu| menu.items.len() == 1)
     }
 
     pub fn completion_menu(&self) -> Option<CompletionMenuData> {
@@ -275,10 +302,13 @@ impl LspUiState {
     }
 
     pub(crate) fn set_hover_state_if_word_changed(&mut self, hover_state: HoverState) -> bool {
+        // The range must take part in the comparison: a document can repeat the same word
+        // (`END` closing several blocks in a routine body), and matching on text alone would
+        // keep the previously hovered occurrence's range, anchoring the tooltip to that line.
         let should_update = self
             .hover_state
             .as_ref()
-            .map(|current| current.word != hover_state.word)
+            .map(|current| current.word != hover_state.word || current.range != hover_state.range)
             .unwrap_or(true);
         if should_update {
             self.hover_state = Some(hover_state);
@@ -680,6 +710,7 @@ impl LspRequestState {
                 return CompletionResolution::CachedFilter {
                     items: filtered,
                     trigger_offset: context.trigger_offset,
+                    items_revision: cache.items_revision,
                 };
             }
         }
@@ -1013,6 +1044,7 @@ mod tests {
             }],
             trigger_prefix: "se".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         });
         state.set_completion_items(
             vec![CompletionItem {
@@ -1020,6 +1052,7 @@ mod tests {
                 ..Default::default()
             }],
             3,
+            0,
         );
 
         assert!(state.has_completion_menu());
@@ -1050,6 +1083,7 @@ mod tests {
             }],
             trigger_prefix: "n".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         });
 
         assert_eq!(state.visible_completions("nam").len(), 1);
@@ -1076,6 +1110,7 @@ mod tests {
             ],
             trigger_prefix: "g".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         });
 
         let completions = state.visible_completions("gc");
@@ -1094,6 +1129,7 @@ mod tests {
                     ..Default::default()
                 })
                 .collect(),
+            0,
             0,
         );
 
@@ -1147,6 +1183,7 @@ mod tests {
                 },
             ],
             0,
+            0,
         );
 
         assert_eq!(
@@ -1197,6 +1234,7 @@ mod tests {
             }],
             trigger_prefix: "se".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         };
 
         let resolution = state.resolve_completion_request(
@@ -1215,9 +1253,11 @@ mod tests {
             CompletionResolution::CachedFilter {
                 items,
                 trigger_offset,
+                items_revision,
             } => {
                 assert_eq!(trigger_offset, 3);
                 assert_eq!(items.len(), 1);
+                assert_eq!(items_revision, 0);
             }
             other => panic!("expected cached completion filter, got {other:?}"),
         }
@@ -1234,6 +1274,7 @@ mod tests {
             }],
             trigger_prefix: "n".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         };
 
         let resolution = state.resolve_completion_request(
@@ -1273,6 +1314,7 @@ mod tests {
             ],
             trigger_prefix: "g".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         };
 
         let resolution = state.resolve_completion_request(
@@ -1314,6 +1356,7 @@ mod tests {
             ],
             trigger_prefix: "sel".to_string(),
             trigger_offset: 3,
+            items_revision: 0,
         };
 
         let resolution = state.resolve_completion_request(
@@ -1866,13 +1909,30 @@ pub trait HoverProvider: 'static {
     ) -> Task<Result<Option<Hover>>>;
 }
 
+/// Where a symbol's definition lives.
+///
+/// Not every definition is in the buffer: a SQL editor resolves a table name to a
+/// database object, which the editor cannot jump to on its own. Those are surfaced
+/// as [`TextEditorEvent::OpenExternalDefinition`] for the embedder to act on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DefinitionTarget {
+    /// A byte offset in the current buffer.
+    InDocument(usize),
+    /// An object outside the buffer, named in the provider's own URI scheme.
+    External(String),
+}
+
 /// Provider for go-to-definition requests (feat-046).
 ///
-/// Implementors resolve a byte offset in the buffer to a target position within
-/// the same buffer. Returning `None` means "no definition found."
+/// Returning `None` means "no definition found."
 pub trait DefinitionProvider: 'static {
-    /// Return the byte offset of the definition for the symbol at `offset`, if known.
-    fn definition(&self, text: &Rope, offset: usize, document: &DocumentContext) -> Option<usize>;
+    /// Resolve the definition of the symbol at `offset`, if known.
+    fn definition(
+        &self,
+        text: &Rope,
+        offset: usize,
+        document: &DocumentContext,
+    ) -> Option<DefinitionTarget>;
 }
 
 /// Provider for find-references requests (feat-047).
@@ -1916,8 +1976,15 @@ pub trait CodeActionProvider: 'static {
 /// Provider for document diagnostic refreshes.
 pub trait DiagnosticProvider: 'static {
     /// Return diagnostics for the current document snapshot.
-    fn diagnostics(&self, text: &Rope, document: &DocumentContext)
-    -> Task<Result<Vec<Diagnostic>>>;
+    ///
+    /// `cursor_offset` lets a provider tell "the user is mid-edit here" apart from a
+    /// genuine error, so half-typed constructs at the caret can be tolerated.
+    fn diagnostics(
+        &self,
+        text: &Rope,
+        document: &DocumentContext,
+        cursor_offset: Option<usize>,
+    ) -> Task<Result<Vec<Diagnostic>>>;
 }
 
 /// Provider for applying a selected code action through one editor contract.
@@ -2182,6 +2249,14 @@ impl Lsp {
         self.ui_state.has_completion_items()
     }
 
+    pub(crate) fn completion_menu_user_navigated(&self) -> bool {
+        self.ui_state.completion_menu_user_navigated()
+    }
+
+    pub(crate) fn completion_menu_has_single_item(&self) -> bool {
+        self.ui_state.completion_menu_has_single_item()
+    }
+
     pub(crate) fn select_previous_completion(&mut self) -> bool {
         self.ui_state.select_previous_completion()
     }
@@ -2258,8 +2333,10 @@ impl Lsp {
         &mut self,
         items: Vec<CompletionItem>,
         trigger_offset: usize,
+        items_revision: usize,
     ) {
-        self.ui_state.set_completion_items(items, trigger_offset);
+        self.ui_state
+            .set_completion_items(items, trigger_offset, items_revision);
     }
 
     pub(crate) fn take_completion_menu_state(&mut self) -> Option<CompletionMenuState> {
@@ -2370,10 +2447,11 @@ impl Lsp {
         &self,
         text: &Rope,
         document: &DocumentContext,
+        cursor_offset: Option<usize>,
     ) -> Option<Task<Result<Vec<Diagnostic>>>> {
         self.diagnostic_provider
             .as_ref()
-            .map(|provider| provider.diagnostics(text, document))
+            .map(|provider| provider.diagnostics(text, document, cursor_offset))
     }
 
     pub(crate) fn set_legacy_sql_lsp(&mut self, lsp: Arc<dyn std::any::Any + Send + Sync>) {
@@ -2431,7 +2509,7 @@ impl Lsp {
         rope: &Rope,
         offset: usize,
         context: &DocumentContext,
-    ) -> Option<usize> {
+    ) -> Option<DefinitionTarget> {
         self.definition_provider
             .as_ref()
             .and_then(|provider| provider.definition(rope, offset, context))
@@ -2571,7 +2649,7 @@ mod provider_contract_tests {
         FoldingRangeProvider, FormattingProvider, HoverProvider, InlayHintProvider,
         LinkedEditingRangeProvider, Lsp, ReferencesProvider, RenameProvider, SemanticTokenProvider,
     };
-    use crate::{DocumentContext, DocumentIdentity, TextDocument, TextEditor};
+    use crate::{DefinitionTarget, DocumentContext, DocumentIdentity, TextDocument, TextEditor};
     use anyhow::Result;
     use gpui::{App, Context, Task, Window};
     use lsp_types::{
@@ -2638,8 +2716,8 @@ mod provider_contract_tests {
             _text: &Rope,
             offset: usize,
             _document: &DocumentContext,
-        ) -> Option<usize> {
-            Some(offset.saturating_sub(1))
+        ) -> Option<DefinitionTarget> {
+            Some(DefinitionTarget::InDocument(offset.saturating_sub(1)))
         }
     }
 
@@ -2708,6 +2786,7 @@ mod provider_contract_tests {
             &self,
             _text: &Rope,
             _document: &DocumentContext,
+            _cursor_offset: Option<usize>,
         ) -> Task<Result<Vec<Diagnostic>>> {
             Task::ready(Ok(vec![Diagnostic {
                 message: "fake diagnostic".to_string(),
@@ -2860,7 +2939,7 @@ mod provider_contract_tests {
         let text = Rope::from_str("select one");
 
         let definition = FakeDefinitionProvider.definition(&text, 6, &document);
-        assert_eq!(definition, Some(5));
+        assert_eq!(definition, Some(DefinitionTarget::InDocument(5)));
 
         let references = FakeReferencesProvider.references(&text, 0, &document);
         assert_eq!(references, vec![0..6]);
@@ -2947,7 +3026,7 @@ mod provider_contract_tests {
         assert!(applied_edit.is_some());
 
         let diagnostics =
-            futures::executor::block_on(FakeDiagnosticProvider.diagnostics(&text, &document))
+            futures::executor::block_on(FakeDiagnosticProvider.diagnostics(&text, &document, None))
                 .expect("diagnostics result");
         assert_eq!(diagnostics.len(), 1);
 

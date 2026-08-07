@@ -153,6 +153,13 @@ impl TableViewerDelegate {
                 continue;
             }
 
+            // The same value is applied across columns that may not share a type,
+            // so each target has to be checked rather than trusting one parse.
+            if let Err(message) = self.validate_cell_value(data_col, new_value_str) {
+                tracing::warn!("Skipping cell in bulk edit: {}", message);
+                continue;
+            }
+
             let data_type = self
                 .column_meta
                 .get(data_col)
@@ -167,7 +174,7 @@ impl TableViewerDelegate {
                 .cloned()
                 .unwrap_or_default();
 
-            if new_value == original_value {
+            if new_value.is_equivalent_to(&original_value) {
                 continue;
             }
 

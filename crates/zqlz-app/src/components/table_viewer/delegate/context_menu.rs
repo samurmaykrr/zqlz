@@ -1,8 +1,14 @@
 use super::context_menu_utils::{
-    TableContextMenuAction, ordered_unique_actual_rows_from_display_rows,
-    pasted_text_for_selection_index, table_context_menu_action_availability,
+    TableContextMenuAction, first_disabled_reason, ordered_unique_actual_rows_from_display_rows,
+    pasted_text_for_selection_index, table_action_disabled_reason,
 };
 use super::*;
+
+const NO_COLUMN_REASON: &str = "No column under the cursor";
+const NO_SELECTION_REASON: &str = "No cells selected";
+const SINGLE_CELL_REASON: &str = "Select a single cell to use this action";
+const SINGLE_ROW_REASON: &str = "Select a single row to use this action";
+const RELATIONAL_ONLY_REASON: &str = "Only available for relational databases";
 
 impl TableViewerDelegate {
     pub fn context_menu(
@@ -56,21 +62,30 @@ impl TableViewerDelegate {
             .map(|column| column.nullable || self.is_string_column(data_col_ix))
             .unwrap_or(false);
         let can_generate_uuid = self.can_generate_uuid_for_column(data_col_ix);
-        let edit_cells_available = table_context_menu_action_availability(
+        let is_key_value = matches!(self.driver_category, DriverCategory::KeyValue);
+        let edit_cells_reason = table_action_disabled_reason(
             &self.data_editing_features,
             TableContextMenuAction::EditCells,
-        )
-        .available;
-        let can_open_editor =
-            edit_cells_available || matches!(self.driver_category, DriverCategory::KeyValue);
-        let delete_rows_available = table_context_menu_action_availability(
-            &self.data_editing_features,
-            TableContextMenuAction::DeleteRows,
-        )
-        .available
-            || matches!(self.driver_category, DriverCategory::KeyValue);
+        );
+        // Key-value stores edit through the key editor rather than the cell
+        // editing feature, so they can always open it.
+        let open_editor_reason = if is_key_value {
+            None
+        } else {
+            edit_cells_reason.clone()
+        };
+        let delete_rows_reason = if is_key_value {
+            None
+        } else {
+            table_action_disabled_reason(
+                &self.data_editing_features,
+                TableContextMenuAction::DeleteRows,
+            )
+        };
         let supports_relational_sql_actions =
             matches!(self.driver_category, DriverCategory::Relational);
+        let relational_only_reason =
+            first_disabled_reason(&[(!supports_relational_sql_actions, RELATIONAL_ONLY_REASON)]);
 
         let mut selected_display_rows = self.context_menu_selected_rows.clone();
         if !selected_display_rows.contains(&row_ix) {
@@ -116,12 +131,13 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(
-                    !edit_cells_available
-                        || column_meta.is_none()
-                        || !can_set_empty_string
-                        || selected_rows_with_values.is_empty(),
-                )
+                .disabled_with_reason(edit_cells_reason.clone().or_else(|| {
+                    first_disabled_reason(&[
+                        (column_meta.is_none(), NO_COLUMN_REASON),
+                        (!can_set_empty_string, "This column does not hold text"),
+                        (selected_rows_with_values.is_empty(), NO_SELECTION_REASON),
+                    ])
+                }))
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
                         let updates: Vec<(usize, Value)> = selected_rows_with_values
@@ -148,12 +164,13 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(
-                    !edit_cells_available
-                        || column_meta.is_none()
-                        || !can_set_null
-                        || selected_rows_with_values.is_empty(),
-                )
+                .disabled_with_reason(edit_cells_reason.clone().or_else(|| {
+                    first_disabled_reason(&[
+                        (column_meta.is_none(), NO_COLUMN_REASON),
+                        (!can_set_null, "This column is NOT NULL"),
+                        (selected_rows_with_values.is_empty(), NO_SELECTION_REASON),
+                    ])
+                }))
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if column_meta.is_some() {
                         let updates: Vec<(usize, Value)> = selected_rows_with_values
@@ -179,12 +196,13 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(
-                    !edit_cells_available
-                        || column_meta.is_none()
-                        || !can_generate_uuid
-                        || selected_rows_with_values.is_empty(),
-                )
+                .disabled_with_reason(edit_cells_reason.clone().or_else(|| {
+                    first_disabled_reason(&[
+                        (column_meta.is_none(), NO_COLUMN_REASON),
+                        (!can_generate_uuid, "This column type cannot hold a UUID"),
+                        (selected_rows_with_values.is_empty(), NO_SELECTION_REASON),
+                    ])
+                }))
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
                         let updates: Vec<(usize, Value)> = selected_rows_with_values
@@ -207,16 +225,19 @@ impl TableViewerDelegate {
         })
         .item(
             {
-                let label = if selected_count > 1 {
-                    "Edit in Cell Editor (Single Row Only)".to_string()
-                } else if matches!(self.driver_category, DriverCategory::KeyValue) {
+                let label = if is_key_value {
                     "Edit Key".to_string()
                 } else {
                     "Edit in Cell Editor".to_string()
                 };
 
                 PopupMenuItem::new(label)
-                    .disabled(!can_open_editor || column_meta.is_none() || selected_count > 1)
+                    .disabled_with_reason(open_editor_reason.clone().or_else(|| {
+                        first_disabled_reason(&[
+                            (column_meta.is_none(), NO_COLUMN_REASON),
+                            (selected_count > 1, SINGLE_CELL_REASON),
+                        ])
+                    }))
                     .on_click({
                     let column_meta = column_meta.clone();
                     let current_value = current_value.clone();
@@ -260,14 +281,12 @@ impl TableViewerDelegate {
             let all_row_values = all_row_values.clone();
             let all_column_names = all_column_names.clone();
             let column_meta_vec = self.column_meta.clone();
-            let label = if selected_count > 1 {
-                "Edit Row in Form (Single Row Only)".to_string()
-            } else {
-                "Edit Row in Form".to_string()
-            };
-
-            PopupMenuItem::new(label)
-                .disabled(!edit_cells_available || selected_count > 1)
+            PopupMenuItem::new("Edit Row in Form")
+                .disabled_with_reason(
+                    edit_cells_reason
+                        .clone()
+                        .or_else(|| first_disabled_reason(&[(selected_count > 1, SINGLE_ROW_REASON)])),
+                )
                 .on_click(window.listener_for(
                     &menu_entity,
                     move |_this, _, _, cx| {
@@ -299,7 +318,10 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(column_meta.is_none())
+                .disabled_with_reason(first_disabled_reason(&[(
+                    column_meta.is_none(),
+                    NO_COLUMN_REASON,
+                )]))
                 .on_click(window.listener_for(&menu_entity, move |_table, _, _, cx| {
                         if let Some(col_meta) = &column_meta {
                             let mut unique_selected_values = std::collections::HashSet::new();
@@ -362,12 +384,16 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(
-                    !edit_cells_available
-                        || column_meta.is_none()
-                        || !can_cut
-                        || selected_rows_with_values.is_empty(),
-                )
+                .disabled_with_reason(edit_cells_reason.clone().or_else(|| {
+                    first_disabled_reason(&[
+                        (column_meta.is_none(), NO_COLUMN_REASON),
+                        (
+                            !can_cut,
+                            "This column is NOT NULL and does not hold text, so it cannot be cleared",
+                        ),
+                        (selected_rows_with_values.is_empty(), NO_SELECTION_REASON),
+                    ])
+                }))
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     let clipboard_text = if selected_cell_texts.len() > 1 {
                         selected_cell_texts.join("\n")
@@ -418,7 +444,10 @@ impl TableViewerDelegate {
         .item({
             let column_meta = column_meta.clone();
             PopupMenuItem::new("Copy Field Name")
-                .disabled(column_meta.is_none())
+                .disabled_with_reason(first_disabled_reason(&[(
+                    column_meta.is_none(),
+                    NO_COLUMN_REASON,
+                )]))
                 .on_click(window.listener_for(&menu_entity, move |_table, _, _, cx| {
                     if let Some(col_meta) = &column_meta {
                         cx.write_to_clipboard(gpui::ClipboardItem::new_string(
@@ -431,18 +460,19 @@ impl TableViewerDelegate {
             let table_name = table_name.clone();
             let all_column_names = all_column_names.clone();
             let selected_rows_with_values = selected_rows_with_values.clone();
-            let label = if !supports_relational_sql_actions && selected_count > 1 {
-                "Copy Selected Rows as SQL Statements (Relational Only)".to_string()
-            } else if !supports_relational_sql_actions {
-                "Copy Row as SQL Statement (Relational Only)".to_string()
-            } else if selected_count > 1 {
+            let label = if selected_count > 1 {
                 format!("Copy Selected Rows as SQL Statements ({})", selected_count)
             } else {
                 "Copy Row as SQL Statement".to_string()
             };
 
             PopupMenuItem::new(label)
-                .disabled(selected_rows_with_values.is_empty() || !supports_relational_sql_actions)
+                .disabled_with_reason(relational_only_reason.clone().or_else(|| {
+                    first_disabled_reason(&[(
+                        selected_rows_with_values.is_empty(),
+                        NO_SELECTION_REASON,
+                    )])
+                }))
                 .on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, _, cx| {
@@ -490,11 +520,12 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(
-                    !edit_cells_available
-                        || column_meta.is_none()
-                        || selected_rows_with_values.is_empty(),
-                )
+                .disabled_with_reason(edit_cells_reason.clone().or_else(|| {
+                    first_disabled_reason(&[
+                        (column_meta.is_none(), NO_COLUMN_REASON),
+                        (selected_rows_with_values.is_empty(), NO_SELECTION_REASON),
+                    ])
+                }))
                 .on_click(window.listener_for(&menu_entity, move |table, _, _, cx| {
                     if let Some(clipboard_item) = cx.read_from_clipboard()
                         && let Some(text) = clipboard_item.text()
@@ -509,6 +540,16 @@ impl TableViewerDelegate {
                             else {
                                 break;
                             };
+
+                            // Clipboard text is unvetted, so a value that does not
+                            // fit the column must not reach the update path.
+                            if let Err(message) = table
+                                .delegate()
+                                .validate_cell_value(data_col_ix, &pasted_text)
+                            {
+                                tracing::warn!("Skipping pasted cell: {}", message);
+                                continue;
+                            }
 
                             updates.push((
                                 *actual_row,
@@ -537,7 +578,7 @@ impl TableViewerDelegate {
             };
 
             PopupMenuItem::new(label)
-                .disabled(!delete_rows_available)
+                .disabled_with_reason(delete_rows_reason.clone())
                 .on_click(window.listener_for(
                 &menu_entity,
                 move |_this, _, window, cx| {
@@ -750,13 +791,11 @@ impl TableViewerDelegate {
             let column_name = column_name.clone();
             let connection_id = self.connection_id;
             let table_name = self.table_name.clone();
-            let label = if supports_distinct_values {
-                "Filter by Distinct Values".to_string()
-            } else {
-                "Filter by Distinct Values (Relational Only)".to_string()
-            };
-            PopupMenuItem::new(label)
-                .disabled(!supports_distinct_values)
+            PopupMenuItem::new("Filter by Distinct Values")
+                .disabled_with_reason(first_disabled_reason(&[(
+                    !supports_distinct_values,
+                    RELATIONAL_ONLY_REASON,
+                )]))
                 .on_click(window.listener_for(&menu_entity, move |_this, _, _, cx| {
                     if let Err(e) = viewer_panel.update(cx, |_panel, cx| {
                         cx.emit(TableViewerEvent::LoadDistinctValues {

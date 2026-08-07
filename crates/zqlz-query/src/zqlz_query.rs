@@ -8,7 +8,7 @@ pub mod batch;
 mod engine;
 mod error;
 mod execution_workflows;
-mod explain;
+pub mod explain;
 mod history;
 pub mod parameters;
 mod saved_queries;
@@ -33,7 +33,8 @@ pub use execution_workflows::{
     plan_query_database_selection, resolve_query_connection_selection,
     resolve_query_connection_switch, resolve_query_editor_open_connection,
     resolve_workflow_connection_id, run_execute_query_workflow, run_explain_query_workflow,
-    run_query_workflow, should_refresh_connection_surfaces_for_database_selection,
+    run_explain_query_workflow_with_mode, run_query_workflow,
+    should_refresh_connection_surfaces_for_database_selection,
 };
 pub use history::{HistoryPersistence, QueryHistory, QueryHistoryEntry};
 pub use saved_queries::{
@@ -43,7 +44,7 @@ pub use saved_queries::{
     load_saved_query, move_saved_query_to_folder, rename_saved_query, run_saved_query_workflow,
     update_saved_query_sql,
 };
-pub use service::QueryService;
+pub use service::{ExplainMode, QueryService};
 // Note: view_models types are superseded by widgets types for UI consumption
 pub use view_models::StatementExecution;
 // Re-export widgets for convenient access

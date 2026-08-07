@@ -33,6 +33,7 @@ pub(in crate::main_view) fn convert_to_schema_details(
             name: idx.name,
             columns: idx.columns,
             unique: idx.is_unique,
+            index_type: idx.index_type,
         })
         .collect();
 

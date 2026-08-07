@@ -57,6 +57,7 @@ impl ConnectionSidebar {
         let view_for_menu = view_name.clone();
         let action_context = self.focus_handle.clone();
         let driver_actions = self.driver_row_actions(conn_id, "view");
+        let object_features = self.connection_object_features(conn_id);
         let driver_context = DriverObjectMenuContext {
             connection_id: conn_id,
             object_name: view_name.clone(),
@@ -75,6 +76,7 @@ impl ConnectionSidebar {
                             menu.action_context(action_context.clone()).max_h(px(400.0)),
                             actions,
                             driver_context.clone(),
+                            object_features.clone(),
                             sidebar_weak.clone(),
                         );
                     }

@@ -43,6 +43,7 @@ pub enum PopupMenuItem {
         checked: bool,
         is_link: bool,
         action: Option<Box<dyn Action>>,
+        tooltip: Option<SharedString>,
         // For link item
         handler: Option<PopupMenuItemClickHandler>,
     },
@@ -62,6 +63,7 @@ pub enum PopupMenuItem {
         icon: Option<Icon>,
         label: SharedString,
         disabled: bool,
+        tooltip: Option<SharedString>,
         menu: Entity<PopupMenu>,
     },
 }
@@ -78,6 +80,7 @@ impl PopupMenuItem {
             checked: false,
             action: None,
             is_link: false,
+            tooltip: None,
             handler: None,
         }
     }
@@ -106,6 +109,7 @@ impl PopupMenuItem {
             icon: None,
             label: label.into(),
             disabled: false,
+            tooltip: None,
             menu,
         }
     }
@@ -176,6 +180,36 @@ impl PopupMenuItem {
         self
     }
 
+    /// Set a hover tooltip for the menu item.
+    ///
+    /// The tooltip is shown for disabled items too, so it can explain why an
+    /// action is unavailable.
+    ///
+    /// Only works for [`PopupMenuItem::Item`] and [`PopupMenuItem::Submenu`].
+    pub fn tooltip(mut self, tooltip: impl Into<SharedString>) -> Self {
+        match &mut self {
+            PopupMenuItem::Item { tooltip: t, .. } => {
+                *t = Some(tooltip.into());
+            }
+            PopupMenuItem::Submenu { tooltip: t, .. } => {
+                *t = Some(tooltip.into());
+            }
+            _ => {}
+        }
+        self
+    }
+
+    /// Disable the menu item when `reason` is `Some`, showing the reason as a tooltip.
+    ///
+    /// Passing `None` leaves the item enabled and untouched, so callers can pass the
+    /// result of an availability check directly.
+    pub fn disabled_with_reason(self, reason: Option<SharedString>) -> Self {
+        match reason {
+            Some(reason) => self.disabled(true).tooltip(reason),
+            None => self,
+        }
+    }
+
     /// Set checked state for the menu item.
     ///
     /// NOTE: If `check_side` is [`Side::Left`], the icon will replace with a check icon.
@@ -222,6 +256,7 @@ impl PopupMenuItem {
             checked: false,
             action: None,
             is_link: true,
+            tooltip: None,
             handler: Some(Rc::new(move |_, _, cx| cx.open_url(&href))),
         }
     }
@@ -1208,6 +1243,7 @@ impl PopupMenu {
                 action,
                 disabled,
                 is_link,
+                tooltip,
                 ..
             } => {
                 let show_link_icon = *is_link && self.external_link_icon;
@@ -1220,6 +1256,7 @@ impl PopupMenu {
                     )
                 })
                 .disabled(*disabled)
+                .tooltip_text(tooltip.clone())
                 .h(item_height)
                 .gap_x_1()
                 .children(Self::render_icon(
@@ -1259,9 +1296,11 @@ impl PopupMenu {
                 label,
                 menu,
                 disabled,
+                tooltip,
             } => this
                 .selected(selected)
                 .disabled(*disabled || self.scrollable)
+                .tooltip_text(tooltip.clone())
                 .items_start()
                 .child(
                     h_flex()

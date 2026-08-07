@@ -32,6 +32,12 @@ impl MainView {
         };
 
         let table_service = app_state.table_service.clone();
+        let connection_service = app_state.connection_service.clone();
+        let target_database = self
+            .workspace_state
+            .read(cx)
+            .active_database()
+            .map(ToString::to_string);
 
         let driver_name = app_state
             .connection_service
@@ -42,8 +48,9 @@ impl MainView {
             connection_id,
             table_name,
             driver_name,
-            connection.clone(),
+            connection_service,
             table_service,
+            target_database,
             cx.entity().downgrade(),
             cx,
         );

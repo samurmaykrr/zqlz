@@ -19,8 +19,8 @@ use crate::actions::*;
 use crate::app::AppState;
 use crate::components::{
     CommandPalette, CommandPaletteEvent, CommandUsagePersistence, ConnectionSidebarEvent,
-    ObjectsPanelEvent, ProjectManagerEvent, QueryEditor, ResultsPanelEvent, SettingsPanel,
-    SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
+    InspectorView, ObjectsPanelEvent, ProjectManagerEvent, QueryEditor, ResultsPanelEvent,
+    SettingsPanel, SettingsPanelEvent, TableViewerPanel, TemplateLibraryEvent,
 };
 use crate::main_view::table_handlers::table_ops::design::TableDesignSaveRequest;
 use crate::workspace::WorkspaceItemCloseIntent;
@@ -106,11 +106,13 @@ impl MainView {
                     start_time: now,
                     end_time: now,
                     duration_ms: 0,
+                    duration_micros: 0,
                     connection_name: None,
                     database_name: None,
                     statements: vec![crate::components::StatementResult {
                         sql: String::new(),
                         duration_ms: 0,
+                        duration_micros: 0,
                         result: None,
                         error: Some("Query cancelled by user".to_string()),
                         affected_rows: 0,
@@ -1193,8 +1195,8 @@ impl MainView {
         };
 
         let schema_service = app_state.schema_service.clone();
-        let Some(palette_data) = app_state
-            .connection_service
+        let connection_service = app_state.connection_service.clone();
+        let Some(palette_data) = connection_service
             .build_palette_schema_commands_data(connection_id, schema_service.as_ref())
         else {
             return;
@@ -1210,6 +1212,38 @@ impl MainView {
                 cx,
             );
         });
+
+        // The palette above was populated from stale-but-known cache data so it opens
+        // instantly. When a reload is in flight, stream the fresh tables into the
+        // already-open palette instead of leaving the user with the old list.
+        if palette_data.is_refreshing {
+            let palette = palette.downgrade();
+            let capabilities = palette_data.object_capabilities;
+            cx.spawn(async move |_this, cx| {
+                let fresh = cx
+                    .background_spawn(async move {
+                        connection_service
+                            .refresh_palette_schema_commands_data(connection_id)
+                            .await
+                    })
+                    .await;
+                match fresh {
+                    Ok(data) => palette.update(cx, |palette, cx| {
+                        palette.add_schema_commands(
+                            connection_id,
+                            &data.connection_name,
+                            &data.tables,
+                            &data.views,
+                            capabilities,
+                            cx,
+                        );
+                    })?,
+                    Err(error) => tracing::error!("palette schema refresh failed: {}", error),
+                }
+                anyhow::Ok(())
+            })
+            .detach();
+        }
     }
 
     /// Begin the dismiss animation, then actually drop the palette after a delay.
@@ -1320,6 +1354,46 @@ impl MainView {
         });
     }
 
+    pub(super) fn handle_show_schema_inspector(
+        &mut self,
+        _action: &ShowSchemaInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_inspector_view(InspectorView::Schema, window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_show_cell_editor_inspector(
+        &mut self,
+        _action: &ShowCellEditorInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_inspector_view(InspectorView::CellEditor, window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_show_key_editor_inspector(
+        &mut self,
+        _action: &ShowKeyEditorInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_key_editor_for_active_selection(window, cx);
+        cx.notify();
+    }
+
+    pub(super) fn handle_show_query_history_inspector(
+        &mut self,
+        _action: &ShowQueryHistoryInspector,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.activate_inspector_view(InspectorView::QueryHistory, window, cx);
+        cx.notify();
+    }
+
     /// Handle ToggleProblemsPanel action - shows/focuses the Problems panel
     pub(super) fn handle_toggle_problems_panel(
         &mut self,
@@ -1408,6 +1482,39 @@ impl MainView {
         if let Some(editor) = self.active_query_editor(cx) {
             editor.update(cx, |editor, cx| {
                 editor.emit_explain_selection(cx);
+            });
+        }
+    }
+
+    /// Handle ExplainAnalyzeQuery action - runs EXPLAIN ANALYZE on the whole editor buffer.
+    ///
+    /// EXPLAIN ANALYZE really executes the statement, so the workflow layer screens
+    /// the SQL for destructive operations and requires confirmation before running.
+    pub(super) fn handle_explain_analyze_query(
+        &mut self,
+        _action: &crate::actions::ExplainAnalyzeQuery,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!("ExplainAnalyzeQuery action triggered");
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_analyze_query(cx);
+            });
+        }
+    }
+
+    /// Handle ExplainAnalyzeSelection action - runs EXPLAIN ANALYZE on the selection.
+    pub(super) fn handle_explain_analyze_selection(
+        &mut self,
+        _action: &crate::actions::ExplainAnalyzeSelection,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        tracing::debug!("ExplainAnalyzeSelection action triggered");
+        if let Some(editor) = self.active_query_editor(cx) {
+            editor.update(cx, |editor, cx| {
+                editor.emit_explain_analyze_selection(cx);
             });
         }
     }
@@ -2531,8 +2638,10 @@ impl MainView {
                     .active_database()
                     .map(ToString::to_string);
 
-                self.objects_panel
-                    .update(cx, |panel, cx| panel.set_loading(true, cx));
+                let ticket = self.objects_panel.update(cx, |panel, cx| {
+                    panel.set_loading(true, cx);
+                    panel.begin_kind_request(kind_id.as_str())
+                });
 
                 cx.spawn(async move |_this, cx| {
                     match connection_service
@@ -2547,7 +2656,12 @@ impl MainView {
                         Ok(data) => {
                             if let Err(error) = objects_panel.update(cx, |panel, cx| {
                                 panel.set_loading(false, cx);
-                                panel.replace_kind_objects(kind_id.as_str(), data, cx);
+                                panel.replace_kind_objects_if_current(
+                                    ticket,
+                                    kind_id.as_str(),
+                                    data,
+                                    cx,
+                                );
                             }) {
                                 tracing::warn!(
                                     %error,

@@ -4,10 +4,12 @@ use zqlz_core::{
     KeyValueDeleteRequest, KeyValueKind, KeyValueSaveRequest, KeyValueScanRequest, RowIdentifier,
     Value,
 };
+use std::sync::Arc;
 use zqlz_drivers::{
     mongodb::MongoDbDriver, mysql::MySqlDriver, postgres::PostgresDriver, redis::RedisDriver,
     sqlite::SqliteConnection,
 };
+use zqlz_services::{CellUpdateData, RowDeleteData, TableService};
 
 fn env_value(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|value| !value.is_empty())
@@ -186,6 +188,82 @@ async fn sqlite_smoke_covers_core_supported_capabilities() {
         .await
         .expect_err("missing table should error");
     assert!(!error.to_string().is_empty());
+}
+
+/// A table with no primary key is editable through the table service, and one
+/// grid row maps to one database row even when the table holds exact duplicates.
+#[tokio::test]
+async fn sqlite_keyless_table_edits_affect_exactly_one_row() {
+    let connection: Arc<dyn Connection> =
+        Arc::new(SqliteConnection::open(":memory:").expect("open sqlite memory database"));
+    let service = TableService::new(100);
+
+    connection
+        .execute("CREATE TABLE workflows (workflow_id TEXT, note TEXT)", &[])
+        .await
+        .expect("create keyless table");
+    for _ in 0..3 {
+        connection
+            .execute(
+                "INSERT INTO workflows (workflow_id, note) VALUES ('search_web', 'same')",
+                &[],
+            )
+            .await
+            .expect("insert duplicate row");
+    }
+
+    let outcome = service
+        .update_cell(
+            connection.clone(),
+            "workflows",
+            None,
+            CellUpdateData {
+                column_name: "note".to_string(),
+                new_value: Some(Value::String("edited".to_string())),
+                all_column_names: vec!["workflow_id".to_string(), "note".to_string()],
+                all_row_values: vec![
+                    Value::String("search_web".to_string()),
+                    Value::String("same".to_string()),
+                ],
+                all_column_types: vec!["TEXT".to_string(), "TEXT".to_string()],
+            },
+        )
+        .await
+        .expect("keyless cell update should succeed");
+    assert_eq!(outcome.affected_rows, 1);
+
+    let edited = connection
+        .query("SELECT COUNT(*) FROM workflows WHERE note = 'edited'", &[])
+        .await
+        .expect("count edited rows");
+    assert_eq!(
+        edited.rows[0].values[0].as_i64(),
+        Some(1),
+        "only the edited row should change"
+    );
+
+    let deleted = service
+        .delete_rows(
+            connection.clone(),
+            "workflows",
+            None,
+            RowDeleteData {
+                all_column_names: vec!["workflow_id".to_string(), "note".to_string()],
+                rows: vec![vec![
+                    Value::String("search_web".to_string()),
+                    Value::String("same".to_string()),
+                ]],
+            },
+        )
+        .await
+        .expect("keyless delete should succeed");
+    assert_eq!(deleted, 1);
+
+    let remaining = connection
+        .query("SELECT COUNT(*) FROM workflows", &[])
+        .await
+        .expect("count remaining rows");
+    assert_eq!(remaining.rows[0].values[0].as_i64(), Some(2));
 }
 
 #[tokio::test]

@@ -51,7 +51,7 @@ mod rename_window;
 mod saved_query_handlers;
 mod tab_menu;
 pub(crate) mod table_handlers;
-mod table_handlers_utils;
+pub(crate) mod table_handlers_utils;
 mod table_workflow_adapter;
 mod ui_components;
 mod versioning_facade;
@@ -1122,6 +1122,8 @@ impl Render for MainView {
             .on_action(cx.listener(Self::handle_execute_current_statement))
             .on_action(cx.listener(Self::handle_explain_query))
             .on_action(cx.listener(Self::handle_explain_selection))
+            .on_action(cx.listener(Self::handle_explain_analyze_query))
+            .on_action(cx.listener(Self::handle_explain_analyze_selection))
             .on_action(cx.listener(Self::handle_stop_query))
             .on_action(cx.listener(Self::handle_save_query_as))
             .on_action(cx.listener(Self::handle_refresh))
@@ -1129,6 +1131,10 @@ impl Render for MainView {
             .on_action(cx.listener(Self::handle_toggle_right_sidebar))
             .on_action(cx.listener(Self::handle_toggle_bottom_panel))
             .on_action(cx.listener(Self::handle_toggle_all_docks))
+            .on_action(cx.listener(Self::handle_show_schema_inspector))
+            .on_action(cx.listener(Self::handle_show_cell_editor_inspector))
+            .on_action(cx.listener(Self::handle_show_key_editor_inspector))
+            .on_action(cx.listener(Self::handle_show_query_history_inspector))
             .on_action(cx.listener(Self::handle_focus_editor))
             .on_action(cx.listener(Self::handle_focus_results))
             .on_action(cx.listener(Self::handle_focus_sidebar))

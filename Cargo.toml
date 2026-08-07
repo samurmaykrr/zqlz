@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     # ZQLZ crates
     "crates/zqlz-core",
+    "crates/zqlz-schema-engine",
     "crates/zqlz-schema-tools",
     "crates/zqlz-drivers",
     "crates/zqlz-drivers/crates/zqlz-driver-postgres",
@@ -42,7 +43,7 @@ members = [
 default-members = ["crates/zqlz-app"]
 
 [workspace.package]
-version = "0.0.10"
+version = "0.0.11"
 edition = "2024"
 license = "GPL-3.0-or-later"
 repository = "https://github.com/yourorg/zqlz"
@@ -295,6 +296,7 @@ take-until = "0.2"
 
 # Internal ZQLZ crates
 zqlz-core = { path = "crates/zqlz-core" }
+zqlz-schema-engine = { path = "crates/zqlz-schema-engine" }
 zqlz-internal-storage = { path = "crates/zqlz-internal-storage" }
 zqlz-schema-tools = { path = "crates/zqlz-schema-tools" }
 zqlz-drivers = { path = "crates/zqlz-drivers" }

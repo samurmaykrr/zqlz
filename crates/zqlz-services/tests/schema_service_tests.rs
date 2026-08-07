@@ -13,7 +13,10 @@ use zqlz_core::{
 };
 use zqlz_services::SchemaService;
 
-use common::{mock_single_value_result, mysql_connection, postgres_connection, MockConnection};
+use common::{
+    mock_single_value_result, mysql_connection, mysql_connection_with_bulk_columns,
+    postgres_connection, MockConnection,
+};
 
 // ============ MySQL Driver Path Tests ============
 
@@ -2391,4 +2394,236 @@ impl zqlz_core::SchemaIntrospection for SqliteVirtualTableFallbackConnection {
     ) -> zqlz_core::Result<Vec<zqlz_core::Dependency>> {
         Ok(vec![])
     }
+}
+
+#[tokio::test]
+async fn get_all_cached_columns_exposes_columns_after_table_details_load() {
+    let conn = mysql_connection("cached_columns_view_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+
+    assert!(
+        service.get_all_cached_columns(conn_id).is_none(),
+        "no columns should be cached before any table is opened"
+    );
+
+    service
+        .get_table_details(connection, conn_id, "users", None)
+        .await
+        .expect("table details");
+
+    let cached_columns = service
+        .get_all_cached_columns(conn_id)
+        .expect("columns cached after loading table details");
+
+    assert!(
+        cached_columns.keys().any(|key| key
+            .rsplit_once('.')
+            .map(|(_, name)| name)
+            .unwrap_or(key.as_str())
+            == "users"),
+        "expected a cached entry for users, got keys: {:?}",
+        cached_columns.keys().collect::<Vec<_>>()
+    );
+
+    service.invalidate_connection_cache(conn_id);
+
+    assert!(
+        service.get_all_cached_columns(conn_id).is_none(),
+        "refresh invalidation should hide the cached columns view"
+    );
+}
+
+#[tokio::test]
+async fn scoped_schema_load_preserves_prefetched_table_details() {
+    // A targeted (database-scoped) load invalidates the connection-wide snapshot and
+    // never writes it back, so gating the detail caches on that snapshot's validity
+    // made every pre-warmed table permanently unreadable.
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("initial schema load");
+    service
+        .get_table_details(connection.clone(), conn_id, "users", None)
+        .await
+        .expect("table details");
+
+    service
+        .load_database_schema_for_database(connection.clone(), conn_id, Some("analytics_db"))
+        .await
+        .expect("targeted schema load");
+
+    let cached_details = service
+        .get_all_cached_table_details(conn_id)
+        .expect("pre-warmed details should survive a targeted load");
+    assert!(
+        cached_details.contains_key("users"),
+        "expected users in cached details, got: {:?}",
+        cached_details.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn scoped_schema_load_keeps_table_details_readable_without_reload() {
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("initial schema load");
+    service
+        .get_table_details(connection.clone(), conn_id, "users", None)
+        .await
+        .expect("table details");
+
+    let get_columns_count_after_warm = conn.get_columns_count();
+
+    service
+        .load_database_schema_for_database(connection.clone(), conn_id, Some("analytics_db"))
+        .await
+        .expect("targeted schema load");
+
+    assert!(
+        service
+            .peek_table_details_cache(conn_id, "users", None)
+            .is_some(),
+        "peek should still see warmed details after a targeted load"
+    );
+
+    service
+        .get_table_details(connection, conn_id, "users", None)
+        .await
+        .expect("table details from cache");
+
+    assert_eq!(
+        conn.get_columns_count(),
+        get_columns_count_after_warm,
+        "a warmed table must not be re-queried after a targeted load"
+    );
+}
+
+#[tokio::test]
+async fn empty_cached_tables_do_not_serve_an_empty_schema() {
+    // `set_connection_names` creates a cache entry with a fresh timestamp but no
+    // tables, so an empty table list means "never loaded", not "no tables".
+    let conn = mysql_connection("default_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .cache()
+        .set_connection_names(conn_id, Some("default_db".to_string()), None);
+
+    let schema = service
+        .load_database_schema(connection, conn_id)
+        .await
+        .expect("schema load");
+
+    assert!(
+        !schema.tables.is_empty(),
+        "an entry with no cached tables must not short-circuit the load"
+    );
+}
+
+#[tokio::test]
+async fn warm_schema_columns_uses_a_single_bulk_fetch() {
+    // The whole point of the change: one round-trip for the schema, and zero
+    // per-table column queries.
+    let conn = mysql_connection_with_bulk_columns("bulk_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    let summaries = service
+        .warm_schema_columns(
+            connection,
+            conn_id,
+            vec!["users".to_string(), "posts".to_string()],
+            None,
+        )
+        .await;
+
+    assert_eq!(conn.list_all_columns_count(), 1);
+    assert_eq!(
+        conn.get_columns_count(),
+        0,
+        "the bulk path must not fall back to per-table column fetches"
+    );
+    assert!(
+        summaries
+            .get("users")
+            .is_some_and(|summary| summary.columns.iter().any(|c| c.name == "id")),
+        "expected warmed users columns, got: {:?}",
+        summaries.keys().collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn warm_schema_columns_falls_back_when_bulk_is_unsupported() {
+    let conn = mysql_connection("fallback_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+
+    let summaries = service
+        .warm_schema_columns(connection, conn_id, vec!["users".to_string()], None)
+        .await;
+
+    assert_eq!(conn.list_all_columns_count(), 0);
+    assert!(
+        conn.get_columns_count() > 0,
+        "a driver without a bulk form must still warm via the per-table path"
+    );
+    assert!(summaries.contains_key("users"));
+}
+
+#[tokio::test]
+async fn warm_schema_columns_writes_the_key_get_table_details_reads() {
+    // Guards the cache-key convention: the bulk path must store columns under the
+    // same scoped key `load_relation_columns` uses, or every table is re-queried
+    // the first time its details are opened.
+    let conn = mysql_connection_with_bulk_columns("scoped_bulk_db");
+    let service = SchemaService::new();
+    let conn_id = Uuid::new_v4();
+    let connection: Arc<dyn Connection> = conn.clone();
+
+    service
+        .load_database_schema(connection.clone(), conn_id)
+        .await
+        .expect("schema load");
+    service
+        .warm_schema_columns(connection.clone(), conn_id, vec!["users".to_string()], None)
+        .await;
+
+    let columns_before = conn.get_columns_count();
+    service
+        .get_table_details(connection, conn_id, "users", None)
+        .await
+        .expect("table details");
+
+    assert_eq!(
+        conn.get_columns_count(),
+        columns_before,
+        "warmed columns should satisfy get_table_details without a new query"
+    );
 }

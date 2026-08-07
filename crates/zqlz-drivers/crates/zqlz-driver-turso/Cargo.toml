@@ -12,6 +12,7 @@ path = "src/zqlz_driver_turso.rs"
 
 [dependencies]
 zqlz-core.workspace = true
+zqlz-schema-engine.workspace = true
 zqlz-driver-sqlite.workspace = true
 async-trait.workspace = true
 tracing.workspace = true

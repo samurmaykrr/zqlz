@@ -13,7 +13,7 @@ use gpui::*;
 use uuid::Uuid;
 use zqlz_core::{
     ColumnMeta, DataEditingFeatureSet, DriverCategory, FeatureAvailability, ForeignKeyInfo,
-    QueryResult, Value,
+    QueryResult, RowIdentity, Value,
 };
 use zqlz_ui::widgets::{
     ActiveTheme, Icon, IconName, IndexPath, Sizable, Size, ZqlzIcon,
@@ -220,6 +220,10 @@ pub struct TableViewerDelegate {
 
     /// Primary key column names (for rendering PK indicators in headers)
     pub(super) primary_key_columns: Vec<String>,
+
+    /// How a row is addressed when it is edited or deleted, which decides
+    /// whether row mutations are offered at all.
+    pub(super) row_identity: RowIdentity,
 
     /// Foreign key mapping: column index -> FK info
     /// Used to detect FK columns and show dropdown with referenced values

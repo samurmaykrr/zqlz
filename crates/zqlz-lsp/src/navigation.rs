@@ -48,7 +48,8 @@ pub(crate) fn get_definition(
             for column in columns {
                 if column.name.to_lowercase() == word_lower {
                     tracing::debug!(table = table_name, column = %column.name, "Found column definition");
-                    return internal_definition_location();
+                    // A column has no location of its own, so navigate to its table.
+                    return schema_object_definition("table", &table_name);
                 }
             }
         }
@@ -58,41 +59,42 @@ pub(crate) fn get_definition(
         && let Some(table) = lsp.table_info(&table_name)
     {
         tracing::debug!(table = %table.name, "Found table definition");
-        return internal_definition_location();
+        return schema_object_definition("table", &table.name);
     }
 
     for (table_name, columns) in &lsp.schema_cache.columns_by_table {
         for column in columns {
             if column.name.to_lowercase() == word_lower {
                 tracing::debug!(column = %column.name, table = table_name, "Found column definition");
-                return internal_definition_location();
+                // A column has no location of its own, so navigate to its table.
+                return schema_object_definition("table", table_name);
             }
         }
     }
 
     if let Some(view) = lsp.schema_cache.views.get(&word) {
         tracing::debug!(view = %view.name, "Found view definition");
-        return internal_definition_location();
+        return schema_object_definition("view", &view.name);
     }
 
     if let Some(function) = lsp.schema_cache.functions.get(&word) {
         tracing::debug!(function = %function.name, "Found function definition");
-        return internal_definition_location();
+        return schema_object_definition("function", &function.name);
     }
 
     if let Some(procedure) = lsp.schema_cache.procedures.get(&word) {
         tracing::debug!(procedure = %procedure.name, "Found procedure definition");
-        return internal_definition_location();
+        return schema_object_definition("procedure", &procedure.name);
     }
 
     if let Some(trigger) = lsp.schema_cache.triggers.get(&word) {
         tracing::debug!(trigger = %trigger.name, "Found trigger definition");
-        return internal_definition_location();
+        return schema_object_definition("trigger", &trigger.name);
     }
 
     if let Some(index) = lsp.schema_cache.indexes.get(&word) {
         tracing::debug!(index = %index.name, "Found index definition");
-        return internal_definition_location();
+        return schema_object_definition("index", &index.name);
     }
 
     tracing::debug!("no definition found for: {}", word);
@@ -301,10 +303,17 @@ fn find_schema_references(lsp: &SqlLsp, word_lower: &str, references: &mut Vec<L
     }
 }
 
-fn internal_definition_location() -> Option<GotoDefinitionResponse> {
-    Some(GotoDefinitionResponse::Scalar(zero_location(
-        internal_uri().ok()?,
-    )))
+/// Points a definition at a schema object rather than a spot in the buffer.
+///
+/// The object has no position in the user's query, so the URI carries its identity
+/// (`sql://internal/<kind>/<name>`) for the editor to act on — the same scheme
+/// `find_schema_references` already uses. The range stays zeroed; it is meaningless
+/// for an object that lives in the database.
+fn schema_object_definition(kind: &str, name: &str) -> Option<GotoDefinitionResponse> {
+    let uri = format!("sql://internal/{kind}/{name}")
+        .parse::<Uri>()
+        .ok()?;
+    Some(GotoDefinitionResponse::Scalar(zero_location(uri)))
 }
 
 fn zero_location(uri: Uri) -> Location {

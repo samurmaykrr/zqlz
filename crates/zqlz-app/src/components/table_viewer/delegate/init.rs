@@ -70,6 +70,7 @@ impl TableViewerDelegate {
             last_filter_conditions: Vec::new(),
             last_filter_search_text: String::new(),
             primary_key_columns: Vec::new(),
+            row_identity: RowIdentity::default(),
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             cell_preview_cache: HashMap::new(),
@@ -136,15 +137,19 @@ impl TableViewerDelegate {
         }
     }
 
+    /// Row mutations need a way to address the row being changed. A primary key
+    /// is the best one, but a unique key or a full-row match works too, so only
+    /// relations that offer none of those are blocked.
     fn data_editing_features_for_row_identity(
         category: DriverCategory,
-        has_primary_key: bool,
+        row_identity: &RowIdentity,
     ) -> DataEditingFeatureSet {
         let mut features = Self::data_editing_features_for_driver_category(category);
 
-        if matches!(category, DriverCategory::Relational) && !has_primary_key {
-            let unavailable =
-                FeatureAvailability::unavailable("Editing requires a stable primary key");
+        if matches!(category, DriverCategory::Relational)
+            && let Some(reason) = row_identity.unavailable_reason()
+        {
+            let unavailable = FeatureAvailability::unavailable(reason);
             features.edit_cells = unavailable.clone();
             features.delete_rows = unavailable;
         }
@@ -166,14 +171,16 @@ impl TableViewerDelegate {
 
     pub fn set_primary_key_columns(&mut self, columns: Vec<String>) {
         self.primary_key_columns = columns;
+    }
+
+    pub fn set_row_identity(&mut self, row_identity: RowIdentity) {
+        self.row_identity = row_identity;
         self.apply_row_identity_editing_policy();
     }
 
     fn apply_row_identity_editing_policy(&mut self) {
-        self.data_editing_features = Self::data_editing_features_for_row_identity(
-            self.driver_category,
-            !self.primary_key_columns.is_empty(),
-        );
+        self.data_editing_features =
+            Self::data_editing_features_for_row_identity(self.driver_category, &self.row_identity);
     }
 
     pub fn append_rows(&mut self, new_rows: Vec<Vec<Value>>, has_more: bool) {
@@ -269,13 +276,13 @@ impl TableViewerDelegate {
 #[cfg(test)]
 mod tests {
     use super::TableViewerDelegate;
-    use zqlz_core::DriverCategory;
+    use zqlz_core::{DriverCategory, RowIdentity, VIEW_ROW_IDENTITY_REASON};
 
     #[test]
-    fn row_identity_policy_disables_existing_row_mutations_without_primary_key() {
+    fn row_identity_policy_disables_existing_row_mutations_without_any_identity() {
         let features = TableViewerDelegate::data_editing_features_for_row_identity(
             DriverCategory::Relational,
-            false,
+            &RowIdentity::Unavailable(VIEW_ROW_IDENTITY_REASON.to_string()),
         );
 
         assert!(features.browse_rows.available);
@@ -284,7 +291,7 @@ mod tests {
         assert!(!features.delete_rows.available);
         assert_eq!(
             features.edit_cells.reason.as_deref(),
-            Some("Editing requires a stable primary key")
+            Some(VIEW_ROW_IDENTITY_REASON)
         );
     }
 
@@ -292,7 +299,18 @@ mod tests {
     fn row_identity_policy_allows_existing_row_mutations_with_primary_key() {
         let features = TableViewerDelegate::data_editing_features_for_row_identity(
             DriverCategory::Relational,
-            true,
+            &RowIdentity::PrimaryKey(vec!["id".to_string()]),
+        );
+
+        assert!(features.edit_cells.available);
+        assert!(features.delete_rows.available);
+    }
+
+    #[test]
+    fn keyless_table_rows_stay_editable_through_a_full_row_match() {
+        let features = TableViewerDelegate::data_editing_features_for_row_identity(
+            DriverCategory::Relational,
+            &RowIdentity::AllColumns,
         );
 
         assert!(features.edit_cells.available);

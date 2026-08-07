@@ -1810,6 +1810,7 @@ impl MainView {
 
                     let schema_columns = viewer_metadata.schema_columns;
                     let pk_columns = viewer_metadata.primary_key_columns;
+                    let row_identity = viewer_metadata.row_identity;
                     Self::update_open_viewer_if_current_request_with_kind(
                         &viewer_weak,
                         request_context,
@@ -1818,6 +1819,7 @@ impl MainView {
                         |viewer, cx| {
                             viewer.update_column_types_from_schema(&schema_columns, cx);
                             viewer.set_primary_key_columns(pk_columns, cx);
+                            viewer.set_row_identity(row_identity, cx);
                         },
                     );
 

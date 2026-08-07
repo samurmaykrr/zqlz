@@ -10,6 +10,7 @@ zqlz-drivers = { workspace = true, features = ["mongodb"] }
 zqlz-ui.workspace = true
 
 gpui.workspace = true
+futures.workspace = true
 async-trait.workspace = true
 tokio.workspace = true
 parking_lot.workspace = true
@@ -23,3 +24,4 @@ chrono.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+gpui = { workspace = true, features = ["test-support"] }
